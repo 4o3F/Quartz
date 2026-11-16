@@ -1,0 +1,56 @@
+# ---- Rust ----
+/target/
+**/*.rs.bk
+# Cargo.lock 与 .cargo/config.toml 需要入库（应用程序锁定依赖；M0 关闭 kache wrapper）
+
+# ---- 浏览器扩展 ----
+/extension/**/node_modules/
+/extension/**/dist/
+/extension/**/web-ext-artifacts/
+*.crx
+*.xpi
+# 扩展签名私钥，绝不入库
+*.pem
+
+# ---- Quartz 本地数据（开发与测试时生成） ----
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+# 迁移测试样本库需要入库（03 第 8.4 节）
+!/tests/fixtures/db/*.db
+/logs/
+*.log
+
+# ---- 性能测量与覆盖率 ----
+# WPR/ETW 追踪文件体积很大；测量结论写入 docs/measurements.md
+*.etl
+*.wpaProfile.tmp
+*.profraw
+*.profdata
+lcov.info
+/coverage/
+
+# ---- 工作流与本地工具 ----
+# ccg 任务过程材料，不随项目发布
+/.ccg/
+/.codegraph/
+/.claude/settings.local.json
+/.claude/worktrees/
+
+# ---- 编辑器 ----
+/.idea/
+/.vscode/*
+!/.vscode/extensions.json
+*.swp
+*~
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ---- 环境与密钥 ----
+.env
+.env.*
