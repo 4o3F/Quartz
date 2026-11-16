@@ -74,7 +74,9 @@ u32 小端，JSON 字节长度 | UTF-8 JSON
 |---|---|
 | `ui` | 全部查询、订阅、设置、规则、标注、删除、图标、浏览器 host 管理、维护、隐私模式；发送 `ui.first_frame` |
 | `host` | `hello`、`browser.*`；只能为它自己在握手里登记的 `browser_stream` 上报 |
-| `cli` | 只读 `query.*`、`apps.icon`、`browser_hosts.status` 与 `core.status`（用于诊断和测试脚本） |
+| `cli` | 只读 `query.*`、`apps.icon`、`browser_hosts.status`、`core.status`、`rules_text.validate`、`rules_text.preview`、`rules_text.diff`、`rules_text.export`、`rule_sets.tree`、`rule_sets.versions`、`rules.explain`（用于诊断、测试脚本与规则编写） |
+
+新增功能模块使用独立的操作前缀与订阅主题（例如以后的自控协议使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节），权限表按前缀授权。
 
 角色在握手时声明。host 必须通过同用户、同会话、exe 路径一致的检查，握手中的扩展 ID 还必须在已登记列表中；失败则断开。浏览器种类由扩展在 `browser.hello` 自报，host 不依赖父进程名推断。Edge 通过 `cmd.exe` 中转启动也是合法路径。
 
@@ -102,9 +104,9 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 
 | op | 参数 | 返回 |
 |---|---|---|
-| `query.day` | 本地日期、时区 | 状态行指标、每小时分类堆叠、排行（应用、域名、文档，完整列表分页）、未分类时长 |
+| `query.day` | 逻辑日期、时区（日起点偏移取自设置，见 03 第 1 节） | 状态行指标、每小时分类堆叠、排行（应用、域名、文档，完整列表分页）、未分类时长 |
 | `query.timeline` | 时间范围、细节级别（`category` / `app` / `raw`） | 时间轴片段；小于一个像素对应时长的相邻片段由核心合并，界面传入"每像素毫秒数" |
-| `query.range` | 起止本地日期、时区、维度 | 按天或按周聚合 |
+| `query.range` | 起止逻辑日期、时区、维度 | 按天或按周聚合 |
 | `query.segment_detail` | 时间点或片段 ID | 原始区间、标题、网页上下文、分类来源（规则 ID 或标注 ID）、提取结果 |
 | `query.entity_detail` | 应用、域名或文档 | 近 7 天每日时长、常见标题、命中的规则 |
 | `query.unclassified` | 时间范围 | 未分类的条目，按时长降序 |
@@ -116,9 +118,17 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 
 | op | 说明 |
 |---|---|
-| `rules.list` / `rules.upsert` / `rules.delete` / `rules.reorder` | 分类规则 |
+| `rule_sets.tree` | 某类规则的规则集树：每个规则集的 key、父级、版本、启用状态、差异统计（新增、覆盖、停用）与告警（目标已删除、上游已变更、冲突） |
+| `rule_sets.get` / `rule_sets.versions` | 规则集某版本的内容；版本列表 |
+| `rule_sets.set_enabled` / `rule_sets.reorder` / `rule_sets.delete` / `rule_sets.revert` | 启停（连同子树）、同级排序、删除（有子规则集时拒绝）、回退到某个旧版本（生成新版本） |
+| `rule_sets.edit` | 界面编辑器提交对某个规则集的一次修改，生成新版本；编辑内置规则时写入指定的用户覆盖规则集 |
 | `rules.preview` | 预览一条规则草稿：过去 7 天命中多少段、多少小时，列出前 50 个样本 |
-| `extractors.*`、`privacy_rules.*` | 结构同上；预览返回提取前后对比，或隐私级别命中情况 |
+| `rules.explain` | 解释一个时刻或片段：按规则集树列出每条规则、每个条件的求值结果与实际字段值（受隐私约束），标出生效规则与被遮蔽的规则 |
+| `rules_text.validate` | 校验一份 `quartz-rules/1` 文本，返回结构化错误（路径、错误码、参数），不写入 |
+| `rules_text.preview` | 校验并预览文本中的每条规则，不写入 |
+| `rules_text.diff` | 与同一 key 的当前版本（或指定两个版本）对比：规则级差异，以及过去 N 天结果会改变的片段（分类、提取、隐私级别、判例放行） |
+| `rules_text.import` | 校验通过且已预览后导入；同一 `id` 视为新版本。判例与隐私规则必须携带对应预览的版本号，否则拒绝 |
+| `rules_text.export` | 把选中的规则导出为 `quartz-rules/1` 文本 |
 | `categories.*` | 分类的增删改、排序 |
 | `annotations.create` / `update` / `delete` | 可以一次提交多个不相交的范围，核心在一个事务里写入 |
 | `settings.get` / `settings.set` | 设置 |

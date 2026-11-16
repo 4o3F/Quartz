@@ -76,6 +76,20 @@ enum Command {
     BenchQuery { #[arg(long)] db: PathBuf },
     /// 用迁移前备份替换数据库；核心必须已退出
     RestoreBackup { file: PathBuf },
+    /// 规则文本的校验与预览（quartz-rules/1，见 docs/rules/rule-format.md）
+    #[command(subcommand)]
+    Rules(RulesCommand),
+}
+
+#[derive(Subcommand)]
+enum RulesCommand {
+    /// 校验规则文件及其与已安装规则集组成的树，按固定格式输出错误（离线，不需要核心）
+    Check { files: Vec<PathBuf> },
+    /// 以下经管道以 cli 角色请求核心（只读）
+    Preview { file: PathBuf, #[arg(long, default_value_t = 7)] days: u32 },
+    Diff { file: PathBuf, #[arg(long, default_value_t = 7)] days: u32 },
+    Explain { #[arg(long)] at: String },
+    Tree { #[arg(long)] kind: Option<String> },
 }
 ```
 
@@ -84,7 +98,7 @@ enum Command {
 | 无子命令 | 核心 |
 | `ui [--prewarm]` | 界面 |
 | `native-host` | host |
-| `dump`、`status`、`gen-data`、`bench-query`、`restore-backup` | 命令行 |
+| `dump`、`status`、`gen-data`、`bench-query`、`restore-backup`、`rules check/preview/diff/explain/tree` | 命令行 |
 | 解析失败 | 报错退出，不进入核心 |
 
 解析失败时退出码为 2，不启动核心。这样，浏览器或其他调用方传入未预料的参数时，不会误启动第二个核心。`ui` 和 `native-host` 在帮助中隐藏，它们是进程间约定，不是用户命令。
@@ -149,6 +163,8 @@ crates/
 ├─ quartz-protocol 消息类型、分帧编解码、版本与错误码
 ├─ quartz-i18n     翻译资源、语言协商、复数、时长与日期格式化（10）
 └─ quartz-ui       GPUI 界面，只依赖 quartz-protocol 与 quartz-i18n
+
+以后：quartz-protocols  自控协议的纯逻辑（12 第 4 节），依赖规则同 quartz-domain
 ```
 
 依赖规则：
@@ -192,6 +208,16 @@ crates/
 主线程到采集线程的队列容量为 1,024。满时主线程不阻塞，置过载标志并丢弃新事件。采集线程发现标志后，把当前区间结束于最后可信时间，写 `capture_gaps`，清空不再可信的排队事件；恢复后重读前台，缺口到重读成功时结束。
 
 采集线程到数据库线程的队列容量为 4,096。满时先合并可替换的确认点命令；仍无法入队则按同一过载流程记录未知范围。数据库写入失败时托盘显示异常；写入队列作为失败缓冲，最多保留 4,096 条命令或 10 分钟，以先到者为准，超限范围转为 `capture_gaps`。数据库恢复后优先落盘缺口，再恢复采集。缺口不包含标题或应用身份。
+
+### 6.1 截止时间调度器
+
+暂停、隐私模式、保持计时、空闲例外等限时状态，以及以后的协议计时（12 第 7 节），都注册到核心的一个截止时间调度器：
+
+- 调度器在主线程，只为最近的一个截止时间设置一次性 `SetTimer`；没有截止时间时不设定时器，不产生周期唤醒。
+- 截止时间以 UTC 持久化在 `settings`，注册与取消和对应状态的修改在同一事务完成。
+- 核心启动时读取全部截止时间：已过期的立即按到期处理，其余重新调度。
+- 到期回调投递给拥有该状态的模块（采集线程或以后的 selfreg 模块），由它产生 `policy_changed` 等边界。
+- 系统时间跳变（02 第 5 节）后重新计算最近截止时间。
 
 ## 7. 依赖选型
 

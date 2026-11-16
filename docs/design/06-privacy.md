@@ -54,7 +54,7 @@ struct Verdict {
     window_title: FieldAction,     // Keep | Drop
     web: WebCaptureLevel,          // Full | DomainOnly | None
     label: Option<Label>,          // Key("privacy.label.private_window") | Text(用户输入)
-    rule_id: Option<String>,       // builtin.browser_private@3 | user:42@7
+    rule_id: Option<String>,       // builtin.privacy/browser-private-edge@3 | user.bank/bank@2 | builtin.capture_excluded@1
 }
 
 trait Detector {
@@ -76,40 +76,50 @@ trait Detector {
 | `builtin.credential_ui` | consent.exe、CredentialUIBroker.exe、LogonUI.exe 与凭据窗口 | title_hidden | 应用与窗口模式使用规则数据 |
 | `builtin.password_manager` | KeePass、KeePassXC、1Password、Bitwarden 等 exe 名 | title_hidden | 名单使用规则数据 |
 | `builtin.capture_excluded` | `WDA_EXCLUDEFROMCAPTURE` 或 `WDA_MONITOR` | title_hidden | 查询失败记 unknown，由其他规则继续求值 |
-| `user` | privacy_rules | 按用户字段动作 | 见第 4 节 |
+| `rules` | `kind = privacy` 的规则集树（含 `builtin.privacy` 与用户规则集） | 按规则字段动作 | 见第 3.3、4 节 |
 | `session.privacy_mode` | 限时隐私模式 | private_window | 截止 UTC 存 settings，到期触发 policy_changed |
 
 `GetWindowDisplayAffinity` 支持跨进程查询；窗口条件、DWM 状态会影响成功率。M1 验证常见应用窗口的查询覆盖、错误码与成本（[Microsoft 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowdisplayaffinity)）。
 
 ### 3.3 规则数据表
 
-按应用、类名、标题模式识别的内置规则编译进 exe，并带修订号：
+按应用、类名、标题模式识别的内置规则，以 `quartz-rules/1` 规则集 `builtin.privacy` 编译进 exe，带版本号（规则格式见 [规则格式文档](../rules/rule-format.md)，升级见 03 第 8.5 节）。内置规则集比用户规则多三个只允许内置使用的键：`detector`（所属识别器）、`languages`（模式适用的应用界面语言）、`verified`（是否有样本验证）。
 
 ```toml
-# privacy-rules.toml（内置，revision 3）
+format = "quartz-rules/1"
+
+[set]
+key = "builtin.privacy"
+kind = "privacy"
+name = "内置隐私规则"
+
 [[rule]]
-id = "browser_private.edge"
+id = "browser-private-edge"
 detector = "builtin.browser_private"
-app = { exe_name = "msedge.exe" }
-window_class = "Chrome_WidgetWin_1"
-title_regex = '\[InPrivate\]|InPrivate'
+label_key = "privacy.label.private_window"
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = "msedge.exe" },
+  { field = "window.class", op = "equals", value = "Chrome_WidgetWin_1", case_sensitive = true },
+  { field = "title.raw", op = "regex", value = 'InPrivate' },
+]
 languages = ["*"]               # 品牌名，各语言相同；随语言变化的模式按语言分别列出（10 第 4.2 节）
 preset = "private_window"
-label_key = "privacy.label.private_window"
-sort_order = 10
 verified = false
 
 [[rule]]
-id = "password_manager.keepassxc"
+id = "password-manager-keepassxc"
 detector = "builtin.password_manager"
-app = { exe_name = "keepassxc.exe" }
-preset = "title_hidden"
 label_key = "privacy.label.password_manager"
-sort_order = 20
+match = "all"
+when = [{ field = "app.exe_name", op = "equals", value = "keepassxc.exe" }]
+preset = "title_hidden"
 verified = true
 ```
 
-`verified = false` 的条目仍生效，设置页显示未验证。所有语言变体同时生效，不按 Quartz 界面语言筛选。每个已验证条目都要有样本；用户规则与内置模式使用同一字段白名单。
+`verified = false` 的条目仍生效，设置页显示未验证。所有语言变体同时生效，不按 Quartz 界面语言筛选。每个已验证条目都要有样本。`label_key` 只供内置规则使用，用户规则用 `label` 文本。
+
+用户可以用子规则集停用或覆盖内置隐私规则（规则格式文档 1.1 节），导入时单独警告；`builtin.capture_excluded` 这类基于系统信号的识别器是代码，不在规则集中，只能在设置中开关。
 
 ### 3.4 识别不可靠时
 
@@ -117,22 +127,7 @@ M1 若无法从类名或标题识别某浏览器的无痕窗口，设置页标�
 
 ## 4. 用户规则
 
-```sql
-CREATE TABLE privacy_rules (
-  id               INTEGER PRIMARY KEY,
-  uuid             TEXT NOT NULL UNIQUE,
-  revision         INTEGER NOT NULL,
-  enabled          INTEGER NOT NULL DEFAULT 1,
-  match_mode       INTEGER NOT NULL,       -- 1 all | 2 any
-  conditions       TEXT NOT NULL,          -- JSON，字段白名单见下表
-  app_action       INTEGER NOT NULL,       -- 1 keep | 2 drop
-  window_title_action INTEGER NOT NULL,    -- 1 keep | 2 drop
-  web_action       INTEGER NOT NULL,       -- 1 full | 2 domain_only | 3 none
-  label            TEXT,
-  sort_order       INTEGER NOT NULL,
-  updated_utc_ms   INTEGER NOT NULL
-);
-```
+用户隐私规则是 `kind = privacy` 的规则集（03 第 2.6 节），可以独立成树，也可以作为 `builtin.privacy` 的子规则集。规则写法见规则格式文档 3.3 节；字段只能使用下表中采集时即可得到的字段。
 
 | 可用字段 | 求值时机 |
 |---|---|
@@ -149,7 +144,7 @@ CREATE TABLE privacy_rules (
 - `title.raw contains "病历"` → title_hidden。
 - `web.domain domain_suffix "bank.example"` → window_title drop、web domain_only。
 
-规则编辑器预览过去 7 天命中段数和时长，仅使用仍保留的字段。规则每次修改递增 revision，形成 `user:42@7` 这样的解释 ID。
+规则编辑器预览过去 7 天命中段数和时长，仅使用仍保留的字段。规则集每次修改生成新版本，形成 `user.bank/bank@2` 这样的解释 ID。
 
 ### 4.1 规则变化的作用范围
 

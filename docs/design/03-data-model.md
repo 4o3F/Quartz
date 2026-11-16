@@ -11,7 +11,8 @@
 - 取值固定的枚举列存小整数，编码从 1 开始，列注释写明编码。编码只追加，不改号、不复用；废弃的取值保留编码。名称记录在 `enum_labels` 表，排查时使用 `_v` 视图（第 2.9 节）。取值开放的列（浏览器种类、色板键）仍存文本。
 - 确认点列（`confirmed_utc_ms`、`confirmed_mono_ms`）只在开放行有值；行结束时置 NULL，因为此时它与结束时间相同。各表用 CHECK 约束保证“结束列为 NULL”与“确认点列非 NULL”同时成立。
 - 实体表用 `INTEGER PRIMARY KEY`。回执、版本与键值配置使用下文列出的复合键或文本键。创建类操作的实体带客户端生成的 `uuid TEXT NOT NULL UNIQUE`，重试返回已有实体。
-- 规则条件这类结构化配置存为 JSON 文本，由核心解析。
+- 规则条件这类结构化配置存为 JSON 文本，由核心解析。条件的解析、规范化与匹配是 `quartz-domain` 中的独立组件“条件引擎”，分类规则、隐私规则与以后的判例、国策评估（12）共用。
+- 逻辑日：“今天”与日统计按本地日期加设置 `day.start_offset_min`（默认 0，范围 0–720 分钟）切分。例如偏移 240 时，凌晨 3 点仍属于前一个逻辑日。偏移属于查询语义，进入日缓存键；存储层仍按 UTC 午夜拆分，与偏移无关。
 
 ## 2. 表结构
 
@@ -119,7 +120,7 @@ CREATE TABLE intervals (
 );
 ```
 
-`privacy_label` 是降级时保存的标签快照。规则改名、删除或内置修订更新后，历史仍使用该标签。规则 ID 格式为 `builtin.browser_private@3`、`user:42@7`；同等严格程度下，用户规则优先于内置规则，同来源按 `sort_order` 小者优先。前台 capture_level 为 full 时，两列均为 NULL；网页行按自身 web_level 判断，full 时两列均为 NULL。
+`privacy_label` 是降级时保存的标签快照。规则改名、删除或内置修订更新后，历史仍使用该标签。规则 ID 格式为 `<规则集 key>/<规则 id>@<规则集版本>`，例如 `builtin.privacy/browser-private-edge@3`、`user.bank/bank@2`；系统信号识别器（06 第 3.2 节）为 `builtin.capture_excluded@1` 这样的识别器 ID；同等严格程度下，用户规则优先于内置规则，同来源按 `sort_order` 小者优先。前台 capture_level 为 full 时，两列均为 NULL；网页行按自身 web_level 判断，full 时两列均为 NULL。
 
 窗口标题被丢弃时，`title_id = NULL`、`title_status = redacted`；网页 domain_only 时，`tab_title_id = NULL`、`tab_title_status = redacted`。保留期清理使用 purged，读取失败使用 unreadable，空文本使用 empty。
 
@@ -220,34 +221,30 @@ CREATE TABLE categories (
   CHECK (name IS NOT NULL OR builtin_key IS NOT NULL)
 );
 
-CREATE TABLE classification_rules (
+CREATE TABLE rule_sets (
   id               INTEGER PRIMARY KEY,
-  uuid             TEXT NOT NULL UNIQUE,
-  category_id      INTEGER NOT NULL REFERENCES categories(id),
-  enabled          INTEGER NOT NULL DEFAULT 1,
-  priority         INTEGER NOT NULL,    -- 大者优先
-  sort_order       INTEGER NOT NULL,    -- 同优先级时小者优先，保证结果稳定
-  match_mode       INTEGER NOT NULL,       -- 1 all | 2 any
-  conditions       TEXT NOT NULL,          -- JSON：[{field, op, value, case_sensitive}]
+  key              TEXT NOT NULL UNIQUE,   -- builtin.classification | user.study-sites ...
+  kind             INTEGER NOT NULL,       -- 1 classification | 2 extraction | 3 privacy | 4 precedent | 5 policy_check
+  parent_id        INTEGER REFERENCES rule_sets(id), -- 同 kind；不成环
   source           INTEGER NOT NULL,       -- 1 builtin | 2 user
-  builtin_key      TEXT UNIQUE,            -- 内置规则的稳定键；用户规则为 NULL
-  builtin_revision INTEGER,             -- 写入时的内置规则修订号
-  user_modified    INTEGER NOT NULL DEFAULT 0, -- 用户改过内置规则后为 1，升级不再覆盖
-  updated_utc_ms   INTEGER NOT NULL
+  name             TEXT NOT NULL,
+  enabled          INTEGER NOT NULL DEFAULT 1, -- 停用时整个子树不生效
+  sibling_order    INTEGER NOT NULL,       -- 同一父级下的顺序
+  current_version  INTEGER NOT NULL,
+  chain_id         INTEGER,                -- kind = precedent 时所属的链（12，M7）
+  created_utc_ms   INTEGER NOT NULL
 );
 
-CREATE TABLE extractor_rules (
-  id               INTEGER PRIMARY KEY,
-  uuid             TEXT NOT NULL UNIQUE,
-  app_selector     TEXT NOT NULL,          -- JSON：exe_name / aumid / identity_key 条件
-  pattern          TEXT NOT NULL,          -- 带命名捕获的正则：document, project, profile, dirty
-  priority         INTEGER NOT NULL,
-  source           INTEGER NOT NULL,       -- 1 builtin | 2 user
-  revision         INTEGER NOT NULL,
-  enabled          INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE privacy_rules (...);          -- 见 06-privacy.md 第 4 节
+CREATE TABLE rule_set_versions (
+  set_id           INTEGER NOT NULL REFERENCES rule_sets(id),
+  version          INTEGER NOT NULL,       -- 每次导入或编辑加一
+  content          TEXT NOT NULL,          -- 规范化 JSON：rule / override / disable 条目；分类以 uuid 引用
+  content_hash     TEXT NOT NULL,          -- content 的 SHA-256
+  parent_version   INTEGER,                -- 保存时父规则集的版本，用于三方对比
+  note             TEXT,
+  created_utc_ms   INTEGER NOT NULL,
+  PRIMARY KEY (set_id, version)
+) WITHOUT ROWID;
 
 CREATE TABLE annotations (
   id               INTEGER PRIMARY KEY,
@@ -271,7 +268,12 @@ CREATE TABLE settings (
 
 schema 版本由 diesel 的 `__diesel_schema_migrations` 表记录，不另建版本表，见第 8 节。
 
-分类规则的条件字段有：`app.identity_key`、`app.exe_name`、`app.display_name`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`、`web.domain`、`web.tab_title`、`browser.profile_label`。隐私规则另用 06 第 4 节的字段白名单，保存时拒绝 `doc.*` 与 `title.normalized`。
+所有规则（分类、提取、隐私，以及 M7 的判例与国策检查）都以**规则集**组织，规则集通过 `parent_id` 组成树，子规则集只保存相对父级的差异（新增 `rule`、覆盖 `override`、停用 `disable`）。规则集树的语义、生效规则的计算顺序、对外文本格式 `quartz-rules/1`、全部字段、操作符与校验错误码，以 [规则格式文档](../rules/rule-format.md) 为准；`rule_set_versions.content` 是该文本的规范化 JSON 形式，分类改用 uuid 引用，因此分类改名不影响规则。
+
+- 规则数量在数百条以内。核心启动或规则变化时，把每类规则的规则集树解析为生效规则列表并编译（正则、规范化后的条件值），常驻内存；查询与采集线程只读这份编译结果。
+- 每条生效规则带来源：定义它的规则集 key 与版本、规则 id，以及覆盖它的规则集。这份来源用于解释（`rules.explain`）、命中预览与隐私解释 ID。
+- 界面中“编辑内置规则”不修改内置规则集，而是写入用户选定的覆盖规则集（默认 `user.local`，以对应内置规则集为父）；编辑用户规则则生成该规则集的新版本。
+- 历史版本全部保留（体积很小），用于版本 diff、回退与三方对比。分类规则的条件字段有：`app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`、`web.domain`、`web.tab_title`、`browser.profile_label`。判例与国策检查另可使用 `category`、`category.tendency`、`activity`。隐私规则另用 06 第 4 节的字段白名单，保存时拒绝 `doc.*` 与 `title.normalized`。
 
 操作符有：`equals`、`contains`、`starts_with`、`ends_with`、`regex`、`domain_suffix`。文本比较的规范化、大小写与全半角处理、IDN 域名转换见 10 第 4.1 节；匹配结果与界面语言无关。
 
@@ -286,9 +288,9 @@ CREATE TABLE data_day_versions (
 ) WITHOUT ROWID;
 ```
 
-规则集版本（`classification_version`、`extractor_version`、`privacy_version`、`stats_policy_version`）存在 `settings` 里。修改规则的事务里同时把对应版本加一。
+`classification_version`、`extractor_version`、`privacy_version` 是对应类型**生效规则列表**的内容哈希（由各规则集当前版本的 `content_hash` 按解析顺序组合而成），不是手动递增的计数器：任何导入、编辑、启停、调整顺序都会自然改变哈希，回退到旧状态时哈希也恢复，可以复用缓存。`stats_policy_version` 仍保存在 `settings` 中，修改统计口径的事务里加一。
 
-`settings.metadata_version` 在应用显示名、浏览器 profile 标签、分类名称、颜色、倾向或层级变化时，在同一事务加一。日缓存、托盘摘要和 `day` 订阅同时失效。限时状态也保存在 `settings`：暂停、隐私模式、保持计时和空闲例外的截止 UTC，重启后检查是否到期。
+`settings.metadata_version` 在应用显示名、浏览器 profile 标签、分类名称、颜色、倾向或层级变化时，在同一事务加一。日缓存、托盘摘要和 `day` 订阅同时失效。限时状态也保存在 `settings`：暂停、隐私模式、保持计时和空闲例外的截止 UTC，由核心的截止时间调度器管理，重启后检查是否到期（01 第 6.1 节）。
 
 首版不建立持久的派生表，派生结果放在内存缓存里（见第 5 节）。
 
@@ -502,21 +504,20 @@ struct DerivedSegment {
 
 规则按以下顺序尝试，第一个匹配的生效：
 
-1. 用户为这个应用写的提取规则；
-2. 内置规则，首版覆盖 VS Code、JetBrains 系列、Office、浏览器 profile 后缀、Windows Terminal；
-3. 通用回退：去掉"` - <应用显示名>`"后缀，剩下的部分作为文档名。
+1. 提取规则集树解析后的生效规则，按规则格式文档 1.2 节的顺序（用户子规则集更深，因此同优先级时优先于内置）；内置规则集 `builtin.extraction` 首版覆盖 VS Code、JetBrains 系列、Office、浏览器 profile 后缀、Windows Terminal；
+2. 通用回退：去掉"` - <应用显示名>`"后缀，剩下的部分作为文档名。
 
-输出 `{document, project, profile, dirty, normalized_title, extractor_id, extractor_revision, status}`。`status` 取 `extracted`、`fallback`、`empty` 或 `unknown`。
+输出 `{document, project, profile, dirty, normalized_title, extractor_rule, status}`，其中 `extractor_rule` 为 `<规则集>/<规则>@<版本>`。`status` 取 `extracted`、`fallback`、`empty` 或 `unknown`。
 
 规范化只在已识别的格式里进行。比如 VS Code 的 `● ` 前缀，只在 VS Code 的规则中去掉，并记为 `dirty = true`。通用回退不删除数字和括号，以免把合法的文件名改掉。
 
 ### 5.3 分类
 
-- 规则按 `priority` 从大到小、`sort_order` 从小到大排序，第一条匹配的规则决定分类。
+- 生效规则按规则格式文档 1.2 节排序（`priority` 大者优先；同优先级时所在规则集更深者优先；再按树的遍历顺序与文件顺序），第一条匹配的规则决定分类。
 - 浏览器在前台且有网页区间时，规则可以同时看到 `web.*` 和 `title.*` 字段。
 - 没有规则匹配就是"未分类"。
 
-默认分类有 6 个：开发、学习、沟通、娱乐、系统与工具、未分类。每个分类带一个倾向（专注、中性、分心）。首版预置约 50 条规则。
+默认分类有 6 个：开发（`development`）、学习（`learning`）、沟通（`communication`）、娱乐（`entertainment`）、系统与工具（`system`）、未分类。括号内为 `builtin_key`，规则文本中写作 `builtin:<键>`；未分类不是分类行，而是“没有规则命中”。每个分类带一个倾向（专注、中性、分心）。首版预置约 50 条规则。
 
 ### 5.4 缓存
 
@@ -524,7 +525,7 @@ struct DerivedSegment {
 |---|---|---|---|
 | 提取缓存 | `(app_id, title_id, extractor_version, metadata_version)` | 提取结果 | 提取规则或元数据版本变化 |
 | 分类匹配缓存 | `(classification_version, extractor_version, metadata_version, app_id, title_id, domain_id, tab_title_id, stream_id)` | `(category_id, rule_id)` | 任一输入版本变化 |
-| 日结果缓存 | `(本地日期, 时区, 查询语义版本, metadata_version, 各规则版本, 覆盖的 UTC 日期的 data_day_versions 摘要)` | 该日完整的派生片段和各维度完整聚合 | 任一依赖版本变化 |
+| 日结果缓存 | `(逻辑日期, 时区, 日起点偏移, 查询语义版本, metadata_version, 各规则版本, 覆盖的 UTC 日期的 data_day_versions 摘要)` | 该日完整的派生片段和各维度完整聚合 | 任一依赖版本变化 |
 
 分类匹配字段与缓存依赖：
 
@@ -583,8 +584,8 @@ struct DerivedSegment {
 | 对象 | 版本来源 | 处理 |
 |---|---|---|
 | 数据库 schema | diesel 迁移 | 第 8.1–8.4 节 |
-| 内置分类与提取规则 | 规则的 `builtin_revision` | 第 8.5 节 |
-| 内置隐私规则 | 编译进 exe 的修订号（06 第 3.3 节） | 随 exe 生效；历史行保留当时的 `privacy_rule_id@revision` 与标签快照 |
+| 内置规则集（分类、提取、隐私） | 规则集版本 | 第 8.5 节 |
+| 隐私解释 ID | `<规则集>/<规则>@<版本>` | 历史行保留当时的规则 ID 与标签快照，规则集升级后仍可解释 |
 | JSON 配置列 | serde 默认值与忽略未知字段 | 第 8.6 节 |
 | 核心、界面、host 协议 | `hello` 协商的协议版本范围（04） | 同一 exe 一起升级；仍在运行的旧界面重连得到 `proto_mismatch`，提示重启 |
 | 浏览器扩展 | `browser.hello` 的协议版本（05） | 扩展由商店单独更新，核心同时支持当前与上一个协议版本 |
@@ -624,16 +625,15 @@ struct DerivedSegment {
 - 一年模拟数据迁移的耗时与峰值内存满足 8.3 的限制。
 - 模拟“数据库更新、程序更旧”和迁移中途失败，确认核心不写入、不采集，备份可以恢复。
 
-### 8.5 内置规则升级
+### 8.5 内置规则集升级
 
-内置分类与提取规则以 `builtin_key` 标识，带 `builtin_revision`。核心启动时把 exe 内的内置规则与数据库对比：
+内置规则集（`builtin.classification`、`builtin.extraction`、`builtin.privacy`）以 `quartz-rules/1` 文本编译进 exe，带版本号。核心启动时：
 
-- 新增的内置规则插入数据库；
-- 未被用户修改（`user_modified = 0`）且修订号更旧的规则，更新为新内容；
-- 用户修改过的规则不覆盖，在规则页标出“内置规则有更新”，由用户选择采用或保留；
-- exe 中已删除的内置规则，未修改的设为停用，修改过的转为用户规则。
-
-规则内容有变化时，在同一事务推进 `classification_version` 或 `extractor_version`，使缓存失效。
+1. exe 中的版本高于数据库当前版本时，写入新版本并设为当前版本；旧版本保留。exe 中新出现的内置规则集直接创建。
+2. 重新解析每类规则集树，检查用户子规则集的差异：
+   - `override` 或 `disable` 的目标在新版本中不存在 → 该条差异标为“目标已删除”，暂不生效；
+   - 被覆盖的内置规则内容变化 → 标为“上游已变更”，规则页提供三方对比（`parent_version` 指向的旧内置版本、新内置版本、用户覆盖），由用户选择保留或删除覆盖。
+3. 不自动合并、不修改用户规则集。生效规则哈希变化后，缓存自然失效（第 2.7 节）。
 
 ### 8.6 JSON 配置列
 
