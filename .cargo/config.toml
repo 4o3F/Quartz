@@ -1,0 +1,12 @@
+# 09 M0 要求关闭全局 kache，直接调用编译器和文档工具以测量资源基线。
+[build]
+rustc-wrapper = ""
+rustdoc = "rustdoc"
+
+# 不在这里覆盖 HOST_CC / HOST_CXX：项目配置在 Windows 原生构建时同样生效，
+# 而 Windows 上没有 cc/c++，会导致 bundled SQLite 等 C 依赖编译失败。
+# 用户全局配置中的 kache 只影响 WSL 构建的宿主 C 编译器。
+
+[target.x86_64-pc-windows-msvc]
+# 单 exe 解压即用，不依赖 VC++ 运行库。
+rustflags = ["-C", "target-feature=+crt-static"]

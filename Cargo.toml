@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/quartz",
+    "crates/quartz-domain",
+    "crates/quartz-protocol",
+    "crates/quartz-i18n",
+    "crates/quartz-ui",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.100"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/4o3F/Quartz"
+version = "0.0.0"
+publish = false
+
+[workspace.dependencies]
+# 依赖在 crate 真正使用时再加入，避免“未使用的 workspace 依赖”告警掩盖真实问题。
+# 选型与版本约束见 docs/design/01-architecture.md 第 7 节；diesel 保持 2.3 系列，gpui-kit 固定 =0.9.1。
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+undocumented_unsafe_blocks = "deny"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+# M0 实测体积和性能后，在 "s" 与 3 之间决定。
+opt-level = 3
+
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
