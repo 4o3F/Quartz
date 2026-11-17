@@ -5123,6 +5123,7 @@ name = "quartz-i18n"
 version = "0.0.0"
 dependencies = [
  "rust-i18n",
+ "snafu",
 ]
 
 [[package]]
@@ -5140,8 +5141,10 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "jiff",
  "quartz-i18n",
  "quartz-protocol",
+ "quartz-ui",
  "raw-window-handle",
  "serde",
  "serde_json",

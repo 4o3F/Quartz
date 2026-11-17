@@ -7,20 +7,45 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[dependencies]
-quartz-protocol.workspace = true
-quartz-i18n.workspace = true
-
 [target.'cfg(windows)'.dependencies]
 anyhow.workspace = true
 gpui-kit.workspace = true
+jiff.workspace = true
+quartz-i18n.workspace = true
+quartz-protocol.workspace = true
+raw-window-handle = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
+windows = { workspace = true, optional = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
-[target.'cfg(windows)'.dev-dependencies]
-raw-window-handle = "0.6.2"
-windows = { version = "0.62.2", default-features = false, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+[features]
+# Mock data and the off-screen preview window, for screenshots and tests; never in release builds.
+preview = ["dep:raw-window-handle", "dep:windows"]
 
-[lints]
-workspace = true
+# The view models, text and timeline geometry have no GPUI dependency; they are tested on every
+# platform but only used by the Windows views, so other platforms need them for tests alone.
+[dev-dependencies]
+jiff.workspace = true
+quartz-i18n.workspace = true
+quartz-protocol.workspace = true
+snafu.workspace = true
+# Tests and the preview example build against the mock data.
+quartz-ui = { workspace = true, features = ["preview"] }
+
+# The workspace lints, plus casts and indexing checks for this crate's float-heavy layout code.
+# A package cannot extend `[workspace.lints]`, so this table repeats it; keep the two in sync.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+undocumented_unsafe_blocks = "deny"
+as_conversions = "warn"
+cast_precision_loss = "warn"
+indexing_slicing = "warn"

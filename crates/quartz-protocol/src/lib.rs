@@ -20,6 +20,14 @@ pub enum CoreErrorCode {
 }
 
 impl CoreErrorCode {
+    /// Every code, so consumers can check they handle each one.
+    pub const ALL: [Self; 4] = [
+        Self::NewerDatabase,
+        Self::MigrationFailed,
+        Self::OtherSession,
+        Self::CoreStartFailed,
+    ];
+
     /// Returns the stable string used in command arguments and JSON.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -35,6 +43,17 @@ impl fmt::Display for CoreErrorCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// The command line of the `quartz` executable, shared so that recovery instructions shown by the
+/// UI name the commands the CLI accepts.
+pub mod cli {
+    /// The executable name.
+    pub const PROGRAM: &str = "quartz";
+    /// The subcommand that replaces the database with a migration backup.
+    pub const RESTORE_BACKUP: &str = "restore-backup";
+    /// The flag confirming that a restore discards records written after the backup.
+    pub const CONFIRM: &str = "--yes";
 }
 
 /// An argv error code is not recognized by this program.
@@ -76,6 +95,24 @@ impl CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn all_lists_every_code() {
+        for code in CoreErrorCode::ALL {
+            // Adding a variant breaks this match; add the variant to `ALL` as well.
+            match code {
+                CoreErrorCode::NewerDatabase
+                | CoreErrorCode::MigrationFailed
+                | CoreErrorCode::OtherSession
+                | CoreErrorCode::CoreStartFailed => {}
+            }
+        }
+        let distinct: std::collections::BTreeSet<&str> = CoreErrorCode::ALL
+            .iter()
+            .map(|code| code.as_str())
+            .collect();
+        assert_eq!(distinct.len(), CoreErrorCode::ALL.len());
+    }
+
     #[test]
     fn startup_codes_round_trip_through_argv_and_json() {
         for (code, text) in [

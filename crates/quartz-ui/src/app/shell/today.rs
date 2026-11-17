@@ -3,54 +3,116 @@
 use std::time::Duration;
 
 use gpui_kit::{
-    Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
+    Context, Div, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
     StatefulInteractiveElement as _, Styled as _, assets::IconName, div,
     prelude::FluentBuilder as _, px,
 };
 
 use super::AppShell;
-use crate::app::{
-    format::Formatter,
-    model::Share,
-    tokens::{Palette, metrics::MAX_CONTENT_WIDTH},
-    widgets::{Density, Ramp, RampExt as _, icon, space},
+use crate::{
+    app::{
+        metrics::{Density, Ramp},
+        widgets::{ButtonContent, RampExt as _, Widgets},
+    },
+    format::{DurationParts, Formatter, Msg},
+    model::{DaySummary, Share},
 };
 
+/// Width of the date picker button, wide enough for the longest date of either language.
+const DATE_PICKER_WIDTH: f32 = 200.;
+
+/// What one cell of the status card shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Divider {
-    Hidden,
-    Visible,
+enum StatValue {
+    /// Numbers in `number` type with their units in `unit` type.
+    Duration {
+        duration: Duration,
+        number: Ramp,
+        unit: Ramp,
+    },
+    Percent(Share),
+    SwitchesPerHour(u64),
+}
+
+/// One cell of the status card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatCell {
+    value: StatValue,
+    label: Msg,
+    /// Shown after the value of a cell that opens a list.
+    trailing: Option<IconName>,
+}
+
+/// The status card cells in display order (07 section 3).
+fn stat_cells(summary: &DaySummary) -> [StatCell; 6] {
+    let cell = |value, label| StatCell {
+        value,
+        label,
+        trailing: None,
+    };
+    let duration = |duration, number, unit| StatValue::Duration {
+        duration,
+        number,
+        unit,
+    };
+    [
+        cell(
+            duration(summary.active, Ramp::Title, Ramp::BodyLarge),
+            Msg::StatActive,
+        ),
+        cell(StatValue::Percent(summary.focus), Msg::StatFocus),
+        cell(
+            StatValue::Percent(summary.distraction),
+            Msg::StatDistraction,
+        ),
+        StatCell {
+            trailing: Some(IconName::ChevronRight),
+            ..cell(
+                duration(summary.unclassified, Ramp::Subtitle, Ramp::Body),
+                Msg::StatUnclassified,
+            )
+        },
+        cell(
+            duration(summary.longest_focus_streak, Ramp::Subtitle, Ramp::Body),
+            Msg::StatLongestFocus,
+        ),
+        cell(
+            StatValue::SwitchesPerHour(summary.switches_per_hour()),
+            Msg::StatSwitches,
+        ),
+    ]
 }
 
 impl AppShell {
     pub(super) fn render_today(
         &self,
-        p: &Palette,
-        main_width: f32,
+        ui: &Widgets<'_>,
+        main_width: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let space = &ui.metrics.space;
         let content = div()
             .flex()
             .flex_col()
-            .gap(px(space::S))
+            .gap(space.s)
             .w_full()
-            .max_w(px(MAX_CONTENT_WIDTH))
+            .max_w(ui.metrics.layout.max_content_width)
             .mx_auto()
-            .px(px(space::XXL))
-            .pt(px(space::XXXL))
-            .pb(px(space::XXL))
-            .child(self.render_date_bar(p))
-            .child(self.render_status(p))
-            .child(self.render_timeline(p, main_width, cx))
+            .px(space.xxl)
+            .pt(space.xxxl)
+            .pb(space.xxl)
+            .child(self.render_date_bar(ui))
+            .child(self.render_status(ui))
+            .child(self.render_timeline(ui, main_width, cx))
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(space::S))
-                    .child(self.render_hourly(p))
-                    .child(self.render_ranking(p, cx)),
+                    .gap(space.s)
+                    .child(self.render_hourly(ui))
+                    .child(self.render_ranking(ui, cx)),
             )
-            .children(self.render_pending(p));
+            .children(self.render_pending(ui));
         div()
             .id("today-scroll")
             .flex_1()
@@ -59,164 +121,163 @@ impl AppShell {
             .child(content)
     }
 
-    fn render_date_bar(&self, p: &Palette) -> impl IntoElement {
-        let date = self.fmt.date(self.day.date);
+    // The date buttons are inert until day navigation exists.
+    fn render_date_bar(&self, ui: &Widgets<'_>) -> impl IntoElement {
+        let density = Density::Standard;
         div()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(space::S))
-            .child(p.button(
+            .gap(ui.metrics.space.s)
+            .child(ui.button(
                 "date-prev",
-                Density::Standard,
-                None,
-                Some(IconName::ChevronLeft),
+                density,
+                ButtonContent::Icon(IconName::ChevronLeft),
             ))
             .child(
-                p.button(
+                ui.button(
                     "date-pick",
-                    Density::Standard,
-                    None,
-                    Some(IconName::Calendar),
+                    density,
+                    ButtonContent::Icon(IconName::Calendar),
                 )
-                .w(px(200.))
+                .w(px(DATE_PICKER_WIDTH))
                 .justify_start()
-                .child(div().flex_1().child(date))
-                .child(icon(IconName::ChevronDown, 16., p.text_secondary)),
+                .child(div().flex_1().child(self.formatter.date(self.day.date())))
+                .child(ui.icon(
+                    IconName::ChevronDown,
+                    density,
+                    ui.palette.text_secondary,
+                )),
             )
-            .child(p.button(
+            .child(ui.button(
                 "date-next",
-                Density::Standard,
-                None,
-                Some(IconName::ChevronRight),
+                density,
+                ButtonContent::Icon(IconName::ChevronRight),
             ))
-            .child(p.button(
+            .child(ui.button(
                 "date-today",
-                Density::Standard,
-                Some(self.fmt.text("today.today")),
-                None,
+                density,
+                ButtonContent::Label(self.formatter.text(Msg::TodayButton)),
             ))
     }
 
-    fn render_status(&self, p: &Palette) -> impl IntoElement {
-        let summary = self.day.summary();
-        let fmt = self.fmt;
-        let cells = [
-            self.stat_cell(
-                p,
-                fmt.duration_value(p, summary.active, Ramp::Title, Ramp::BodyLarge),
-                "today.stat.active",
-                Divider::Hidden,
-            ),
-            self.stat_cell(
-                p,
-                fmt.percent_value(p, summary.focus),
-                "today.stat.focus",
-                Divider::Visible,
-            ),
-            self.stat_cell(
-                p,
-                fmt.percent_value(p, summary.distraction),
-                "today.stat.distraction",
-                Divider::Visible,
-            ),
-            self.stat_cell(
-                p,
-                (fmt)
-                    .duration_value(p, summary.unclassified, Ramp::Subtitle, Ramp::Body)
-                    .child(icon(IconName::ChevronRight, 14., p.text_secondary)),
-                "today.stat.unclassified",
-                Divider::Visible,
-            ),
-            self.stat_cell(
-                p,
-                fmt.duration_value(p, summary.longest_focus_streak, Ramp::Subtitle, Ramp::Body),
-                "today.stat.longest_focus",
-                Divider::Visible,
-            ),
-            self.stat_cell(
-                p,
-                fmt.switch_value(p, summary.switches_per_hour),
-                "today.stat.switches",
-                Divider::Visible,
-            ),
-        ];
-        p.card()
+    fn render_status(&self, ui: &Widgets<'_>) -> impl IntoElement {
+        let divider = ui.palette.stroke_divider;
+        let cells = stat_cells(self.day.summary())
+            .into_iter()
+            .enumerate()
+            .map(|(index, cell)| {
+                let cell = self.stat_cell(ui, cell);
+                if index == 0 {
+                    cell.pl(px(0.))
+                } else {
+                    cell.border_l_1().border_color(divider)
+                }
+            });
+        ui.card()
             .flex()
             .flex_col()
-            .gap(px(space::S))
-            .px(px(space::L))
-            .py(px(space::M))
+            .gap(ui.metrics.space.s)
+            .px(ui.metrics.space.l)
+            .py(ui.metrics.space.m)
             .child(div().flex().flex_row().children(cells))
-            .child(self.render_share_bar(p))
+            .child(self.render_share_bar(ui))
     }
 
-    fn stat_cell(&self, p: &Palette, value: Div, label_key: &str, divider: Divider) -> Div {
+    /// One status cell; the caller sets every cell but the first off with a divider.
+    fn stat_cell(&self, ui: &Widgets<'_>, cell: StatCell) -> Div {
+        let palette = ui.palette;
+        let value = match cell.value {
+            StatValue::Duration {
+                duration,
+                number,
+                unit,
+            } => duration_value(ui, self.formatter, duration, number, unit),
+            StatValue::Percent(share) => text_value(ui, self.formatter.percent(share)),
+            StatValue::SwitchesPerHour(rate) => text_value(ui, self.formatter.switches(rate)),
+        };
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.))
-            .px(px(space::L))
-            .when(divider == Divider::Hidden, |cell| cell.pl(px(0.)))
-            .when(divider == Divider::Visible, |cell| {
-                cell.border_l_1().border_color(p.stroke_divider)
-            })
-            .child(value)
+            .px(ui.metrics.space.l)
+            .child(value.when_some(cell.trailing, |value, icon| {
+                value.child(ui.icon(icon, Density::Compact, palette.text_secondary))
+            }))
             .child(
                 div()
-                    .ramp(Ramp::Caption)
-                    .text_color(p.text_secondary)
-                    .child(self.fmt.text(label_key)),
+                    .ramp(ui, Ramp::Caption)
+                    .text_color(palette.text_secondary)
+                    .child(self.formatter.text(cell.label)),
             )
     }
 }
 
-impl Formatter {
-    /// Number and unit pairs in different sizes, such as `7` `小时` `5` `分`.
-    fn duration_value(self, p: &Palette, duration: Duration, big: Ramp, small: Ramp) -> Div {
-        let parts = crate::app::format::DurationParts::from_duration(duration);
-        let pairs = parts
-            .hours
-            .map(|hours| (hours, self.hour_unit()))
-            .into_iter()
-            .chain(parts.minutes.map(|minutes| (minutes, self.minute_unit())));
-        pairs.fold(
-            div().flex().flex_row().items_baseline().gap(px(space::XXS)),
-            |row, (value, unit)| {
-                row.child(
-                    div()
-                        .ramp(big)
-                        .text_color(p.text_primary)
-                        .child(value.to_string()),
-                )
-                .child(
-                    div()
-                        .ramp(small)
-                        .text_color(p.text_secondary)
-                        .mr(px(space::XXS))
-                        .child(unit),
-                )
-            },
-        )
-    }
-    fn percent_value(self, p: &Palette, share: Share) -> Div {
-        div()
-            .flex()
-            .flex_row()
-            .items_baseline()
-            .ramp(Ramp::Subtitle)
-            .text_color(p.text_primary)
-            .child(self.percent(share))
-    }
-    fn switch_value(self, p: &Palette, per_hour: f32) -> Div {
-        let rounded = per_hour.round().max(0.).to_string();
-        div()
-            .flex()
-            .flex_row()
-            .items_baseline()
-            .ramp(Ramp::Subtitle)
-            .text_color(p.text_primary)
-            .child(self.text_with("today.stat.switch_count", &[("count", &rounded)]))
+/// Number and unit pairs in different sizes, such as `7` `小时` `5` `分`.
+fn duration_value(
+    ui: &Widgets<'_>,
+    formatter: Formatter,
+    duration: Duration,
+    number: Ramp,
+    unit: Ramp,
+) -> Div {
+    let (hours, minutes) = (
+        formatter.text(Msg::UnitHour),
+        formatter.text(Msg::UnitMinute),
+    );
+    let pairs = match DurationParts::from_duration(duration) {
+        DurationParts::Minutes(count) => vec![(count, minutes)],
+        DurationParts::Hours(count) => vec![(count, hours)],
+        DurationParts::HoursMinutes {
+            hours: hour_count,
+            minutes: minute_count,
+        } => vec![(hour_count, hours), (minute_count, minutes)],
+    };
+    let row = div()
+        .flex()
+        .flex_row()
+        .items_baseline()
+        .gap(ui.metrics.space.xxs);
+    row.children(pairs.into_iter().flat_map(|(count, label)| {
+        [
+            div()
+                .ramp(ui, number)
+                .text_color(ui.palette.text_primary)
+                .child(count.to_string()),
+            div()
+                .ramp(ui, unit)
+                .text_color(ui.palette.text_secondary)
+                .mr(ui.metrics.space.xxs)
+                .child(label),
+        ]
+    }))
+}
+
+/// A status value set as one subtitle string.
+fn text_value(ui: &Widgets<'_>, text: String) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_baseline()
+        .ramp(ui, Ramp::Subtitle)
+        .text_color(ui.palette.text_primary)
+        .child(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_unclassified_cell_opens_a_list() {
+        let cells = stat_cells(&DaySummary::default());
+        let opening: Vec<Msg> = cells
+            .iter()
+            .filter(|cell| cell.trailing.is_some())
+            .map(|cell| cell.label)
+            .collect();
+        assert_eq!(opening, [Msg::StatUnclassified]);
+        assert_eq!(cells.first().map(|cell| cell.label), Some(Msg::StatActive));
     }
 }

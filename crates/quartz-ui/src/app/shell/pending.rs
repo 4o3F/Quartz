@@ -1,57 +1,99 @@
 //! Pending-away row with inline label buttons (07 section 3).
 
-use gpui_kit::{IntoElement, ParentElement as _, Styled as _, assets::IconName, div, px};
+use gpui_kit::{IntoElement, ParentElement as _, Styled as _, assets::IconName, div};
 
 use super::AppShell;
-use crate::app::{
-    tokens::Palette,
-    widgets::{Density, Ramp, RampExt as _, icon, space},
+use crate::{
+    app::{
+        metrics::{Density, Ramp},
+        widgets::{ButtonContent, RampExt as _, Widgets},
+    },
+    format::{Arg, Msg},
 };
 
-const ACTIONS: [&str; 5] = [
-    "today.pending.rest",
-    "today.pending.meeting",
-    "today.pending.reading",
-    "today.pending.dismiss",
-    "today.pending.other",
-];
+/// How the user can label an away span (07 section 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PendingAction {
+    Rest,
+    Meeting,
+    Reading,
+    Dismiss,
+    Other,
+}
+
+impl PendingAction {
+    const ALL: [Self; 5] = [
+        Self::Rest,
+        Self::Meeting,
+        Self::Reading,
+        Self::Dismiss,
+        Self::Other,
+    ];
+
+    const fn label(self) -> Msg {
+        match self {
+            Self::Rest => Msg::PendingRest,
+            Self::Meeting => Msg::PendingMeeting,
+            Self::Reading => Msg::PendingReading,
+            Self::Dismiss => Msg::PendingDismiss,
+            Self::Other => Msg::PendingOther,
+        }
+    }
+
+    const fn element_id(self) -> &'static str {
+        match self {
+            Self::Rest => "pending-rest",
+            Self::Meeting => "pending-meeting",
+            Self::Reading => "pending-reading",
+            Self::Dismiss => "pending-dismiss",
+            Self::Other => "pending-other",
+        }
+    }
+}
 
 impl AppShell {
-    pub(super) fn render_pending(&self, p: &Palette) -> Option<impl IntoElement> {
+    // The label buttons are inert until labeling exists.
+    pub(super) fn render_pending(&self, ui: &Widgets<'_>) -> Option<impl IntoElement> {
         let away = self.day.pending_away()?;
-        let mut buttons = div().flex().flex_row().gap(px(space::S));
-        for (index, key) in ACTIONS.iter().enumerate() {
-            buttons = buttons.child(p.button(
-                ("pending", index),
-                Density::Compact,
-                Some(self.fmt.text(key)),
-                None,
-            ));
-        }
+        let space = &ui.metrics.space;
+        let buttons = div()
+            .flex()
+            .flex_row()
+            .gap(space.s)
+            .children(PendingAction::ALL.map(|action| {
+                ui.button(
+                    action.element_id(),
+                    Density::Compact,
+                    ButtonContent::Label(self.formatter.text(action.label())),
+                )
+            }));
         Some(
-            p.card()
+            ui.card()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(space::S))
-                .px(px(space::L))
-                .py(px(space::S))
-                .child(icon(IconName::Clock, 16., p.text_primary))
+                .gap(space.s)
+                .px(space.l)
+                .py(space.s)
+                .child(ui.icon(IconName::Clock, Density::Compact, ui.palette.text_primary))
                 .child(
                     div()
-                        .ramp(Ramp::BodyStrong)
-                        .child(self.fmt.text("today.pending.title")),
+                        .ramp(ui, Ramp::BodyStrong)
+                        .child(self.formatter.text(Msg::PendingTitle)),
                 )
                 .child(
                     div()
                         .flex_1()
-                        .ramp(Ramp::Caption)
-                        .text_color(p.text_secondary)
-                        .child(self.fmt.text_with(
-                            "today.pending.range",
+                        .ramp(ui, Ramp::Caption)
+                        .text_color(ui.palette.text_secondary)
+                        .child(self.formatter.text_with(
+                            Msg::PendingRange,
                             &[
-                                ("range", &away.span.to_string()),
-                                ("duration", &self.fmt.duration(away.span.duration())),
+                                (Arg::Range, &away.span.to_string()),
+                                (
+                                    Arg::Duration,
+                                    &self.formatter.duration(away.span.duration()),
+                                ),
                             ],
                         )),
                 )

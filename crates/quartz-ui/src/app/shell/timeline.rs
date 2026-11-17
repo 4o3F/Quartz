@@ -1,314 +1,308 @@
 //! The timeline: category main track, per-application swimlanes, axis, hover and selection
-//! (07 section 4, 11 sections 3.4 and 5.3). Blocks are positioned by fractions of the plot width,
-//! so the layout never needs the plot's pixel size and nothing redraws while idle.
+//! (07 section 4, 11 sections 3.4 and 5.3). Blocks are positioned by fractions of the plot width
+//! (see [`crate::timeline_scale`]), so the layout never needs the plot's pixel size and nothing
+//! redraws while idle.
 
 use gpui_kit::{
-    Context, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, MouseMoveEvent,
-    ParentElement as _, Stateful, StatefulInteractiveElement as _, Styled as _, anchored,
-    assets::IconName, div, pattern_slash, point, prelude::FluentBuilder as _, px, relative,
+    ClickEvent, Context, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
+    MouseMoveEvent, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
+    Styled as _, anchored, assets::IconName, div, pattern_slash, point,
+    prelude::FluentBuilder as _, px, relative,
 };
 
 use super::{AppShell, HoverTarget, LaneMode, RangeChoice};
-use crate::app::{
+use crate::{
+    app::{
+        metrics::{Density, Metrics, Ramp},
+        widgets::{ButtonContent, RampExt as _, Segment as SegmentedItem, Widgets},
+    },
+    format::{Arg, Msg, SourceText},
     model::{
-        ClassificationSource, DetailsSubject, MainBlock, Segment, SegmentId, StateBlock, StateKind,
-        TimeOfDay, TimeSpan,
+        CategoryId, ClockAnomaly, DetailsSubject, Lane, MainBlock, Segment, StateBlock, StateKind,
+        TimeSpan,
     },
-    tokens::{
-        Palette,
-        metrics::{AXIS_HEIGHT, BLOCK_RADIUS, LANE_GAP, LANE_HEIGHT, MAIN_TRACK_HEIGHT},
-    },
-    widgets::{Density, RADIUS_CONTROL, Ramp, RampExt as _, icon, space},
+    timeline_scale::{View, ZoomStep, fitting_label},
 };
 
+/// Width of the label column left of the plot.
 const LABEL_WIDTH: f32 = 140.;
-const PLOT_PADDING: f32 = 4.;
-const MARGIN_MINUTES: u32 = 15;
-const MIN_ZOOM_MINUTES: f32 = 5.;
-/// Horizontal padding a block label needs on top of its text.
-const LABEL_PADDING: f32 = 12.;
+/// Narrowest plot width assumed when choosing block labels.
+const MIN_PLOT_WIDTH: f32 = 200.;
+/// Width of a tick label, centered on its tick.
+const AXIS_LABEL_WIDTH: f32 = 40.;
+/// Narrowest painted block, so one-pixel blocks stay visible.
+const MIN_BLOCK_WIDTH: f32 = 2.;
+/// Horizontal padding of block text; `timeline_scale` reserves twice this when fitting labels.
+const BLOCK_TEXT_PADDING: f32 = 6.;
+/// Width of the hover tooltip.
 const TOOLTIP_WIDTH: f32 = 260.;
+/// Offset of the tooltip from the pointer.
+const TOOLTIP_OFFSET: (f32, f32) = (12., 16.);
+/// Height of a category chip.
+const CHIP_HEIGHT: f32 = 20.;
 
-/// Visible window as fractions of the plot.
-#[derive(Debug, Clone, Copy)]
-struct View {
-    start: f32,
-    end: f32,
+/// Lane-mode choices in display order with their element ids and labels.
+const LANE_MODES: [(LaneMode, &str, Msg); 2] = [
+    (LaneMode::Swimlanes, "lanes-apps", Msg::TimelineLanesApps),
+    (
+        LaneMode::CategoryOnly,
+        "lanes-category",
+        Msg::TimelineLanesCategory,
+    ),
+];
+
+/// Whether the pointer is over a block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BlockHover {
+    Idle,
+    Hovered,
 }
 
-impl View {
-    fn from_span(span: TimeSpan) -> Self {
-        Self {
-            start: span.start.minutes_f32(),
-            end: span.end.minutes_f32().max(span.start.minutes_f32() + 1.),
-        }
-    }
-
-    fn length(self) -> f32 {
-        self.end - self.start
-    }
-
-    /// Left and width fractions of `span`, clipped to the view; `None` when outside.
-    fn place(self, span: TimeSpan) -> Option<(f32, f32)> {
-        let start = span.start.minutes_f32().max(self.start);
-        let end = span.end.minutes_f32().min(self.end);
-        (end > start).then(|| {
-            (
-                (start - self.start) / self.length(),
-                (end - start) / self.length(),
-            )
-        })
-    }
+/// Estimated plot width, used only to decide which labels fit inside blocks: the page width
+/// without the page margins, the card padding, the label column and the plot padding.
+fn estimated_plot_width(main_width: Pixels, metrics: &Metrics) -> f32 {
+    let space = &metrics.space;
+    let page = f32::from(main_width).min(f32::from(metrics.layout.max_content_width));
+    let chrome = 2. * f32::from(space.xxl) + 2. * f32::from(space.l) + f32::from(space.m);
+    (page - chrome - LABEL_WIDTH).max(MIN_PLOT_WIDTH)
 }
 
 impl AppShell {
     fn view(&self) -> View {
         match self.range {
-            RangeChoice::Activity => {
-                let range = self.day.activity_range();
-                View::from_span(TimeSpan::new(
-                    range.start.earlier_by_minutes(MARGIN_MINUTES),
-                    range.end.later_by_minutes(MARGIN_MINUTES),
-                ))
+            RangeChoice::Activity => View::activity(self.day.activity_range()),
+            RangeChoice::FullDay => View::full_day(),
+            RangeChoice::Zoomed(span) => {
+                View::new(span).expect("zooming never yields an empty span")
             }
-            RangeChoice::FullDay => {
-                View::from_span(TimeSpan::new(TimeOfDay::START, TimeOfDay::END))
-            }
-            RangeChoice::Zoomed {
-                start_minute,
-                end_minute,
-            } => View {
-                start: start_minute,
-                end: end_minute,
-            },
         }
     }
 
-    fn zoom(&mut self, factor: f32, cx: &mut Context<Self>) {
-        let view = self.view();
-        let center = (view.start + view.end) / 2.;
-        let half = (view.length() * factor / 2.).clamp(MIN_ZOOM_MINUTES / 2., 12. * 60.);
-        let start = (center - half).max(0.);
-        let end = (center + half).min(24. * 60.);
-        self.range = RangeChoice::Zoomed {
-            start_minute: start,
-            end_minute: end,
+    fn zoom(&mut self, step: ZoomStep, cx: &mut Context<Self>) {
+        self.range = RangeChoice::Zoomed(self.view().zoomed(step));
+        self.hover = None;
+        cx.notify();
+    }
+
+    fn toggle_full_day(&mut self, cx: &mut Context<Self>) {
+        self.range = match self.range {
+            RangeChoice::FullDay => RangeChoice::Activity,
+            RangeChoice::Activity | RangeChoice::Zoomed(_) => RangeChoice::FullDay,
         };
         self.hover = None;
         cx.notify();
     }
 
+    fn set_lanes(&mut self, lanes: LaneMode, cx: &mut Context<Self>) {
+        self.lanes = lanes;
+        self.hover = None;
+        cx.notify();
+    }
+
+    fn visible_lanes(&self) -> &[Lane] {
+        match self.lanes {
+            LaneMode::Swimlanes => self.day.lanes(),
+            LaneMode::CategoryOnly => &[],
+        }
+    }
+
     pub(super) fn render_timeline(
         &self,
-        p: &Palette,
-        main_width: f32,
+        ui: &Widgets<'_>,
+        main_width: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = self.view();
-        // Estimated plot width, used only to decide which labels fit inside blocks.
-        let plot_width =
-            (main_width.min(1200.) - 2. * space::XXL - 2. * space::L - LABEL_WIDTH - space::M)
-                .max(200.);
-        let lanes = match self.lanes {
-            LaneMode::Swimlanes => self.day.lanes(),
-            LaneMode::CategoryOnly => Vec::new(),
-        };
-        let range = self.day.activity_range();
-        let full_day = self.range == RangeChoice::FullDay;
+        let plot_width = estimated_plot_width(main_width, ui.metrics);
+        ui.card()
+            .flex()
+            .flex_col()
+            .gap(ui.metrics.space.s)
+            .p(ui.metrics.space.l)
+            .child(self.timeline_header(ui, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .child(self.label_column(ui))
+                    .child(self.plot(ui, view, plot_width, cx)),
+            )
+    }
 
-        let header = div()
+    fn timeline_header(&self, ui: &Widgets<'_>, cx: &mut Context<Self>) -> Div {
+        let full_day = self.range == RangeChoice::FullDay;
+        let density = Density::Compact;
+        div()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(space::S))
+            .gap(ui.metrics.space.s)
             .child(
                 div()
                     .flex_1()
-                    .ramp(Ramp::Subtitle)
-                    .child(self.fmt.text("timeline.title")),
+                    .ramp(ui, Ramp::Subtitle)
+                    .child(self.formatter.text(Msg::TimelineTitle)),
             )
-            .child(
+            .children(self.day.activity_range().map(|range| {
                 div()
-                    .ramp(Ramp::Caption)
-                    .text_color(p.text_secondary)
-                    .mr(px(space::S))
-                    .child(range.to_string()),
-            )
-            .child(p.segmented(
+                    .ramp(ui, Ramp::Caption)
+                    .text_color(ui.palette.text_secondary)
+                    .mr(ui.metrics.space.s)
+                    .child(range.to_string())
+            }))
+            .child(ui.segmented(
                 "timeline-lanes",
-                vec![
-                    (self.fmt.text("timeline.lanes.apps"), LaneMode::Swimlanes),
-                    (
-                        self.fmt.text("timeline.lanes.category"),
-                        LaneMode::CategoryOnly,
-                    ),
-                ],
+                LANE_MODES.map(|(mode, id, label)| SegmentedItem {
+                    id,
+                    label: self.formatter.text(label),
+                    value: mode,
+                }),
                 self.lanes,
-                |mode| {
-                    cx.listener(move |this, _: &gpui_kit::ClickEvent, _, cx| {
-                        this.lanes = mode;
-                        this.hover = None;
-                        cx.notify();
-                    })
-                },
+                |mode| cx.listener(move |this, _: &ClickEvent, _, cx| this.set_lanes(mode, cx)),
             ))
             .child(
-                p.button("zoom-out", Density::Compact, None, Some(IconName::Minus))
-                    .on_click(cx.listener(|this, _, _, cx| this.zoom(2., cx))),
+                ui.button("zoom-out", density, ButtonContent::Icon(IconName::Minus))
+                    .on_click(cx.listener(|this, _, _, cx| this.zoom(ZoomStep::Out, cx))),
             )
             .child(
-                p.button("zoom-in", Density::Compact, None, Some(IconName::Plus))
-                    .on_click(cx.listener(|this, _, _, cx| this.zoom(0.5, cx))),
+                ui.button("zoom-in", density, ButtonContent::Icon(IconName::Plus))
+                    .on_click(cx.listener(|this, _, _, cx| this.zoom(ZoomStep::In, cx))),
             )
             .child(
-                p.button(
+                ui.button(
                     "zoom-full",
-                    Density::Compact,
-                    Some(self.fmt.text(if full_day {
-                        "timeline.fit_activity"
+                    density,
+                    ButtonContent::Label(self.formatter.text(if full_day {
+                        Msg::TimelineFitActivity
                     } else {
-                        "timeline.full_day"
+                        Msg::TimelineFullDay
                     })),
-                    None,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.range = if full_day {
-                        RangeChoice::Activity
-                    } else {
-                        RangeChoice::FullDay
-                    };
-                    this.hover = None;
-                    cx.notify();
-                })),
-            );
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_full_day(cx))),
+            )
+    }
 
-        // Left label column; rows mirror the plot rows exactly.
-        let mut labels = div()
+    /// The label column; its rows mirror the plot rows exactly.
+    fn label_column(&self, ui: &Widgets<'_>) -> Div {
+        let palette = ui.palette;
+        let sizes = &ui.metrics.timeline;
+        div()
             .flex()
             .flex_col()
             .flex_shrink_0()
             .w(px(LABEL_WIDTH))
-            .py(px(PLOT_PADDING))
+            .py(ui.metrics.space.xs)
             .child(
                 div()
-                    .h(px(MAIN_TRACK_HEIGHT))
+                    .h(sizes.main_track_height)
                     .flex()
                     .items_center()
-                    .ramp(Ramp::Caption)
-                    .text_color(p.text_secondary)
-                    .child(self.fmt.text("timeline.main_track")),
-            );
-        for lane in &lanes {
-            let app = self.day.app(lane.app);
-            labels = labels.child(
+                    .ramp(ui, Ramp::Caption)
+                    .text_color(palette.text_secondary)
+                    .child(self.formatter.text(Msg::TimelineMainTrack)),
+            )
+            .children(self.visible_lanes().iter().map(|lane| {
+                let app = self.day.app(lane.app);
                 div()
-                    .h(px(LANE_HEIGHT))
-                    .mt(px(LANE_GAP))
+                    .h(sizes.lane_height)
+                    .mt(sizes.lane_gap)
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(space::S))
-                    .ramp(Ramp::Caption)
-                    .text_color(p.text_secondary)
-                    .child(icon(app.glyph.icon_name(), 14., p.text_secondary))
-                    .child(app.short_name.clone()),
-            );
-        }
-        labels = labels.child(div().h(px(AXIS_HEIGHT)));
+                    .gap(ui.metrics.space.s)
+                    .ramp(ui, Ramp::Caption)
+                    .text_color(palette.text_secondary)
+                    .child(ui.icon(app.glyph.into(), Density::Compact, palette.text_secondary))
+                    .child(app.short_name.clone())
+            }))
+            .child(div().h(sizes.axis_height))
+    }
 
-        let mut rows = div()
+    fn plot(&self, ui: &Widgets<'_>, view: View, plot_width: f32, cx: &mut Context<Self>) -> Div {
+        let rows = div()
             .flex()
             .flex_col()
-            .py(px(PLOT_PADDING))
-            .child(self.main_track(p, view, plot_width, cx));
-        for lane in &lanes {
-            rows = rows.child(self.lane_row(p, view, &lane.segments, cx));
-        }
-        rows = rows.child(self.axis(p, view));
-
-        let mut plot = (p)
-            .plot_area()
+            .py(ui.metrics.space.xs)
+            .child(self.main_track(ui, view, plot_width, cx))
+            .children(
+                self.visible_lanes()
+                    .iter()
+                    .map(|lane| self.lane_row(ui, view, lane, cx)),
+            )
+            .child(self.axis(ui, view));
+        ui.plot_area()
             .relative()
             .flex_1()
             .min_w(px(0.))
             .overflow_hidden()
-            .children(self.gridlines(p, view))
-            .child(rows);
-        if let Some(selection) = self.selection_overlay(p, view) {
-            plot = plot.child(selection);
-        }
-
-        p.card()
-            .flex()
-            .flex_col()
-            .gap(px(space::S))
-            .p(px(space::L))
-            .child(header)
-            .child(div().flex().flex_row().child(labels).child(plot))
+            .children(self.gridlines(ui, view))
+            .child(rows)
+            .children(self.selection_overlay(ui, view))
     }
 
-    fn gridlines(&self, p: &Palette, view: View) -> Vec<Div> {
+    fn gridlines(&self, ui: &Widgets<'_>, view: View) -> Vec<Div> {
         view.ticks()
             .into_iter()
-            .map(|minute| {
+            .map(|tick| {
                 div()
                     .absolute()
                     .top(px(0.))
                     .bottom(px(0.))
-                    .left(relative((minute - view.start) / view.length()))
-                    .w(px(1.))
-                    .bg(p.stroke_divider)
+                    .left(relative(tick.fraction))
+                    .w(ui.metrics.layout.divider)
+                    .bg(ui.palette.stroke_divider)
             })
             .collect()
     }
 
-    fn axis(&self, p: &Palette, view: View) -> Div {
-        let mut axis = div().relative().h(px(AXIS_HEIGHT));
-        for minute in view.ticks() {
-            let fraction = (minute - view.start) / view.length();
-            if !(0.02..=0.98).contains(&fraction) {
-                continue;
-            }
-            let time = TimeOfDay::from_minutes_f32(minute);
-            axis = axis.child(
+    fn axis(&self, ui: &Widgets<'_>, view: View) -> Div {
+        let labels = view
+            .ticks()
+            .into_iter()
+            .filter(|tick| tick.has_room_for_label())
+            .map(|tick| {
                 div()
                     .absolute()
-                    .top(px(space::XS))
-                    .left(relative((minute - view.start) / view.length()))
-                    .ml(px(-20.))
-                    .w(px(40.))
+                    .top(ui.metrics.space.xs)
+                    .left(relative(tick.fraction))
+                    .ml(px(-AXIS_LABEL_WIDTH / 2.))
+                    .w(px(AXIS_LABEL_WIDTH))
                     .flex()
                     .justify_center()
-                    .ramp(Ramp::Caption)
-                    .text_color(p.text_tertiary)
-                    .child(time.to_string()),
-            );
-        }
-        axis
+                    .ramp(ui, Ramp::Caption)
+                    .text_color(ui.palette.text_tertiary)
+                    .child(tick.time.to_string())
+            });
+        div()
+            .relative()
+            .h(ui.metrics.timeline.axis_height)
+            .children(labels)
     }
 
-    fn selection_overlay(&self, p: &Palette, view: View) -> Option<Div> {
-        let DetailsSubject::Segment(id) = self.details? else {
-            return None;
-        };
-        let segment = self.day.segment(id)?;
-        let (left, width) = view.place(segment.span)?;
+    fn selection_overlay(&self, ui: &Widgets<'_>, view: View) -> Option<Div> {
+        let interval = self.details.as_ref()?.content.interval.as_ref()?;
+        let placement = view.place(interval.span)?;
+        let accent = ui.palette.accent_fill;
         Some(
             div()
                 .absolute()
                 .top(px(0.))
                 .bottom(px(0.))
-                .left(relative(left))
-                .w(relative(width))
-                .bg(p.accent_fill.opacity(0.2))
+                .left(relative(placement.left))
+                .w(relative(placement.width))
+                .bg(accent.opacity(ui.metrics.opacity.selection))
                 .border_l_1()
                 .border_r_1()
-                .border_color(p.accent_fill),
+                .border_color(accent),
         )
     }
 
-    fn hover_state(&self, target: HoverTarget) -> bool {
-        self.hover.is_some_and(|hover| hover.target == target)
+    fn block_hover(&self, target: HoverTarget) -> BlockHover {
+        if self.hover.is_some_and(|hover| hover.target == target) {
+            BlockHover::Hovered
+        } else {
+            BlockHover::Idle
+        }
     }
 
     fn with_hover<E>(&self, element: E, target: HoverTarget, cx: &mut Context<Self>) -> E
@@ -326,252 +320,269 @@ impl AppShell {
             }))
     }
 
-    fn main_track(&self, p: &Palette, view: View, plot_width: f32, cx: &mut Context<Self>) -> Div {
-        let mut row = div().relative().h(px(MAIN_TRACK_HEIGHT));
-        for (index, block) in self.day.main_track().iter().enumerate() {
-            let Some((left, width)) = view.place(block.span()) else {
-                continue;
-            };
-            let target = HoverTarget::MainBlock(index);
-            let hovered = self.hover_state(target);
-            let pixels = width * plot_width;
-            let element = p.block_body(if hovered {
-                BlockHover::Hovered
-            } else {
-                BlockHover::Idle
-            });
-            let element = match block {
-                MainBlock::Active { span, category } => {
-                    let category = self.day.category(*category);
-                    let color = p.category(category.color);
-                    let name = self.fmt.category_name(&category.name);
-                    let label = block_label(
-                        pixels,
-                        &name,
-                        &self.fmt.text_with(
-                            "timeline.block_label",
-                            &[
-                                ("name", &name),
-                                ("duration", &self.fmt.duration(span.duration())),
-                            ],
-                        ),
-                    );
-                    (element.bg(color)).block_text(label, p.text_on(color))
+    fn main_track(
+        &self,
+        ui: &Widgets<'_>,
+        view: View,
+        plot_width: f32,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let blocks = self.day.main_track().iter().filter_map(|block| {
+            let span = block.span();
+            let placement = view.place(span)?;
+            let target = HoverTarget::MainBlock(span.start());
+            let pixels = placement.width * plot_width;
+            let body = block_body(ui, self.block_hover(target));
+            let body = match block {
+                MainBlock::Active { category, .. } => {
+                    self.active_block(ui, body, *category, span, pixels)
                 }
-                MainBlock::State(state) => self.state_block(p, element, state, pixels),
+                MainBlock::State(state) => self.state_block(ui, body, state, pixels),
             };
-            let tile = tile(("main-block", index), left, width).child(element);
-            row = row.child(self.with_hover(tile, target, cx));
-        }
-        row
+            let tile = tile(
+                ("main-block", span.start().seconds()),
+                placement.left,
+                placement.width,
+            )
+            .child(body);
+            Some(self.with_hover(tile, target, cx))
+        });
+        div()
+            .relative()
+            .h(ui.metrics.timeline.main_track_height)
+            .children(blocks.collect::<Vec<_>>())
     }
 
-    fn state_block(&self, p: &Palette, element: Div, state: &StateBlock, pixels: f32) -> Div {
-        match state.kind {
-            StateKind::Idle => {
-                let color = state.category.map_or(p.status_neutral, |id| {
-                    p.category(self.day.category(id).color)
+    fn active_block(
+        &self,
+        ui: &Widgets<'_>,
+        body: Div,
+        category: CategoryId,
+        span: TimeSpan,
+        pixels: f32,
+    ) -> Div {
+        let category = self.day.category(category);
+        let color = ui.palette.category(category.color);
+        let name = self.formatter.category_name(&category.name);
+        let full = self.formatter.text_with(
+            Msg::TimelineBlockLabel,
+            &[
+                (Arg::Name, &name),
+                (Arg::Duration, &self.formatter.duration(span.duration())),
+            ],
+        );
+        block_text(
+            ui,
+            body.bg(color),
+            fitting_label(pixels, &name, &full),
+            ui.palette.text_on(color),
+        )
+    }
+
+    /// A state block styled per 11 section 3.4.
+    fn state_block(&self, ui: &Widgets<'_>, body: Div, state: &StateBlock, pixels: f32) -> Div {
+        let palette = ui.palette;
+        let metrics = ui.metrics;
+        let body = match state.kind {
+            StateKind::Idle { preceding, .. } => {
+                let color = preceding.map_or(palette.status_neutral, |id| {
+                    palette.category(self.day.category(id).color)
                 });
-                element.bg(color.opacity(0.4)).child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .bg(pattern_slash(p.stroke_control_strong, 1., 4.)),
-                )
+                body.bg(color.opacity(metrics.opacity.idle))
+                    .child(div().absolute().size_full().bg(pattern_slash(
+                        palette.stroke_control_strong,
+                        metrics.timeline.hatch_width,
+                        metrics.timeline.hatch_spacing,
+                    )))
             }
-            kind if kind.is_quiet() => element.bg(p.fill_subtle_hover),
-            kind => {
-                let name = self.fmt.text(kind.label_key());
-                let full = self.fmt.text_with(
-                    "timeline.state_label",
+            StateKind::Locked | StateKind::Sleep | StateKind::CoreStopped => {
+                body.bg(palette.fill_subtle_hover)
+            }
+            kind @ (StateKind::NoForeground | StateKind::Excluded | StateKind::CollectionGap) => {
+                let name = self.formatter.state_name(kind);
+                let full = self.formatter.text_with(
+                    Msg::TimelineStateLabel,
                     &[
-                        ("state", &name),
-                        ("duration", &self.fmt.duration(state.span.duration())),
+                        (Arg::State, &name),
+                        (
+                            Arg::Duration,
+                            &self.formatter.duration(state.span.duration()),
+                        ),
                     ],
                 );
-                (element.bg(p.status_neutral.opacity(0.3)))
-                    .block_text(block_label(pixels, &name, &full), p.text_primary)
+                block_text(
+                    ui,
+                    body.bg(palette
+                        .status_neutral
+                        .opacity(metrics.opacity.neutral_state)),
+                    fitting_label(pixels, &name, &full),
+                    palette.text_primary,
+                )
             }
-        }
-        .when(state.clock_anomaly, |element| {
-            element.child(
+        };
+        body.when(state.clock == ClockAnomaly::Detected, |body| {
+            body.child(
                 div()
                     .absolute()
                     .top(px(0.))
                     .left(px(0.))
                     .right(px(0.))
-                    .h(px(2.))
-                    .bg(p.status_caution),
+                    .h(metrics.timeline.clock_mark_height)
+                    .bg(palette.status_caution),
             )
         })
     }
 
-    fn lane_row(
-        &self,
-        p: &Palette,
-        view: View,
-        segments: &[SegmentId],
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let mut row = div().relative().mt(px(LANE_GAP)).h(px(LANE_HEIGHT));
-        for id in segments {
-            let Some(segment) = self.day.segment(*id) else {
-                continue;
-            };
-            let Some((left, width)) = view.place(segment.span) else {
-                continue;
-            };
-            let target = HoverTarget::Segment(*id);
-            let hovered = self.hover_state(target);
-            let color = p.category(self.day.category(segment.category).color);
-            let id = *id;
-            let tile = tile(("segment", id.0 as usize), left, width)
+    fn lane_row(&self, ui: &Widgets<'_>, view: View, lane: &Lane, cx: &mut Context<Self>) -> Div {
+        let blocks = self.day.lane_segments(lane).filter_map(|segment| {
+            let placement = view.place(segment.span)?;
+            let id = segment.id;
+            let target = HoverTarget::Segment(id);
+            let color = ui
+                .palette
+                .category(self.day.category(segment.category).color);
+            let tile = tile(("segment", id.get()), placement.left, placement.width)
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.select(DetailsSubject::Segment(id), cx);
                 }))
-                .child(
-                    p.block_body(if hovered {
-                        BlockHover::Hovered
-                    } else {
-                        BlockHover::Idle
-                    })
-                    .bg(color),
-                );
-            row = row.child(self.with_hover(tile, target, cx));
-        }
-        row
+                .child(block_body(ui, self.block_hover(target)).bg(color));
+            Some(self.with_hover(tile, target, cx))
+        });
+        div()
+            .relative()
+            .mt(ui.metrics.timeline.lane_gap)
+            .h(ui.metrics.timeline.lane_height)
+            .children(blocks.collect::<Vec<_>>())
     }
 
-    pub(super) fn render_tooltip(&self, p: &Palette) -> Option<impl IntoElement> {
+    pub(super) fn render_tooltip(&self, ui: &Widgets<'_>) -> Option<impl IntoElement> {
         let hover = self.hover?;
         let body = match hover.target {
-            HoverTarget::Segment(id) => self.segment_tooltip(p, self.day.segment(id)?),
-            HoverTarget::MainBlock(index) => {
-                let track = self.day.main_track();
-                self.block_tooltip(p, track.get(index)?)
-            }
+            HoverTarget::Segment(id) => self.segment_tooltip(
+                ui,
+                self.day
+                    .segment(id)
+                    .expect("hover targets are segments of the day shown"),
+            ),
+            HoverTarget::MainBlock(start) => self.block_tooltip(
+                ui,
+                self.day
+                    .main_block_at(start)
+                    .expect("hover targets are main blocks of the day shown"),
+            ),
         };
+        let (offset_x, offset_y) = TOOLTIP_OFFSET;
         Some(
             anchored()
                 .position(hover.position)
-                .offset(point(px(12.), px(16.)))
-                .snap_to_window_with_margin(px(8.))
+                .offset(point(px(offset_x), px(offset_y)))
+                .snap_to_window_with_margin(ui.metrics.space.s)
                 .child(
-                    p.flyout()
+                    ui.flyout()
                         .w(px(TOOLTIP_WIDTH))
-                        .p(px(space::M))
+                        .p(ui.metrics.space.m)
                         .flex()
                         .flex_col()
-                        .gap(px(space::XS))
-                        .text_color(p.text_primary)
+                        .gap(ui.metrics.space.xs)
+                        .text_color(ui.palette.text_primary)
                         .child(body),
                 ),
         )
     }
 
-    fn segment_tooltip(&self, p: &Palette, segment: &Segment) -> Div {
+    fn segment_tooltip(&self, ui: &Widgets<'_>, segment: &Segment) -> Div {
+        let palette = ui.palette;
         let app = self.day.app(segment.app);
         let category = self.day.category(segment.category);
-        let rule = match &segment.source {
-            ClassificationSource::Rule { condition } => self.fmt.text_with(
-                "timeline.tooltip.rule",
-                &[
-                    ("condition", condition),
-                    ("category", &self.fmt.category_name(&category.name)),
-                ],
-            ),
-            ClassificationSource::Manual => self.fmt.text("timeline.tooltip.manual"),
-            ClassificationSource::Unmatched => self.fmt.text("timeline.tooltip.unmatched"),
-        };
+        let rule = self.formatter.classification(
+            &self.day,
+            &segment.source,
+            SourceText::WithCategory(&category.name),
+        );
         div()
             .flex()
             .flex_col()
-            .gap(px(space::XS))
+            .gap(ui.metrics.space.xs)
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(space::S))
-                    .ramp(Ramp::BodyStrong)
-                    .child(icon(app.glyph.icon_name(), 16., p.text_primary))
+                    .gap(ui.metrics.space.s)
+                    .ramp(ui, Ramp::BodyStrong)
+                    .child(ui.icon(app.glyph.into(), Density::Compact, palette.text_primary))
                     .child(app.name.clone()),
             )
             .child(
                 div()
-                    .ramp(Ramp::Caption)
-                    .text_color(p.text_secondary)
+                    .ramp(ui, Ramp::Caption)
+                    .text_color(palette.text_secondary)
                     .child(segment.title.clone()),
             )
             .children(segment.domain.clone().map(|domain| {
                 div()
-                    .ramp(Ramp::Caption)
-                    .text_color(p.text_tertiary)
+                    .ramp(ui, Ramp::Caption)
+                    .text_color(palette.text_tertiary)
                     .child(domain)
             }))
-            .child(self.span_row(p, segment.span))
-            .child(self.category_chip(p, segment.category))
+            .child(self.span_row(ui, segment.span))
+            .child(self.category_chip(ui, segment.category))
             .child(
                 div()
-                    .ramp(Ramp::Caption)
-                    .text_color(p.text_secondary)
+                    .ramp(ui, Ramp::Caption)
+                    .text_color(palette.text_secondary)
                     .child(rule),
             )
     }
 
-    fn block_tooltip(&self, p: &Palette, block: &MainBlock) -> Div {
+    fn block_tooltip(&self, ui: &Widgets<'_>, block: &MainBlock) -> Div {
         let head = match block {
-            MainBlock::Active { category, .. } => self.category_chip(p, *category),
+            MainBlock::Active { category, .. } => self.category_chip(ui, *category),
             MainBlock::State(state) => div()
-                .ramp(Ramp::BodyStrong)
-                .child(self.fmt.text(state.kind.label_key())),
+                .ramp(ui, Ramp::BodyStrong)
+                .child(self.formatter.state_name(state.kind)),
         };
         div()
             .flex()
             .flex_col()
-            .gap(px(space::XS))
+            .gap(ui.metrics.space.xs)
             .child(head)
-            .child(self.span_row(p, block.span()))
+            .child(self.span_row(ui, block.span()))
     }
 
-    fn span_row(&self, p: &Palette, span: TimeSpan) -> Div {
+    fn span_row(&self, ui: &Widgets<'_>, span: TimeSpan) -> Div {
         div()
             .flex()
             .flex_row()
             .justify_between()
-            .ramp(Ramp::Caption)
-            .text_color(p.text_primary)
+            .ramp(ui, Ramp::Caption)
+            .text_color(ui.palette.text_primary)
             .child(span.to_string())
-            .child(self.fmt.duration(span.duration()))
+            .child(self.formatter.duration(span.duration()))
     }
 
-    pub(super) fn category_chip(&self, p: &Palette, id: crate::app::model::CategoryId) -> Div {
+    pub(super) fn category_chip(&self, ui: &Widgets<'_>, id: CategoryId) -> Div {
         let category = self.day.category(id);
         div()
             .flex()
             .flex_row()
             .items_center()
             .self_start()
-            .gap(px(space::S))
-            .px(px(space::S))
-            .h(px(20.))
-            .rounded(px(RADIUS_CONTROL))
-            .bg(p.fill_control_hover)
-            .ramp(Ramp::Caption)
-            .child(
-                div()
-                    .size(px(8.))
-                    .rounded(px(BLOCK_RADIUS))
-                    .bg(p.category(category.color)),
-            )
-            .child(self.fmt.category_name(&category.name))
+            .gap(ui.metrics.space.s)
+            .px(ui.metrics.space.s)
+            .h(px(CHIP_HEIGHT))
+            .rounded(ui.metrics.radius.control)
+            .bg(ui.palette.fill_control_hover)
+            .ramp(ui, Ramp::Caption)
+            .child(ui.swatch(ui.palette.category(category.color)))
+            .child(self.formatter.category_name(&category.name))
     }
 }
 
 /// Hit area of one timeline block, placed by plot fractions. The painted body inside leaves a
-/// 1 px background gap on its right (11 section 3.3); blocks have square corners so touching
-/// blocks never leave notches, and the 2 px minimum keeps 1 px wide blocks solid.
+/// background gap on its right (11 section 3.3); blocks have square corners so touching blocks
+/// never leave notches, and the minimum width keeps one-pixel blocks solid.
 fn tile(id: impl Into<ElementId>, left: f32, width: f32) -> Stateful<Div> {
     div()
         .id(id)
@@ -581,100 +592,58 @@ fn tile(id: impl Into<ElementId>, left: f32, width: f32) -> Stateful<Div> {
         .h_full()
         .left(relative(left))
         .w(relative(width))
-        .min_w(px(2.))
+        .min_w(px(MIN_BLOCK_WIDTH))
 }
 
-/// Rough width of 12 px text: wide glyphs take 12 px, narrow ones 6.5 px.
-fn estimate_text_width(text: &str) -> f32 {
-    text.chars()
-        .map(|c| if c.is_ascii() { 6.5 } else { 12. })
-        .sum::<f32>()
-        + LABEL_PADDING
-}
-
-/// Chooses the longest label that fits in `pixels`, or none.
-fn block_label(pixels: f32, short: &str, full: &str) -> Option<String> {
-    [full, short]
-        .into_iter()
-        .find(|text| estimate_text_width(text) <= pixels)
-        .map(str::to_owned)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BlockHover {
-    Idle,
-    Hovered,
-}
-impl Palette {
-    /// Painted body of a block; the hover outline is an overlay so it never eats into narrow blocks.
-    fn block_body(&self, hover: BlockHover) -> Div {
-        div()
-            .relative()
-            .flex_1()
-            .h_full()
-            .mr(px(1.))
-            .overflow_hidden()
-            .when(hover == BlockHover::Hovered, |body| {
-                body.child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .border_1()
-                        .border_color(self.text_primary),
-                )
-            })
-    }
-}
-
-impl StateKind {
-    const fn label_key(self) -> &'static str {
-        match self {
-            StateKind::Idle => "timeline.state.idle",
-            StateKind::Locked => "timeline.state.locked",
-            StateKind::Sleep => "timeline.state.sleep",
-            StateKind::CoreStopped => "timeline.state.core_stopped",
-            StateKind::NoForeground => "timeline.state.no_foreground",
-            StateKind::Excluded => "timeline.state.excluded",
-            StateKind::CollectionGap => "timeline.state.gap",
-        }
-    }
-}
-
-trait BlockTextExt {
-    fn block_text(self, label: Option<String>, color: Hsla) -> Self;
-}
-impl BlockTextExt for Div {
-    fn block_text(self, label: Option<String>, color: Hsla) -> Div {
-        self.when_some(label, |element, text| {
-            element.child(
+/// Painted body of a block; the hover outline is an overlay so it never eats into narrow blocks.
+fn block_body(ui: &Widgets<'_>, hover: BlockHover) -> Div {
+    div()
+        .relative()
+        .flex_1()
+        .h_full()
+        .mr(ui.metrics.timeline.block_gap)
+        .overflow_hidden()
+        .when(hover == BlockHover::Hovered, |body| {
+            body.child(
                 div()
-                    .px(px(space::S - 2.))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .whitespace_nowrap()
-                    .ramp(Ramp::Caption)
-                    .text_color(color)
-                    .child(text),
+                    .absolute()
+                    .size_full()
+                    .border_1()
+                    .border_color(ui.palette.text_primary),
             )
         })
-    }
 }
 
-impl View {
-    fn tick_step_minutes(self) -> f32 {
-        const STEPS: [f32; 9] = [1., 5., 10., 15., 30., 60., 120., 180., 360.];
-        STEPS
-            .into_iter()
-            .find(|step| self.length() / step <= 14.)
-            .unwrap_or(360.)
-    }
-    fn ticks(self) -> Vec<f32> {
-        let step = self.tick_step_minutes();
-        let first = (self.start / step).ceil();
-        (0..)
-            .map(|index| (first + index as f32) * step)
-            .take_while(|minute| *minute <= self.end)
-            .collect()
+/// Adds `label`, when there is one, as block text in `color`.
+fn block_text(ui: &Widgets<'_>, body: Div, label: Option<String>, color: Hsla) -> Div {
+    body.when_some(label, |body, text| {
+        body.child(
+            div()
+                .px(px(BLOCK_TEXT_PADDING))
+                .h_full()
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .ramp(ui, Ramp::Caption)
+                .text_color(color)
+                .child(text),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::ThemeBundle;
+
+    #[test]
+    fn plot_width_estimate_follows_the_page_width_up_to_the_content_limit() {
+        let tokens = ThemeBundle::embedded().expect("embedded theme").tokens();
+        let metrics = tokens.metrics();
+        // 1200 px content minus 2 x 24 page margin, 2 x 16 card padding, 12 plot padding and
+        // the 140 px label column.
+        assert!((estimated_plot_width(px(1600.), metrics) - 968.).abs() < f32::EPSILON);
+        assert!((estimated_plot_width(px(992.), metrics) - 760.).abs() < f32::EPSILON);
+        assert!((estimated_plot_width(px(100.), metrics) - MIN_PLOT_WIDTH).abs() < f32::EPSILON);
     }
 }

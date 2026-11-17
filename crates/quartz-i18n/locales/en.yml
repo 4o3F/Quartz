@@ -31,6 +31,8 @@ ui.core_error.backups:
   en: "Migration backups"
 ui.core_error.restore_warning:
   en: "Restoring replaces the current database. All records written after the backup will be lost."
+ui.core_error.restore_manually:
+  en: "This path cannot be written as a command. Run %{command} with this backup from a terminal."
 nav.today:
   en: "Today"
 nav.week:
@@ -139,6 +141,8 @@ details.rule_set:
   en: "Rule set %{name}"
 details.actual:
   en: "Actual: %{value}"
+details.condition:
+  en: "%{field} %{operator} %{value}"
 details.no_shadowed:
   en: "Not shadowed: no other rule matched"
 details.no_rule:

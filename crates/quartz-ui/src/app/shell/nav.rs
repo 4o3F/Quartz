@@ -1,129 +1,87 @@
 //! Left navigation: 240 px sidebar that collapses to a 48 px icon rail (11 section 5.4).
 
 use gpui_kit::{
-    Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    Context, Div, InteractiveElement as _, IntoElement, ParentElement as _, Stateful,
     StatefulInteractiveElement as _, Styled as _, assets::IconName, div,
     prelude::FluentBuilder as _, px,
 };
 
-use super::{AppShell, Page};
+use super::{AppShell, NavLayout, Page};
 use crate::app::{
-    tokens::{
-        Palette,
-        metrics::{NAV_WIDTH, RAIL_WIDTH},
-    },
-    widgets::{RADIUS_CONTROL, Ramp, RampExt as _, icon, space},
+    metrics::{Density, Ramp},
+    widgets::{RampExt as _, Widgets},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NavLayout {
-    Expanded,
-    Rail,
-}
-
+/// Height of a navigation item, as in the WinUI navigation view.
 const ITEM_HEIGHT: f32 = 36.;
 
 impl AppShell {
-    pub(super) fn render_nav(
-        &self,
-        p: &Palette,
-        layout: NavLayout,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let items = [
-            (Page::Today, IconName::Calendar, "nav.today"),
-            (Page::Week, IconName::CalendarRange, "nav.week"),
-            (Page::Rules, IconName::Tag, "nav.rules"),
-        ];
-        let mut list = div().flex().flex_col().gap(px(space::XXS));
-        for (page, glyph, key) in items {
-            list = list.child(self.nav_item(p, layout, page, glyph, key, cx));
-        }
+    pub(super) fn render_nav(&self, ui: &Widgets<'_>, cx: &mut Context<Self>) -> impl IntoElement {
+        let layout = self.nav_layout();
+        let space = &ui.metrics.space;
         div()
             .flex()
             .flex_col()
             .flex_shrink_0()
-            .w(px(if layout == NavLayout::Rail {
-                RAIL_WIDTH
-            } else {
-                NAV_WIDTH
-            }))
+            .w(layout.width(ui.metrics))
             .h_full()
-            .p(px(space::XS))
-            .gap(px(space::XXS))
+            .p(space.xs)
+            .gap(space.xxs)
             .child(
                 div()
                     .id("nav-toggle")
                     .flex()
                     .items_center()
                     .h(px(ITEM_HEIGHT))
-                    .px(px(space::M))
-                    .rounded(px(RADIUS_CONTROL))
+                    .px(space.m)
+                    .rounded(ui.metrics.radius.control)
                     .cursor_pointer()
-                    .hover({
-                        let hover = p.fill_subtle_hover;
-                        move |style| style.bg(hover)
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.nav_collapsed_by_user = !this.nav_collapsed_by_user;
-                        cx.notify();
-                    }))
-                    .child(icon(IconName::Menu, 16., p.text_primary)),
+                    .hover(ui.subtle_hover())
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_nav(cx)))
+                    .child(ui.icon(IconName::Menu, Density::Compact, ui.palette.text_primary)),
             )
-            .child(list)
+            .child(
+                div().flex().flex_col().gap(space.xxs).children(
+                    Page::NAV_ITEMS
+                        .into_iter()
+                        .map(|page| self.nav_item(ui, layout, page, cx)),
+                ),
+            )
             .child(div().flex_1())
-            .child(self.nav_item(
-                p,
-                layout,
-                Page::Settings,
-                IconName::Settings,
-                "nav.settings",
-                cx,
-            ))
+            .child(self.nav_item(ui, layout, Page::Settings, cx))
     }
 
     fn nav_item(
         &self,
-        p: &Palette,
+        ui: &Widgets<'_>,
         layout: NavLayout,
         page: Page,
-        glyph: IconName,
-        key: &str,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let selected = self.page == page;
-        let hover = p.fill_subtle_hover;
+        let palette = ui.palette;
         div()
-            .id(("nav", page as usize))
+            .id(page.element_id())
             .relative()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(space::M))
+            .gap(ui.metrics.space.m)
             .h(px(ITEM_HEIGHT))
-            .px(px(space::M))
-            .rounded(px(RADIUS_CONTROL))
-            .ramp(Ramp::Body)
-            .text_color(p.text_primary)
+            .px(ui.metrics.space.m)
+            .rounded(ui.metrics.radius.control)
+            .ramp(ui, Ramp::Body)
+            .text_color(palette.text_primary)
             .cursor_pointer()
-            .when(selected, |item| item.bg(p.fill_subtle_hover))
-            .when(!selected, |item| item.hover(move |style| style.bg(hover)))
-            .on_click(cx.listener(move |this, _, _, cx| this.set_page(page, cx)))
             .when(selected, |item| {
-                item.child(
-                    div()
-                        .absolute()
-                        .left(px(0.))
-                        .top(px((ITEM_HEIGHT - 16.) / 2.))
-                        .w(px(3.))
-                        .h(px(16.))
-                        .rounded_full()
-                        .bg(p.accent_fill),
-                )
+                item.bg(palette.fill_subtle_hover)
+                    .child(ui.indicator_bar(palette.accent_fill, px(ITEM_HEIGHT)))
             })
-            .child(icon(glyph, 16., p.text_primary))
+            .when(!selected, |item| item.hover(ui.subtle_hover()))
+            .on_click(cx.listener(move |this, _, _, cx| this.set_page(page, cx)))
+            .child(ui.icon(page.icon(), Density::Compact, palette.text_primary))
             .when(layout == NavLayout::Expanded, |item| {
-                item.child(self.fmt.text(key))
+                item.child(self.formatter.text(page.label()))
             })
     }
 }

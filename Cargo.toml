@@ -39,6 +39,7 @@ toml = { version = "1.2.1", default-features = false, features = ["std", "serde"
 quartz-protocol = { path = "crates/quartz-protocol" }
 quartz-i18n = { path = "crates/quartz-i18n" }
 quartz-ui = { path = "crates/quartz-ui" }
+raw-window-handle = { version = "0.6.2", default-features = false, features = ["std"] }
 rust-i18n = { version = "4.2.4", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"

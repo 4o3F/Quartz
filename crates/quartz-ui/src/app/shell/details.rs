@@ -2,169 +2,202 @@
 //! explanation tree and actions.
 
 use gpui_kit::{
-    ClickEvent, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, assets::IconName, div, px, relative,
+    ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, assets::IconName, div, px,
+    relative,
 };
 
 use super::AppShell;
-use crate::app::{
-    model::{ClassificationSource, Details, IntervalCard},
-    tokens::{Palette, metrics::PANEL_WIDTH},
-    widgets::{Density, RADIUS_CONTROL, Ramp, RampExt as _, icon, space},
+use crate::{
+    app::{
+        metrics::{Density, Ramp},
+        widgets::{ButtonContent, RampExt as _, Widgets},
+    },
+    format::{Arg, Msg, SourceText},
+    model::{BarDay, Details, Explanation, IntervalCard, Share},
 };
 
+/// Height of the 7-day chart.
 const WEEK_CHART_HEIGHT: f32 = 88.;
+/// Width of one day's bar.
 const WEEK_BAR_WIDTH: f32 = 36.;
-const MONO_FONT: &str = "Cascadia Mono";
+/// Rows of the common titles list.
+const TITLE_ROWS: usize = 4;
+/// Height of one common title row.
+const TITLE_ROW_HEIGHT: f32 = 28.;
+/// Width of a title's proportion bar.
+const TITLE_BAR_WIDTH: f32 = 56.;
+/// Height of a title's proportion bar.
+const TITLE_BAR_HEIGHT: f32 = 4.;
+/// Width of a title's duration column.
+const TITLE_VALUE_WIDTH: f32 = 72.;
 
 impl AppShell {
     pub(super) fn render_details(
         &self,
-        p: &Palette,
+        ui: &Widgets<'_>,
         details: &Details,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let color = p.category(self.day.category(details.category).color);
-        let mut body = div()
+        let palette = ui.palette;
+        let space = &ui.metrics.space;
+        let color = palette.category(self.day.category(details.category).color);
+        let body = div()
             .id("details-scroll")
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll()
-            .gap(px(space::L))
-            .px(px(space::L))
-            .pb(px(space::L));
-        if let Some(interval) = &details.interval {
-            body = body.child(self.interval_card(p, interval));
-        }
-        body = body
-            .child(self.section(p, "details.week", self.week_chart(p, details, color)))
-            .child(self.section(p, "details.titles", self.titles(p, details, color)))
-            .child(self.section(p, "details.why", self.explanation(p, details)));
-
+            .gap(space.l)
+            .px(space.l)
+            .pb(space.l)
+            .children(
+                details
+                    .interval
+                    .as_ref()
+                    .map(|interval| self.interval_card(ui, interval)),
+            )
+            .child(self.section(ui, Msg::DetailsWeek, self.week_chart(ui, details, color)))
+            .child(self.section(ui, Msg::DetailsTitles, self.titles(ui, details, color)))
+            .child(self.section(
+                ui,
+                Msg::DetailsWhy,
+                self.explanation(ui, details.explanation.as_ref()),
+            ));
         div()
             .flex()
             .flex_col()
             .flex_shrink_0()
-            .w(px(PANEL_WIDTH))
+            .w(ui.metrics.layout.panel_width)
             .h_full()
-            .bg(p.fill_layer)
+            .bg(palette.fill_layer)
             .border_l_1()
-            .border_color(p.stroke_divider)
+            .border_color(palette.stroke_divider)
+            .child(self.details_header(ui, details, cx))
+            .child(body)
+            .child(self.details_actions(ui))
+    }
+
+    fn details_header(&self, ui: &Widgets<'_>, details: &Details, cx: &mut Context<Self>) -> Div {
+        let palette = ui.palette;
+        let space = &ui.metrics.space;
+        let app = self.day.app(details.app);
+        let close_size = ui.metrics.density(Density::Compact).control_height;
+        div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(space.s)
+            .p(space.l)
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .items_start()
-                    .gap(px(space::S))
-                    .p(px(space::L))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap(space.s)
+                    .child(div().pt(space.xxs).child(ui.icon(
+                        app.glyph.into(),
+                        Density::Compact,
+                        palette.text_primary,
+                    )))
                     .child(
                         div()
                             .flex()
-                            .flex_row()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .gap(px(space::S))
-                            .child(div().pt(px(space::XXS)).child(icon(
-                                details.app.glyph.icon_name(),
-                                16.,
-                                p.text_primary,
-                            )))
+                            .flex_col()
+                            .child(div().ramp(ui, Ramp::BodyStrong).child(app.name.clone()))
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .ramp(Ramp::BodyStrong)
-                                            .child(details.app.name.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .ramp(Ramp::Caption)
-                                            .text_color(p.text_secondary)
-                                            .child(details.app.exe.clone()),
-                                    ),
+                                    .ramp(ui, Ramp::Caption)
+                                    .text_color(palette.text_secondary)
+                                    .child(app.exe.clone()),
                             ),
-                    )
-                    .child(
-                        div()
-                            .id("details-close")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(24.))
-                            .rounded(px(RADIUS_CONTROL))
-                            .cursor_pointer()
-                            .hover({
-                                let hover = p.fill_subtle_hover;
-                                move |style| style.bg(hover)
-                            })
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.close_details(cx);
-                            }))
-                            .child(icon(IconName::Close, 14., p.text_primary)),
                     ),
             )
-            .child(body)
             .child(
                 div()
+                    .id("details-close")
                     .flex()
-                    .flex_row()
-                    .gap(px(space::S))
-                    .p(px(space::L))
-                    .child(p.button(
-                        "action-classify",
-                        Density::Standard,
-                        Some(self.fmt.text("details.action.classify")),
-                        None,
-                    ))
-                    .child(p.button(
-                        "action-privacy",
-                        Density::Standard,
-                        Some(self.fmt.text("details.action.privacy")),
-                        Some(IconName::Shield),
-                    ))
-                    .child(
-                        p.button(
-                            "action-delete",
-                            Density::Standard,
-                            None,
-                            Some(IconName::Trash),
-                        )
-                        .text_color(p.status_critical),
-                    ),
+                    .items_center()
+                    .justify_center()
+                    .size(close_size)
+                    .rounded(ui.metrics.radius.control)
+                    .cursor_pointer()
+                    .hover(ui.subtle_hover())
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.close_details(cx);
+                    }))
+                    .child(ui.icon(IconName::Close, Density::Compact, palette.text_primary)),
             )
     }
 
-    fn section(&self, p: &Palette, key: &str, content: Div) -> Div {
+    // The actions are inert until classification and privacy rules can be edited.
+    // Compact density; the row wraps instead of truncating labels when the
+    // translated actions are wider than the panel (English needs two rows).
+    fn details_actions(&self, ui: &Widgets<'_>) -> Div {
+        let density = Density::Compact;
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap(ui.metrics.space.s)
+            .p(ui.metrics.space.l)
+            .child(
+                ui.button(
+                    "action-classify",
+                    density,
+                    ButtonContent::Label(self.formatter.text(Msg::DetailsClassify)),
+                )
+                .flex_none(),
+            )
+            .child(
+                ui.button(
+                    "action-privacy",
+                    density,
+                    ButtonContent::IconLabel(
+                        IconName::Shield,
+                        self.formatter.text(Msg::DetailsPrivacy),
+                    ),
+                )
+                .flex_none(),
+            )
+            .child(
+                ui.button(
+                    "action-delete",
+                    density,
+                    ButtonContent::Icon(IconName::Trash),
+                )
+                .flex_none()
+                .text_color(ui.palette.status_critical),
+            )
+    }
+
+    fn section(&self, ui: &Widgets<'_>, title: Msg, content: Div) -> Div {
         div()
             .flex()
             .flex_col()
-            .gap(px(space::S))
+            .gap(ui.metrics.space.s)
             .child(
                 div()
-                    .ramp(Ramp::BodyStrong)
-                    .text_color(p.text_primary)
-                    .child(self.fmt.text(key)),
+                    .ramp(ui, Ramp::BodyStrong)
+                    .text_color(ui.palette.text_primary)
+                    .child(self.formatter.text(title)),
             )
             .child(content)
     }
 
-    fn interval_card(&self, p: &Palette, interval: &IntervalCard) -> Div {
-        let rule = match &interval.source {
-            ClassificationSource::Rule { condition } => self
-                .fmt
-                .text_with("details.rule_line", &[("condition", condition)]),
-            ClassificationSource::Manual => self.fmt.text("timeline.tooltip.manual"),
-            ClassificationSource::Unmatched => self.fmt.text("timeline.tooltip.unmatched"),
-        };
-        p.card()
+    fn interval_card(&self, ui: &Widgets<'_>, interval: &IntervalCard) -> Div {
+        let palette = ui.palette;
+        let space = &ui.metrics.space;
+        let rule = self
+            .formatter
+            .classification(&self.day, &interval.source, SourceText::Short);
+        ui.card()
             .flex()
             .flex_col()
-            .gap(px(space::S))
-            .p(px(space::M))
+            .gap(space.s)
+            .p(space.m)
             .child(
                 div()
                     .flex()
@@ -173,28 +206,28 @@ impl AppShell {
                     .items_baseline()
                     .child(
                         div()
-                            .ramp(Ramp::BodyStrong)
+                            .ramp(ui, Ramp::BodyStrong)
                             .child(interval.span.to_string()),
                     )
                     .child(
                         div()
-                            .ramp(Ramp::Caption)
-                            .text_color(p.text_secondary)
-                            .child(self.fmt.duration(interval.span.duration())),
+                            .ramp(ui, Ramp::Caption)
+                            .text_color(palette.text_secondary)
+                            .child(self.formatter.duration(interval.span.duration())),
                     ),
             )
-            .child(div().ramp(Ramp::Caption).child(interval.title.clone()))
+            .child(div().ramp(ui, Ramp::Caption).child(interval.title.clone()))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(space::S))
-                    .child(self.category_chip(p, interval.category))
+                    .gap(space.s)
+                    .child(self.category_chip(ui, interval.category))
                     .child(
                         div()
-                            .ramp(Ramp::Caption)
-                            .text_color(p.text_secondary)
+                            .ramp(ui, Ramp::Caption)
+                            .text_color(palette.text_secondary)
                             .child(rule),
                     ),
             )
@@ -203,28 +236,36 @@ impl AppShell {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(space::XS))
-                    .ramp(Ramp::Caption)
-                    .text_color(p.text_secondary)
-                    .child(icon(IconName::ChevronRight, 12., p.text_secondary))
-                    .child(self.fmt.text_with(
-                        "details.merged",
-                        &[("count", &interval.merged_count.to_string())],
+                    .gap(space.xs)
+                    .ramp(ui, Ramp::Caption)
+                    .text_color(palette.text_secondary)
+                    .child(ui.icon(
+                        IconName::ChevronRight,
+                        Density::Compact,
+                        palette.text_secondary,
+                    ))
+                    .child(self.formatter.text_with(
+                        Msg::DetailsMerged,
+                        &[(Arg::Count, &interval.merged.to_string())],
                     )),
             )
     }
 
-    fn week_chart(&self, p: &Palette, details: &Details, color: gpui_kit::Hsla) -> Div {
-        let max = details
+    fn week_chart(&self, ui: &Widgets<'_>, details: &Details, color: Hsla) -> Div {
+        let palette = ui.palette;
+        let longest = details
             .week
             .iter()
-            .map(|bar| bar.total.as_secs_f32())
-            .fold(1., f32::max);
-        let mut bars = div().flex().flex_row().items_end().h(px(WEEK_CHART_HEIGHT));
-        let mut labels = div().flex().flex_row().pt(px(space::XS));
-        for day in &details.week {
-            let height = (day.total.as_secs_f32() / max * WEEK_CHART_HEIGHT).max(0.);
-            bars = bars.child(
+            .map(|bar| bar.total)
+            .max()
+            .unwrap_or_default();
+        let bars = div()
+            .flex()
+            .flex_row()
+            .items_end()
+            .h(px(WEEK_CHART_HEIGHT))
+            .children(details.week.iter().map(|day| {
+                let height = Share::of(day.total, longest).fraction() * WEEK_CHART_HEIGHT;
                 div()
                     .flex()
                     .flex_1()
@@ -235,50 +276,56 @@ impl AppShell {
                         div()
                             .w(px(WEEK_BAR_WIDTH))
                             .h(px(height))
-                            .rounded_t(px(2.))
+                            .rounded_t(ui.metrics.timeline.block_radius)
                             .bg(color),
-                    ),
-            );
-            let name = if day.is_today {
-                self.fmt.text("details.today")
-            } else {
-                self.fmt.weekday(day.weekday)
-            };
-            labels = labels.child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .justify_center()
-                    .ramp(Ramp::Caption)
-                    .text_color(if day.is_today {
-                        p.text_primary
-                    } else {
-                        p.text_secondary
-                    })
-                    .child(name),
-            );
-        }
+                    )
+            }));
+        let labels =
+            div()
+                .flex()
+                .flex_row()
+                .pt(ui.metrics.space.xs)
+                .children(details.week.iter().map(|day| {
+                    let (name, text_color) = match day.day {
+                        BarDay::Earlier(weekday) => {
+                            (self.formatter.weekday(weekday), palette.text_secondary)
+                        }
+                        BarDay::Today => {
+                            (self.formatter.text(Msg::DetailsToday), palette.text_primary)
+                        }
+                    };
+                    div()
+                        .flex_1()
+                        .flex()
+                        .justify_center()
+                        .ramp(ui, Ramp::Caption)
+                        .text_color(text_color)
+                        .child(name)
+                }));
         div()
             .flex()
             .flex_col()
-            .child(p.plot_area().p(px(space::S)).child(bars))
+            .child(ui.plot_area().p(ui.metrics.space.s).child(bars))
             .child(labels)
     }
 
-    fn titles(&self, p: &Palette, details: &Details, color: gpui_kit::Hsla) -> Div {
-        let max = details
+    fn titles(&self, ui: &Widgets<'_>, details: &Details, color: Hsla) -> Div {
+        let palette = ui.palette;
+        let bar_radius = ui.metrics.timeline.block_radius;
+        let longest = details
             .titles
-            .first()
-            .map_or(1., |row| row.total.as_secs_f32().max(1.));
-        let mut list = div().flex().flex_col().gap(px(space::XS));
-        for row in &details.titles {
-            list = list.child(
+            .iter()
+            .map(|row| row.total)
+            .max()
+            .unwrap_or_default();
+        div().flex().flex_col().gap(ui.metrics.space.xs).children(
+            details.titles.iter().take(TITLE_ROWS).map(|row| {
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(space::M))
-                    .h(px(28.))
+                    .gap(ui.metrics.space.m)
+                    .h(px(TITLE_ROW_HEIGHT))
                     .child(
                         div()
                             .flex_1()
@@ -286,126 +333,130 @@ impl AppShell {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .ramp(Ramp::Caption)
+                            .ramp(ui, Ramp::Caption)
                             .child(row.title.clone()),
                     )
                     .child(
                         div()
-                            .w(px(56.))
-                            .h(px(4.))
+                            .w(px(TITLE_BAR_WIDTH))
+                            .h(px(TITLE_BAR_HEIGHT))
                             .flex_shrink_0()
-                            .rounded(px(2.))
-                            .bg(p.fill_subtle_hover)
+                            .rounded(bar_radius)
+                            .bg(palette.fill_subtle_hover)
                             .child(
                                 div()
                                     .h_full()
-                                    .w(relative(row.total.as_secs_f32() / max))
-                                    .rounded(px(2.))
+                                    .w(relative(Share::of(row.total, longest).fraction()))
+                                    .rounded(bar_radius)
                                     .bg(color),
                             ),
                     )
                     .child(
                         div()
-                            .w(px(72.))
+                            .w(px(TITLE_VALUE_WIDTH))
                             .flex_shrink_0()
                             .flex()
                             .justify_end()
-                            .ramp(Ramp::Caption)
-                            .text_color(p.text_secondary)
-                            .child(self.fmt.duration(row.total)),
-                    ),
-            );
-        }
-        list
+                            .ramp(ui, Ramp::Caption)
+                            .text_color(palette.text_secondary)
+                            .child(self.formatter.duration(row.total)),
+                    )
+            }),
+        )
     }
 
-    fn explanation(&self, p: &Palette, details: &Details) -> Div {
-        let Some(why) = &details.explanation else {
+    /// The explain tree: rule, rule set, the matched condition with its actual value.
+    fn explanation(&self, ui: &Widgets<'_>, explanation: Option<&Explanation>) -> Div {
+        let palette = ui.palette;
+        let space = &ui.metrics.space;
+        let Some(why) = explanation else {
             return div()
-                .ramp(Ramp::Caption)
-                .text_color(p.text_secondary)
-                .child(self.fmt.text("details.no_rule"));
+                .ramp(ui, Ramp::Caption)
+                .text_color(palette.text_secondary)
+                .child(self.formatter.text(Msg::DetailsNoRule));
         };
-        let condition = format!("{} {} \"{}\"", why.field, why.operator, why.expected);
+        // Lines under a check icon start where the text beside the icon starts.
+        let text_indent = ui.metrics.density(Density::Compact).icon_size + space.s;
+        let check = |color| ui.icon(IconName::Check, Density::Compact, color);
         div()
             .flex()
             .flex_col()
-            .gap(px(space::XS))
-            .ramp(Ramp::Caption)
+            .gap(space.xs)
+            .ramp(ui, Ramp::Caption)
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(space::S))
-                    .child(icon(IconName::Check, 14., p.text_secondary))
+                    .gap(space.s)
+                    .child(check(palette.text_secondary))
                     .child(
                         div()
-                            .ramp(Ramp::Caption)
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(self.fmt.text_with(
-                                "details.rule_priority",
+                            .ramp(ui, Ramp::Caption)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(self.formatter.text_with(
+                                Msg::DetailsRulePriority,
                                 &[
-                                    ("rule", &why.rule_name),
-                                    ("priority", &why.priority.to_string()),
+                                    (Arg::Rule, &why.rule.name),
+                                    (Arg::Priority, &why.rule.priority.to_string()),
                                 ],
                             )),
                     )
                     .child(
                         div()
-                            .px(px(space::S))
-                            .rounded(px(RADIUS_CONTROL))
-                            .bg(p.status_success_bg)
-                            .text_color(p.status_success)
-                            .child(self.fmt.text("details.effective")),
+                            .px(space.s)
+                            .rounded(ui.metrics.radius.control)
+                            .bg(palette.status_success_bg)
+                            .text_color(palette.status_success)
+                            .child(self.formatter.text(Msg::DetailsEffective)),
                     ),
             )
             .child(
                 div()
-                    .pl(px(space::XXL - space::XXS))
-                    .text_color(p.text_secondary)
+                    .pl(text_indent)
+                    .text_color(palette.text_secondary)
                     .child(
-                        self.fmt
-                            .text_with("details.rule_set", &[("name", &why.rule_set)]),
+                        self.formatter
+                            .text_with(Msg::DetailsRuleSet, &[(Arg::Name, &why.rule.rule_set)]),
                     ),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(space::XXS))
-                    .ml(px(space::XXL))
-                    .pl(px(space::S))
+                    .gap(space.xxs)
+                    .ml(text_indent)
+                    .pl(space.s)
                     .border_l_1()
-                    .border_color(p.stroke_divider)
+                    .border_color(palette.stroke_divider)
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(px(space::S))
-                            .child(icon(IconName::Check, 14., p.status_success))
+                            .gap(space.s)
+                            .child(check(palette.status_success))
                             .child(
                                 div()
-                                    .font_family(MONO_FONT)
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child(condition),
+                                    .font(ui.mono_font())
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(self.formatter.rule_condition(&why.rule.condition)),
                             ),
                     )
                     .child(
                         div()
-                            .pl(px(space::XXL - space::XS))
-                            .text_color(p.text_secondary)
+                            .pl(text_indent)
+                            .text_color(palette.text_secondary)
                             .child(
-                                self.fmt
-                                    .text_with("details.actual", &[("value", &why.actual)]),
+                                self.formatter
+                                    .text_with(Msg::DetailsActual, &[(Arg::Value, &why.actual)]),
                             ),
                     ),
             )
             .child(
                 div()
-                    .text_color(p.text_secondary)
-                    .child(self.fmt.text("details.no_shadowed")),
+                    .text_color(palette.text_secondary)
+                    .child(self.formatter.text(Msg::DetailsNoShadowed)),
             )
     }
 }

@@ -31,6 +31,8 @@ ui.core_error.backups:
   zh-CN: "迁移前备份"
 ui.core_error.restore_warning:
   zh-CN: "恢复会替换当前数据库，并丢失备份之后的记录。"
+ui.core_error.restore_manually:
+  zh-CN: "此路径无法写成命令。请在终端中对此备份运行 %{command}。"
 nav.today:
   zh-CN: "今天"
 nav.week:
@@ -139,6 +141,8 @@ details.rule_set:
   zh-CN: "规则集 %{name}"
 details.actual:
   zh-CN: "实际值：%{value}"
+details.condition:
+  zh-CN: "%{field} %{operator} %{value}"
 details.no_shadowed:
   zh-CN: "未被遮蔽：没有其他规则命中"
 details.no_rule:

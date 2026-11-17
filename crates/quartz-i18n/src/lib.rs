@@ -2,6 +2,8 @@
 
 use std::borrow::Cow;
 
+use snafu::{OptionExt as _, Snafu};
+
 #[cfg(debug_assertions)]
 mod pseudo;
 
@@ -14,21 +16,111 @@ mod translations {
 
 use translations::{_rust_i18n_t, _rust_i18n_try_translate};
 
-/// Selects the first supported preferred language, falling back to English.
-#[must_use]
-pub fn negotiate_language(preferred: &[&str]) -> &'static str {
-    for language in preferred {
+/// An interface language with a translation catalog (10 section 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Language {
+    /// `en`, also the fallback for missing translations.
+    #[default]
+    English,
+    /// `zh-CN`
+    SimplifiedChinese,
+    /// `en-XA`: English lengthened by about 40 percent with start and end markers, for
+    /// screenshot review of truncation and hard-coded text (10 section 2.3).
+    #[cfg(debug_assertions)]
+    PseudoEnglish,
+}
+
+/// A language code has no translation catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Snafu)]
+#[snafu(display("no translation catalog for language {code:?}"))]
+pub struct ParseLanguageError {
+    code: String,
+}
+
+impl Language {
+    /// Every language with a catalog in this build.
+    pub const ALL: &[Self] = &[
+        Self::English,
+        Self::SimplifiedChinese,
         #[cfg(debug_assertions)]
-        if language.eq_ignore_ascii_case("en-XA") {
-            return "en-XA";
-        }
-        match language.split('-').next() {
-            Some(base) if base.eq_ignore_ascii_case("zh") => return "zh-CN",
-            Some(base) if base.eq_ignore_ascii_case("en") => return "en",
-            _ => {}
+        Self::PseudoEnglish,
+    ];
+
+    /// The locale code rust-i18n and gpui-component use, such as `zh-CN`.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::English => "en",
+            Self::SimplifiedChinese => "zh-CN",
+            #[cfg(debug_assertions)]
+            Self::PseudoEnglish => "en-XA",
         }
     }
-    "en"
+
+    /// The first supported language of `preferred`, in order; English when none is supported.
+    #[must_use]
+    pub fn negotiate(preferred: &[&str]) -> Self {
+        for language in preferred {
+            #[cfg(debug_assertions)]
+            if language.eq_ignore_ascii_case("en-XA") {
+                return Self::PseudoEnglish;
+            }
+            match language.split('-').next() {
+                Some(base) if base.eq_ignore_ascii_case("zh") => return Self::SimplifiedChinese,
+                Some(base) if base.eq_ignore_ascii_case("en") => return Self::English,
+                _ => {}
+            }
+        }
+        Self::English
+    }
+
+    /// Looks up a template in this language without changing the global language; English
+    /// fills in missing translations, and an unknown key comes back unchanged.
+    #[must_use]
+    pub fn translate(self, key: &str) -> Cow<'_, str> {
+        rust_i18n::t!(key, locale = self.code())
+    }
+
+    /// Whether this language's own catalog has `key`, without falling back to English.
+    #[must_use]
+    pub fn has_message(self, key: &str) -> bool {
+        translations::_rust_i18n_backend()
+            .translate(self.code(), key)
+            .is_some()
+    }
+
+    /// Makes this the global language shared with rust-i18n consumers such as gpui-component.
+    pub fn set_global(self) {
+        rust_i18n::set_locale(self.code());
+    }
+}
+
+impl std::fmt::Display for Language {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::str::FromStr for Language {
+    type Err = ParseLanguageError;
+
+    /// Parses an exact locale code of [`Language::code`].
+    fn from_str(code: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|language| language.code() == code)
+            .context(ParseLanguageSnafu { code })
+    }
+}
+
+/// Selects the first supported preferred language, falling back to English.
+///
+/// Returns the locale code for callers that still pass languages as text; new code uses
+/// [`Language::negotiate`].
+#[must_use]
+pub fn negotiate_language(preferred: &[&str]) -> &'static str {
+    Language::negotiate(preferred).code()
 }
 
 /// Changes the global translation locale shared with rust-i18n consumers.
@@ -40,12 +132,6 @@ pub fn set_locale(locale: &str) {
 #[must_use]
 pub fn translate(key: &str) -> Cow<'_, str> {
     rust_i18n::t!(key)
-}
-
-/// Looks up a template in an explicit locale without changing global language.
-#[must_use]
-pub fn translate_in_locale<'a>(key: &'a str, locale: &str) -> Cow<'a, str> {
-    rust_i18n::t!(key, locale = locale)
 }
 
 /// Formats the English diagnostic used by unfinished commands.
@@ -206,6 +292,23 @@ mod tests {
         }
         set_locale("en");
         assert_eq!(translate("tray.open"), "Open", "global English locale");
+    }
+
+    #[test]
+    fn languages_parse_their_codes_and_translate_without_the_global_locale() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
+        for language in Language::ALL {
+            assert_eq!(language.code().parse::<Language>(), Ok(*language));
+        }
+        assert!("zh".parse::<Language>().is_err());
+        assert!("fr".parse::<Language>().is_err());
+        assert_eq!(Language::SimplifiedChinese.translate("tray.open"), "打开");
+        assert!(Language::SimplifiedChinese.has_message("tray.open"));
+        assert!(!Language::SimplifiedChinese.has_message("no.such.key"));
+        assert_eq!(
+            Language::negotiate(&["fr", "zh-TW"]),
+            Language::SimplifiedChinese
+        );
     }
 
     #[test]

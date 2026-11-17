@@ -1,12 +1,50 @@
 {
   "name": "Quartz Fluent",
   "quartz": {
-    "title_bar.height": 32,
-    "space.m": 12,
-    "type.caption": {
-      "font_family": "Segoe UI Variable Small",
-      "font_size": 12,
-      "line_height": 16
+    "metrics": {
+      "radius": { "control": 4, "overlay": 8 },
+      "space": { "xxs": 2, "xs": 4, "s": 8, "m": 12, "l": 16, "xl": 20, "xxl": 24, "xxxl": 32 },
+      "density": {
+        "standard": { "control_height": 32, "row_height": 40, "icon_size": 20 },
+        "compact": { "control_height": 24, "row_height": 32, "icon_size": 16 }
+      },
+      "layout": {
+        "title_bar_height": 32,
+        "nav_width": 240,
+        "rail_width": 48,
+        "panel_width": 360,
+        "max_content_width": 1200,
+        "indicator_width": 3,
+        "indicator_height": 16,
+        "divider": 1
+      },
+      "timeline": {
+        "main_track_height": 24,
+        "lane_height": 20,
+        "lane_gap": 4,
+        "axis_height": 20,
+        "block_radius": 2,
+        "block_gap": 1,
+        "clock_mark_height": 2,
+        "hatch_width": 1,
+        "hatch_spacing": 4
+      },
+      "opacity": { "idle": 0.4, "neutral_state": 0.3, "selection": 0.2 },
+      "type": {
+        "caption": { "font_size": 12, "line_height": 16, "weight": 400, "font_family": "Segoe UI Variable Small" },
+        "body": { "font_size": 14, "line_height": 20, "weight": 400 },
+        "body_strong": { "font_size": 14, "line_height": 20, "weight": 600 },
+        "body_large": { "font_size": 18, "line_height": 24, "weight": 400 },
+        "subtitle": { "font_size": 20, "line_height": 28, "weight": 600 },
+        "title": { "font_size": 28, "line_height": 36, "weight": 600 }
+      },
+      "font": { "mono": "Cascadia Mono", "mono_fallbacks": ["Consolas"] },
+      "shadow": {
+        "tooltip": [
+          { "offset_y": 0, "blur": 2, "color": "ambient" },
+          { "offset_y": 8, "blur": 16, "color": "key" }
+        ]
+      }
     },
     "palette": {
       "light": {
