@@ -1,0 +1,271 @@
+//! SQLite connections, schema migrations, and offline backup recovery.
+
+#[expect(
+    dead_code,
+    reason = "schema v1 row models are consumed by later capture steps"
+)]
+mod enums;
+mod migrations;
+mod raw;
+#[expect(
+    dead_code,
+    reason = "schema v1 row models are consumed by later capture steps"
+)]
+mod rows;
+mod schema;
+
+use diesel::{migration::MigrationSource, prelude::*};
+use diesel_migrations::MigrationHarness;
+use migrations::{Migrations, typed};
+use snafu::{OptionExt, ResultExt, Snafu};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+#[derive(Debug, Snafu)]
+pub(crate) enum OpenStoreError {
+    #[snafu(display("database path is not valid Unicode"))]
+    InvalidPath,
+    #[snafu(display("could not open SQLite database"))]
+    Connect { source: diesel::ConnectionError },
+    #[snafu(display("could not inspect SQLite database"))]
+    Inspect { source: diesel::result::Error },
+    #[snafu(display("SQLite {version} is older than required 3.51.3"))]
+    OldSqlite { version: String },
+    #[snafu(display("database contains unknown migration {version}"))]
+    NewerDatabase { version: String },
+    #[snafu(display("could not load embedded migrations"))]
+    LoadMigrations {
+        source: migrations::ApplyMigrationError,
+    },
+    #[snafu(display("could not configure database connection"))]
+    Configure { source: diesel::result::Error },
+    #[snafu(display("could not create backup directory"))]
+    CreateBackupDirectory { source: std::io::Error },
+    #[snafu(display("could not create migration backup {}", path.display()))]
+    Backup {
+        path: PathBuf,
+        source: diesel::result::Error,
+    },
+    #[snafu(display("migration failed; restore backup {}", backup.display()))]
+    Migrate {
+        backup: PathBuf,
+        source: migrations::ApplyMigrationError,
+    },
+}
+
+/// Owns both connections on the calling thread until the database thread is introduced.
+pub(crate) struct Store {
+    _writer: SqliteConnection,
+    _reader: SqliteConnection,
+}
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store").finish_non_exhaustive()
+    }
+}
+
+impl Store {
+    /// The caller must hold the data-directory lock for this store's lifetime.
+    pub(crate) fn open(directory: &Path) -> Result<Self, OpenStoreError> {
+        Self::open_with_migrations(directory, Migrations)
+    }
+
+    fn open_with_migrations(
+        directory: &Path,
+        migrations: impl MigrationSource<diesel::sqlite::Sqlite>,
+    ) -> Result<Self, OpenStoreError> {
+        let path = directory.join("quartz.db");
+        let mut source = typed(migrations.migrations()).context(LoadMigrationsSnafu)?;
+        source.sort_by(|a, b| a.name().version().cmp(&b.name().version()));
+        let applied = if path.exists() {
+            // Inspect through mode=ro before any persistent PRAGMA or migration-table creation.
+            let mut probe = open_reader(&path)?;
+            inspect(&mut probe, &source)?
+        } else {
+            Vec::new()
+        };
+        let mut writer = SqliteConnection::establish(path.to_str().context(InvalidPathSnafu)?)
+            .context(ConnectSnafu)?;
+        check_sqlite(&mut writer)?;
+        raw::configure_writer(&mut writer).context(ConfigureSnafu)?;
+        let pending: Vec<_> = source
+            .into_iter()
+            .filter(|migration| !applied.contains(&migration.name().version().to_string()))
+            .collect();
+        if !pending.is_empty() {
+            let backup_directory = directory.join("backups");
+            fs::create_dir_all(&backup_directory).context(CreateBackupDirectorySnafu)?;
+            let old = applied.last().map(String::as_str).unwrap_or("0");
+            let timestamp = jiff::Timestamp::now().as_millisecond();
+            let backup = backup_directory.join(format!("pre-migrate-{old}-{timestamp}.db"));
+            raw::backup(&mut writer, backup.to_str().context(InvalidPathSnafu)?)
+                .context(BackupSnafu { path: &backup })?;
+            tracing::info!(backup = %backup.display(), "upgrading database");
+            // Initialize Diesel's tracking table only after version checks and a usable backup.
+            typed(writer.applied_migrations()).context(MigrateSnafu { backup: &backup })?;
+            for migration in pending {
+                typed(writer.run_migration(migration.as_ref()))
+                    .context(MigrateSnafu { backup: &backup })?;
+            }
+            prune_backups(&backup_directory);
+        }
+        let reader = open_reader(&path)?;
+        Ok(Self {
+            _writer: writer,
+            _reader: reader,
+        })
+    }
+}
+
+fn check_sqlite(conn: &mut SqliteConnection) -> Result<(), OpenStoreError> {
+    let version = raw::sqlite_version(conn).context(InspectSnafu)?;
+    let parts: Option<Vec<u32>> = version.split('.').map(|part| part.parse().ok()).collect();
+    snafu::ensure!(
+        parts
+            .as_deref()
+            .is_some_and(|p| p.len() == 3 && p >= [3, 51, 3].as_slice()),
+        OldSqliteSnafu { version }
+    );
+    Ok(())
+}
+
+fn inspect(
+    conn: &mut SqliteConnection,
+    source: &[Box<dyn diesel::migration::Migration<diesel::sqlite::Sqlite>>],
+) -> Result<Vec<String>, OpenStoreError> {
+    check_sqlite(conn)?;
+    let applied = raw::applied_versions(conn).context(InspectSnafu)?;
+    for version in &applied {
+        snafu::ensure!(
+            source
+                .iter()
+                .any(|migration| migration.name().version().to_string() == *version),
+            NewerDatabaseSnafu { version }
+        );
+    }
+    Ok(applied)
+}
+
+fn open_reader(path: &Path) -> Result<SqliteConnection, OpenStoreError> {
+    let path = path.to_str().context(InvalidPathSnafu)?.replace('\\', "/");
+    // Escape URI delimiters without changing the Windows drive prefix or directory separators.
+    let path = path
+        .replace('%', "%25")
+        .replace('?', "%3F")
+        .replace('#', "%23");
+    let mut conn =
+        SqliteConnection::establish(&format!("file:{path}?mode=ro")).context(ConnectSnafu)?;
+    raw::configure_reader(&mut conn).context(ConfigureSnafu)?;
+    Ok(conn)
+}
+
+fn prune_backups(directory: &Path) {
+    let result = (|| -> std::io::Result<()> {
+        let mut files = fs::read_dir(directory)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(is_migration_backup)
+            })
+            .collect::<Vec<_>>();
+        files.sort_by_key(|path| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.rsplit('-').next())
+                .and_then(|s| s.parse::<i64>().ok())
+        });
+        let remove_count = files.len().saturating_sub(2);
+        for path in files.into_iter().take(remove_count) {
+            fs::remove_file(path)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(%error, "could not prune migration backups");
+    }
+}
+fn is_migration_backup(name: &str) -> bool {
+    name.strip_prefix("pre-migrate-")
+        .and_then(|s| s.strip_suffix(".db"))
+        .and_then(|s| s.split_once('-'))
+        .is_some_and(|(version, time)| {
+            !version.is_empty()
+                && version.bytes().all(|b| b.is_ascii_digit())
+                && time.parse::<i64>().is_ok()
+        })
+}
+
+#[derive(Debug, Snafu)]
+pub(crate) enum RestoreBackupError {
+    #[snafu(display("could not open backup"))]
+    Open { source: OpenStoreError },
+    #[snafu(display("could not validate or stage backup"))]
+    Validate { source: diesel::result::Error },
+    #[snafu(display("backup failed integrity or foreign key checks"))]
+    Corrupt,
+    #[snafu(display("database is busy; close other database connections before restoring"))]
+    Busy,
+    #[snafu(display("could not replace database"))]
+    Replace { source: std::io::Error },
+}
+
+/// Restores a consistent staged copy; the caller holds the data-directory lock.
+pub(crate) fn restore_backup(directory: &Path, file: &Path) -> Result<(), RestoreBackupError> {
+    let mut backup = open_reader(file).context(OpenSnafu)?;
+    let source = typed(Migrations.migrations())
+        .context(LoadMigrationsSnafu)
+        .context(OpenSnafu)?;
+    inspect(&mut backup, &source).context(OpenSnafu)?;
+    snafu::ensure!(
+        raw::is_healthy(&mut backup).context(ValidateSnafu)?,
+        CorruptSnafu
+    );
+    let staged = directory.join("quartz.restore.db");
+    // A previous interrupted attempt can only leave this staged file, never a partial live DB.
+    if staged.exists() {
+        fs::remove_file(&staged).context(ReplaceSnafu)?;
+    }
+    // VACUUM INTO writes an independent snapshot even when the input has a WAL.
+    raw::stage_backup(
+        &mut backup,
+        staged
+            .to_str()
+            .context(InvalidPathSnafu)
+            .context(OpenSnafu)?,
+    )
+    .context(ValidateSnafu)?;
+    drop(backup);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&staged)
+        .context(ReplaceSnafu)?
+        .sync_all()
+        .context(ReplaceSnafu)?;
+    let database = directory.join("quartz.db");
+    if database.exists() {
+        let mut current = SqliteConnection::establish(
+            database
+                .to_str()
+                .context(InvalidPathSnafu)
+                .context(OpenSnafu)?,
+        )
+        .context(ConnectSnafu)
+        .context(OpenSnafu)?;
+        snafu::ensure!(
+            raw::checkpoint(&mut current).context(ValidateSnafu)?,
+            BusySnafu
+        );
+        drop(current);
+    }
+    // rename replaces the destination atomically on both Windows and Unix.
+    fs::rename(&staged, &database).context(ReplaceSnafu)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

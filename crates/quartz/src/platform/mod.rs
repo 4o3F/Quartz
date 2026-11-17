@@ -4,7 +4,9 @@
 mod windows;
 
 #[cfg(windows)]
-pub(super) use windows::{run_core, ui_language};
+pub(super) use windows::{
+    AcquireInstance, AcquireInstanceError, acquire_instance, run_core, ui_language,
+};
 
 /// Attaches CLI output to the parent console on Windows.
 pub(super) fn attach_parent_console() {

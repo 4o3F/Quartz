@@ -27,7 +27,7 @@ use crate::instance_name;
 
 /// Failures while identifying the current user and acquiring the core instance guards.
 #[derive(Debug, Snafu)]
-pub(super) enum AcquireInstanceError {
+pub(crate) enum AcquireInstanceError {
     #[snafu(display("could not open current process token (OpenProcessToken)"))]
     OpenProcessToken { source: windows::core::Error },
     #[snafu(display("could not read current token user (GetTokenInformation)"))]
@@ -42,7 +42,7 @@ pub(super) enum AcquireInstanceError {
 
 /// Keeps the session mutex and byte-range lock alive until core shutdown.
 #[derive(Debug)]
-pub(super) struct CoreInstance {
+pub(crate) struct CoreInstance {
     // Release the file lock before making the session mutex available again.
     _lock: File,
     _mutex: OwnedHandle,
@@ -50,7 +50,7 @@ pub(super) struct CoreInstance {
 
 /// Normal startup outcomes, distinct from operating-system failures.
 #[derive(Debug)]
-pub(super) enum AcquireInstance {
+pub(crate) enum AcquireInstance {
     Acquired(CoreInstance),
     SameSession,
     OtherSession,
@@ -60,7 +60,7 @@ pub(super) enum AcquireInstance {
 ///
 /// # Errors
 /// Returns token lookup, mutex creation, lock-file open, or file-lock failures.
-pub(super) fn acquire(data_directory: &Path) -> Result<AcquireInstance, AcquireInstanceError> {
+pub(crate) fn acquire(data_directory: &Path) -> Result<AcquireInstance, AcquireInstanceError> {
     use std::os::windows::fs::OpenOptionsExt;
 
     let name = wide(instance_name::core_mutex_name(&user_sid()?).as_ref());

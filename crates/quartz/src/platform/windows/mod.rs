@@ -5,56 +5,39 @@ mod instance;
 mod language;
 mod process;
 mod tray;
-mod window;
 
-use std::{
-    fs::{self, OpenOptions},
-    path::PathBuf,
-    process::ExitCode,
+use quartz_protocol::{CoreError, CoreErrorCode};
+use std::{fs, path::PathBuf, process::ExitCode};
+
+use snafu::{ResultExt, Snafu};
+use windows::Win32::{
+    Foundation::{WAIT_FAILED, WAIT_OBJECT_0},
+    System::Threading::INFINITE,
+    UI::WindowsAndMessaging::{self, MSG, PM_REMOVE, QS_ALLINPUT, WM_QUIT},
 };
 
-use snafu::{OptionExt, ResultExt, Snafu};
-use windows::{
-    Win32::{
-        Foundation::{WAIT_FAILED, WAIT_OBJECT_0},
-        System::Threading::INFINITE,
-        UI::WindowsAndMessaging::{
-            self, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MSG, PM_REMOVE,
-            QS_ALLINPUT, WM_QUIT,
-        },
-    },
-    core::PCWSTR,
-};
-
-use crate::{logging, ui_state::UiState};
-use instance::{AcquireInstance, AcquireInstanceError};
-use tray::{AddTrayIconError, TrayIcon, TrayMenuItem};
-use window::{CoreEvent, CreateCoreWindowError, Window};
+use crate::{data_directory, logging, store, ui_state::UiState};
+pub(crate) use instance::{AcquireInstance, AcquireInstanceError, acquire as acquire_instance};
+use tray::{CreateTrayError, Tray, TrayCommand, TrayState, TrayTooltip};
 
 pub(crate) use language::select as ui_language;
 
 #[derive(Debug, Snafu)]
 enum StartCoreError {
-    #[snafu(display("LOCALAPPDATA must name an absolute data directory"))]
-    ResolveDataDirectory,
-    #[snafu(display("could not create core log directory {} (create_dir_all)", path.display()))]
-    CreateLogDirectory {
-        path: PathBuf,
-        source: std::io::Error,
+    #[snafu(display("could not open core database"))]
+    OpenStore { source: store::OpenStoreError },
+    #[snafu(display("could not resolve core data directory"))]
+    DataDirectory {
+        source: data_directory::ResolveDataDirectoryError,
     },
-    #[snafu(display("could not open core log file {} (OpenOptions::open)", path.display()))]
-    OpenLogFile {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[snafu(display("could not initialize core tracing"))]
-    InitializeTracing { source: logging::InitTracingError },
+    #[snafu(display("{source}"))]
+    InitLog { source: logging::InitFileLogError },
     #[snafu(display("could not acquire core instance"))]
     AcquireInstance { source: AcquireInstanceError },
-    #[snafu(display("could not create core message window"))]
-    CreateWindow { source: CreateCoreWindowError },
-    #[snafu(display("could not add core tray icon"))]
-    AddTrayIcon { source: AddTrayIconError },
+    #[snafu(display("could not initialize shell tray"))]
+    CreateTray { source: CreateTrayError },
+    #[snafu(display("data directory is locked by another Windows session"))]
+    OtherSession,
     #[snafu(display("could not run core message loop"))]
     RunMessageLoop { source: WaitCoreEventsError },
 }
@@ -70,58 +53,61 @@ pub(crate) fn run_core() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            tracing::error!(error = ?error, "core failed");
-            show_message(&quartz_i18n::translate("error.start_core"), MB_ICONERROR);
+            let report = error.report();
+            tracing::error!(?error, code = %report.code, "core failed");
+            if let Err(error) = process::launch_core_error(&report) {
+                tracing::error!(?error, "could not launch core error UI");
+            }
             ExitCode::FAILURE
         }
     }
 }
 
+impl StartCoreError {
+    fn report(&self) -> CoreError {
+        match self {
+            Self::OpenStore {
+                source: store::OpenStoreError::NewerDatabase { .. },
+            } => CoreError::new(CoreErrorCode::NewerDatabase, available_backups()),
+            Self::OpenStore {
+                source: store::OpenStoreError::Migrate { backup, .. },
+            } => CoreError::new(CoreErrorCode::MigrationFailed, vec![backup.clone()]),
+            Self::OtherSession => CoreError::new(CoreErrorCode::OtherSession, vec![]),
+            _ => CoreError::new(CoreErrorCode::CoreStartFailed, vec![]),
+        }
+    }
+}
+
 fn run() -> Result<(), StartCoreError> {
-    let data_directory = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .context(ResolveDataDirectorySnafu)?
-        .join("Quartz");
-    let logs = data_directory.join("logs");
-    fs::create_dir_all(&logs).context(CreateLogDirectorySnafu { path: &logs })?;
-    let log_path = logs.join("core.log");
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .context(OpenLogFileSnafu { path: &log_path })?;
-    logging::init_file(file).context(InitializeTracingSnafu)?;
-    let language = ui_language();
-    quartz_i18n::set_locale(language);
-    let _instance = match instance::acquire(&data_directory).context(AcquireInstanceSnafu)? {
+    let data_directory = data_directory::resolve().context(DataDirectorySnafu)?;
+    logging::init_file_log(&data_directory, logging::LogTarget::Core).context(InitLogSnafu)?;
+    let _instance = match acquire_instance(&data_directory).context(AcquireInstanceSnafu)? {
         AcquireInstance::SameSession => {
             // TODO(M2): Forward the open request through the core pipe before exiting.
             tracing::info!("core already running in this Windows session");
             return Ok(());
         }
-        AcquireInstance::OtherSession => {
-            tracing::info!("core already running in another Windows session");
-            show_message(
-                &quartz_i18n::translate("error.other_session"),
-                MB_ICONINFORMATION,
-            );
-            return Ok(());
-        }
+        AcquireInstance::OtherSession => return OtherSessionSnafu.fail(),
         AcquireInstance::Acquired(instance) => instance,
     };
-    let window = Window::create().context(CreateWindowSnafu)?;
-    let mut tray = TrayIcon::add(&window).context(AddTrayIconSnafu)?;
-    tracing::info!(language, "core message loop started");
-    message_loop(&window, &mut tray).context(RunMessageLoopSnafu)?;
-    // The tray borrows the window, ensuring icon removal precedes window destruction.
+    let mut tray = Tray::create(TrayState {
+        tooltip: TrayTooltip::Upgrading,
+        ..TrayState::default()
+    })
+    .context(CreateTraySnafu)?;
+    let _store = store::Store::open(&data_directory).context(OpenStoreSnafu)?;
+    if let Err(error) = tray.update(TrayState::default()) {
+        tracing::error!(?error, "could not update tray state");
+    }
+    tracing::info!("core message loop started");
+    // TODO(M2): Push runtime failures as structured state over the pipe and select the warning tray icon.
+    message_loop(&mut tray).context(RunMessageLoopSnafu)?;
     drop(tray);
-    drop(window);
     tracing::info!("core stopped");
     Ok(())
 }
 
-fn message_loop(window: &Window, tray: &mut TrayIcon<'_>) -> Result<(), WaitCoreEventsError> {
+fn message_loop(tray: &mut Tray) -> Result<(), WaitCoreEventsError> {
     let mut ui: UiState<handle::OwnedHandle> = UiState::None;
     loop {
         let mut message = MSG::default();
@@ -141,27 +127,17 @@ fn message_loop(window: &Window, tray: &mut TrayIcon<'_>) -> Result<(), WaitCore
             }
         }
         loop {
-            let events = window.drain_events();
+            let events = tray.commands();
             if events.is_empty() {
                 break;
             }
             for event in events {
                 match event {
-                    CoreEvent::Quit => return Ok(()),
-                    CoreEvent::RestoreTray => match tray.readd() {
-                        Ok(()) => tracing::info!("tray icon restored after TaskbarCreated"),
-                        Err(error) => tracing::error!(?error, "could not restore tray icon"),
-                    },
-                    CoreEvent::OpenUi => open_ui(&mut ui, tray),
-                    CoreEvent::ShowTrayMenu => match tray.menu() {
-                        Ok(Some(TrayMenuItem::Open)) => open_ui(&mut ui, tray),
-                        Ok(Some(TrayMenuItem::Exit)) => return Ok(()),
-                        Ok(None) => {}
-                        Err(error) => tracing::error!(?error, "could not show tray menu"),
-                    },
+                    TrayCommand::Exit => return Ok(()),
+                    TrayCommand::OpenUi => open_ui(&mut ui, tray),
                 }
             }
-            // TrackPopupMenu may have queued more events in its nested message loop.
+            // Native dispatch can enqueue another batch of semantic commands.
         }
         let handles = match &ui {
             UiState::None => None,
@@ -185,35 +161,24 @@ fn message_loop(window: &Window, tray: &mut TrayIcon<'_>) -> Result<(), WaitCore
                 process::log_exit(process);
             }
             ui.exited();
-            if let Err(error) = tray.tooltip("app.name") {
+            if let Err(error) = tray.update(TrayState::default()) {
                 tracing::error!(?error, "could not restore tray tooltip");
             }
         }
     }
 }
 
-fn open_ui(ui: &mut UiState<handle::OwnedHandle>, tray: &mut TrayIcon<'_>) {
+fn open_ui(ui: &mut UiState<handle::OwnedHandle>, tray: &mut Tray) {
     if let Err(error) = ui.open(process::launch_ui) {
         tracing::error!(?error, "could not launch UI");
         return;
     }
-    if let Err(error) = tray.tooltip("tray.opening") {
+    if let Err(error) = tray.update(TrayState {
+        tooltip: TrayTooltip::Opening,
+        ..TrayState::default()
+    }) {
         tracing::error!(?error, "could not set opening tooltip");
     }
-}
-
-fn show_message(text: &str, style: MESSAGEBOX_STYLE) {
-    let text = wide(text);
-    let title = wide(&quartz_i18n::translate("app.name"));
-    // SAFETY: Both strings are terminated and remain live for the duration of this modal call.
-    let _ = unsafe {
-        WindowsAndMessaging::MessageBoxW(
-            None,
-            PCWSTR(text.as_ptr()),
-            PCWSTR(title.as_ptr()),
-            MB_OK | style,
-        )
-    };
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -227,6 +192,22 @@ pub(super) fn attach_parent_console() {
     // SAFETY: This attaches the current process to its parent's console and takes no pointers.
     // No parent console and an already attached console are both normal launch conditions.
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
+fn available_backups() -> Vec<PathBuf> {
+    let Ok(directory) = data_directory::resolve().map(|path| path.join("backups")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut files: Vec<_> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
+        .collect();
+    files.sort();
+    files
 }
 
 #[cfg(test)]
@@ -258,18 +239,30 @@ mod tests {
     }
 
     #[test]
-    fn startup_error_preserves_io_cause_and_path() {
-        let path = PathBuf::from(r"C:\Quartz\logs");
-        let error = Err::<(), _>(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-            .context(CreateLogDirectorySnafu { path: &path })
-            .expect_err("log directory failure must reach the startup error");
-        assert!(
-            matches!(&error, StartCoreError::CreateLogDirectory { path: failed_path, .. } if failed_path == &path)
-        );
+    fn startup_error_wraps_file_log_error_without_redefining_it() {
+        let path = std::path::PathBuf::from(r"C:\Quartz\logs");
+        let log_error = logging::InitFileLogError::CreateDirectory {
+            target: logging::LogTarget::Core,
+            path: path.clone(),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let error = Err::<(), _>(log_error)
+            .context(InitLogSnafu)
+            .expect_err("log failure reaches core startup");
         let source = error
             .source()
-            .and_then(|source| source.downcast_ref::<std::io::Error>())
-            .expect("original I/O error source");
-        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+            .and_then(|source| source.downcast_ref::<logging::InitFileLogError>())
+            .expect("original file log error");
+        assert!(
+            matches!(source, logging::InitFileLogError::CreateDirectory { path: failed_path, .. } if failed_path == &path)
+        );
+        assert_eq!(
+            source
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .expect("original I/O cause")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 }

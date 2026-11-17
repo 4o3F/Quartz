@@ -334,7 +334,7 @@ CREATE TABLE enum_labels (
 ) WITHOUT ROWID;
 ```
 
-- Rust 侧每个枚举显式写出编码（例如 `TitleChanged = 3`），一个宏同时生成 `ToSql`/`FromSql<Integer, Sqlite>` 和该枚举的 `enum_labels` 行。测试检查迁移写入的 `enum_labels` 与 Rust 枚举完全一致。
+- Rust 侧使用普通枚举定义，显式写出编码（例如 `Shutdown = 1`），并通过 `IntegerCode` 实现列名、全部变体、编码和标签映射；宏只为具体枚举生成 `ToSql`/`FromSql<Integer, Sqlite>` 实现，转发到泛型转换函数。测试检查迁移写入的 `enum_labels` 与全部 Rust 枚举的列名、编码和标签集合完全一致。
 - 新增取值时，同一个迁移插入对应的 `enum_labels` 行。读到未知编码返回错误；数据库来自更新版本时核心已拒绝启动（第 8.2 节），正常运行不会遇到。
 - 迁移为主要事实表建只读视图：`intervals_v`、`availability_intervals_v`、`web_intervals_v`、`capture_gaps_v`、`annotations_v`。视图把枚举编码连接成名称，把 UTC 毫秒转换成本地时间文本，并连接应用名、标题与域名。直接打开数据库排查时查询视图即可。
 - 视图只供人工排查，核心代码不读视图。
@@ -408,9 +408,9 @@ PRAGMA busy_timeout = 2000;
 
 ### 4.5 访问层（diesel）
 
-数据库访问使用 `diesel 2.3`（`sqlite`、`returning_clauses_for_sqlite_3_35` feature）与 `diesel_migrations`。SQLite 由 `libsqlite3-sys` 的 `bundled` feature 静态链接，版本固定在 diesel 允许的范围内，启动时检查 `sqlite_version()` 不低于 3.51.3。
+数据库访问使用 `diesel 2.4.0`（`sqlite`、`returning_clauses_for_sqlite_3_35` feature）与 `diesel_migrations 2.4.0`。SQLite 由 `libsqlite3-sys` 的 `bundled` feature 静态链接，版本固定在 diesel 允许的范围内，启动时检查 `sqlite_version()` 不低于 3.51.3。
 
-- **schema 与模型。** `store/schema.rs` 由 `diesel print-schema` 从迁移生成并提交。行类型使用 `Queryable`、`Selectable`、`Insertable`、`AsChangeset`，并加 `#[diesel(check_for_backend(Sqlite))]`，让列类型不匹配在编译期报错。
+- **schema 与模型。** `store/schema.rs` 由 `diesel print-schema` 从迁移生成并提交。SQLite 的时间戳、时长与实体标识映射为 Rust `i64`；`diesel.toml` 使用 `schema.patch` 修正 SQLite `INTEGER` 的默认 32 位推断，保持 SQL 列定义不变。行类型使用 `Queryable`、`Selectable`、`Insertable`、`AsChangeset`，并加 `#[diesel(check_for_backend(Sqlite))]`，让列类型不匹配在编译期报错。
 - **枚举列。** 整数编码与名称映射见第 2.9 节。
 - **写入。** 批量写入使用 `immediate_transaction`，避免读后升级写锁时出现 `SQLITE_BUSY`。字典表（titles、domains、applications）用 `on_conflict(...).do_update()` 加 `RETURNING id` 一次取得 ID。批量插入按 SQLite 绑定参数上限分块。
 - **只读快照。** 跨批次持有读事务时，用 diesel `TransactionManager` 的 `begin_transaction` / `commit_transaction` 包装成一个守卫类型，不使用闭包式 `transaction`。
@@ -597,17 +597,19 @@ struct DerivedSegment {
 
 - 迁移放在 `crates/quartz/migrations/<时间戳>_<名称>/up.sql`，用 `embed_migrations!` 编进 exe。不提供 `down.sql`：Quartz 不支持把数据库降级到旧 schema。
 - 已发布的迁移不可修改。仓库里的 `migrations.lock` 记录每个已发布迁移的 SHA-256，CI 校验文件未变。diesel 自身不校验迁移内容，这一检查由我们补上。
-- `store/schema.rs` 必须与迁移一致。CI 在空库上执行全部迁移，再运行 `diesel print-schema`，与提交的文件比较。CHECK 约束和部分索引不出现在 schema.rs 中，由迁移测试覆盖。
+- `store/schema.rs` 必须与迁移一致。CI 在空库上执行全部迁移，再运行 `diesel print-schema`，与提交的文件比较。CHECK 约束和部分索引不出现在 schema.rs 中，由迁移测试覆盖。本地执行 `scripts/check-schema.sh` 完成空库迁移与生成结果比较，需要 Diesel CLI 2.4.0（`sqlite-bundled`）；脚本使用仓库中的 `diesel.toml` 与 `crates/quartz/schema.patch`。
 
 ### 8.2 启动流程
 
 核心在拿到数据目录锁之后、启动采集之前执行：
 
-1. 打开写连接，读取已应用的迁移版本（`applied_migrations`），与 exe 内嵌的迁移比较。
-2. **数据库更新、程序更旧**：已应用的版本里有 exe 不认识的迁移。核心拒绝启动，不写入数据库，托盘和界面提示“数据库由更新版本的 Quartz 创建”，并列出可用的迁移前备份。
+1. 先通过只读连接读取已应用的迁移版本，与 exe 内嵌的迁移比较；确认兼容后再打开写连接。
+2. **数据库更新、程序更旧**：已应用的版本里有 exe 不认识的迁移。核心拒绝启动，不写入数据库，核心以 `newer_database` 错误码和可用备份路径启动独立 UI 错误窗口后退出，由 UI 本地化说明并列出恢复命令。
 3. **没有待执行迁移**：正常启动。
 4. **有待执行迁移**：先用 `VACUUM INTO` 写出 `backups\pre-migrate-<旧版本>-<时间>.db`，备份失败就不迁移。再按顺序执行迁移，托盘提示“正在升级数据库”。全部成功后清理更旧的迁移备份，只保留最近 2 份。
-5. **迁移失败**：核心停止，不启动采集，数据库停在最后一个成功的迁移。提示中给出备份路径；用户可以用 `quartz restore-backup <文件>` 恢复后换回旧版本 exe，或等待修复版本继续迁移。
+5. **迁移失败**：核心停止，不启动采集，数据库停在最后一个成功的迁移。核心以 `migration_failed` 错误码和备份路径启动独立 UI 错误窗口后退出；UI 给出备份路径和 `quartz restore-backup` 命令，用户可以用 `quartz restore-backup <文件>` 恢复后换回旧版本 exe，或等待修复版本继续迁移。
+
+`quartz restore-backup <文件>` 先用英文列出将要恢复的备份、被替换的 `quartz.db` 路径以及备份之后的记录会丢失的提示；未提供 `--yes` 时返回非零退出码，不创建目录、不获取锁、不打开数据库。用户确认后执行 `quartz restore-backup <文件> --yes`；命令持有数据目录锁，检查备份并生成独立副本，同步到磁盘，完成目标库 WAL checkpoint 后原子替换主库。恢复直接替换当前数据库；需要保留当前记录时，用户应先自行备份。命令不读取标准输入。
 
 ### 8.3 编写约束
 

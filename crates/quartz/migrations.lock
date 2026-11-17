@@ -1,0 +1,2 @@
+# SHA-256 of every released migration file; additions require a new migration.
+bb58141e66a46f65bc1d890f650c74edaa7e250cfb047d70016eeaca9a76fd7f  migrations/20261116000000_schema_v1/up.sql

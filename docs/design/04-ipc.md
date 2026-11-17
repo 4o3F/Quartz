@@ -39,8 +39,10 @@ u32 小端，JSON 字节长度 | UTF-8 JSON
 
 - `id` 由客户端分配，在一个连接里递增，用来匹配响应。host 为自己的核心 `hello` 分配 ID，转发浏览器请求时重映射并恢复响应 ID，避免与扩展请求冲突。
 - 创建类操作由客户端在实体中提供 `uuid`。annotations、分类和各类规则用数据库唯一约束去重，重试遇到已有 UUID 时返回已有实体。批量创建时每个实体独立带 UUID；删除不存在的实体也返回成功。更新按实体 UUID 设置最终值，重试保持相同结果。
-- 错误码是稳定的字符串枚举。`msg` 只用于显示和日志，客户端不能根据 `msg` 做判断。
+- 错误码是稳定的字符串枚举，定义在 `quartz-protocol`。核心只发送代码与结构化字段，`quartz-ui` 按代码本地化并呈现；host 与 UI 均不得按错误文本分支。信封中的 `msg` 若存在，仅为日志诊断文字。
 - 未知字段一律忽略，以便向前兼容。
+
+M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>` 交给 UI，核心随后返回失败退出码。当前稳定代码为 `newer_database`、`migration_failed`、`other_session`、`core_start_failed`。备份路径通过独立、可重复的 `--backup-path <路径>` 参数传递；`migration_failed` 必须带其迁移前备份路径。共享的 `CoreError` 使用 `code` 和 `backup_paths` 字段，后续管道沿用这些代码与字段。
 
 ## 4. 握手
 

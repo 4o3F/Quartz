@@ -7,10 +7,13 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+quartz-protocol.workspace = true
+quartz-i18n.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 anyhow.workspace = true
 gpui-kit.workspace = true
-quartz-i18n.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true

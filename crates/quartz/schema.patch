@@ -1,0 +1,274 @@
+--- schema.rs
++++ schema.rs
+@@ -5,13 +5,13 @@
+         id -> Nullable<BigInt>,
+         uuid -> Text,
+         kind -> Integer,
+-        start_utc_ms -> Integer,
+-        end_utc_ms -> Integer,
++        start_utc_ms -> BigInt,
++        end_utc_ms -> BigInt,
+         category_id -> Nullable<BigInt>,
+         label -> Nullable<Text>,
+         note -> Nullable<Text>,
+-        created_utc_ms -> Integer,
+-        updated_utc_ms -> Integer,
++        created_utc_ms -> BigInt,
++        updated_utc_ms -> BigInt,
+     }
+ }
+ 
+@@ -24,7 +24,7 @@
+         aumid -> Nullable<Text>,
+         exe_name -> Nullable<Text>,
+         display_name -> Text,
+-        first_seen_utc_ms -> Integer,
++        first_seen_utc_ms -> BigInt,
+     }
+ }
+ 
+@@ -34,18 +34,18 @@
+         run_id -> BigInt,
+         clock_segment_id -> BigInt,
+         reason -> Integer,
+-        start_utc_ms -> Integer,
+-        start_mono_ms -> Integer,
+-        end_utc_ms -> Nullable<Integer>,
+-        end_mono_ms -> Nullable<Integer>,
+-        confirmed_utc_ms -> Nullable<Integer>,
+-        confirmed_mono_ms -> Nullable<Integer>,
+-        end_reason -> Nullable<Integer>,
+-        last_input_utc_ms -> Nullable<Integer>,
+-        detected_utc_ms -> Nullable<Integer>,
+-        threshold_ms -> Nullable<Integer>,
++        start_utc_ms -> BigInt,
++        start_mono_ms -> BigInt,
++        end_utc_ms -> Nullable<BigInt>,
++        end_mono_ms -> Nullable<BigInt>,
++        confirmed_utc_ms -> Nullable<BigInt>,
++        confirmed_mono_ms -> Nullable<BigInt>,
++        end_reason -> Nullable<Integer>,
++        last_input_utc_ms -> Nullable<BigInt>,
++        detected_utc_ms -> Nullable<BigInt>,
++        threshold_ms -> Nullable<BigInt>,
+         exception -> Nullable<Integer>,
+-        policy_version -> Integer,
++        policy_version -> BigInt,
+     }
+ }
+ 
+@@ -56,8 +56,8 @@
+         profile_instance_id -> Text,
+         extension_id -> Text,
+         label -> Nullable<Text>,
+-        first_seen_utc_ms -> Integer,
+-        last_seen_utc_ms -> Integer,
++        first_seen_utc_ms -> BigInt,
++        last_seen_utc_ms -> BigInt,
+     }
+ }
+ 
+@@ -66,10 +66,10 @@
+         id -> Nullable<BigInt>,
+         run_id -> BigInt,
+         clock_segment_id -> BigInt,
+-        start_utc_ms -> Integer,
+-        end_utc_ms -> Integer,
+-        start_mono_ms -> Integer,
+-        end_mono_ms -> Integer,
++        start_utc_ms -> BigInt,
++        end_utc_ms -> BigInt,
++        start_mono_ms -> BigInt,
++        end_mono_ms -> BigInt,
+         reason -> Integer,
+     }
+ }
+@@ -78,11 +78,11 @@
+     capture_runs (id) {
+         id -> Nullable<BigInt>,
+         device_id -> Text,
+-        win_session_id -> Integer,
++        win_session_id -> BigInt,
+         app_version -> Text,
+-        started_utc_ms -> Integer,
+-        confirmed_utc_ms -> Nullable<Integer>,
+-        ended_utc_ms -> Nullable<Integer>,
++        started_utc_ms -> BigInt,
++        confirmed_utc_ms -> Nullable<BigInt>,
++        ended_utc_ms -> Nullable<BigInt>,
+         end_reason -> Nullable<Integer>,
+     }
+ }
+@@ -96,7 +96,7 @@
+         name -> Nullable<Text>,
+         color -> Text,
+         tendency -> Integer,
+-        sort_order -> Integer,
++        sort_order -> BigInt,
+         archived -> Integer,
+     }
+ }
+@@ -105,12 +105,12 @@
+     clock_segments (id) {
+         id -> Nullable<BigInt>,
+         run_id -> BigInt,
+-        start_utc_ms -> Integer,
+-        start_mono_ms -> Integer,
+-        confirmed_utc_ms -> Nullable<Integer>,
+-        confirmed_mono_ms -> Nullable<Integer>,
+-        end_utc_ms -> Nullable<Integer>,
+-        end_mono_ms -> Nullable<Integer>,
++        start_utc_ms -> BigInt,
++        start_mono_ms -> BigInt,
++        confirmed_utc_ms -> Nullable<BigInt>,
++        confirmed_mono_ms -> Nullable<BigInt>,
++        end_utc_ms -> Nullable<BigInt>,
++        end_mono_ms -> Nullable<BigInt>,
+         end_reason -> Nullable<Integer>,
+     }
+ }
+@@ -118,18 +118,18 @@
+ diesel::table! {
+     data_day_versions (source, utc_date) {
+         source -> Integer,
+-        utc_date -> Integer,
+-        version -> Integer,
++        utc_date -> BigInt,
++        version -> BigInt,
+     }
+ }
+ 
+ diesel::table! {
+     deletion_barriers (id) {
+         id -> Nullable<BigInt>,
+-        start_utc_ms -> Integer,
+-        end_utc_ms -> Integer,
++        start_utc_ms -> BigInt,
++        end_utc_ms -> BigInt,
+         scope -> Text,
+-        created_utc_ms -> Integer,
++        created_utc_ms -> BigInt,
+     }
+ }
+ 
+@@ -152,9 +152,9 @@
+ diesel::table! {
+     ingest_receipts (stream_id, epoch, message_seq) {
+         stream_id -> BigInt,
+-        epoch -> Integer,
+-        message_seq -> Integer,
+-        received_utc_ms -> Integer,
++        epoch -> BigInt,
++        message_seq -> BigInt,
++        received_utc_ms -> BigInt,
+         outcome -> Integer,
+     }
+ }
+@@ -163,7 +163,7 @@
+     intervals (id) {
+         id -> Nullable<BigInt>,
+         run_id -> BigInt,
+-        sequence -> Integer,
++        sequence -> BigInt,
+         clock_segment_id -> BigInt,
+         kind -> Integer,
+         no_foreground_reason -> Nullable<Integer>,
+@@ -175,14 +175,14 @@
+         privacy_rule_id -> Nullable<Text>,
+         privacy_label_key -> Nullable<Text>,
+         privacy_label -> Nullable<Text>,
+-        session_key -> Integer,
+-        start_utc_ms -> Integer,
+-        start_mono_ms -> Integer,
+-        end_utc_ms -> Nullable<Integer>,
+-        end_mono_ms -> Nullable<Integer>,
+-        confirmed_utc_ms -> Nullable<Integer>,
+-        confirmed_mono_ms -> Nullable<Integer>,
+-        duration_ms -> Nullable<Integer>,
++        session_key -> BigInt,
++        start_utc_ms -> BigInt,
++        start_mono_ms -> BigInt,
++        end_utc_ms -> Nullable<BigInt>,
++        end_mono_ms -> Nullable<BigInt>,
++        confirmed_utc_ms -> Nullable<BigInt>,
++        confirmed_mono_ms -> Nullable<BigInt>,
++        duration_ms -> Nullable<BigInt>,
+         end_reason -> Nullable<Integer>,
+     }
+ }
+@@ -190,12 +190,12 @@
+ diesel::table! {
+     rule_set_versions (set_id, version) {
+         set_id -> BigInt,
+-        version -> Integer,
++        version -> BigInt,
+         content -> Text,
+         content_hash -> Text,
+-        parent_version -> Nullable<Integer>,
++        parent_version -> Nullable<BigInt>,
+         note -> Nullable<Text>,
+-        created_utc_ms -> Integer,
++        created_utc_ms -> BigInt,
+     }
+ }
+ 
+@@ -208,10 +208,10 @@
+         source -> Integer,
+         name -> Text,
+         enabled -> Integer,
+-        sibling_order -> Integer,
+-        current_version -> Integer,
+-        chain_id -> Nullable<Integer>,
+-        created_utc_ms -> Integer,
++        sibling_order -> BigInt,
++        current_version -> BigInt,
++        chain_id -> Nullable<BigInt>,
++        created_utc_ms -> BigInt,
+     }
+ }
+ 
+@@ -234,16 +234,16 @@
+         id -> Nullable<BigInt>,
+         stream_id -> BigInt,
+         interval_id -> BigInt,
+-        start_utc_ms -> Integer,
+-        end_utc_ms -> Nullable<Integer>,
+-        confirmed_utc_ms -> Nullable<Integer>,
++        start_utc_ms -> BigInt,
++        end_utc_ms -> Nullable<BigInt>,
++        confirmed_utc_ms -> Nullable<BigInt>,
+         end_reason -> Nullable<Integer>,
+         domain_id -> Nullable<BigInt>,
+         tab_title_id -> Nullable<BigInt>,
+         tab_title_status -> Integer,
+-        tab_id -> Nullable<Integer>,
+-        browser_window_id -> Nullable<Integer>,
+-        navigation_id -> Nullable<Integer>,
++        tab_id -> Nullable<BigInt>,
++        browser_window_id -> Nullable<BigInt>,
++        navigation_id -> Nullable<BigInt>,
+         audible -> Integer,
+         link_status -> Integer,
+         web_level -> Integer,
+@@ -258,14 +258,14 @@
+         id -> Nullable<BigInt>,
+         run_id -> BigInt,
+         app_id -> BigInt,
+-        pid -> Integer,
+-        process_created_utc_ms -> Nullable<Integer>,
+-        hwnd -> Integer,
+-        generation -> Integer,
+-        retired_utc_ms -> Nullable<Integer>,
++        pid -> BigInt,
++        process_created_utc_ms -> Nullable<BigInt>,
++        hwnd -> BigInt,
++        generation -> BigInt,
++        retired_utc_ms -> Nullable<BigInt>,
+         window_class -> Nullable<Text>,
+-        first_seen_utc_ms -> Integer,
+-        last_seen_utc_ms -> Integer,
++        first_seen_utc_ms -> BigInt,
++        last_seen_utc_ms -> BigInt,
+     }
+ }
+ 

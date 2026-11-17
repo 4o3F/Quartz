@@ -50,8 +50,12 @@ enum Command {
     /// 界面进程，只由核心拉起
     #[command(hide = true)]
     Ui {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "core_error")]
         prewarm: bool,
+        #[arg(long)]
+        core_error: Option<CoreErrorCode>,
+        #[arg(long, requires = "core_error", required_if_eq("core_error", "migration_failed"))]
+        backup_path: Vec<PathBuf>,
     },
     /// 打印某天的区间（经管道以 cli 角色查询核心；M1 可直接只读打开数据库）
     Dump { #[arg(long)] date: String },
@@ -62,7 +66,7 @@ enum Command {
     /// 只读模拟库的查询基准
     BenchQuery { #[arg(long)] db: PathBuf },
     /// 用迁移前备份替换数据库；核心必须已退出
-    RestoreBackup { file: PathBuf },
+    RestoreBackup { file: PathBuf, #[arg(long)] yes: bool },
     /// 规则文本的校验与预览（quartz-rules/1，见 docs/rules/rule-format.md）
     #[command(subcommand)]
     Rules(RulesCommand),
@@ -102,7 +106,7 @@ enum RulesCommand {
 ## 3. 单实例
 
 - 同一用户只允许一个采集会话。核心在初始化数据库与管道前，用 `LockFileEx` 独占数据目录的 `quartz.lock`，并在整个生命周期持有；锁文件跨 Windows 会话生效。
-- `Local\Quartz.<SID>.core` 互斥量只用于会话内快速转发。同会话重复启动时，把参数（例如"打开界面"）通过管道转发后退出。另一会话启动时，提示"Quartz 已在另一个 Windows 会话中运行"并退出。
+- `Local\Quartz.<SID>.core` 互斥量只用于会话内快速转发。同会话重复启动时，把参数（例如"打开界面"）通过管道转发后退出。另一会话启动时，核心以 `other_session` 错误码启动 UI 错误窗口并返回失败退出码。
 - 首个管道实例使用 `FILE_FLAG_FIRST_PIPE_INSTANCE`，防止其他进程抢先创建同名管道。
 - 界面进程用互斥量 `Local\Quartz.<SID>.ui` 保证唯一。重复启动时，通过核心转发"激活窗口"请求后退出。
 
@@ -159,6 +163,7 @@ crates/
 - `quartz-domain` 不依赖 Windows API、SQLite 和 GPUI，可以在任意平台跑单元测试。时间来源通过 `Clock` trait 注入。
 - `quartz-ui` 不依赖 `quartz-domain`，展示所需的一切都来自协议消息；文字翻译与格式化来自 `quartz-i18n`。
 - `quartz-i18n` 不依赖 GPUI、Windows API 与 SQLite，核心和界面共用。界面里要显示"命中规则"或"预览命中"，都向核心请求。
+- `quartz` 不呈现窗口、对话框或错误文字，只保留 Shell 托盘；启动错误以 `quartz-protocol::CoreErrorCode` 和结构化参数交给 `quartz-ui` 本地化并展示，`quartz-i18n` 的文字查找仅用于托盘菜单和提示。托盘通过 `TrayState` 输入、`TrayCommand` 输出隔离，原生窗口、菜单和 Shell 调用集中在 `platform/windows/tray/`；以后可像 `quartz-host` 一样将该模块移到独立可执行文件。
 - `quartz` 对 `quartz-ui` 的依赖只出现在入口里一个函数调用：`quartz_ui::run(args)`。日后要拆成独立的 `quartz-ui.exe`，只需把这一行移到新的 bin crate。
 - 平台代码放在 `quartz/src/platform/windows/`，对外只暴露领域事件，不暴露 HWND、HANDLE 或 COM 类型。macOS 实现以后放在同级目录。
 
@@ -218,7 +223,7 @@ crates/
 | 日志 | `tracing` + 精简 `tracing-subscriber`（`fmt`、`env-filter`），自写按大小滚动的文件 writer | 日志里不写标题、域名等内容，见 06 |
 | 界面 | `gpui-kit 0.10.0`（固定版本，及其依赖的 `gpui-pre`） | 只在 `quartz-ui` 中 |
 | 托盘 | `tray-icon 0.26` | 复用核心的消息循环。如果无法拿到悬停事件或需要自绘 HMENU，就改为直接调用 `Shell_NotifyIconW` |
-| 数据库 | `diesel 2.3`（`sqlite`、`returning_clauses_for_sqlite_3_35`）+ `diesel_migrations`；`libsqlite3-sys` 开 `bundled` | 只在 `store` 模块中，见 03 第 4.5、8 节。启动时检查 SQLite 版本不低于 3.51.3（WAL-reset 缺陷修复版本） |
+| 数据库 | `diesel 2.4.0`（`sqlite`、`returning_clauses_for_sqlite_3_35`）+ `diesel_migrations 2.4.0`；`libsqlite3-sys` 开 `bundled` | 只在 `store` 模块中，见 03 第 4.5、8 节。启动时检查 SQLite 版本不低于 3.51.3（WAL-reset 缺陷修复版本） |
 | 序列化 | `serde` + `serde_json` | 协议与浏览器共用 JSON |
 | 日期 | `jiff` | [Windows 系统时区识别与内嵌 IANA 历史时区数据](https://docs.rs/jiff/1.0.0/jiff/_documentation/platform/index.html#windows) |
 | 正则 | `regex`，规则编译时设置 `size_limit` 和 `dfa_size_limit` | 防止用户正则耗尽内存 |
@@ -228,6 +233,8 @@ crates/
 | 域名 | `idna` | 用户输入的 Unicode 域名转 punycode |
 
 ### 7.1 错误处理
+
+错误类型定义在执行该失败操作的模块中，上层只通过 `source` 包装下层错误，不重复定义下层的失败原因。
 
 - `anyhow` 仅在 `quartz-ui` 的 GPUI 错误边界作为上游错误的 `source` 类型出现，所有内部错误均使用 `snafu`。
 - 按失败情形定义 snafu 错误类型，名称采用“动词 + 对象 + Error”；一个操作有多种失败原因时，用该操作命名的一个枚举为每种原因定义变体，并用 context selector 附加上下文（路径、调用名、规则 ID 等）。不定义整个 crate 共用的兜底错误枚举，不使用 `Box<dyn Error>`；裸名 `Error` 仅用于模块私有类型。
@@ -256,4 +263,4 @@ release profile：`lto = "fat"`，`codegen-units = 1`，`panic = "abort"`，`str
 - 首版手动更新：利用 Windows 允许重命名运行中 exe 的行为，把 `quartz.exe` 重命名为 `quartz.old.exe`，放入新 `quartz.exe`，然后退出并重启 Quartz；下次启动删除 `.old`。
 - 程序目录和数据目录分开。数据目录是 `%LOCALAPPDATA%\Quartz\`，里面有 `quartz.db`、`logs\`、`icons\`、`backups\`。
 - 数据库升级、备份、降级处理见 03 第 7–8 节：迁移前用 `VACUUM INTO` 备份，只保留最近 2 份迁移备份；数据库来自更新版本时，核心拒绝启动，不尝试写入。按隐私规则清理历史时提示并可一并删除备份（03 第 6 节）。
-- 换回旧版本 exe 前，用 `quartz restore-backup <文件>` 恢复迁移前备份；备份之后记录的数据会丢失，命令执行前会提示。
+- 换回旧版本 exe 前，用 `quartz restore-backup <文件>` 恢复迁移前备份；备份之后记录的数据会丢失；不带 `--yes` 时仅打印替换范围并返回非零退出码，确认后加 `--yes` 执行。

@@ -102,7 +102,7 @@ impl WindowState {
 
 /// Failures while registering and creating the core's hidden top-level window.
 #[derive(Debug, Snafu)]
-pub(super) enum CreateCoreWindowError {
+pub(in crate::platform::windows) enum CreateCoreWindowError {
     #[snafu(display("could not find executable module (GetModuleHandleW)"))]
     GetModuleHandle { source: windows::core::Error },
     #[snafu(display("could not register TaskbarCreated message (RegisterWindowMessageW)"))]

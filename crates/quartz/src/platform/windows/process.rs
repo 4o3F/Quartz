@@ -78,3 +78,31 @@ pub(super) fn log_exit(process: &OwnedHandle) {
         Err(error) => tracing::error!(%error, "could not read UI child exit code"),
     }
 }
+
+/// Failures while resolving the executable or starting the error UI process.
+#[derive(Debug, Snafu)]
+pub(super) enum LaunchCoreErrorUiError {
+    #[snafu(display("could not resolve executable for core error UI"))]
+    ErrorExecutable { source: std::io::Error },
+    #[snafu(display("could not create core error UI process"))]
+    ErrorProcess { source: std::io::Error },
+}
+
+pub(super) fn launch_core_error(
+    error: &quartz_protocol::CoreError,
+) -> Result<(), LaunchCoreErrorUiError> {
+    let executable = std::env::current_exe().context(ErrorExecutableSnafu)?;
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("ui")
+        .arg("--core-error")
+        .arg(error.code.as_str());
+    for backup in &error.backup_paths {
+        command.arg("--backup-path").arg(backup);
+    }
+    // Command quotes each native Windows argument, including Unicode paths and spaces.
+    let child = command.spawn().context(ErrorProcessSnafu)?;
+    tracing::info!(pid=child.id(),code=%error.code,backup_paths=?error.backup_paths,"core error UI started");
+    // Dropping Child closes its process handle without terminating the UI.
+    Ok(())
+}

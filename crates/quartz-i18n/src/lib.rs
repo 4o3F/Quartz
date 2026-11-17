@@ -42,6 +42,12 @@ pub fn translate(key: &str) -> Cow<'_, str> {
     rust_i18n::t!(key)
 }
 
+/// Looks up a template in an explicit locale without changing global language.
+#[must_use]
+pub fn translate_in_locale<'a>(key: &'a str, locale: &str) -> Cow<'a, str> {
+    rust_i18n::t!(key, locale = locale)
+}
+
 /// Formats the English diagnostic used by unfinished commands.
 #[must_use]
 pub fn not_implemented(operation: &str) -> String {
@@ -55,7 +61,13 @@ pub fn not_implemented(operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Mutex,
+    };
+
+    // Backend initialization can touch the global locale as well as set_locale.
+    static LOCALE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     use super::translations::_rust_i18n_backend;
     use super::*;
@@ -76,6 +88,7 @@ mod tests {
 
     #[test]
     fn every_locale_has_every_key_and_matching_placeholders() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
         // Read the backend directly so fallback cannot hide missing keys.
         let backend = _rust_i18n_backend();
         let catalogs: BTreeMap<_, BTreeMap<_, _>> = backend
@@ -120,6 +133,7 @@ mod tests {
 
     #[test]
     fn tray_text_fits_utf16_tooltip_buffer() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
         let backend = _rust_i18n_backend();
         for locale in backend.available_locales() {
             for (key, text) in backend
@@ -140,6 +154,7 @@ mod tests {
 
     #[test]
     fn translations_and_english_fallback() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
         assert_eq!(
             rust_i18n::t!("tray.open", locale = "zh-CN"),
             "打开",
@@ -173,6 +188,7 @@ mod tests {
 
     #[test]
     fn global_locale_changes_translation_but_cli_errors_remain_english() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
         set_locale("zh-CN");
         assert_eq!(translate("tray.open"), "打开", "global Chinese locale");
         assert_eq!(
@@ -194,6 +210,7 @@ mod tests {
 
     #[test]
     fn preferred_languages_are_matched_in_order() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
         for (preferred, expected) in [
             (vec![], "en"),
             (vec!["fr"], "en"),
@@ -208,6 +225,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn pseudo_locale_is_expanded_and_preserves_substitutions() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
         let backend = _rust_i18n_backend();
         for (key, english) in backend.messages_for_locale("en").expect("English catalog") {
             let pseudo = backend

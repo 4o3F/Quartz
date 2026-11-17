@@ -2,8 +2,14 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod commands;
+#[cfg(any(windows, test))]
+mod data_directory;
 mod logging;
 mod platform;
+#[cfg(any(windows, test))]
+mod store;
 
 #[cfg(any(windows, test))]
 mod instance_name;
@@ -15,6 +21,8 @@ mod ui_state;
 use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
+#[cfg(windows)]
+use snafu::ResultExt;
 use snafu::Snafu;
 
 #[derive(Debug, PartialEq, Eq, Parser)]
@@ -31,8 +39,16 @@ struct Args {
 enum Command {
     #[command(hide = true)]
     Ui {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "core_error")]
         prewarm: bool,
+        #[arg(long)]
+        core_error: Option<quartz_protocol::CoreErrorCode>,
+        #[arg(
+            long,
+            requires = "core_error",
+            required_if_eq("core_error", "migration_failed")
+        )]
+        backup_path: Vec<PathBuf>,
     },
     #[command(flatten)]
     Cli(CliCommand),
@@ -58,7 +74,12 @@ enum CliCommand {
         db: PathBuf,
     },
     /// Restore a database backup while the core is stopped.
-    RestoreBackup { file: PathBuf },
+    RestoreBackup {
+        file: PathBuf,
+        /// Replace the current database and discard records written after this backup.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Validate and inspect rules.
     #[command(subcommand)]
     Rules(RulesCommand),
@@ -112,13 +133,28 @@ impl CliCommand {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(display("{}", quartz_i18n::not_implemented(operation)))]
-struct DispatchCommandError {
-    operation: &'static str,
+enum DispatchCommandError {
+    #[snafu(display("not implemented yet: {operation}"))]
+    NotImplemented { operation: &'static str },
+    #[cfg(windows)]
+    #[snafu(display("could not restore database backup: {source}"))]
+    Restore {
+        source: commands::RestoreBackupCommandError,
+    },
 }
 
 fn dispatch(command: CliCommand) -> Result<(), DispatchCommandError> {
-    DispatchCommandSnafu {
+    #[cfg(windows)]
+    if let CliCommand::RestoreBackup { file, yes } = &command {
+        use snafu::ResultExt as _;
+        let confirmation = if *yes {
+            commands::RestoreConfirmation::Confirmed
+        } else {
+            commands::RestoreConfirmation::Required
+        };
+        return commands::restore_backup(file, confirmation).context(RestoreSnafu);
+    }
+    NotImplementedSnafu {
         operation: command.name(),
     }
     .fail()
@@ -138,14 +174,24 @@ fn main() -> ExitCode {
         #[cfg(not(windows))]
         None => ExitCode::FAILURE,
         #[cfg(windows)]
-        Some(Command::Ui { prewarm }) => {
-            if let Err(error) = logging::init_ui() {
-                // A log-directory failure cannot be reported to ui.log itself.
-                platform::attach_parent_console();
-                eprintln!("could not initialize UI diagnostics: {error}");
-                return ExitCode::FAILURE;
-            }
-            let options = if prewarm {
+        Some(Command::Ui {
+            prewarm,
+            core_error,
+            backup_path,
+        }) => {
+            let core_error = match init_ui_diagnostics() {
+                Ok(()) => core_error,
+                Err(error) => {
+                    tracing::error!(?error, "could not initialize UI diagnostics");
+                    core_error.or(Some(quartz_protocol::CoreErrorCode::CoreStartFailed))
+                }
+            };
+            let options = if let Some(code) = core_error {
+                quartz_ui::RunOptions::CoreError {
+                    language: platform::ui_language(),
+                    error: quartz_protocol::CoreError::new(code, backup_path),
+                }
+            } else if prewarm {
                 quartz_ui::RunOptions::Prewarm
             } else {
                 quartz_ui::RunOptions::Open {
@@ -172,6 +218,23 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+#[cfg(windows)]
+#[derive(Debug, Snafu)]
+enum StartUiError {
+    #[snafu(display("could not resolve UI data directory"))]
+    UiDataDirectory {
+        source: data_directory::ResolveDataDirectoryError,
+    },
+    #[snafu(display("{source}"))]
+    UiInitLog { source: logging::InitFileLogError },
+}
+
+#[cfg(windows)]
+fn init_ui_diagnostics() -> Result<(), StartUiError> {
+    let directory = data_directory::resolve().context(UiDataDirectorySnafu)?;
+    logging::init_file_log(&directory, logging::LogTarget::Ui).context(UiInitLogSnafu)
 }
 
 #[cfg(windows)]
@@ -250,21 +313,33 @@ mod tests {
                 vec!["ui"],
                 Args {
                     autostart: false,
-                    command: Some(Command::Ui { prewarm: false }),
+                    command: Some(Command::Ui {
+                        prewarm: false,
+                        core_error: None,
+                        backup_path: vec![],
+                    }),
                 },
             ),
             (
                 vec!["ui", "--prewarm"],
                 Args {
                     autostart: false,
-                    command: Some(Command::Ui { prewarm: true }),
+                    command: Some(Command::Ui {
+                        prewarm: true,
+                        core_error: None,
+                        backup_path: vec![],
+                    }),
                 },
             ),
             (
                 vec!["--autostart", "ui", "--prewarm"],
                 Args {
                     autostart: true,
-                    command: Some(Command::Ui { prewarm: true }),
+                    command: Some(Command::Ui {
+                        prewarm: true,
+                        core_error: None,
+                        backup_path: vec![],
+                    }),
                 },
             ),
         ] {
@@ -303,6 +378,7 @@ mod tests {
                 vec!["restore-backup", "backup.db"],
                 CliCommand::RestoreBackup {
                     file: "backup.db".into(),
+                    yes: false,
                 },
             ),
         ] {
@@ -313,10 +389,69 @@ mod tests {
             let Some(Command::Cli(command)) = parsed.command else {
                 panic!("expected CLI command for {args:?}");
             };
+            if matches!(command, CliCommand::RestoreBackup { .. }) {
+                continue;
+            }
             assert!(
-                matches!(dispatch(command), Err(DispatchCommandError { operation }) if operation == args[0]),
+                matches!(dispatch(command), Err(DispatchCommandError::NotImplemented { operation }) if operation == args[0]),
                 "dispatch operation for {args:?}"
             );
+        }
+    }
+
+    #[test]
+    fn restore_confirmation_is_an_explicit_flag() {
+        for args in [
+            vec!["quartz", "restore-backup", "backup.db", "--yes"],
+            vec!["quartz", "restore-backup", "--yes", "backup.db"],
+        ] {
+            assert_eq!(
+                Args::try_parse_from(args)
+                    .expect("confirmed restore arguments")
+                    .command,
+                Some(Command::Cli(CliCommand::RestoreBackup {
+                    file: "backup.db".into(),
+                    yes: true
+                }))
+            );
+        }
+        for args in [
+            vec!["quartz", "restore-backup", "--yes"],
+            vec!["quartz", "restore-backup", "backup.db", "yes"],
+            vec!["quartz", "restore-backup", "backup.db", "--yes=false"],
+        ] {
+            assert!(
+                Args::try_parse_from(args).is_err(),
+                "invalid confirmation syntax"
+            );
+        }
+        let help =
+            Args::try_parse_from(["quartz", "restore-backup", "--help"]).expect_err("restore help");
+        assert_eq!(help.exit_code(), 0);
+        assert!(help.to_string().contains("--yes"));
+    }
+
+    #[test]
+    fn startup_error_arguments_are_typed_and_recovery_path_is_required() {
+        let args = Args::try_parse_from([
+            "quartz",
+            "ui",
+            "--core-error",
+            "migration_failed",
+            "--backup-path",
+            "C:/数据/backup with spaces.db",
+        ])
+        .expect("structured failure arguments");
+        assert!(
+            matches!(args.command,Some(Command::Ui { core_error: Some(quartz_protocol::CoreErrorCode::MigrationFailed), backup_path, .. }) if backup_path == [PathBuf::from("C:/数据/backup with spaces.db")])
+        );
+        for args in [
+            vec!["quartz", "ui", "--core-error", "unknown"],
+            vec!["quartz", "ui", "--core-error", "migration_failed"],
+            vec!["quartz", "ui", "--backup-path", "backup.db"],
+            vec!["quartz", "ui", "--core-error", "other_session", "--prewarm"],
+        ] {
+            assert!(Args::try_parse_from(args).is_err());
         }
     }
 
@@ -372,7 +507,7 @@ mod tests {
                 panic!("expected rules command for {args:?}");
             };
             assert!(
-                matches!(dispatch(command), Err(DispatchCommandError { operation }) if operation == name),
+                matches!(dispatch(command), Err(DispatchCommandError::NotImplemented { operation }) if operation == name),
                 "dispatch operation for {args:?}"
             );
         }

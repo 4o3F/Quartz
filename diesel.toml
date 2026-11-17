@@ -1,0 +1,4 @@
+[print_schema]
+file = "crates/quartz/src/store/schema.rs"
+patch_file = "crates/quartz/schema.patch"
+sqlite_integer_primary_key_is_bigint = true

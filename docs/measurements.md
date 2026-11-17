@@ -192,3 +192,126 @@ Q1 已按用户决策选定 jiff，查询到的最新发布版为 1.0.0。已核
 | `jiff` | 本步骤未添加 | — | `1.0.0` |
 
 `icu_casemap_data` 是本次新增的间接依赖，resolved 与本次查询的 latest 均为 2.4.0。`cargo update --verbose --dry-run` 的可更新包数为 0；上游精确约束保留 `generic-array 0.14.7`（已发布 0.14.9）及 `gpui-pre` 系列 0.3.12（已发布 0.3.13）。新增 ICU4X 依赖声明的最低 Rust 版本为 1.88，idna 为 1.57，其实际后端 idna_adapter 1.2.2 为 1.86；当前 Rust 1.100.0 完成了全部构建，rust-toolchain.toml 保持原样。
+
+## 2026-11-16 M1-B：SQLite 存储、迁移与 H9
+
+基线代码提交为 `ba2a3ccdbf0dba1cf71cfdbf1d4672aeb61eddf6`（M1-A）。本次使用 Windows x86_64、Rust 1.100.0 和仓库 release 配置：`opt-level = 3`、`lto = "fat"`、`codegen-units = 1`、`panic = "abort"`、`strip = true`，静态链接 C 运行库。存储实现以未提交修改进行构建。
+
+### 实现范围
+
+`quartz::store` 包含 schema v1 的全部 20 张表、16 个显式索引、21 组枚举标签和 5 个排查视图。全部表均提供 `Queryable`、`Selectable`、`Insertable`、`AsChangeset` 行模型，并用 `check_for_backend(Sqlite)` 检查类型。实体标识、UTC 毫秒、单调时间与时长使用 `i64`。枚举通过同一个宏生成显式编码、SQLite 序列化与反序列化、用于校验的标签行；未知编码返回结构化解码错误。
+
+核心持有数据目录锁后，在主线程完成版本检查、迁移前备份、迁移与连接初始化，再进入消息循环。已有数据库先以 `mode=ro` 检查未知迁移，兼容后才打开写连接并设置 WAL；只读查询连接另设 `query_only=ON`。写连接采用第 03 章的全部连接设置，保留自动 checkpoint。此步骤增加的线程数为 0。数据库线程、采集运行与时钟段的写入、批量写入、确认点和空闲维护调度在后续步骤接入。
+
+`quartz restore-backup <file>` 在持有同一数据目录锁期间执行，核心运行时拒绝恢复。命令先用英文列出源备份、目标数据库和数据丢失提示；没有 `--yes` 时仅返回非零退出码，提供 `--yes` 后检查源库的版本、完整性和外键，生成独立副本，同步副本到磁盘，对目标库执行 WAL checkpoint，最后原子替换主库。源库使用 `mode=ro`；仅在生成副本期间关闭 `query_only`，允许 `VACUUM INTO` 写出目标文件。
+
+### 设计细节
+
+- v1 的表、CHECK 和索引采用第 03 章给出的 SQL；枚举标签使用列注释中的名称。排查视图保留原始列，增加枚举名称与本地时间；前台视图连接应用与标题，网页视图连接应用、标题与域名。
+- 第 8.2 节的版本兼容性按已应用迁移的集合判断。任何程序不认识的迁移均拒绝启动，包括版本号更小但未知的迁移。
+- 初次创建的空库也先备份，旧版本标为 `0`。备份名使用 jiff 的 UTC 毫秒时间戳，成功迁移后仅清理程序生成的旧迁移备份，保留最近两份。
+- Diesel 的迁移接口使用擦除错误类型，且 SQL 迁移的具体运行错误未公开。自定义 SQL 迁移适配器保留内嵌迁移的名称与事务元数据，在 `store::raw` 执行 SQL，立即把接口返回的错误转换回具体类型；自有错误类型不保存 `Box<dyn Error>`。Rust 迁移与 SQL 迁移共用自定义来源和版本序列。
+- `store/schema.rs` 由 Diesel CLI 2.4.0 生成。`diesel.toml` 和 `crates/quartz/schema.patch` 将 SQLite `INTEGER` 的时间、时长、标识等字段映射为 `BigInt`，枚举与布尔标志保留整数类型。执行 `scripts/check-schema.sh` 会迁移临时空库、重新生成 schema 并比较；安装命令为 `cargo install diesel_cli --version 2.4.0 --no-default-features --features sqlite-bundled --locked`。
+- `crates/quartz/migrations.lock` 校验迁移目录中每个文件的 SHA-256 和完整文件清单，增删或修改文件都会导致测试失败。`tests/fixtures/db/v1.db` 保存全部表的测试数据，覆盖开放记录、零时长、Unicode、隐藏标题和未知 JSON 字段。
+
+### 依赖版本与许可
+
+对全部外部直接依赖逐项执行 `cargo info --registry crates-io <crate>`；required 来自工作区清单，resolved 来自 `Cargo.lock`，latest 来自 registry 查询。Diesel 2.4.0 允许 `libsqlite3-sys >=0.17.2, <0.41.0`，因此使用最新的 0.40.0；该版本内嵌 SQLite 3.54.1，高于启动要求的 3.51.3。
+
+| crate | required | resolved | latest |
+|---|---|---|---|
+| `diesel` | `2.4.0` | `2.4.0` | `2.4.0` |
+| `diesel_migrations` | `2.4.0` | `2.4.0` | `2.4.0` |
+| `libsqlite3-sys` | `0.40.0` | `0.40.0` | `0.40.0` |
+| `jiff` | `1.0.0` | `1.0.0` | `1.0.0` |
+| `sha2` | `0.11.1` | `0.11.1` | `0.11.1` |
+| `tempfile` | `3.27.0` | `3.27.0` | `3.27.0` |
+| `anyhow` | `1` | `1.0.104` | `1.0.104` |
+| `clap` | `4.6.8` | `4.6.8` | `4.6.8` |
+| `gpui-kit` | `=0.10.0` | `0.10.0` | `0.10.0` |
+| `icu_casemap` | `2.4.0` | `2.4.0` | `2.4.0` |
+| `icu_normalizer` | `2.4.0` | `2.4.0` | `2.4.0` |
+| `idna` | `1.1.0` | `1.1.0` | `1.1.0` |
+| `rust-i18n` | `4.2.4` | `4.2.4` | `4.2.4` |
+| `serde` | `1` | `1.0.229` | `1.0.229` |
+| `serde_json` | `1` | `1.0.154` | `1.0.154` |
+| `snafu` | `0.9.2` | `0.9.2` | `0.9.2` |
+| `tracing` | `0.1` | `0.1.44` | `0.1.44` |
+| `tracing-subscriber` | `0.3.23` | `0.3.23` | `0.3.23` |
+| `windows` | `0.62.2` | `0.62.2` | `0.62.2` |
+
+新增直接依赖均关闭默认 feature：Diesel 启用 `std`、`sqlite`、SQLite `RETURNING` 和支持前台表所需的 `32-column-tables`；diesel_migrations 启用 `sqlite`；libsqlite3-sys 启用 `bundled`；jiff 仅启用 `std`，用于备份时间戳；sha2 和 tempfile 仅用于测试。新增的 23 个锁文件包声明的许可为 MIT、MIT OR Apache-2.0、MIT/Apache-2.0、Unlicense OR MIT；jiff 系列按 MIT 接受。`deny.toml` 保持不变。
+
+### H9 测量
+
+基线和存储实现分别执行 Windows `cargo.exe build --release --workspace`，按实际文件字节数比较。增量编译先完成 Windows debug `cargo.exe build -p quartz`，只将 `store/mod.rs` 中的一条日志文本从 `upgrading database` 改为 `applying database migrations`，再用 Stopwatch 测量同一构建命令；构建日志仅重新编译 quartz。测量后恢复原始源码，并重新构建 release。
+
+| 指标 | M1-A 基线 | M1-B | 变化 |
+|---|---:|---:|---:|
+| `quartz.exe`（字节） | 12,868,096 | 15,003,136 | +2,135,040（2.036 MiB，16.59%） |
+| Windows debug 一行增量编译（秒） | — | 9.028 | 单次 Stopwatch 实测；Cargo 报告 8.89 秒 |
+| 核心启动后 Private Bytes（字节） | 2,486,272 | 3,276,800 | +790,528（0.754 MiB） |
+| 核心启动后线程数 | 4 | 4 | 0 |
+
+Private Bytes 在启动完成后约 3 秒读取 `Process.PrivateMemorySize64`，只作本步骤的短时观察；核心没有加载 `nv*.dll`。第 08 章的 10 分钟空闲、界面开关、ETW 唤醒和真实采集负载回归在 M1 完成时执行。第 08 章未设置 exe 大小或增量编译时间上限；H9 本步骤完成大小与编译测量。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo fmt --all --check` | 通过 |
+| Linux `cargo clippy --workspace --all-targets -- -D warnings` | 通过 |
+| Linux `cargo test --workspace` | 45 项通过，其中 store 11 项 |
+| `cargo deny check` | advisories、bans、licenses、sources 全部通过；重复版本仅有警告；规则未改动 |
+| Windows `cargo.exe clippy --workspace --all-targets -- -D warnings` | 通过 |
+| Windows `cargo.exe test --workspace` | 56 项通过 |
+| Windows `cargo.exe build --release --workspace` | 通过；本轮构建 quartz.exe 为 14,997,504 字节 |
+| `scripts/check-schema.sh`（Diesel CLI 2.4.0） | 空库迁移与 schema.rs 比较通过 |
+| Windows 核心与恢复命令冒烟检查 | 核心存活并创建 quartz.db；迁移记录为 `20261116000000`，20 张业务表、5 个视图，完整性检查为 ok；第二次启动返回 0；通过 taskkill 停止核心 |
+| Core/UI 文件日志 | 核心与 `ui --prewarm` 均启动成功，core.log 与 ui.log 正常写入，UI 预热占位进程返回 0 |
+| 不提供 `--yes` 的恢复命令 | 返回 1，列出源备份、目标数据库及数据丢失提示；不存在的数据目录保持不存在，已有目录的全部文件清单及 SHA-256 保持不变；标准输入保持打开仍立即退出 |
+| 核心运行时 `quartz.exe restore-backup <file> --yes` | 返回 1，控制台提示先停止核心 |
+| 停止核心后使用 `--yes` 恢复 v1 样本 | 返回 0；恢复后迁移版本、完整性与两条样本运行记录均正确 |
+
+store 测试覆盖空库迁移及重复启动、枚举标签与未知编码、只读连接与特殊路径、全部原始语句的准备、CHECK 与三组开放行部分唯一索引、未来 schema 拒绝且主库字节不变、样本库 schema 一致性、迁移中途失败的事务回滚与备份恢复、备份保留数量、迁移文件内容及清单校验。迁移失败测试通过同一个启动函数注入两条 Rust 迁移：第一条成功，第二条建表并写入设置后失败；第二条回滚，数据库停在第一条，恢复备份后 schema 与升级前完全相同。
+
+`quartz-i18n` 的全部测试共用一个互斥锁，覆盖全局语言切换及翻译后端初始化。用 `cargo test -p quartz-i18n --lib --no-run --message-format=json`（Windows 使用 `cargo.exe`）取得 `compiler-artifact.executable`，在每次新建的进程中执行测试二进制并传入 `--test-threads=8`：Linux 连续 30 次、Windows 连续 10 次，每次 6 项测试全部通过。
+
+核心启动、恢复命令、迁移失败备份列表和界面日志共用 `data_directory::resolve()` 与 `ResolveDataDirectoryError`，统一验证 `LOCALAPPDATA` 为绝对路径。
+
+`logging::init_file_log` 接收已解析的数据目录和 `LogTarget::{Core, Ui}`，统一创建 logs、追加打开 core.log 或 ui.log 并安装订阅器；文件日志错误只由 `InitFileLogError` 定义，核心和界面启动错误只通过 `source` 包装。
+
+`commands::restore_backup` 负责确认、目录、实例锁和存储恢复的调用顺序；数据目录的创建及其 `CreateDataDirectoryError` 由 `data_directory` 定义，平台模块只提供实例锁操作及其结果。
+
+workspace 的窗口、托盘、进程、语言、领域转换、迁移、连接和恢复错误均已检查归属，已有的下层错误保持为 `source`，没有按错误文本分支。命令行提示和错误按第 10 章第 3 节保持英文，GUI 错误由 quartz-ui 按界面语言本地化。clap 测试覆盖 `--yes` 在文件前后的位置、默认不确认、缺少文件、错误确认写法和帮助文本；目录解析测试覆盖缺失、空值、相对路径和绝对路径。
+
+## 2026-11-17 M1-B：启动错误 UI 与托盘边界
+
+基于 `609810c` 及 M1-B 未提交修改构建，未修改原有暂存条目。核心删除全部 MessageBox 与错误文字展示，启动错误使用 `quartz-protocol::CoreErrorCode` 的稳定字符串：`newer_database`、`migration_failed`、`other_session`、`core_start_failed`。核心记录诊断后通过原生进程启动传递 `ui --core-error <code>`，备份路径逐个使用 `--backup-path <path>` 参数传递，核心返回 1；同会话重复启动仍返回 0。
+
+`quartz-ui` 使用主窗口相同的无边框标题栏显示本地化错误、备份路径、`quartz restore-backup --yes "<path>"` 命令和恢复会丢失后续记录的提示。错误窗口关闭后进程返回 0。UI 日志初始化失败时仍可展示结构化错误。CoreError 的 JSON 与 argv 代码使用相同表示，测试覆盖四种代码往返、未知代码、独立备份路径和未知 JSON 字段；clap 检查迁移失败必须带备份路径，并禁止错误窗口与预热参数并用。
+
+托盘的隐藏原生窗口、AppMessage/CoreEvent 转换、菜单与 Shell 调用集中在 `platform/windows/tray/`。核心只提交 `TrayState` 并处理 `TrayCommand::{OpenUi, Exit}`，窗口与图标的生命周期由模块管理。运行时故障通过管道推送状态并选择警告图标的接入点标记为 TODO(M2)。第 01 章第 5 节与第 07 章第 1 节记录了以后将托盘模块移到独立可执行文件的边界。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo fmt --all --check` | 通过 |
+| Linux `cargo clippy --workspace --all-targets -- -D warnings` | 通过 |
+| Linux `cargo test --workspace` | 50 项通过 |
+| Windows `cargo.exe clippy --workspace --all-targets -- -D warnings` | 通过 |
+| Windows `cargo.exe test --workspace` | 61 项通过 |
+| `cargo deny check` | advisories、bans、licenses、sources 通过；没有放宽规则 |
+| `scripts/check-schema.sh` | 通过，迁移与 schema 未改变 |
+| Windows `cargo.exe build --release --workspace` | 通过，quartz.exe 为 15,016,960 字节 |
+| 核心正常启动、第二次启动、taskkill | 核心创建数据库并运行；第二次启动返回 0；按 PID 停止核心 |
+| 托盘打开 UI | 向托盘隐藏窗口发送选择事件，实际启动普通 UI 子进程；关闭 UI 返回 0，核心继续运行 |
+| 新版本数据库 | 在 v1 样本加入未知迁移版本 `99999999999999`，核心返回 1，UI 子进程收到 `newer_database` 与独立备份路径；主库 SHA-256 不变 |
+| 迁移失败 | 无迁移记录的库预先建立 settings 表，触发 v1 SQL 的表名冲突；核心返回 1，UI 子进程收到 `migration_failed` 与实际 VACUUM INTO 备份路径；主库和备份完整性检查为 ok，测试标记数据保留，迁移中的 capture_runs 表回滚 |
+| 另一会话占用 | 单独持有 quartz.lock 的一字节排他锁，不创建会话互斥量；核心返回 1，UI 子进程收到 `other_session` |
+| 通用启动失败 | quartz.lock 路径被目录占用，核心返回 1，UI 子进程收到 `core_start_failed` |
+| 错误窗口 | 四种实际启动错误均打开 GPUI 窗口，关闭后 UI 返回 0，核心保持退出；三个指定场景的暗色截图已检查 |
+| 恢复命令回归 | 没有 --yes 时返回 1，目录与文件 SHA-256 不变；核心运行中带 --yes 拒绝恢复，核心停止后返回 0 并恢复样本数据 |
+
+全部外部直接依赖再次逐项运行 `cargo info --registry crates-io <crate>`，最新发布版本与上一节依赖表一致；没有增加外部 crate，仅调整本地 crate 依赖及现有 serde、snafu 的使用位置。`quartz` 的 quartz-i18n 依赖限定 Windows，文字查找仅用于托盘；语言协商不生成错误文字。

@@ -7,9 +7,27 @@ tray.exit:
   en: Exit
 tray.opening:
   en: Opening…
-error.other_session:
-  en: Quartz is already running in another Windows session
-error.start_core:
-  en: Could not start Quartz. See the core log for details.
 error.not_implemented:
   en: "not implemented yet: %{operation}"
+tray.upgrading:
+  en: "Upgrading database…"
+ui.core_error.newer_database.title:
+  en: "Database version is newer"
+ui.core_error.newer_database.message:
+  en: "This database was upgraded by a newer version of Quartz. Use the newer program, or restore a migration backup before starting this version."
+ui.core_error.migration_failed.title:
+  en: "Database upgrade failed"
+ui.core_error.migration_failed.message:
+  en: "The upgrade could not finish. Restore the migration backup below, then restart Quartz, or install a fixed version."
+ui.core_error.other_session.title:
+  en: "Quartz is running in another Windows session"
+ui.core_error.other_session.message:
+  en: "Exit Quartz in the other Windows session, then start it again in this session."
+ui.core_error.start_failed.title:
+  en: "Could not start Quartz"
+ui.core_error.start_failed.message:
+  en: "Check the data directory and core log, resolve the problem, then restart Quartz."
+ui.core_error.backups:
+  en: "Migration backups"
+ui.core_error.restore_warning:
+  en: "Restoring replaces the current database. All records written after the backup will be lost."
