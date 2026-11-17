@@ -124,3 +124,71 @@ UI 打开时的模块：
 ### 后续测量
 
 本次记录核心空闲和 UI 开关场景。ETW 唤醒统计、8 小时运行、采集与数据库场景按各自里程碑补充。`quartz-host.exe` 当前为 M5 占位程序，启动后直接退出，尚无常驻资源测量。
+
+## 2026-11-16 M1-A：文本比较与 H10 Windows release 体积
+
+构建基于 `2cf93289e7168d27e5a194e4f8530ee967df74e9` 加本次未提交的 M1-A 修改。Windows x86_64，Rust 1.100.0；沿用仓库 release 配置：`opt-level = 3`、`lto = "fat"`、`codegen-units = 1`、`panic = "abort"`、`strip = true`，并启用静态 C 运行库。
+
+### 实现与语义
+
+`quartz-domain::text::NfcText` 用于区分大小写的相等、子串、前缀、后缀比较，以及正则输入；`FoldedKey` 按 NFKC → Unicode 默认完整大小写折叠 → NFKC 生成比较键。原始标题由调用方保留，规范化键单独缓存。两种键的比较方法只接受同类型的键，且不读取界面语言或系统区域设置。
+
+`quartz-domain::domain_name::DomainName` 使用 idna 的非过渡 UTS #46 转换，保存小写 ASCII / Punycode，提供 Unicode 拼写和完整标签边界的域名后缀匹配。采用 URL 主机字符限制、浏览器的连字符处理与 DNS 长度验证；移除尾部根点，使 `example.com.` 与 `example.com` 使用同一比较键。无效输入返回 `NormalizeDomainError::InvalidDomain`，保留不含输入文本的 IDNA 原因。
+
+Q1 已按用户决策选定 jiff，查询到的最新发布版为 1.0.0。已核对其 [Windows 平台文档](https://docs.rs/jiff/1.0.0/jiff/_documentation/platform/index.html#windows)：通过 Windows API 识别系统时区，默认在 Windows 内嵌 IANA 时区数据库。本步骤未添加时间库依赖。
+
+### H10 测量方法
+
+先执行 Windows `cargo.exe build --release -p quartz`，保存没有调用 quartz-domain 的基线。随后临时给 quartz 添加 quartz-domain 路径依赖，并在入口加入由环境变量控制的调用：输入来自运行时环境变量，经 `std::hint::black_box` 传给 NFC、折叠和各项比较 API，输出也传给 `black_box`，保证 release 优化保留实际代码和数据。先测 NFC 与完整折叠，再加入域名 ASCII / Unicode 转换与后缀比较。每次均使用相同的构建命令和发布配置。
+
+文件大小按字节统计；PE 节表分别记录 `.text` 与 `.rdata` 的实际内容长度及文件对齐后的长度。另从 ICU4X 2.4.0 的生成数据源码中提取至少 16 字节的字节数组，在最终 PE 的 `.rdata` 中查找完整字节序列，合并重叠地址后统计覆盖量；它衡量实际保留的数据载荷，结构体描述符、其他常量与对齐计入只读节增量。
+
+| 构建 | exe（字节） | 相对基线增量（字节） | `.text` 内容（字节） | `.rdata` 内容（字节） | `.rdata` 文件占用（字节） | ICU 数据数组载荷（字节） |
+|---|---:|---:|---:|---:|---:|---:|
+| 基线 | 12,868,608 | 0 | 10,236,320 | 2,288,206 | 2,288,640 | 0 |
+| NFC + NFKC / 完整折叠 | 13,028,352 | 159,744 | 10,270,336 | 2,413,070 | 2,413,568 | 123,835 |
+| 完整模块：再加入 IDN | 13,168,128 | 299,520 | 10,316,368 | 2,507,078 | 2,507,264 | 216,035 |
+
+仅 NFC 与完整折叠使 exe 增加 159,744 字节（156 KiB），其中数据数组载荷为 123,835 字节，`.rdata` 内容增加 124,864 字节。完整模块使 exe 从 12.272 MiB 增至 12.558 MiB，增加 299,520 字节（292.5 KiB，2.33%）；其中数据数组载荷为 216,035 字节，`.rdata` 内容增加 218,872 字节。IDN 相对仅规范化与折叠再增加 139,776 字节，其中新增数据数组为 92,200 字节。
+
+识别到的规范化与折叠数组分别为：case map 23,145 字节、NFC 5,308 字节、NFD 分解 35,028 字节、NFD 表 2,129 字节、NFKD 分解 52,308 字节、NFKD 表 5,917 字节。IDN 再保留 UTS #46 数据 57,368 字节、双向文本类别 9,832 字节、通用类别 17,908 字节、连接类型 7,092 字节。基线中没有匹配到这些数组。它们位于只读映射中；各构建 `.data` 内容均为 142,888 字节。
+
+测量结束后移除入口调用和 quartz 对 quartz-domain 的临时依赖，恢复锁文件中的正式依赖关系，并重新构建基线。重建后 exe 恢复为 12,868,608 字节，各 PE 节长度与基线相同；二进制差异仅为 PE / 调试目录时间戳与 CodeView GUID，屏蔽这些构建元数据后逐字节一致。第 08 章没有单独设置可执行文件体积上限；H10 本步骤完成体积测量，常驻核心的 10 分钟内存验收随 M1 采集与存储接入后的资源回归完成。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo fmt --all --check` | 通过 |
+| Linux `cargo clippy --workspace --all-targets -- -D warnings` | 通过 |
+| Linux `cargo test --workspace` | 29 项通过，其中 quartz-domain 7 项 |
+| `cargo deny check` | advisories、bans、licenses、sources 全部通过；重复版本仅有警告 |
+| Windows `cargo.exe clippy --workspace --all-targets -- -D warnings` | 通过 |
+| Windows `cargo.exe test --workspace` | 38 项通过，其中 quartz-domain 7 项 |
+| `cargo doc -p quartz-domain --no-deps` | 通过 |
+| Windows `cargo.exe build --release -p quartz` | 基线、仅规范化与折叠、完整模块及移除临时调用后的重建均通过 |
+
+7 项文本与域名测试覆盖：全角 / 半角拉丁字母数字与片假名、兼容连字、德语 ß / ẞ、土耳其语点 / 无点 i 的非 Turkic 折叠、希腊末尾 sigma、中文子串、组合音标、折叠后的再次规范化、IDN / Punycode 往返、域名标签边界和无效域名。
+
+### 依赖版本
+
+逐项执行 `cargo info --registry crates-io <crate>` 核对全部外部直接依赖；required 来自工作区清单，resolved 来自 Cargo.lock，latest 来自本次 registry 查询。新增 ICU4X 依赖只启用 `compiled_data`；idna 只启用 `alloc` 与 `compiled_data`，snafu 复用工作区配置。
+
+| crate | required | resolved | latest |
+|---|---|---|---|
+| `anyhow` | `1` | `1.0.104` | `1.0.104` |
+| `clap` | `4.6.8` | `4.6.8` | `4.6.8` |
+| `gpui-kit` | `=0.10.0` | `0.10.0` | `0.10.0` |
+| `icu_casemap` | `2.4.0` | `2.4.0` | `2.4.0` |
+| `icu_normalizer` | `2.4.0` | `2.4.0` | `2.4.0` |
+| `idna` | `1.1.0` | `1.1.0` | `1.1.0` |
+| `rust-i18n` | `4.2.4` | `4.2.4` | `4.2.4` |
+| `serde` | `1` | `1.0.229` | `1.0.229` |
+| `serde_json` | `1` | `1.0.154` | `1.0.154` |
+| `snafu` | `0.9.2` | `0.9.2` | `0.9.2` |
+| `tracing` | `0.1` | `0.1.44` | `0.1.44` |
+| `tracing-subscriber` | `0.3.23` | `0.3.23` | `0.3.23` |
+| `windows` | `0.62.2` | `0.62.2` | `0.62.2` |
+| `jiff` | 本步骤未添加 | — | `1.0.0` |
+
+`icu_casemap_data` 是本次新增的间接依赖，resolved 与本次查询的 latest 均为 2.4.0。`cargo update --verbose --dry-run` 的可更新包数为 0；上游精确约束保留 `generic-array 0.14.7`（已发布 0.14.9）及 `gpui-pre` 系列 0.3.12（已发布 0.3.13）。新增 ICU4X 依赖声明的最低 Rust 版本为 1.88，idna 为 1.57，其实际后端 idna_adapter 1.2.2 为 1.86；当前 Rust 1.100.0 完成了全部构建，rust-toolchain.toml 保持原样。

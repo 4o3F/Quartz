@@ -220,7 +220,7 @@ crates/
 | 托盘 | `tray-icon 0.26` | 复用核心的消息循环。如果无法拿到悬停事件或需要自绘 HMENU，就改为直接调用 `Shell_NotifyIconW` |
 | 数据库 | `diesel 2.3`（`sqlite`、`returning_clauses_for_sqlite_3_35`）+ `diesel_migrations`；`libsqlite3-sys` 开 `bundled` | 只在 `store` 模块中，见 03 第 4.5、8 节。启动时检查 SQLite 版本不低于 3.51.3（WAL-reset 缺陷修复版本） |
 | 序列化 | `serde` + `serde_json` | 协议与浏览器共用 JSON |
-| 日期 | `jiff` 或 `chrono` + `chrono-tz` | M1 时比较体积后选定；需要历史时区规则 |
+| 日期 | `jiff` | [Windows 系统时区识别与内嵌 IANA 历史时区数据](https://docs.rs/jiff/1.0.0/jiff/_documentation/platform/index.html#windows) |
 | 正则 | `regex`，规则编译时设置 `size_limit` 和 `dfa_size_limit` | 防止用户正则耗尽内存 |
 | 界面文字 | `rust-i18n`（与 gpui-component 相同） | 只在 `quartz-i18n` 中声明翻译资源，见 10 第 2 节 |
 | 文本比较 | ICU4X `icu_normalizer`、`icu_casemap`（编译期数据） | `quartz-domain` 的规则匹配使用；M1 测量体积（09 H10） |
