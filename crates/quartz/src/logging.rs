@@ -3,6 +3,25 @@
 use snafu::Snafu;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(windows)]
+use std::{fs::File, sync::Mutex};
+
+/// Installs a synchronous file writer without creating a logging thread.
+#[cfg(windows)]
+pub(super) fn init_file(file: File) -> Result<(), InitTracingError> {
+    let filter = EnvFilter::builder()
+        .with_regex(false)
+        .with_default_directive(tracing::Level::INFO.into())
+        .from_env_lossy();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(Mutex::new(file))
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+    Ok(())
+}
+
 /// Failure to install the process-wide tracing subscriber.
 #[derive(Debug, Snafu)]
 #[snafu(context(false), display("could not install tracing subscriber"))]

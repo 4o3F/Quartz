@@ -5,5 +5,11 @@ tray.open:
   zh-CN: 打开
 tray.exit:
   zh-CN: 退出
+tray.opening:
+  zh-CN: 正在打开…
+error.other_session:
+  zh-CN: Quartz 已在另一个 Windows 会话中运行
+error.start_core:
+  zh-CN: 无法启动 Quartz。请查看核心日志。
 error.not_implemented:
   zh-CN: "尚未实现：%{operation}"

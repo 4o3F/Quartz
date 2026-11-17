@@ -3,18 +3,17 @@
 ## 1. 进程模型
 
 ```text
-quartz.exe（同一个文件）
+quartz.exe（windows 子系统，核心与界面共用）
 ├─ 核心模式（默认，常驻）
 │  ├─ 主线程：Win32 消息循环、托盘、WinEvent hook、会话与电源通知
 │  ├─ 采集线程：应用身份解析 → 隐私策略 → 计时状态机 → 写入队列
 │  ├─ 数据库线程：diesel（SQLite）单写者，查询也在这里执行
 │  └─ I/O 线程：tokio current-thread，命名管道服务
-│
-├─ 界面模式（`ui` 子命令，按需启动）
-│  └─ GPUI 窗口：连接核心 → 查询与订阅 → 渲染；最后一个窗口关闭即退出进程
-│
-└─ host 模式（由浏览器启动）
-   └─ 浏览器 stdio ⇄ 长度与格式校验 ⇄ 命名管道
+└─ 界面模式（`ui` 子命令，按需启动）
+   └─ GPUI 窗口：连接核心 → 查询与订阅 → 渲染；最后一个窗口关闭即退出进程
+
+quartz-host.exe（console 子系统，由浏览器启动，不链接 GPUI）
+└─ 浏览器 stdio ⇄ 长度与格式校验 ⇄ 命名管道
 ```
 
 进程数上限为：1 个核心，加最多 1 个界面进程，再加每个已连接的浏览器 profile 一个 host。
@@ -31,18 +30,9 @@ quartz.exe（同一个文件）
 
 ## 2. 入口识别
 
-入口先识别模式，再初始化日志、线程、数据库和平台设施。识别分两步。
+`quartz.exe` 用 `Args::try_parse()` 解析自身命令，确定模式后再初始化日志、线程、数据库和平台设施。浏览器通过 Native Messaging manifest 启动独立的 `quartz-host.exe`。
 
-**第一步：浏览器启动预检。** 浏览器拉起 host 时的参数格式由浏览器决定，不是 Quartz 的命令行语法。Chrome、Edge 还会追加 `--parent-window=N`，交给 clap 会被当作未知参数报错。所以先用固定模式匹配原始参数（`std::env::args_os`）：
-
-| 条件 | 模式 |
-|---|---|
-| 第一个参数以 `chrome-extension://` 开头 | host（Chrome、Edge 传扩展 origin，后面可能跟 `--parent-window=N`） |
-| 恰好两个参数，第一个是以 `.json` 结尾的绝对路径，第二个是已登记的 Firefox 扩展 ID | host（Firefox 传 manifest 路径和扩展 ID） |
-
-Native Messaging manifest 的 `path` 字段不能带参数，所以只能这样识别，详见 [05-browser.md](05-browser.md)。
-
-**第二步：clap 解析。** 预检不命中时，用 `clap`（derive）解析 Quartz 自己的命令行：
+`quartz.exe` 的命令行定义如下：
 
 ```rust
 #[derive(Parser)]
@@ -63,9 +53,6 @@ enum Command {
         #[arg(long)]
         prewarm: bool,
     },
-    /// 显式 host 入口，测试用
-    #[command(hide = true)]
-    NativeHost,
     /// 打印某天的区间（经管道以 cli 角色查询核心；M1 可直接只读打开数据库）
     Dump { #[arg(long)] date: String },
     /// 核心状态
@@ -97,11 +84,10 @@ enum RulesCommand {
 |---|---|
 | 无子命令 | 核心 |
 | `ui [--prewarm]` | 界面 |
-| `native-host` | host |
 | `dump`、`status`、`gen-data`、`bench-query`、`restore-backup`、`rules check/preview/diff/explain/tree` | 命令行 |
 | 解析失败 | 报错退出，不进入核心 |
 
-解析失败时退出码为 2，不启动核心。这样，浏览器或其他调用方传入未预料的参数时，不会误启动第二个核心。`ui` 和 `native-host` 在帮助中隐藏，它们是进程间约定，不是用户命令。
+解析失败时退出码为 2，不启动核心。这样，浏览器或其他调用方传入未预料的参数时，不会误启动第二个核心。`ui` 在帮助中隐藏，它是核心拉起界面时使用的进程间约定。
 
 **为什么界面需要显式子命令。** 界面和核心是同一个 exe，但启动后的行为完全不同。核心拉起界面时必须明确告诉子进程“你是界面”：
 
@@ -109,9 +95,9 @@ enum RulesCommand {
 2. 预热进程（`ui --prewarm`）不开窗口，它的行为本来就需要用参数区分。
 3. 用户双击 exe 或从开始菜单启动时不带参数，走核心路径：核心已在运行时，把“打开界面”转发给核心后退出（第 3 节），由核心按第 4 节拉起界面。所以界面进程始终由核心创建，UI 状态机（`starting`、`prewarming`、`visible`）只有核心这一个所有者，不会和用户直接启动的界面实例竞争。
 
-**控制台输出。** exe 使用 `windows` 子系统，启动时没有控制台。命令行模式在解析前调用 `AttachConsole(ATTACH_PARENT_PROCESS)`，clap 的帮助与错误输出写到调用者的控制台。没有父控制台时（例如被双击后解析失败），错误写入日志文件。GUI 子系统进程附加控制台后，cmd 不会等它退出，输出可能和下一个提示符交错。M0 评估这个体验；不可接受时，与 host 共用一个 console 子系统的小 exe（见下）。
+**控制台输出。** `quartz.exe` 使用 `windows` 子系统，启动时没有控制台。`Args::try_parse()` 返回帮助、版本或解析错误时，先调用 `AttachConsole(ATTACH_PARENT_PROCESS)`，再由 clap 输出并选择退出码。解析成功后，仅用户命令行子命令附加父控制台，核心和界面均不附加。没有父控制台时（例如被双击后解析失败），错误写入日志文件。GUI 子系统进程附加控制台后，cmd 不会等它退出，输出可能和下一个提示符交错。
 
-host 模式要验证 GUI 子系统进程能否继承浏览器给的标准句柄并按二进制读写。验证失败时改用独立的 console 子系统 `quartz-host.exe`，命令行模式也可迁到这个 exe。它很小，不链接 GPUI。
+`quartz-host.exe` 使用独立的 console 子系统入口接收浏览器提供的标准句柄，不链接 GPUI。浏览器参数不用于入口路由；Native Messaging manifest 的 `allowed_origins`、`allowed_extensions` 限制可调用的扩展。用户命令行入口仍留在 `quartz.exe`。
 
 ## 3. 单实例
 
@@ -158,7 +144,8 @@ GPUI 在 `Application::run` 内部、启动回调之前创建 D3D 设备（`conn
 
 ```text
 crates/
-├─ quartz          exe 入口；核心装配、平台层、存储、查询、托盘、host
+├─ quartz          exe 入口；核心装配、平台层、存储、查询、托盘
+├─ quartz-host     独立 Native Messaging 主机；浏览器 stdio 与核心管道转发，不链接 GPUI
 ├─ quartz-domain   纯逻辑：计时状态机、区间运算、可用状态裁剪、规则匹配、提取、隐私策略求值
 ├─ quartz-protocol 消息类型、分帧编解码、版本与错误码
 ├─ quartz-i18n     翻译资源、语言协商、复数、时长与日期格式化（10）
@@ -179,14 +166,13 @@ crates/
 
 | 模块 | 职责 |
 |---|---|
-| `entry` | 浏览器启动预检、clap 参数解析与模式分发 |
+| `main` | clap 参数解析与模式分发 |
 | `core::app` | 核心装配、线程启动、关闭顺序 |
 | `platform::windows::{foreground, idle, session, power, tray, process, autostart}` | Win32 采集与系统集成 |
 | `capture` | 观测事件 → 身份解析 → 隐私策略 → 状态机 → 写入命令 |
 | `store` | schema 迁移、写入、读取、保留清理 |
 | `query` | 查询管线与缓存 |
 | `ipc` | 管道服务、会话、角色权限、订阅 |
-| `host` | Native Messaging 转发 |
 
 ## 6. 线程模型
 
@@ -243,7 +229,7 @@ crates/
 
 ### 7.1 错误处理
 
-- 每个 crate 和 `quartz` 的每个模块定义自己的 snafu 错误枚举，用 context selector 附加上下文（路径、操作名、规则 ID 等），不用字符串拼接错误。
+- 按失败情形定义 snafu 错误类型，名称采用“动词 + 对象 + Error”；一个操作有多种失败原因时，用该操作命名的一个枚举为每种原因定义变体，并用 context selector 附加上下文（路径、调用名、规则 ID 等）。不定义整个 crate 共用的兜底错误枚举，不使用 `Box<dyn Error>`；裸名 `Error` 仅用于模块私有类型。
 - Win32 调用的 `windows::core::Error` 作为 `source` 保留，上下文写调用名，例如 `OpenProcessSnafu { pid }`。
 - 跨进程只传结构化错误码。`quartz-protocol` 定义错误码枚举，核心把内部 snafu 错误映射为错误码，界面和 host 只按错误码分支，不解析错误消息文本。
 - 错误的 `Display` 与上下文字段同样遵守 06 的日志约束：不携带标题、域名、URL。需要定位时只带区间 ID、规则 ID 等标识。

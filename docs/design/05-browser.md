@@ -3,9 +3,9 @@
 浏览器扩展上报活动标签与状态边界。网站使用时长由核心与前台事实求交得到，扩展不判断空闲和焦点时长。
 
 ```text
-扩展 ──connectNative──▶ quartz.exe（host 模式）──命名管道──▶ 核心
+扩展 ──connectNative──▶ quartz-host.exe ──命名管道──▶ 核心
  ▲                                                       │
- └──────── browser.ack（影响已持久可恢复的连续序号）────────┘
+ └──────── browser.ack（影响已持久可恢复的连续序号）─────┘
 ```
 
 ## 1. 扩展
@@ -20,7 +20,7 @@
 
 ### 1.2 握手与上报
 
-扩展发出的第一条消息是 `browser.hello`。host 读取后，才以 `role = host` 向核心发送 `hello`，将这些字段和启动参数中已校验的 extension_id 放入 `body.browser`：
+扩展发出的第一条消息是 `browser.hello`。host 读取后，才以 `role = host` 向核心发送 `hello`，将这些字段和浏览器启动参数提供的 `extension_id` 放入 `body.browser`：
 
 ```json
 { "t": "req", "id": 1, "op": "browser.hello", "body": {
@@ -115,19 +115,19 @@
 
 | 浏览器 | 注册表键（默认值为 manifest 绝对路径） | 授权字段 |
 |---|---|---|
-| Chrome | `HKCU\Software\Google\Chrome\NativeMessagingHosts\dev.quartz.host` | `allowed_origins: ["chrome-extension://<固定 ID>/"]` |
-| Edge | `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\dev.quartz.host` | 同上，Edge 扩展 ID 单列 |
-| Firefox | `HKCU\Software\Mozilla\NativeMessagingHosts\dev.quartz.host` | `allowed_extensions: ["quartz@quartz.dev"]` |
+| Chrome | `HKCU\Software\Google\Chrome\NativeMessagingHosts\dev.4o3f.quartz` | `allowed_origins: ["chrome-extension://<固定 ID>/"]` |
+| Edge | `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\dev.4o3f.quartz` | 同上，Edge 扩展 ID 单列 |
+| Firefox | `HKCU\Software\Mozilla\NativeMessagingHosts\dev.4o3f.quartz` | `allowed_extensions: ["quartz@4o3f.dev"]` |
 
-Chrome/Edge 共用 `dev.quartz.host.chrome.json`，Firefox 使用 `dev.quartz.host.firefox.json`。manifest 的 `path` 指向 `quartz.exe` 绝对路径；核心每次启动检查并在 exe 移动后改写。`browser_hosts.disable` 移除该浏览器注册，`browser_hosts.status` 返回注册及连接状态。
+Chrome/Edge 共用 `dev.4o3f.quartz.chrome.json`，Firefox 使用 `dev.4o3f.quartz.firefox.json`。manifest 的 `path` 指向 `quartz-host.exe` 绝对路径；核心每次启动检查并在程序目录移动后改写。`browser_hosts.disable` 移除该浏览器注册，`browser_hosts.status` 返回注册及连接状态。
 
 ### 2.2 入口
 
-Chrome/Edge 传入 `chrome-extension://<ID>/`，可能另带 `--parent-window=<N>`；Firefox 传入 manifest 绝对路径和扩展 ID。按 01 第 2 节识别模式，扩展 ID 不在登记列表时退出。
+`quartz-host.exe` 是独立的 console 子系统程序，不链接 GPUI。Chrome/Edge 传入 `chrome-extension://<ID>/`，可能另带 `--parent-window=<N>`；Firefox 传入 manifest 绝对路径和扩展 ID。这些参数由浏览器定义，不用于入口路由；扩展调用权限由 manifest 的 `allowed_origins`、`allowed_extensions` 控制。
 
 ### 2.3 行为
 
-1. 读取并校验首条 `browser.hello`，再连接核心管道并发送核心 `hello`。浏览器种类由扩展自报，扩展 ID 来自已校验的启动参数。
+1. 读取并校验首条 `browser.hello`，再连接核心管道并发送核心 `hello`。浏览器种类由扩展自报，扩展 ID 随核心 `hello` 登记。
 2. 核心检查同用户、同会话、exe 路径与登记扩展 ID，不检查直接父进程。Edge 经 `cmd.exe` 中转启动也须通过验收。
 3. 随后逐帧校验 256 KiB 上限、JSON 结构与 `browser.*` 操作，再双向转发。stdout 只写协议帧；日志不写 stdout/stderr。
 4. 连不上核心时发送下列消息并退出。host 不拉起核心，不落盘，不缓冲；浏览器关闭 stdin 时退出。

@@ -5,5 +5,11 @@ tray.open:
   en: Open
 tray.exit:
   en: Exit
+tray.opening:
+  en: Opening…
+error.other_session:
+  en: Quartz is already running in another Windows session
+error.start_core:
+  en: Could not start Quartz. See the core log for details.
 error.not_implemented:
   en: "not implemented yet: %{operation}"

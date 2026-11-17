@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/quartz",
+    "crates/quartz-host",
     "crates/quartz-domain",
     "crates/quartz-protocol",
     "crates/quartz-i18n",

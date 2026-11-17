@@ -10,8 +10,8 @@
 - 设置 `PIPE_REJECT_REMOTE_CLIENTS`。首个实例设置 `FILE_FLAG_FIRST_PIPE_INSTANCE`。
 - 服务端用 `GetNamedPipeClientProcessId` 取得客户端 PID，然后检查：
   - 客户端与核心属于同一用户、同一个 Windows 会话；
-  - 客户端 exe 的完整路径与核心自己的 `current_exe()` 相同（三种模式是同一个文件）。如果日后拆成独立的 host exe，就改为检查它们在同一个安装目录。
-- 客户端连接后，用 `GetNamedPipeServerProcessId` 反向检查服务端 exe 路径。
+  - 客户端 exe 的完整路径是核心自己的 `current_exe()`（界面、命令行），或同一安装目录中的 `quartz-host.exe`（host）；握手角色必须与该路径对应。
+- 客户端连接后，用 `GetNamedPipeServerProcessId` 反向检查服务端完整路径是否为同一安装目录中的 `quartz.exe`。
 
 路径检查用来排除意外连接的程序。本地同一账户下的恶意程序可以绕过这个检查，所以真正的安全边界是用户账户本身。
 
@@ -78,7 +78,7 @@ u32 小端，JSON 字节长度 | UTF-8 JSON
 
 新增功能模块使用独立的操作前缀与订阅主题（例如以后的自控协议使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节），权限表按前缀授权。
 
-角色在握手时声明。host 必须通过同用户、同会话、exe 路径一致的检查，握手中的扩展 ID 还必须在已登记列表中；失败则断开。浏览器种类由扩展在 `browser.hello` 自报，host 不依赖父进程名推断。Edge 通过 `cmd.exe` 中转启动也是合法路径。
+角色在握手时声明。host 必须通过同用户、同会话及 `quartz-host.exe` 完整路径的检查，握手中的扩展 ID 还必须在已登记列表中；失败则断开。浏览器种类由扩展在 `browser.hello` 自报，host 不依赖父进程名推断。Edge 通过 `cmd.exe` 中转启动也是合法路径。
 
 ## 6. 消息清单
 

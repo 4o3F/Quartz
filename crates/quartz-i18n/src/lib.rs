@@ -126,7 +126,7 @@ mod tests {
                 .messages_for_locale(&locale)
                 .unwrap_or_else(|| panic!("missing translation catalog for {locale}"))
             {
-                if key.starts_with("tray.") {
+                if key.starts_with("tray.") || key == "app.name" {
                     // M0 tray keys have no placeholders; add maximum substitutions with new keys.
                     assert!(
                         placeholders(&text).is_empty(),

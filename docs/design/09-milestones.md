@@ -10,8 +10,8 @@
 
 **交付**
 
-- Cargo workspace：`quartz`、`quartz-domain`、`quartz-protocol`、`quartz-i18n`、`quartz-ui`；`quartz-i18n` 带 zh-CN、en 翻译骨架与键完整性测试（10 第 2 节）；Windows 构建脚本；本项目的 `.cargo/config.toml` 关闭 kache wrapper。
-- 入口模式识别（01 第 2 节）：浏览器启动预检与 clap 解析，带单元测试，覆盖 Chrome `--parent-window`、Firefox 两参数与未知参数报错。
+- Cargo workspace：`quartz`、`quartz-host`、`quartz-domain`、`quartz-protocol`、`quartz-i18n`、`quartz-ui`；`quartz-i18n` 带 zh-CN、en 翻译骨架与键完整性测试（10 第 2 节）；Windows 构建脚本；本项目的 `.cargo/config.toml` 关闭 kache wrapper。
+- 入口模式识别（01 第 2 节）：clap 参数解析与单元测试，覆盖核心、界面、用户子命令及未知参数报错。
 - 核心：消息循环、托盘（打开、退出）、跨会话数据目录锁文件与会话内互斥量。
 - `quartz ui` 打开一个空白的 GPUI 窗口，关窗后进程退出。
 - `scripts/measure.ps1`。
@@ -99,7 +99,7 @@
 **交付**
 
 - Chrome/Edge 扩展、Firefox 扩展（05 第 1 节）。
-- host 模式与注册（05 第 2 节），设置页的浏览器分组。
+- `quartz-host.exe` 的 Native Messaging 转发与注册（05 第 2 节），设置页的浏览器分组。
 - 核心的上下文关联、求交、回执与去重（05 第 3 节）。
 - 扩充 M1 的 `builtin.browser_private` 样本库与关联验证（06 第 3.2–3.4 节）。
 - browser.policy、purge 确认、gap 与连续 ack，扩展 alarm 重连、开放网页行恢复。
@@ -155,7 +155,7 @@
 | H3 | GPUI 能在不开窗的情况下完成 D3D 初始化，因此悬停预热有效 | M3 | 预热时开一个不可见的窗口；或放弃预热，只保留托盘摘要 |
 | H4 | 仅凭 profile、扩展焦点和标题匹配，就能可靠关联浏览器多窗口 | M5 | 保持 ambiguous；如需 UI Automation 等信号，另立原型评估权限、成本与影响 |
 | H5 | 用户在用的浏览器无痕窗口可以从类名或标题识别 | M1，M5 扩充样本 | 提供"该浏览器所有窗口隐藏标题"一键规则（06 第 3.4 节） |
-| H6 | GUI 子系统 exe 能正确继承浏览器给的 stdio | M5 | 增加 console 子系统的 `quartz-host.exe` |
+| H6 | 已决定使用独立 console 子系统 `quartz-host.exe` 承接浏览器 stdio | M0 已由设计解决 | — |
 | H7 | 验证常见应用窗口的显示亲和性查询覆盖、错误码与成本 | M1 | 查询失败记 unknown，其他识别器与用户规则继续求值 |
 | H8 | 一年数据下，内存缓存就能满足查询性能 | M4 | 加持久日缓存表 |
 | H9 | diesel 的泛型代码对 release 体积、编译时间与核心内存的影响可以接受 | M1 | 热路径写入改用 `sql_query`，或把 store 拆成独立 crate 缩短增量编译 |
@@ -168,7 +168,7 @@
 | # | 问题 | 何时决定 |
 |---|---|---|
 | Q1 | 日期库选 `jiff` 还是 `chrono` + `chrono-tz` | M1 开始时，比较体积 |
-| Q2 | 托盘继续用 `tray-icon`，还是直接调用 `Shell_NotifyIconW`（取决于能否拿到悬停事件、自绘菜单） | M0 |
+| Q2 | 已决定通过 `windows` 直接调用 `Shell_NotifyIconW`，以接收悬停事件并减少依赖。 | M0 |
 | Q3 | 复核预热默认开启、电池时关闭 | M3 实测后复核 |
 | Q4 | 数据库是否加密 | 以后 |
 | Q5 | 内置提取规则覆盖哪些应用 | M4，按用户实际常用的应用列表 |

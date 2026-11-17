@@ -1,0 +1,252 @@
+//! Shell notification icon and localized popup menu on the main thread.
+
+use std::fmt;
+
+use snafu::{ResultExt, Snafu};
+use windows::{
+    Win32::{
+        Foundation::{LPARAM, POINT, WPARAM},
+        UI::{
+            Shell::{
+                self, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+                NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONDATAW_0,
+            },
+            WindowsAndMessaging::{
+                self, HMENU, IDI_APPLICATION, MF_STRING, TPM_NONOTIFY, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, WM_NULL,
+            },
+        },
+    },
+    core::PCWSTR,
+};
+
+use super::{
+    wide,
+    window::{AppMessage, Window},
+};
+use crate::tray_tooltip::{self, FormatTrayTooltipError};
+
+// A single notification icon is identified by this ID together with its window handle.
+const ICON_ID: u32 = 1;
+
+/// Failures while preparing and adding a version 4 notification icon.
+#[derive(Debug, Snafu)]
+pub(super) enum AddTrayIconError {
+    #[snafu(display("could not load tray application icon (LoadIconW)"))]
+    LoadIcon { source: windows::core::Error },
+    #[snafu(display("could not encode initial tray tooltip"))]
+    FormatInitialTooltip { source: FormatTrayTooltipError },
+    // Shell_NotifyIconW documents BOOL success without an extended GetLastError value.
+    #[snafu(display("could not add tray icon (Shell_NotifyIconW, NIM_ADD)"))]
+    NotifyAdd,
+    #[snafu(display("could not set tray icon version 4 (Shell_NotifyIconW, NIM_SETVERSION)"))]
+    SetVersion,
+}
+
+/// Failures while encoding or applying a notification icon's tooltip.
+#[derive(Debug, Snafu)]
+pub(super) enum UpdateTrayTooltipError {
+    #[snafu(display("could not encode tray tooltip"))]
+    FormatTooltip { source: FormatTrayTooltipError },
+    #[snafu(display("could not update tray tooltip (Shell_NotifyIconW, NIM_MODIFY)"))]
+    NotifyModify,
+}
+
+/// Failures while constructing and positioning the localized tray menu.
+#[derive(Debug, Snafu)]
+pub(super) enum ShowTrayMenuError {
+    #[snafu(display("could not create tray menu (CreatePopupMenu)"))]
+    CreatePopupMenu { source: windows::core::Error },
+    #[snafu(display("could not append tray menu item {key} (AppendMenuW)"))]
+    AppendMenu {
+        key: &'static str,
+        source: windows::core::Error,
+    },
+    #[snafu(display("could not locate tray menu cursor (GetCursorPos)"))]
+    GetCursorPosition { source: windows::core::Error },
+}
+
+/// Tray commands with their Windows menu IDs and translation keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub(super) enum TrayMenuItem {
+    Open = 1,
+    Exit = 2,
+}
+
+impl TrayMenuItem {
+    const ALL: [Self; 2] = [Self::Open, Self::Exit];
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::Open => "tray.open",
+            Self::Exit => "tray.exit",
+        }
+    }
+
+    fn from_command(id: usize) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| *item as usize == id)
+    }
+}
+
+pub(super) struct TrayIcon<'window> {
+    data: NOTIFYICONDATAW,
+    window: &'window Window,
+}
+
+impl fmt::Debug for TrayIcon<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrayIcon")
+            .field("window", &self.window)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'window> TrayIcon<'window> {
+    /// Loads the icon, encodes its tooltip, and registers version 4 callbacks.
+    ///
+    /// # Errors
+    /// Returns icon loading, tooltip encoding, or Shell registration failures.
+    pub(super) fn add(window: &'window Window) -> Result<Self, AddTrayIconError> {
+        // TODO(M6): Replace the shared default application icon with the Quartz icon resource.
+        // SAFETY: IDI_APPLICATION names a shared system icon; it must not be destroyed by the caller.
+        let icon = unsafe { WindowsAndMessaging::LoadIconW(None, IDI_APPLICATION) }
+            .context(LoadIconSnafu)?;
+        let tray = Self {
+            data: NOTIFYICONDATAW {
+                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: window.raw(),
+                uID: ICON_ID,
+                uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP,
+                uCallbackMessage: AppMessage::TrayCallback as u32,
+                hIcon: icon,
+                szTip: tray_tooltip::encode(&quartz_i18n::translate("app.name"))
+                    .context(FormatInitialTooltipSnafu)?,
+                Anonymous: NOTIFYICONDATAW_0 {
+                    uVersion: NOTIFYICON_VERSION_4,
+                },
+                ..Default::default()
+            },
+            window,
+        };
+        tray.readd()?;
+        Ok(tray)
+    }
+
+    /// Re-registers the configured icon and callback version after Explorer restarts.
+    ///
+    /// # Errors
+    /// Returns Shell icon-addition or version-selection failures.
+    pub(super) fn readd(&self) -> Result<(), AddTrayIconError> {
+        // SAFETY: The initialized data references our live window and a shared system icon.
+        if !unsafe { Shell::Shell_NotifyIconW(NIM_ADD, &self.data) }.as_bool() {
+            return NotifyAddSnafu.fail();
+        }
+        // SAFETY: NIM_ADD succeeded; the version field specifies the supported v4 callback format.
+        if !unsafe { Shell::Shell_NotifyIconW(NIM_SETVERSION, &self.data) }.as_bool() {
+            return SetVersionSnafu.fail();
+        }
+        Ok(())
+    }
+
+    /// Replaces the tooltip with the translation for the supplied key.
+    ///
+    /// # Errors
+    /// Returns tooltip encoding or Shell update failures.
+    pub(super) fn tooltip(&mut self, key: &str) -> Result<(), UpdateTrayTooltipError> {
+        self.data.szTip =
+            tray_tooltip::encode(&quartz_i18n::translate(key)).context(FormatTooltipSnafu)?;
+        let update = NOTIFYICONDATAW {
+            uFlags: NIF_TIP | NIF_SHOWTIP,
+            ..self.data
+        };
+        // SAFETY: The update identifies the same live icon and contains a terminated tooltip.
+        if !unsafe { Shell::Shell_NotifyIconW(NIM_MODIFY, &update) }.as_bool() {
+            return NotifyModifySnafu.fail();
+        }
+        Ok(())
+    }
+
+    /// Shows the localized tray menu, returning None when dismissed.
+    ///
+    /// # Errors
+    /// Returns menu creation, item insertion, or cursor lookup failures.
+    pub(super) fn menu(&self) -> Result<Option<TrayMenuItem>, ShowTrayMenuError> {
+        // SAFETY: Creates an empty, uniquely owned menu without pointer arguments.
+        let menu =
+            Menu(unsafe { WindowsAndMessaging::CreatePopupMenu() }.context(CreatePopupMenuSnafu)?);
+        for item in TrayMenuItem::ALL {
+            let key = item.label_key();
+            let label = wide(&quartz_i18n::translate(key));
+            // SAFETY: Menu is live; each label is terminated and copied synchronously by AppendMenuW.
+            unsafe {
+                WindowsAndMessaging::AppendMenuW(
+                    menu.0,
+                    MF_STRING,
+                    item as usize,
+                    PCWSTR(label.as_ptr()),
+                )
+            }
+            .context(AppendMenuSnafu { key })?;
+        }
+        let mut point = POINT::default();
+        // SAFETY: point is writable storage for the screen-coordinate cursor position.
+        unsafe { WindowsAndMessaging::GetCursorPos(&mut point) }.context(GetCursorPositionSnafu)?;
+        // SAFETY: Our window is live on this thread. Foreground ownership lets clicking elsewhere
+        // dismiss the menu; TPM_RETURNCMD returns the selection without borrowing callback state.
+        let command = unsafe {
+            let _ = WindowsAndMessaging::SetForegroundWindow(self.window.raw());
+            let command = WindowsAndMessaging::TrackPopupMenu(
+                menu.0,
+                TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+                point.x,
+                point.y,
+                None,
+                self.window.raw(),
+                None,
+            );
+            let _ = WindowsAndMessaging::PostMessageW(
+                Some(self.window.raw()),
+                WM_NULL,
+                WPARAM(0),
+                LPARAM(0),
+            );
+            command.0 as usize
+        };
+        Ok(TrayMenuItem::from_command(command))
+    }
+}
+
+impl Drop for TrayIcon<'_> {
+    fn drop(&mut self) {
+        // SAFETY: The window outlives the icon; deleting a missing icon is harmless after Explorer exits.
+        let _ = unsafe { Shell::Shell_NotifyIconW(NIM_DELETE, &self.data) };
+    }
+}
+
+struct Menu(HMENU);
+
+impl Drop for Menu {
+    fn drop(&mut self) {
+        // SAFETY: The popup menu is uniquely owned and TrackPopupMenu has returned.
+        let _ = unsafe { WindowsAndMessaging::DestroyMenu(self.0) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_menu_commands_round_trip_and_unknown_ids_are_absent() {
+        for item in TrayMenuItem::ALL {
+            assert_eq!(TrayMenuItem::from_command(item as usize), Some(item));
+        }
+        for id in [0, 3, usize::MAX] {
+            assert_eq!(TrayMenuItem::from_command(id), None, "unknown command {id}");
+        }
+        assert_eq!(TrayMenuItem::Open.label_key(), "tray.open");
+        assert_eq!(TrayMenuItem::Exit.label_key(), "tray.exit");
+    }
+}

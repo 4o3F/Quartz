@@ -19,7 +19,9 @@
 
 **关于同一 exe 静态导入 D3D 的影响**（用户决策 5）：`d3d11.dll`、`dxgi.dll`、`dcomp.dll`、`dwrite.dll` 会在核心进程里加载，但只要不创建设备，NVIDIA 用户态驱动就不应加载。M0 测量这一项。静态导入造成的超预算记录偏差，作为后续优化，不阻塞里程碑。后续可评估 `/DELAYLOAD` 这些 DLL，再考虑拆成 `quartz.exe` 和 `quartz-ui.exe`。
 
-### 1.2 host（每个浏览器连接一个）
+### 1.2 host（`quartz-host.exe`，每个浏览器连接一个）
+
+独立的 console 子系统程序，不链接 GPUI，也不创建 GPU 设备。
 
 | 指标 | 上限 |
 |---|---|
@@ -53,7 +55,7 @@
 
 ### 2.1 工具
 
-- `scripts/measure.ps1`：基于 ui-spike 的同名脚本，改为测量 Quartz 的三种模式。先稳定一段时间再采样，输出 Private Bytes、Private WS、线程数、句柄数、CPU 时间。
+- `scripts/measure.ps1`：基于 ui-spike 的同名脚本，分别测量 `quartz.exe` 的核心、界面进程及独立的 `quartz-host.exe`。先稳定一段时间再采样，输出 Private Bytes、Private WS、线程数、句柄数、CPU 时间。
 - 只用 `Get-Process` 和 `GetProcessMemoryInfo` 采样。WMI 性能计数器每次查询大约要 1 秒，会干扰测量（spike 里踩过的坑）。
 - `EmptyWorkingSet` 不作为优化手段，也不在验收时调用。
 - 模块检查：用 `Get-Process -Module` 列出核心和 host 加载的模块，断言没有 `nv*.dll`。
