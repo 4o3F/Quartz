@@ -32,7 +32,7 @@ Quartz 是一个 Windows 优先、开源、本地优先的自动时间记录工�
 | # | 决策 | 来源 |
 |---|---|---|
 | D1 | `quartz.exe` 承担常驻核心、按需 GPUI 界面和用户命令行；独立 console 子系统 `quartz-host.exe` 承担浏览器 Native Messaging 转发 | 用户决策，见 01 第 1–2 节 |
-| D2 | 界面用 GPUI（gpui-kit 0.9.1），GPU 渲染；软件渲染在大窗口时间轴上只有约 26 fps，不采用 | [界面原型实测](../research/ui-spike-results.md) |
+| D2 | 界面用 GPUI（gpui-kit 0.10.0），GPU 渲染；软件渲染在大窗口时间轴上只有约 26 fps，不采用 | [界面原型实测](../research/ui-spike-results.md)（历史原型使用 gpui-kit 0.9.1） |
 | D3 | 关窗即退出界面进程；用托盘悬停预热、托盘摘要菜单、`STARTF_FORCEONFEEDBACK` 缓解约 4 秒的 dGPU 冷启动 | 用户决策 1 |
 | D4 | 核心不在时，浏览器扩展保留有界短缓冲；核心入库时只保留与前台事实相交的部分 | 用户决策 2 |
 | D5 | 原始数据只存事实；分类、文档提取、统计在查询时计算，用可重建缓存提速 | 用户决策 3 |

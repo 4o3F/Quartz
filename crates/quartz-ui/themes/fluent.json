@@ -1,0 +1,34 @@
+{
+  "name": "Quartz Fluent",
+  "quartz": {
+    "title_bar.height": 32,
+    "space.m": 12,
+    "type.caption": {
+      "font_family": "Segoe UI Variable Small",
+      "font_size": 12,
+      "line_height": 16
+    }
+  },
+  "themes": [
+    {
+      "name": "Fluent Light",
+      "mode": "light",
+      "font.family": "Segoe UI Variable Text",
+      "font.size": 14,
+      "colors": {
+        "background": "#F3F3F3",
+        "foreground": "#000000E4"
+      }
+    },
+    {
+      "name": "Fluent Dark",
+      "mode": "dark",
+      "font.family": "Segoe UI Variable Text",
+      "font.size": 14,
+      "colors": {
+        "background": "#202020",
+        "foreground": "#FFFFFF"
+      }
+    }
+  ]
+}

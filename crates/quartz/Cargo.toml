@@ -19,6 +19,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+quartz-ui.workspace = true
 windows = { workspace = true, features = [
     "std",
     "Win32_Foundation",

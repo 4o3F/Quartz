@@ -216,7 +216,7 @@ crates/
 | 错误 | `snafu` | 见下文“错误处理” |
 | 异步 I/O | `tokio`，只开 `rt`、`net`、`io-util`、`io-std`、`sync`、`time`、`macros` | 只用 current-thread runtime，见下文“tokio 使用范围” |
 | 日志 | `tracing` + 精简 `tracing-subscriber`（`fmt`、`env-filter`），自写按大小滚动的文件 writer | 日志里不写标题、域名等内容，见 06 |
-| 界面 | `gpui-kit 0.9.1`（固定版本，及其依赖的 `gpui-pre`） | 只在 `quartz-ui` 中 |
+| 界面 | `gpui-kit 0.10.0`（固定版本，及其依赖的 `gpui-pre`） | 只在 `quartz-ui` 中 |
 | 托盘 | `tray-icon 0.26` | 复用核心的消息循环。如果无法拿到悬停事件或需要自绘 HMENU，就改为直接调用 `Shell_NotifyIconW` |
 | 数据库 | `diesel 2.3`（`sqlite`、`returning_clauses_for_sqlite_3_35`）+ `diesel_migrations`；`libsqlite3-sys` 开 `bundled` | 只在 `store` 模块中，见 03 第 4.5、8 节。启动时检查 SQLite 版本不低于 3.51.3（WAL-reset 缺陷修复版本） |
 | 序列化 | `serde` + `serde_json` | 协议与浏览器共用 JSON |
@@ -229,6 +229,7 @@ crates/
 
 ### 7.1 错误处理
 
+- `anyhow` 仅在 `quartz-ui` 的 GPUI 错误边界作为上游错误的 `source` 类型出现，所有内部错误均使用 `snafu`。
 - 按失败情形定义 snafu 错误类型，名称采用“动词 + 对象 + Error”；一个操作有多种失败原因时，用该操作命名的一个枚举为每种原因定义变体，并用 context selector 附加上下文（路径、调用名、规则 ID 等）。不定义整个 crate 共用的兜底错误枚举，不使用 `Box<dyn Error>`；裸名 `Error` 仅用于模块私有类型。
 - Win32 调用的 `windows::core::Error` 作为 `source` 保留，上下文写调用名，例如 `OpenProcessSnafu { pid }`。
 - 跨进程只传结构化错误码。`quartz-protocol` 定义错误码枚举，核心把内部 snafu 错误映射为错误码，界面和 host 只按错误码分支，不解析错误消息文本。

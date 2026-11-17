@@ -2,6 +2,7 @@
 
 mod handle;
 mod instance;
+mod language;
 mod process;
 mod tray;
 mod window;
@@ -16,20 +17,21 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use windows::{
     Win32::{
         Foundation::{WAIT_FAILED, WAIT_OBJECT_0},
-        Globalization::{self, MUI_LANGUAGE_NAME},
         System::Threading::INFINITE,
         UI::WindowsAndMessaging::{
             self, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MSG, PM_REMOVE,
             QS_ALLINPUT, WM_QUIT,
         },
     },
-    core::{PCWSTR, PWSTR},
+    core::PCWSTR,
 };
 
 use crate::{logging, ui_state::UiState};
 use instance::{AcquireInstance, AcquireInstanceError};
 use tray::{AddTrayIconError, TrayIcon, TrayMenuItem};
 use window::{CoreEvent, CreateCoreWindowError, Window};
+
+pub(crate) use language::select as ui_language;
 
 #[derive(Debug, Snafu)]
 enum StartCoreError {
@@ -55,12 +57,6 @@ enum StartCoreError {
     AddTrayIcon { source: AddTrayIconError },
     #[snafu(display("could not run core message loop"))]
     RunMessageLoop { source: WaitCoreEventsError },
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(display("could not read preferred Windows UI languages (GetUserPreferredUILanguages)"))]
-struct ReadUiLanguagesError {
-    source: windows::core::Error,
 }
 
 #[derive(Debug, Snafu)]
@@ -96,10 +92,7 @@ fn run() -> Result<(), StartCoreError> {
         .open(&log_path)
         .context(OpenLogFileSnafu { path: &log_path })?;
     logging::init_file(file).context(InitializeTracingSnafu)?;
-    let language = ui_language().unwrap_or_else(|error| {
-        tracing::warn!(%error, "using English UI language");
-        "en"
-    });
+    let language = ui_language();
     quartz_i18n::set_locale(language);
     let _instance = match instance::acquire(&data_directory).context(AcquireInstanceSnafu)? {
         AcquireInstance::SameSession => {
@@ -126,34 +119,6 @@ fn run() -> Result<(), StartCoreError> {
     drop(window);
     tracing::info!("core stopped");
     Ok(())
-}
-
-fn ui_language() -> Result<&'static str, ReadUiLanguagesError> {
-    let mut count = 0;
-    let mut length = 0;
-    // SAFETY: A null output buffer queries the size of the preferred-language MULTI_SZ.
-    unsafe {
-        Globalization::GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, None, &mut length)
-    }
-    .context(ReadUiLanguagesSnafu)?;
-    let mut buffer = vec![0u16; length as usize];
-    // SAFETY: The buffer has the queried length; Windows writes at most that many UTF-16 units.
-    unsafe {
-        Globalization::GetUserPreferredUILanguages(
-            MUI_LANGUAGE_NAME,
-            &mut count,
-            Some(PWSTR(buffer.as_mut_ptr())),
-            &mut length,
-        )
-    }
-    .context(ReadUiLanguagesSnafu)?;
-    let languages: Vec<_> = buffer
-        .split(|unit| *unit == 0)
-        .filter(|name| !name.is_empty())
-        .map(String::from_utf16_lossy)
-        .collect();
-    let preferred: Vec<_> = languages.iter().map(String::as_str).collect();
-    Ok(quartz_i18n::negotiate_language(&preferred))
 }
 
 fn message_loop(window: &Window, tray: &mut TrayIcon<'_>) -> Result<(), WaitCoreEventsError> {

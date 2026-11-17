@@ -6,6 +6,50 @@ use tracing_subscriber::EnvFilter;
 #[cfg(windows)]
 use std::{fs::File, sync::Mutex};
 
+#[cfg(windows)]
+#[derive(Debug, Snafu)]
+pub(super) enum InitUiLogError {
+    #[snafu(display("LOCALAPPDATA must name an absolute data directory"))]
+    ResolveDataDirectory,
+    #[snafu(display("could not create UI log directory {}", path.display()))]
+    CreateDirectory {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    #[snafu(display("could not open UI log file {}", path.display()))]
+    OpenFile {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    #[snafu(display("could not initialize UI tracing"))]
+    InitializeTracing { source: InitTracingError },
+}
+
+/// Installs UI diagnostics in the same data-directory logs folder as the core.
+#[cfg(windows)]
+pub(super) fn init_ui() -> Result<(), InitUiLogError> {
+    use snafu::{OptionExt as _, ResultExt as _};
+    use std::{
+        fs::{self, OpenOptions},
+        path::PathBuf,
+    };
+
+    let logs = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .context(ResolveDataDirectorySnafu)?
+        .join("Quartz")
+        .join("logs");
+    fs::create_dir_all(&logs).context(CreateDirectorySnafu { path: &logs })?;
+    let path = logs.join("ui.log");
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .context(OpenFileSnafu { path })?;
+    init_file(file).context(InitializeTracingSnafu)
+}
+
 /// Installs a synchronous file writer without creating a logging thread.
 #[cfg(windows)]
 pub(super) fn init_file(file: File) -> Result<(), InitTracingError> {

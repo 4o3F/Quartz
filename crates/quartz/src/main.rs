@@ -137,7 +137,24 @@ fn main() -> ExitCode {
         None => platform::run_core(),
         #[cfg(not(windows))]
         None => ExitCode::FAILURE,
-        // TODO(M0-B2): Open the GPUI window.
+        #[cfg(windows)]
+        Some(Command::Ui { prewarm }) => {
+            if let Err(error) = logging::init_ui() {
+                // A log-directory failure cannot be reported to ui.log itself.
+                platform::attach_parent_console();
+                eprintln!("could not initialize UI diagnostics: {error}");
+                return ExitCode::FAILURE;
+            }
+            let options = if prewarm {
+                quartz_ui::RunOptions::Prewarm
+            } else {
+                quartz_ui::RunOptions::Open {
+                    language: platform::ui_language(),
+                }
+            };
+            run_ui(options)
+        }
+        #[cfg(not(windows))]
         Some(Command::Ui { .. }) => ExitCode::FAILURE,
         Some(Command::Cli(command)) => {
             platform::attach_parent_console();
@@ -153,6 +170,21 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run_ui(options: quartz_ui::RunOptions) -> ExitCode {
+    tracing::info!(?options, "UI started");
+    match quartz_ui::run(options) {
+        Ok(()) => {
+            tracing::info!("UI stopped");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            tracing::error!(?error, "UI failed");
+            ExitCode::FAILURE
         }
     }
 }
