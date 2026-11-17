@@ -201,70 +201,89 @@ impl Drop for Window {
     }
 }
 
-/// Records actions without borrowing application state across reentrant Windows calls.
+/// Borrowed handle valid only while Windows is dispatching the current callback.
+struct CallbackWindow(HWND);
+impl CallbackWindow {
+    /// Dispatches a message using the owning window's borrowed callback state.
+    ///
+    /// # Safety
+    /// The handle and message parameters must be valid for the active Windows callback.
+    unsafe fn dispatch(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        let window = self.0;
+
+        if message == WM_NCCREATE {
+            // SAFETY: WM_NCCREATE supplies a live CREATESTRUCTW. create() passed the stable address
+            // of its owned WindowState as lpCreateParams, and retains that Box through destruction.
+            let creation = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
+            let state = creation.lpCreateParams.cast::<WindowState>();
+            if !state.is_null() {
+                // SAFETY: This callback owns the window on its creating thread; GWLP_USERDATA stores
+                // the borrowed state pointer. Clearing last-error distinguishes a zero prior value
+                // from SetWindowLongPtrW failure, in which case window creation is rejected.
+                let installed = unsafe {
+                    Foundation::SetLastError(ERROR_SUCCESS);
+                    let previous = WindowsAndMessaging::SetWindowLongPtrW(
+                        window,
+                        GWLP_USERDATA,
+                        state as isize,
+                    );
+                    previous != 0 || Foundation::GetLastError() == ERROR_SUCCESS
+                };
+                if !installed {
+                    return LRESULT(0);
+                }
+            }
+        }
+        // SAFETY: The window is live for this callback; its user-data slot is zero until WM_NCCREATE
+        // stores the WindowState pointer and is cleared before the owned Box can be dropped.
+        let state = unsafe { WindowsAndMessaging::GetWindowLongPtrW(window, GWLP_USERDATA) }
+            as *const WindowState;
+        if !state.is_null() {
+            if message == WM_NCDESTROY {
+                // SAFETY: The window is being destroyed on its owning thread. Detach its borrowed
+                // state pointer before the owner can release the allocation after DestroyWindow.
+                unsafe { WindowsAndMessaging::SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
+            } else {
+                // SAFETY: Only create() installs this pointer, and Window keeps the Box alive until
+                // after destruction. RefCell accesses stay on this same window-owning thread.
+                let state = unsafe { &*state };
+                if let Some(event) = CoreEvent::from_message(message, lparam, state.taskbar_created)
+                {
+                    state.enqueue(event);
+                    // SAFETY: The callback's live HWND receives a pointer-free wake message after
+                    // enqueue() has released its RefCell borrow, allowing nested message dispatch.
+                    let _ = unsafe {
+                        WindowsAndMessaging::PostMessageW(
+                            Some(window),
+                            AppMessage::WakeCore as u32,
+                            WPARAM(0),
+                            LPARAM(0),
+                        )
+                    };
+                    return LRESULT(0);
+                }
+                if AppMessage::from_raw(message).is_some() {
+                    return LRESULT(0);
+                }
+            }
+        }
+        // SAFETY: Unhandled callback parameters are passed unchanged to the system default procedure.
+        unsafe { WindowsAndMessaging::DefWindowProcW(window, message, wparam, lparam) }
+    }
+}
+
+/// Windows ABI adapter for the native callback window.
 ///
 /// # Safety
-/// Windows must invoke this callback with the window-procedure ABI and valid message parameters.
+/// Windows must supply a live window and valid window-procedure parameters.
 unsafe extern "system" fn window_procedure(
     window: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if message == WM_NCCREATE {
-        // SAFETY: WM_NCCREATE supplies a live CREATESTRUCTW. create() passed the stable address
-        // of its owned WindowState as lpCreateParams, and retains that Box through destruction.
-        let creation = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
-        let state = creation.lpCreateParams.cast::<WindowState>();
-        if !state.is_null() {
-            // SAFETY: This callback owns the window on its creating thread; GWLP_USERDATA stores
-            // the borrowed state pointer. Clearing last-error distinguishes a zero prior value
-            // from SetWindowLongPtrW failure, in which case window creation is rejected.
-            let installed = unsafe {
-                Foundation::SetLastError(ERROR_SUCCESS);
-                let previous =
-                    WindowsAndMessaging::SetWindowLongPtrW(window, GWLP_USERDATA, state as isize);
-                previous != 0 || Foundation::GetLastError() == ERROR_SUCCESS
-            };
-            if !installed {
-                return LRESULT(0);
-            }
-        }
-    }
-    // SAFETY: The window is live for this callback; its user-data slot is zero until WM_NCCREATE
-    // stores the WindowState pointer and is cleared before the owned Box can be dropped.
-    let state = unsafe { WindowsAndMessaging::GetWindowLongPtrW(window, GWLP_USERDATA) }
-        as *const WindowState;
-    if !state.is_null() {
-        if message == WM_NCDESTROY {
-            // SAFETY: The window is being destroyed on its owning thread. Detach its borrowed
-            // state pointer before the owner can release the allocation after DestroyWindow.
-            unsafe { WindowsAndMessaging::SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
-        } else {
-            // SAFETY: Only create() installs this pointer, and Window keeps the Box alive until
-            // after destruction. RefCell accesses stay on this same window-owning thread.
-            let state = unsafe { &*state };
-            if let Some(event) = CoreEvent::from_message(message, lparam, state.taskbar_created) {
-                state.enqueue(event);
-                // SAFETY: The callback's live HWND receives a pointer-free wake message after
-                // enqueue() has released its RefCell borrow, allowing nested message dispatch.
-                let _ = unsafe {
-                    WindowsAndMessaging::PostMessageW(
-                        Some(window),
-                        AppMessage::WakeCore as u32,
-                        WPARAM(0),
-                        LPARAM(0),
-                    )
-                };
-                return LRESULT(0);
-            }
-            if AppMessage::from_raw(message).is_some() {
-                return LRESULT(0);
-            }
-        }
-    }
-    // SAFETY: Unhandled callback parameters are passed unchanged to the system default procedure.
-    unsafe { WindowsAndMessaging::DefWindowProcW(window, message, wparam, lparam) }
+    // SAFETY: Windows owns this callback's live HWND and supplies its message parameters.
+    unsafe { CallbackWindow(window).dispatch(message, wparam, lparam) }
 }
 
 #[cfg(test)]

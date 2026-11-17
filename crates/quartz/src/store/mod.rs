@@ -12,11 +12,14 @@ mod raw;
     reason = "schema v1 row models are consumed by later capture steps"
 )]
 mod rows;
+pub(crate) mod rules;
 mod schema;
 
+use crate::data_directory::DataDirectory;
 use diesel::{migration::MigrationSource, prelude::*};
 use diesel_migrations::MigrationHarness;
 use migrations::{Migrations, typed};
+use raw::ConnectionSql;
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::{
     fs,
@@ -58,7 +61,7 @@ pub(crate) enum OpenStoreError {
 /// Owns both connections on the calling thread until the database thread is introduced.
 pub(crate) struct Store {
     _writer: SqliteConnection,
-    _reader: SqliteConnection,
+    _reader: ReadOnlyStore,
 }
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -67,40 +70,58 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
+    pub(crate) fn rule_sets(&mut self) -> rules::RuleSets<'_> {
+        rules::RuleSets::new(&mut self._writer)
+    }
+
+    pub(crate) fn transaction<T>(
+        &mut self,
+        execute: impl FnOnce(
+            &mut rules::RuleSetTransaction<'_>,
+        ) -> Result<T, rules::ExecuteRuleWritesError>,
+    ) -> Result<T, rules::ExecuteRuleWritesError> {
+        self._writer.immediate_transaction(|connection| {
+            execute(&mut rules::RuleSetTransaction::new(connection))
+        })
+    }
+
     /// The caller must hold the data-directory lock for this store's lifetime.
-    pub(crate) fn open(directory: &Path) -> Result<Self, OpenStoreError> {
+    pub(crate) fn open(directory: &DataDirectory) -> Result<Self, OpenStoreError> {
         Self::open_with_migrations(directory, Migrations)
     }
 
     fn open_with_migrations(
-        directory: &Path,
+        directory: &DataDirectory,
         migrations: impl MigrationSource<diesel::sqlite::Sqlite>,
     ) -> Result<Self, OpenStoreError> {
-        let path = directory.join("quartz.db");
+        let path = directory.database();
         let mut source = typed(migrations.migrations()).context(LoadMigrationsSnafu)?;
         source.sort_by(|a, b| a.name().version().cmp(&b.name().version()));
         let applied = if path.exists() {
             // Inspect through mode=ro before any persistent PRAGMA or migration-table creation.
-            let mut probe = open_reader(&path)?;
-            inspect(&mut probe, &source)?
+            let mut probe = ReadOnlyStore::connect(&path)?;
+            ConnectionSql::new(&mut probe.connection).inspect(&source)?
         } else {
             Vec::new()
         };
         let mut writer = SqliteConnection::establish(path.to_str().context(InvalidPathSnafu)?)
             .context(ConnectSnafu)?;
-        check_sqlite(&mut writer)?;
-        raw::configure_writer(&mut writer).context(ConfigureSnafu)?;
+        ConnectionSql::new(&mut writer).check_sqlite()?;
+        ConnectionSql::new(&mut writer)
+            .configure_writer()
+            .context(ConfigureSnafu)?;
         let pending: Vec<_> = source
             .into_iter()
             .filter(|migration| !applied.contains(&migration.name().version().to_string()))
             .collect();
         if !pending.is_empty() {
-            let backup_directory = directory.join("backups");
+            let backup_directory = directory.backups();
             fs::create_dir_all(&backup_directory).context(CreateBackupDirectorySnafu)?;
             let old = applied.last().map(String::as_str).unwrap_or("0");
             let timestamp = jiff::Timestamp::now().as_millisecond();
             let backup = backup_directory.join(format!("pre-migrate-{old}-{timestamp}.db"));
-            raw::backup(&mut writer, backup.to_str().context(InvalidPathSnafu)?)
+            ConnectionSql::new(&mut writer)
+                .backup(backup.to_str().context(InvalidPathSnafu)?)
                 .context(BackupSnafu { path: &backup })?;
             tracing::info!(backup = %backup.display(), "upgrading database");
             // Initialize Diesel's tracking table only after version checks and a usable backup.
@@ -109,9 +130,9 @@ impl Store {
                 typed(writer.run_migration(migration.as_ref()))
                     .context(MigrateSnafu { backup: &backup })?;
             }
-            prune_backups(&backup_directory);
+            directory.prune_backups();
         }
-        let reader = open_reader(&path)?;
+        let reader = ReadOnlyStore::connect(&path)?;
         Ok(Self {
             _writer: writer,
             _reader: reader,
@@ -119,76 +140,109 @@ impl Store {
     }
 }
 
-fn check_sqlite(conn: &mut SqliteConnection) -> Result<(), OpenStoreError> {
-    let version = raw::sqlite_version(conn).context(InspectSnafu)?;
-    let parts: Option<Vec<u32>> = version.split('.').map(|part| part.parse().ok()).collect();
-    snafu::ensure!(
-        parts
-            .as_deref()
-            .is_some_and(|p| p.len() == 3 && p >= [3, 51, 3].as_slice()),
-        OldSqliteSnafu { version }
-    );
-    Ok(())
-}
-
-fn inspect(
-    conn: &mut SqliteConnection,
-    source: &[Box<dyn diesel::migration::Migration<diesel::sqlite::Sqlite>>],
-) -> Result<Vec<String>, OpenStoreError> {
-    check_sqlite(conn)?;
-    let applied = raw::applied_versions(conn).context(InspectSnafu)?;
-    for version in &applied {
+impl ConnectionSql<'_> {
+    fn check_sqlite(&mut self) -> Result<(), OpenStoreError> {
+        let version = self.sqlite_version().context(InspectSnafu)?;
+        let parts: Option<Vec<u32>> = version.split('.').map(|part| part.parse().ok()).collect();
         snafu::ensure!(
-            source
-                .iter()
-                .any(|migration| migration.name().version().to_string() == *version),
-            NewerDatabaseSnafu { version }
+            parts
+                .as_deref()
+                .is_some_and(|p| p.len() == 3 && p >= [3, 51, 3].as_slice()),
+            OldSqliteSnafu { version }
         );
-    }
-    Ok(applied)
-}
-
-fn open_reader(path: &Path) -> Result<SqliteConnection, OpenStoreError> {
-    let path = path.to_str().context(InvalidPathSnafu)?.replace('\\', "/");
-    // Escape URI delimiters without changing the Windows drive prefix or directory separators.
-    let path = path
-        .replace('%', "%25")
-        .replace('?', "%3F")
-        .replace('#', "%23");
-    let mut conn =
-        SqliteConnection::establish(&format!("file:{path}?mode=ro")).context(ConnectSnafu)?;
-    raw::configure_reader(&mut conn).context(ConfigureSnafu)?;
-    Ok(conn)
-}
-
-fn prune_backups(directory: &Path) {
-    let result = (|| -> std::io::Result<()> {
-        let mut files = fs::read_dir(directory)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(is_migration_backup)
-            })
-            .collect::<Vec<_>>();
-        files.sort_by_key(|path| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.rsplit('-').next())
-                .and_then(|s| s.parse::<i64>().ok())
-        });
-        let remove_count = files.len().saturating_sub(2);
-        for path in files.into_iter().take(remove_count) {
-            fs::remove_file(path)?;
-        }
         Ok(())
-    })();
-    if let Err(error) = result {
-        tracing::warn!(%error, "could not prune migration backups");
     }
 }
+
+impl ConnectionSql<'_> {
+    fn inspect(
+        &mut self,
+        source: &[Box<dyn diesel::migration::Migration<diesel::sqlite::Sqlite>>],
+    ) -> Result<Vec<String>, OpenStoreError> {
+        self.check_sqlite()?;
+        let applied = self.applied_versions().context(InspectSnafu)?;
+        for version in &applied {
+            snafu::ensure!(
+                source
+                    .iter()
+                    .any(|migration| migration.name().version().to_string() == *version),
+                NewerDatabaseSnafu { version }
+            );
+        }
+        Ok(applied)
+    }
+}
+
+/// Owns a mode=ro connection; opening never migrates or installs rule revisions.
+pub(crate) struct ReadOnlyStore {
+    connection: SqliteConnection,
+}
+impl std::fmt::Debug for ReadOnlyStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadOnlyStore").finish_non_exhaustive()
+    }
+}
+impl ReadOnlyStore {
+    pub(crate) fn open(path: &Path) -> Result<Self, ReadRulesError> {
+        let mut store = Self::connect(path).context(read_rules_error::OpenSnafu)?;
+        let source = typed(Migrations.migrations())
+            .context(LoadMigrationsSnafu)
+            .context(read_rules_error::OpenSnafu)?;
+        ConnectionSql::new(&mut store.connection)
+            .inspect(&source)
+            .context(read_rules_error::OpenSnafu)?;
+        Ok(store)
+    }
+    pub(crate) fn rule_sets(&mut self) -> rules::RuleSets<'_> {
+        rules::RuleSets::new(&mut self.connection)
+    }
+    fn connect(path: &Path) -> Result<Self, OpenStoreError> {
+        let path = path.to_str().context(InvalidPathSnafu)?.replace('\\', "/");
+        // Escape URI delimiters without changing the Windows drive prefix or directory separators.
+        let path = path
+            .replace('%', "%25")
+            .replace('?', "%3F")
+            .replace('#', "%23");
+        let mut conn =
+            SqliteConnection::establish(&format!("file:{path}?mode=ro")).context(ConnectSnafu)?;
+        ConnectionSql::new(&mut conn)
+            .configure_reader()
+            .context(ConfigureSnafu)?;
+        Ok(Self { connection: conn })
+    }
+}
+
+impl DataDirectory {
+    fn prune_backups(&self) {
+        let result = (|| -> std::io::Result<()> {
+            let mut files = fs::read_dir(self.backups())?
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(is_migration_backup)
+                })
+                .collect::<Vec<_>>();
+            files.sort_by_key(|path| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.rsplit('-').next())
+                    .and_then(|s| s.parse::<i64>().ok())
+            });
+            let remove_count = files.len().saturating_sub(2);
+            for path in files.into_iter().take(remove_count) {
+                fs::remove_file(path)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tracing::warn!(%error, "could not prune migration backups");
+        }
+    }
+}
+
 fn is_migration_backup(name: &str) -> bool {
     name.strip_prefix("pre-migrate-")
         .and_then(|s| s.strip_suffix(".db"))
@@ -214,58 +268,89 @@ pub(crate) enum RestoreBackupError {
     Replace { source: std::io::Error },
 }
 
-/// Restores a consistent staged copy; the caller holds the data-directory lock.
-pub(crate) fn restore_backup(directory: &Path, file: &Path) -> Result<(), RestoreBackupError> {
-    let mut backup = open_reader(file).context(OpenSnafu)?;
-    let source = typed(Migrations.migrations())
-        .context(LoadMigrationsSnafu)
-        .context(OpenSnafu)?;
-    inspect(&mut backup, &source).context(OpenSnafu)?;
-    snafu::ensure!(
-        raw::is_healthy(&mut backup).context(ValidateSnafu)?,
-        CorruptSnafu
-    );
-    let staged = directory.join("quartz.restore.db");
-    // A previous interrupted attempt can only leave this staged file, never a partial live DB.
-    if staged.exists() {
-        fs::remove_file(&staged).context(ReplaceSnafu)?;
-    }
-    // VACUUM INTO writes an independent snapshot even when the input has a WAL.
-    raw::stage_backup(
-        &mut backup,
-        staged
-            .to_str()
-            .context(InvalidPathSnafu)
-            .context(OpenSnafu)?,
-    )
-    .context(ValidateSnafu)?;
-    drop(backup);
-    fs::OpenOptions::new()
-        .write(true)
-        .open(&staged)
-        .context(ReplaceSnafu)?
-        .sync_all()
-        .context(ReplaceSnafu)?;
-    let database = directory.join("quartz.db");
-    if database.exists() {
-        let mut current = SqliteConnection::establish(
-            database
-                .to_str()
-                .context(InvalidPathSnafu)
-                .context(OpenSnafu)?,
-        )
-        .context(ConnectSnafu)
-        .context(OpenSnafu)?;
+impl DataDirectory {
+    /// Restores a consistent staged copy; the caller holds the data-directory lock.
+    pub(crate) fn restore_backup(&self, file: &Path) -> Result<(), RestoreBackupError> {
+        let mut backup = ReadOnlyStore::connect(file).context(OpenSnafu)?;
+        let source = typed(Migrations.migrations())
+            .context(LoadMigrationsSnafu)
+            .context(OpenSnafu)?;
+        ConnectionSql::new(&mut backup.connection)
+            .inspect(&source)
+            .context(OpenSnafu)?;
         snafu::ensure!(
-            raw::checkpoint(&mut current).context(ValidateSnafu)?,
-            BusySnafu
+            ConnectionSql::new(&mut backup.connection)
+                .is_healthy()
+                .context(ValidateSnafu)?,
+            CorruptSnafu
         );
-        drop(current);
+        let staged = self.staged_restore();
+        // A previous interrupted attempt can only leave this staged file, never a partial live DB.
+        if staged.exists() {
+            fs::remove_file(&staged).context(ReplaceSnafu)?;
+        }
+        // VACUUM INTO writes an independent snapshot even when the input has a WAL.
+        ConnectionSql::new(&mut backup.connection)
+            .stage_backup(
+                staged
+                    .to_str()
+                    .context(InvalidPathSnafu)
+                    .context(OpenSnafu)?,
+            )
+            .context(ValidateSnafu)?;
+        drop(backup);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&staged)
+            .context(ReplaceSnafu)?
+            .sync_all()
+            .context(ReplaceSnafu)?;
+        let database = self.database();
+        if database.exists() {
+            let mut current = SqliteConnection::establish(
+                database
+                    .to_str()
+                    .context(InvalidPathSnafu)
+                    .context(OpenSnafu)?,
+            )
+            .context(ConnectSnafu)
+            .context(OpenSnafu)?;
+            snafu::ensure!(
+                ConnectionSql::new(&mut current)
+                    .checkpoint()
+                    .context(ValidateSnafu)?,
+                BusySnafu
+            );
+            drop(current);
+        }
+        // rename replaces the destination atomically on both Windows and Unix.
+        fs::rename(&staged, &database).context(ReplaceSnafu)?;
+        Ok(())
     }
-    // rename replaces the destination atomically on both Windows and Unix.
-    fs::rename(&staged, &database).context(ReplaceSnafu)?;
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests;
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub(crate) enum ReadRulesError {
+    #[snafu(display("could not open rule database read-only"))]
+    Open { source: OpenStoreError },
+    #[snafu(display("could not load rule database"))]
+    Load { source: rules::LoadRulesError },
+}
+
+impl From<diesel::result::Error> for ReadRulesError {
+    fn from(source: diesel::result::Error) -> Self {
+        Self::Load {
+            source: rules::LoadRulesError::Query { source },
+        }
+    }
+}
+
+impl From<rules::LoadRulesError> for ReadRulesError {
+    fn from(source: rules::LoadRulesError) -> Self {
+        Self::Load { source }
+    }
+}

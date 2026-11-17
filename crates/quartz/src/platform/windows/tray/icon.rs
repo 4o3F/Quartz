@@ -22,7 +22,7 @@ use windows::{
 
 use super::super::wide;
 use super::window::{AppMessage, Window};
-use crate::tray_tooltip::{self, FormatTrayTooltipError};
+use crate::tray_tooltip::{FormatTrayTooltipError, TrayTooltipText};
 
 // A single notification icon is identified by this ID together with its window handle.
 const ICON_ID: u32 = 1;
@@ -121,8 +121,9 @@ impl TrayIcon {
                 uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP,
                 uCallbackMessage: AppMessage::TrayCallback as u32,
                 hIcon: icon,
-                szTip: tray_tooltip::encode(&quartz_i18n::translate("app.name"))
-                    .context(FormatInitialTooltipSnafu)?,
+                szTip: TrayTooltipText::try_from(quartz_i18n::translate("app.name").as_ref())
+                    .context(FormatInitialTooltipSnafu)?
+                    .into_buffer(),
                 Anonymous: NOTIFYICONDATAW_0 {
                     uVersion: NOTIFYICON_VERSION_4,
                 },
@@ -155,8 +156,10 @@ impl TrayIcon {
     /// # Errors
     /// Returns tooltip encoding or Shell update failures.
     pub(super) fn update(&mut self, state: super::TrayState) -> Result<(), UpdateTrayTooltipError> {
-        self.data.szTip = tray_tooltip::encode(&quartz_i18n::translate(state.tooltip.key()))
-            .context(FormatTooltipSnafu)?;
+        self.data.szTip =
+            TrayTooltipText::try_from(quartz_i18n::translate(state.tooltip.key()).as_ref())
+                .context(FormatTooltipSnafu)?
+                .into_buffer();
         // SAFETY: Both icon identifiers name shared system resources.
         self.data.hIcon = unsafe {
             WindowsAndMessaging::LoadIconW(

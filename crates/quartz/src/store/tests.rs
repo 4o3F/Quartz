@@ -8,18 +8,18 @@ use std::collections::BTreeMap;
 
 fn empty() -> SqliteConnection {
     let mut conn = SqliteConnection::establish(":memory:").expect("open memory database");
-    migrations::apply_all(&mut conn).expect("apply schema v1");
+    Migrations.apply_all(&mut conn).expect("apply schema v1");
     conn
 }
 
 #[test]
 fn migrate_empty_and_reopen_without_another_backup() {
     let directory = tempfile::tempdir().expect("temporary data directory");
-    drop(Store::open(directory.path()).expect("first startup"));
+    drop(Store::open(&DataDirectory::new(directory.path())).expect("first startup"));
     let before = fs::read_dir(directory.path().join("backups"))
         .expect("backup directory")
         .count();
-    drop(Store::open(directory.path()).expect("repeat startup"));
+    drop(Store::open(&DataDirectory::new(directory.path())).expect("repeat startup"));
     assert_eq!(
         fs::read_dir(directory.path().join("backups"))
             .expect("backup directory")
@@ -139,7 +139,7 @@ fn unknown_sql_code_returns_decode_enum_error() {
 #[test]
 fn newer_database_is_refused_without_modifying_any_database_bytes() {
     let directory = tempfile::tempdir().expect("temporary data directory");
-    drop(Store::open(directory.path()).expect("initial migration"));
+    drop(Store::open(&DataDirectory::new(directory.path())).expect("initial migration"));
     let path = directory.path().join("quartz.db");
     {
         let mut conn = SqliteConnection::establish(path.to_str().expect("database path"))
@@ -151,7 +151,7 @@ fn newer_database_is_refused_without_modifying_any_database_bytes() {
     }
     let before = fs::read(&path).expect("database bytes");
     assert!(matches!(
-        Store::open(directory.path()),
+        Store::open(&DataDirectory::new(directory.path())),
         Err(OpenStoreError::NewerDatabase { .. })
     ));
     assert_eq!(fs::read(&path).expect("unchanged database"), before);
@@ -164,18 +164,20 @@ struct SchemaEntry {
     #[diesel(sql_type = Text)]
     sql: String,
 }
-fn schema_entries(conn: &mut SqliteConnection) -> Vec<SchemaEntry> {
-    diesel::sql_query("SELECT name, sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name").load(conn).expect("read schema")
-}
 
 #[test]
 fn fixture_migrates_to_identical_schema_and_keeps_boundary_data() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let path = directory.path().join("quartz.db");
     fs::write(&path, include_bytes!("../../../../tests/fixtures/db/v1.db")).expect("copy fixture");
-    drop(Store::open(directory.path()).expect("migrate fixture"));
-    let mut fixture = open_reader(&path).expect("open fixture");
-    assert_eq!(schema_entries(&mut fixture), schema_entries(&mut empty()));
+    drop(Store::open(&DataDirectory::new(directory.path())).expect("migrate fixture"));
+    let mut fixture = ReadOnlyStore::connect(&path)
+        .expect("open fixture")
+        .connection;
+    assert_eq!(
+        ConnectionSql::new(&mut fixture).schema_entries(),
+        ConnectionSql::new(&mut empty()).schema_entries()
+    );
     use schema::capture_runs::dsl::capture_runs;
     let runs = capture_runs
         .select(rows::CaptureRunsRow::as_select())
@@ -185,16 +187,22 @@ fn fixture_migrates_to_identical_schema_and_keeps_boundary_data() {
     assert_eq!(runs[0].started_utc_ms, 1_794_873_600_000);
     assert_eq!(runs[0].end_reason, Some(enums::RunEndReason::UserExit));
     assert!(runs[1].ended_utc_ms.is_none());
-    assert!(raw::is_healthy(&mut fixture).expect("fixture integrity"));
+    assert!(
+        ConnectionSql::new(&mut fixture)
+            .is_healthy()
+            .expect("fixture integrity")
+    );
 }
 
 #[test]
 fn migration_failure_rolls_back_its_transaction_and_backup_restores() {
     let directory = tempfile::tempdir().expect("data directory");
-    drop(Store::open(directory.path()).expect("initial migration"));
+    drop(Store::open(&DataDirectory::new(directory.path())).expect("initial migration"));
     let path = directory.path().join("quartz.db");
-    let mut conn = open_reader(&path).expect("database before upgrade");
-    let before = schema_entries(&mut conn);
+    let mut conn = ReadOnlyStore::connect(&path)
+        .expect("database before upgrade")
+        .connection;
+    let before = ConnectionSql::new(&mut conn).schema_entries();
     drop(conn);
     let mut rust = diesel_migrations::RustMigrationSource::new();
     rust.add_migration(
@@ -219,26 +227,37 @@ fn migration_failure_rolls_back_its_transaction_and_backup_restores() {
         }
     }
     let source = WithRust(rust);
-    let error = Store::open_with_migrations(directory.path(), source)
+    let error = Store::open_with_migrations(&DataDirectory::new(directory.path()), source)
         .expect_err("migration failure stops startup");
     let OpenStoreError::Migrate { backup, .. } = error else {
         panic!("expected migration error: {error}");
     };
-    let mut failed = open_reader(&path).expect("partially migrated database");
-    let entries = schema_entries(&mut failed);
+    let mut failed = ReadOnlyStore::connect(&path)
+        .expect("partially migrated database")
+        .connection;
+    let entries = ConnectionSql::new(&mut failed).schema_entries();
     assert!(entries.iter().any(|row| row.name == "successful_upgrade"));
     assert!(!entries.iter().any(|row| row.name == "should_rollback"));
     assert_eq!(
-        raw::applied_versions(&mut failed)
+        ConnectionSql::new(&mut failed)
+            .applied_versions()
             .expect("applied migrations")
             .len(),
         2
     );
     drop(failed);
-    restore_backup(directory.path(), &backup).expect("restore pre-migration backup");
-    let mut restored = open_reader(&path).expect("restored database");
-    assert_eq!(schema_entries(&mut restored), before);
-    assert!(raw::is_healthy(&mut restored).expect("restored integrity"));
+    DataDirectory::new(directory.path())
+        .restore_backup(&backup)
+        .expect("restore pre-migration backup");
+    let mut restored = ReadOnlyStore::connect(&path)
+        .expect("restored database")
+        .connection;
+    assert_eq!(ConnectionSql::new(&mut restored).schema_entries(), before);
+    assert!(
+        ConnectionSql::new(&mut restored)
+            .is_healthy()
+            .expect("restored integrity")
+    );
 }
 
 #[test]
@@ -249,8 +268,8 @@ fn readonly_connection_settings_and_uri_escaping() {
     #[cfg(windows)]
     let nested = directory.path().join("data % # 中文");
     fs::create_dir(&nested).expect("special directory");
-    let store = Store::open(&nested).expect("special path startup");
-    let mut reader = store._reader;
+    let store = Store::open(&DataDirectory::new(&nested)).expect("special path startup");
+    let mut reader = store._reader.connection;
     assert!(
         diesel::insert_into(schema::settings::table)
             .values((
@@ -350,6 +369,8 @@ fn released_migration_files_match_lock_and_no_migration_is_unlisted() {
 #[test]
 fn prune_only_generated_backups_and_keep_two_newest() {
     let directory = tempfile::tempdir().expect("backup directory");
+    let root = DataDirectory::new(directory.path());
+    fs::create_dir_all(root.backups()).expect("backups directory");
     for name in [
         "pre-migrate-0-1.db",
         "pre-migrate-20261116000000-2.db",
@@ -357,11 +378,11 @@ fn prune_only_generated_backups_and_keep_two_newest() {
         "manual.db",
         "pre-migrate-not-generated.db",
     ] {
-        fs::write(directory.path().join(name), []).expect("backup file");
+        fs::write(root.backups().join(name), []).expect("backup file");
     }
-    prune_backups(directory.path());
-    assert!(!directory.path().join("pre-migrate-0-1.db").exists());
-    assert_eq!(fs::read_dir(directory.path()).expect("backups").count(), 4);
+    root.prune_backups();
+    assert!(!root.backups().join("pre-migrate-0-1.db").exists());
+    assert_eq!(fs::read_dir(root.backups()).expect("backups").count(), 4);
 }
 
 #[test]
@@ -391,4 +412,10 @@ fn availability_and_web_open_indexes_and_range_checks() {
     );
     assert!(conn.batch_execute("INSERT INTO annotations(uuid,kind,start_utc_ms,end_utc_ms,created_utc_ms,updated_utc_ms) VALUES('invalid',5,1,1,0,0)").is_err(), "annotations require positive duration");
     assert!(conn.batch_execute("INSERT INTO deletion_barriers(start_utc_ms,end_utc_ms,scope,created_utc_ms) VALUES(1,0,'{}',0)").is_err(), "barriers require ordered bounds");
+}
+
+impl ConnectionSql<'_> {
+    fn schema_entries(&mut self) -> Vec<SchemaEntry> {
+        diesel::sql_query("SELECT name, sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name").load(self.connection).expect("read schema")
+    }
 }

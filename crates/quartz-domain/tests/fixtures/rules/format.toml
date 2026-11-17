@@ -1,0 +1,10 @@
+format = "quartz-rules/2"
+[set]
+key = "user.fixture"
+kind = "privacy"
+name = "Fixture"
+[[rule]]
+id = "one"
+label = "Hide title"
+when = [{ field = "title.raw", op = "contains", value = "secret" }]
+preset = "title_hidden"

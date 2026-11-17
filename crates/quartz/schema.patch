@@ -212,14 +212,20 @@
      }
  }
  
-@@ -208,10 +208,10 @@
+@@ -206,14 +206,14 @@
+         kind -> Integer,
+         parent_id -> Nullable<BigInt>,
          source -> Integer,
+-        builtin_revision -> Nullable<Integer>,
++        builtin_revision -> Nullable<BigInt>,
          name -> Text,
          enabled -> Integer,
+-        deleted_utc_ms -> Nullable<Integer>,
 -        sibling_order -> Integer,
 -        current_version -> Integer,
 -        chain_id -> Nullable<Integer>,
 -        created_utc_ms -> Integer,
++        deleted_utc_ms -> Nullable<BigInt>,
 +        sibling_order -> BigInt,
 +        current_version -> BigInt,
 +        chain_id -> Nullable<BigInt>,
@@ -227,7 +233,7 @@
      }
  }
  
-@@ -234,16 +234,16 @@
+@@ -236,16 +236,16 @@
          id -> Nullable<BigInt>,
          stream_id -> BigInt,
          interval_id -> BigInt,
@@ -250,7 +256,7 @@
          audible -> Integer,
          link_status -> Integer,
          web_level -> Integer,
-@@ -258,14 +258,14 @@
+@@ -260,14 +260,14 @@
          id -> Nullable<BigInt>,
          run_id -> BigInt,
          app_id -> BigInt,

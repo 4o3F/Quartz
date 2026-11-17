@@ -28,22 +28,20 @@ pub(super) trait IntegerCode: Copy + 'static {
     }
 
     fn label(self) -> &'static str;
-}
-
-fn to_sql_code<T: IntegerCode>(value: T, out: &mut Output<'_, '_, Sqlite>) -> serialize::Result {
-    out.set_value(value.code());
-    Ok(IsNull::No)
-}
-
-fn from_sql_code<T: IntegerCode>(value: SqliteValue<'_, '_, '_>) -> deserialize::Result<T> {
-    let code = <i32 as FromSql<Integer, Sqlite>>::from_sql(value)?;
-    T::from_code(code).ok_or_else(|| {
-        DecodeEnumError {
-            enum_name: T::COLUMN,
-            code,
-        }
-        .into()
-    })
+    fn write_sql(self, out: &mut Output<'_, '_, Sqlite>) -> serialize::Result {
+        out.set_value(self.code());
+        Ok(IsNull::No)
+    }
+    fn read_sql(value: SqliteValue<'_, '_, '_>) -> deserialize::Result<Self> {
+        let code = <i32 as FromSql<Integer, Sqlite>>::from_sql(value)?;
+        Self::from_code(code).ok_or_else(|| {
+            DecodeEnumError {
+                enum_name: Self::COLUMN,
+                code,
+            }
+            .into()
+        })
+    }
 }
 
 // Diesel's foreign traits require an implementation for each concrete enum type.
@@ -52,12 +50,12 @@ macro_rules! impl_integer_sql {
         $(
             impl ToSql<Integer, Sqlite> for $name {
                 fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Sqlite>) -> serialize::Result {
-                    to_sql_code(*self, out)
+                    self.write_sql(out)
                 }
             }
             impl FromSql<Integer, Sqlite> for $name {
                 fn from_sql(value: SqliteValue<'_, '_, '_>) -> deserialize::Result<Self> {
-                    from_sql_code(value)
+                    Self::read_sql(value)
                 }
             }
         )+

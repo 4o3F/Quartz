@@ -1,0 +1,160 @@
+format = "quartz-rules/1"
+
+[set]
+key = "builtin.privacy"
+kind = "privacy"
+name = "内置隐私规则"
+
+[[rule]]
+id = "browser-private-edge"
+detector = "builtin.browser_private"
+label_key = "privacy.label.private_window"
+languages = ["*"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'msedge.exe' },
+  { field = "window.class", op = "equals", value = 'Chrome_WidgetWin_1', case_sensitive = true },
+  { field = "title.raw", op = "regex", value = 'InPrivate' },
+]
+preset = "private_window"
+
+[[rule]]
+id = "browser-private-chrome-zh-cn"
+detector = "builtin.browser_private"
+label_key = "privacy.label.private_window"
+languages = ["zh-CN"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'chrome.exe' },
+  { field = "window.class", op = "equals", value = 'Chrome_WidgetWin_1', case_sensitive = true },
+  { field = "title.raw", op = "regex", value = '无痕' },
+]
+preset = "private_window"
+
+[[rule]]
+id = "browser-private-chrome-en"
+detector = "builtin.browser_private"
+label_key = "privacy.label.private_window"
+languages = ["en"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'chrome.exe' },
+  { field = "window.class", op = "equals", value = 'Chrome_WidgetWin_1', case_sensitive = true },
+  { field = "title.raw", op = "regex", value = '(?i)incognito' },
+]
+preset = "private_window"
+
+[[rule]]
+id = "browser-private-firefox-zh-cn"
+detector = "builtin.browser_private"
+label_key = "privacy.label.private_window"
+languages = ["zh-CN"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'firefox.exe' },
+  { field = "window.class", op = "equals", value = 'MozillaWindowClass', case_sensitive = true },
+  { field = "title.raw", op = "regex", value = '隐私浏览' },
+]
+preset = "private_window"
+
+[[rule]]
+id = "browser-private-firefox-en"
+detector = "builtin.browser_private"
+label_key = "privacy.label.private_window"
+languages = ["en"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'firefox.exe' },
+  { field = "window.class", op = "equals", value = 'MozillaWindowClass', case_sensitive = true },
+  { field = "title.raw", op = "regex", value = 'Private Browsing' },
+]
+preset = "private_window"
+
+[[rule]]
+id = "credential-ui-consent"
+detector = "builtin.credential_ui"
+label_key = "privacy.label.credential_ui"
+languages = ["*"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'consent.exe' },
+]
+preset = "title_hidden"
+
+[[rule]]
+id = "credential-ui-credentialuibroker"
+detector = "builtin.credential_ui"
+label_key = "privacy.label.credential_ui"
+languages = ["*"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'CredentialUIBroker.exe' },
+]
+preset = "title_hidden"
+
+[[rule]]
+id = "credential-ui-logonui"
+detector = "builtin.credential_ui"
+label_key = "privacy.label.credential_ui"
+languages = ["*"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'LogonUI.exe' },
+]
+preset = "title_hidden"
+
+[[rule]]
+id = "password-manager-keepass"
+detector = "builtin.password_manager"
+label_key = "privacy.label.password_manager"
+languages = ["*"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'KeePass.exe' },
+]
+preset = "title_hidden"
+
+[[rule]]
+id = "password-manager-keepassxc"
+detector = "builtin.password_manager"
+label_key = "privacy.label.password_manager"
+languages = ["*"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'KeePassXC.exe' },
+]
+preset = "title_hidden"
+
+[[rule]]
+id = "password-manager-1password"
+detector = "builtin.password_manager"
+label_key = "privacy.label.password_manager"
+languages = ["*"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = '1Password.exe' },
+]
+preset = "title_hidden"
+
+[[rule]]
+id = "password-manager-bitwarden"
+detector = "builtin.password_manager"
+label_key = "privacy.label.password_manager"
+languages = ["*"]
+verified = false
+match = "all"
+when = [
+  { field = "app.exe_name", op = "equals", value = 'Bitwarden.exe' },
+]
+preset = "title_hidden"

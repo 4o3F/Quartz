@@ -16,16 +16,24 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{self, MSG, PM_REMOVE, QS_ALLINPUT, WM_QUIT},
 };
 
-use crate::{data_directory, logging, store, ui_state::UiState};
-pub(crate) use instance::{AcquireInstance, AcquireInstanceError, acquire as acquire_instance};
+use crate::{
+    data_directory::{self, DataDirectory},
+    logging,
+    rules::registry::{OpenRegistryShellError, RegistryShell},
+    store,
+    ui_state::UiState,
+};
+pub(crate) use instance::{AcquireInstance, AcquireInstanceError};
 use tray::{CreateTrayError, Tray, TrayCommand, TrayState, TrayTooltip};
 
-pub(crate) use language::select as ui_language;
+pub(crate) use language::UiLanguage;
 
 #[derive(Debug, Snafu)]
 enum StartCoreError {
     #[snafu(display("could not open core database"))]
     OpenStore { source: store::OpenStoreError },
+    #[snafu(display("could not initialize rule registry"))]
+    OpenRegistry { source: OpenRegistryShellError },
     #[snafu(display("could not resolve core data directory"))]
     DataDirectory {
         source: data_directory::ResolveDataDirectoryError,
@@ -48,136 +56,23 @@ struct WaitCoreEventsError {
     source: windows::core::Error,
 }
 
-/// Runs the Windows core on the calling main thread and reports startup failures.
-pub(crate) fn run_core() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            let report = error.report();
-            tracing::error!(?error, code = %report.code, "core failed");
-            if let Err(error) = process::launch_core_error(&report) {
-                tracing::error!(?error, "could not launch core error UI");
-            }
-            ExitCode::FAILURE
-        }
-    }
-}
-
 impl StartCoreError {
     fn report(&self) -> CoreError {
         match self {
             Self::OpenStore {
                 source: store::OpenStoreError::NewerDatabase { .. },
-            } => CoreError::new(CoreErrorCode::NewerDatabase, available_backups()),
+            } => CoreError::new(
+                CoreErrorCode::NewerDatabase,
+                DataDirectory::resolve()
+                    .map(|directory| directory.available_backups())
+                    .unwrap_or_default(),
+            ),
             Self::OpenStore {
                 source: store::OpenStoreError::Migrate { backup, .. },
             } => CoreError::new(CoreErrorCode::MigrationFailed, vec![backup.clone()]),
             Self::OtherSession => CoreError::new(CoreErrorCode::OtherSession, vec![]),
             _ => CoreError::new(CoreErrorCode::CoreStartFailed, vec![]),
         }
-    }
-}
-
-fn run() -> Result<(), StartCoreError> {
-    let data_directory = data_directory::resolve().context(DataDirectorySnafu)?;
-    logging::init_file_log(&data_directory, logging::LogTarget::Core).context(InitLogSnafu)?;
-    let _instance = match acquire_instance(&data_directory).context(AcquireInstanceSnafu)? {
-        AcquireInstance::SameSession => {
-            // TODO(M2): Forward the open request through the core pipe before exiting.
-            tracing::info!("core already running in this Windows session");
-            return Ok(());
-        }
-        AcquireInstance::OtherSession => return OtherSessionSnafu.fail(),
-        AcquireInstance::Acquired(instance) => instance,
-    };
-    let mut tray = Tray::create(TrayState {
-        tooltip: TrayTooltip::Upgrading,
-        ..TrayState::default()
-    })
-    .context(CreateTraySnafu)?;
-    let _store = store::Store::open(&data_directory).context(OpenStoreSnafu)?;
-    if let Err(error) = tray.update(TrayState::default()) {
-        tracing::error!(?error, "could not update tray state");
-    }
-    tracing::info!("core message loop started");
-    // TODO(M2): Push runtime failures as structured state over the pipe and select the warning tray icon.
-    message_loop(&mut tray).context(RunMessageLoopSnafu)?;
-    drop(tray);
-    tracing::info!("core stopped");
-    Ok(())
-}
-
-fn message_loop(tray: &mut Tray) -> Result<(), WaitCoreEventsError> {
-    let mut ui: UiState<handle::OwnedHandle> = UiState::None;
-    loop {
-        let mut message = MSG::default();
-        // SAFETY: message is writable MSG storage. Drain the entire queue before waiting again,
-        // including system events that can wake MsgWaitForMultipleObjects without queued input.
-        while unsafe { WindowsAndMessaging::PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }
-            .as_bool()
-        {
-            if message.message == WM_QUIT {
-                return Ok(());
-            }
-            // SAFETY: The message was retrieved for this thread. The callback records actions
-            // without borrowing the UI state or tray across this reentrant Windows call.
-            unsafe {
-                let _ = WindowsAndMessaging::TranslateMessage(&message);
-                WindowsAndMessaging::DispatchMessageW(&message);
-            }
-        }
-        loop {
-            let events = tray.commands();
-            if events.is_empty() {
-                break;
-            }
-            for event in events {
-                match event {
-                    TrayCommand::Exit => return Ok(()),
-                    TrayCommand::OpenUi => open_ui(&mut ui, tray),
-                }
-            }
-            // Native dispatch can enqueue another batch of semantic commands.
-        }
-        let handles = match &ui {
-            UiState::None => None,
-            UiState::Starting(process) => Some([process.raw()]),
-        };
-        // SAFETY: The optional process handle stays owned throughout the wait. Waiting for any
-        // message or process exit on this thread needs neither polling nor a worker thread.
-        let result = unsafe {
-            WindowsAndMessaging::MsgWaitForMultipleObjects(
-                handles.as_ref().map(|handles| handles.as_slice()),
-                false,
-                INFINITE,
-                QS_ALLINPUT,
-            )
-        };
-        if result == WAIT_FAILED {
-            return Err(windows::core::Error::from_thread()).context(WaitCoreEventsSnafu);
-        }
-        if handles.is_some() && result == WAIT_OBJECT_0 {
-            if let UiState::Starting(process) = &ui {
-                process::log_exit(process);
-            }
-            ui.exited();
-            if let Err(error) = tray.update(TrayState::default()) {
-                tracing::error!(?error, "could not restore tray tooltip");
-            }
-        }
-    }
-}
-
-fn open_ui(ui: &mut UiState<handle::OwnedHandle>, tray: &mut Tray) {
-    if let Err(error) = ui.open(process::launch_ui) {
-        tracing::error!(?error, "could not launch UI");
-        return;
-    }
-    if let Err(error) = tray.update(TrayState {
-        tooltip: TrayTooltip::Opening,
-        ..TrayState::default()
-    }) {
-        tracing::error!(?error, "could not set opening tooltip");
     }
 }
 
@@ -194,20 +89,151 @@ pub(super) fn attach_parent_console() {
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
-fn available_backups() -> Vec<PathBuf> {
-    let Ok(directory) = data_directory::resolve().map(|path| path.join("backups")) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    let mut files: Vec<_> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
-        .collect();
-    files.sort();
-    files
+impl DataDirectory {
+    fn available_backups(&self) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(self.backups()) else {
+            return Vec::new();
+        };
+        let mut files: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
+            .collect();
+        files.sort();
+        files
+    }
+}
+
+/// Owns child-process tracking while the core runs on the main thread.
+#[derive(Debug)]
+pub(crate) struct CoreProcess {
+    ui: UiState<process::UiProcess>,
+}
+impl CoreProcess {
+    pub(crate) fn new() -> Self {
+        Self { ui: UiState::None }
+    }
+    /// Runs the Windows core on the calling main thread and reports startup failures.
+    pub(crate) fn run(mut self) -> ExitCode {
+        match self.start() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let report = error.report();
+                tracing::error!(?error, code = %report.code, "core failed");
+                if let Err(error) = process::CoreErrorUi::new(&report).launch() {
+                    tracing::error!(?error, "could not launch core error UI");
+                }
+                ExitCode::FAILURE
+            }
+        }
+    }
+    fn start(&mut self) -> Result<(), StartCoreError> {
+        let data_directory = DataDirectory::resolve().context(DataDirectorySnafu)?;
+        data_directory
+            .init_file_log(logging::LogTarget::Core)
+            .context(InitLogSnafu)?;
+        let _instance = match data_directory
+            .acquire_instance()
+            .context(AcquireInstanceSnafu)?
+        {
+            AcquireInstance::SameSession => {
+                // TODO(M2): Forward the open request through the core pipe before exiting.
+                tracing::info!("core already running in this Windows session");
+                return Ok(());
+            }
+            AcquireInstance::OtherSession => return OtherSessionSnafu.fail(),
+            AcquireInstance::Acquired(instance) => instance,
+        };
+        let mut tray = Tray::create(TrayState {
+            tooltip: TrayTooltip::Upgrading,
+            ..TrayState::default()
+        })
+        .context(CreateTraySnafu)?;
+        let store = store::Store::open(&data_directory).context(OpenStoreSnafu)?;
+        let _registry = RegistryShell::open(store).context(OpenRegistrySnafu)?;
+        if let Err(error) = tray.update(TrayState::default()) {
+            tracing::error!(?error, "could not update tray state");
+        }
+        tracing::info!("core message loop started");
+        // TODO(M2): Push runtime failures as structured state over the pipe and select the warning tray icon.
+        let result = self.message_loop(&mut tray);
+        self.ui = UiState::None;
+        result.context(RunMessageLoopSnafu)?;
+        drop(tray);
+        tracing::info!("core stopped");
+        Ok(())
+    }
+    fn message_loop(&mut self, tray: &mut Tray) -> Result<(), WaitCoreEventsError> {
+        loop {
+            let mut message = MSG::default();
+            // SAFETY: message is writable MSG storage. Drain the entire queue before waiting again,
+            // including system events that can wake MsgWaitForMultipleObjects without queued input.
+            while unsafe { WindowsAndMessaging::PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }
+                .as_bool()
+            {
+                if message.message == WM_QUIT {
+                    return Ok(());
+                }
+                // SAFETY: The message was retrieved for this thread. The callback records actions
+                // without borrowing the UI state or tray across this reentrant Windows call.
+                unsafe {
+                    let _ = WindowsAndMessaging::TranslateMessage(&message);
+                    WindowsAndMessaging::DispatchMessageW(&message);
+                }
+            }
+            loop {
+                let events = tray.commands();
+                if events.is_empty() {
+                    break;
+                }
+                for event in events {
+                    match event {
+                        TrayCommand::Exit => return Ok(()),
+                        TrayCommand::OpenUi => self.open_ui(tray),
+                    }
+                }
+                // Native dispatch can enqueue another batch of semantic commands.
+            }
+            let handles = match &self.ui {
+                UiState::None => None,
+                UiState::Starting(process) => Some([process.raw()]),
+            };
+            // SAFETY: The optional process handle stays owned throughout the wait. Waiting for any
+            // message or process exit on this thread needs neither polling nor a worker thread.
+            let result = unsafe {
+                WindowsAndMessaging::MsgWaitForMultipleObjects(
+                    handles.as_ref().map(|handles| handles.as_slice()),
+                    false,
+                    INFINITE,
+                    QS_ALLINPUT,
+                )
+            };
+            if result == WAIT_FAILED {
+                return Err(windows::core::Error::from_thread()).context(WaitCoreEventsSnafu);
+            }
+            if handles.is_some() && result == WAIT_OBJECT_0 {
+                if let UiState::Starting(process) = &self.ui {
+                    process.log_exit();
+                }
+                self.ui.exited();
+                if let Err(error) = tray.update(TrayState::default()) {
+                    tracing::error!(?error, "could not restore tray tooltip");
+                }
+            }
+        }
+    }
+    fn open_ui(&mut self, tray: &mut Tray) {
+        if let Err(error) = self.ui.open(process::UiProcess::launch) {
+            tracing::error!(?error, "could not launch UI");
+            return;
+        }
+        if let Err(error) = tray.update(TrayState {
+            tooltip: TrayTooltip::Opening,
+            ..TrayState::default()
+        }) {
+            tracing::error!(?error, "could not set opening tooltip");
+        }
+    }
 }
 
 #[cfg(test)]

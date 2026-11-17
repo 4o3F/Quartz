@@ -2,3 +2,5 @@
 
 pub mod domain_name;
 pub mod text;
+
+pub mod rules;

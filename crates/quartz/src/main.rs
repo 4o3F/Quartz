@@ -4,11 +4,18 @@
 
 #[cfg(windows)]
 mod commands;
-#[cfg(any(windows, test))]
 mod data_directory;
 mod logging;
 mod platform;
-#[cfg(any(windows, test))]
+mod rules;
+mod rules_check;
+#[cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "core storage and recovery run on Windows; offline rule reads are cross-platform"
+    )
+)]
 mod store;
 
 #[cfg(any(windows, test))]
@@ -88,7 +95,10 @@ enum CliCommand {
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 enum RulesCommand {
     /// Check rule files and the installed rule tree offline.
-    Check { files: Vec<PathBuf> },
+    Check {
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
+    },
     /// Preview rule matches.
     Preview {
         file: PathBuf,
@@ -134,6 +144,10 @@ impl CliCommand {
 
 #[derive(Debug, Snafu)]
 enum DispatchCommandError {
+    #[snafu(display("{source}"))]
+    CheckRules {
+        source: rules_check::CheckRulesError,
+    },
     #[snafu(display("not implemented yet: {operation}"))]
     NotImplemented { operation: &'static str },
     #[cfg(windows)]
@@ -143,21 +157,32 @@ enum DispatchCommandError {
     },
 }
 
-fn dispatch(command: CliCommand) -> Result<(), DispatchCommandError> {
-    #[cfg(windows)]
-    if let CliCommand::RestoreBackup { file, yes } = &command {
-        use snafu::ResultExt as _;
-        let confirmation = if *yes {
-            commands::RestoreConfirmation::Confirmed
-        } else {
-            commands::RestoreConfirmation::Required
-        };
-        return commands::restore_backup(file, confirmation).context(RestoreSnafu);
+impl CliCommand {
+    fn dispatch(self) -> Result<(), DispatchCommandError> {
+        let command = self;
+        if let CliCommand::Rules(RulesCommand::Check { files }) = &command {
+            use snafu::ResultExt as _;
+            return rules_check::CheckRulesCommand::new(files)
+                .run()
+                .context(CheckRulesSnafu);
+        }
+        #[cfg(windows)]
+        if let CliCommand::RestoreBackup { file, yes } = &command {
+            use snafu::ResultExt as _;
+            let confirmation = if *yes {
+                commands::RestoreConfirmation::Confirmed
+            } else {
+                commands::RestoreConfirmation::Required
+            };
+            return commands::RestoreBackupCommand::new(file, confirmation)
+                .run()
+                .context(RestoreSnafu);
+        }
+        NotImplementedSnafu {
+            operation: command.name(),
+        }
+        .fail()
     }
-    NotImplementedSnafu {
-        operation: command.name(),
-    }
-    .fail()
 }
 
 fn main() -> ExitCode {
@@ -170,7 +195,7 @@ fn main() -> ExitCode {
     };
     match args.command {
         #[cfg(windows)]
-        None => platform::run_core(),
+        None => platform::CoreProcess::new().run(),
         #[cfg(not(windows))]
         None => ExitCode::FAILURE,
         #[cfg(windows)]
@@ -188,17 +213,17 @@ fn main() -> ExitCode {
             };
             let options = if let Some(code) = core_error {
                 quartz_ui::RunOptions::CoreError {
-                    language: platform::ui_language(),
+                    language: platform::UiLanguage::detect().as_str(),
                     error: quartz_protocol::CoreError::new(code, backup_path),
                 }
             } else if prewarm {
                 quartz_ui::RunOptions::Prewarm
             } else {
                 quartz_ui::RunOptions::Open {
-                    language: platform::ui_language(),
+                    language: platform::UiLanguage::detect().as_str(),
                 }
             };
-            run_ui(options)
+            UiCommand::new(options).run()
         }
         #[cfg(not(windows))]
         Some(Command::Ui { .. }) => ExitCode::FAILURE,
@@ -208,7 +233,7 @@ fn main() -> ExitCode {
                 eprintln!("could not initialize entry diagnostics: {error}");
                 return ExitCode::FAILURE;
             }
-            match dispatch(command) {
+            match command.dispatch() {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     tracing::debug!(target: "quartz::entry", error = %error, "command failed");
@@ -233,21 +258,33 @@ enum StartUiError {
 
 #[cfg(windows)]
 fn init_ui_diagnostics() -> Result<(), StartUiError> {
-    let directory = data_directory::resolve().context(UiDataDirectorySnafu)?;
-    logging::init_file_log(&directory, logging::LogTarget::Ui).context(UiInitLogSnafu)
+    let directory = data_directory::DataDirectory::resolve().context(UiDataDirectorySnafu)?;
+    directory
+        .init_file_log(logging::LogTarget::Ui)
+        .context(UiInitLogSnafu)
 }
 
 #[cfg(windows)]
-fn run_ui(options: quartz_ui::RunOptions) -> ExitCode {
-    tracing::info!(?options, "UI started");
-    match quartz_ui::run(options) {
-        Ok(()) => {
-            tracing::info!("UI stopped");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            tracing::error!(?error, "UI failed");
-            ExitCode::FAILURE
+struct UiCommand {
+    options: quartz_ui::RunOptions,
+}
+#[cfg(windows)]
+impl UiCommand {
+    fn new(options: quartz_ui::RunOptions) -> Self {
+        Self { options }
+    }
+    fn run(self) -> ExitCode {
+        let options = self.options;
+        tracing::info!(?options, "UI started");
+        match options.run() {
+            Ok(()) => {
+                tracing::info!("UI stopped");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                tracing::error!(?error, "UI failed");
+                ExitCode::FAILURE
+            }
         }
     }
 }
@@ -392,8 +429,11 @@ mod tests {
             if matches!(command, CliCommand::RestoreBackup { .. }) {
                 continue;
             }
+            if matches!(command, CliCommand::Rules(RulesCommand::Check { .. })) {
+                continue;
+            }
             assert!(
-                matches!(dispatch(command), Err(DispatchCommandError::NotImplemented { operation }) if operation == args[0]),
+                matches!(command.dispatch(), Err(DispatchCommandError::NotImplemented { operation }) if operation == args[0]),
                 "dispatch operation for {args:?}"
             );
         }
@@ -506,8 +546,11 @@ mod tests {
             let Some(Command::Cli(command)) = parsed.command else {
                 panic!("expected rules command for {args:?}");
             };
+            if matches!(command, CliCommand::Rules(RulesCommand::Check { .. })) {
+                continue;
+            }
             assert!(
-                matches!(dispatch(command), Err(DispatchCommandError::NotImplemented { operation }) if operation == name),
+                matches!(command.dispatch(), Err(DispatchCommandError::NotImplemented { operation }) if operation == name),
                 "dispatch operation for {args:?}"
             );
         }
@@ -516,7 +559,6 @@ mod tests {
     #[test]
     fn rules_optional_arguments() {
         for (args, expected) in [
-            (vec!["check"], RulesCommand::Check { files: vec![] }),
             (
                 vec!["preview", "a.yml", "--days", "14"],
                 RulesCommand::Preview {
@@ -557,6 +599,7 @@ mod tests {
             vec!["bench-query"],
             vec!["restore-backup"],
             vec!["rules"],
+            vec!["rules", "check"],
             vec!["rules", "preview"],
             vec!["rules", "diff"],
             vec!["rules", "explain"],

@@ -227,13 +227,20 @@ CREATE TABLE rule_sets (
   kind             INTEGER NOT NULL,       -- 1 classification | 2 extraction | 3 privacy | 4 precedent | 5 policy_check
   parent_id        INTEGER REFERENCES rule_sets(id), -- 同 kind；不成环
   source           INTEGER NOT NULL,       -- 1 builtin | 2 user
+  builtin_revision INTEGER,                -- 仅内置规则集保存发布修订号
   name             TEXT NOT NULL,
   enabled          INTEGER NOT NULL DEFAULT 1, -- 停用时整个子树不生效
+  deleted_utc_ms   INTEGER,                -- NULL = 活跃；删除保留所有版本
   sibling_order    INTEGER NOT NULL,       -- 同一父级下的顺序
   current_version  INTEGER NOT NULL,
   chain_id         INTEGER,                -- kind = precedent 时所属的链（12，M7）
-  created_utc_ms   INTEGER NOT NULL
+  created_utc_ms   INTEGER NOT NULL,
+  CHECK ((source = 1 AND builtin_revision IS NOT NULL) OR
+         (source <> 1 AND builtin_revision IS NULL)),
+  CHECK (builtin_revision IS NULL OR builtin_revision > 0)
 );
+CREATE INDEX rule_sets_active_parent_order
+  ON rule_sets(parent_id, sibling_order) WHERE deleted_utc_ms IS NULL;
 
 CREATE TABLE rule_set_versions (
   set_id           INTEGER NOT NULL REFERENCES rule_sets(id),
@@ -266,13 +273,16 @@ CREATE TABLE settings (
 ) WITHOUT ROWID;
 ```
 
+`settings` 只保存配置值和截止时间，不保存规则状态或关系状态。
+
 schema 版本由 diesel 的 `__diesel_schema_migrations` 表记录，不另建版本表，见第 8 节。
 
 所有规则（分类、提取、隐私，以及 M7 的判例与国策检查）都以**规则集**组织，规则集通过 `parent_id` 组成树，子规则集只保存相对父级的差异（新增 `rule`、覆盖 `override`、停用 `disable`）。规则集树的语义、生效规则的计算顺序、对外文本格式 `quartz-rules/1`、全部字段、操作符与校验错误码，以 [规则格式文档](../rules/rule-format.md) 为准；`rule_set_versions.content` 是该文本的规范化 JSON 形式，分类改用 uuid 引用，因此分类改名不影响规则。
 
-- 规则数量在数百条以内。核心启动或规则变化时，把每类规则的规则集树解析为生效规则列表并编译（正则、规范化后的条件值），常驻内存；查询与采集线程只读这份编译结果。
+- 规则数量在数百条以内。核心启动或规则变化时，把每类规则的规则集树解析为生效规则列表并编译（正则、规范化后的条件值），组成不可变的规则快照常驻内存；查询与采集线程只读快照。规则的修改、快照发布与并发控制由规则注册表负责，见 01 第 6.2 节：注册表是规则表的唯一写者，修改先编译、后提交、再发布，并按 `base_version` 拒绝过期修改。
 - 每条生效规则带来源：定义它的规则集 key 与版本、规则 id，以及覆盖它的规则集。这份来源用于解释（`rules.explain`）、命中预览与隐私解释 ID。
 - 界面中“编辑内置规则”不修改内置规则集，而是写入用户选定的覆盖规则集（默认 `user.local`，以对应内置规则集为父）；编辑用户规则则生成该规则集的新版本。
+- 规则集创建后父级身份固定，删除后重新导入同一 key 也不改变父级；需要换父级时新建规则集。历史基线只由 `rule_set_versions.parent_version` 沿固定父级链追溯。
 - 历史版本全部保留（体积很小），用于版本 diff、回退与三方对比。分类规则的条件字段有：`app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`、`web.domain`、`web.tab_title`、`browser.profile_label`。判例与国策检查另可使用 `category`、`category.tendency`、`activity`。隐私规则另用 06 第 4 节的字段白名单，保存时拒绝 `doc.*` 与 `title.normalized`。
 
 操作符有：`equals`、`contains`、`starts_with`、`ends_with`、`regex`、`domain_suffix`。文本比较的规范化、大小写与全半角处理、IDN 域名转换见 10 第 4.1 节；匹配结果与界面语言无关。
@@ -416,6 +426,7 @@ PRAGMA busy_timeout = 2000;
 - **只读快照。** 跨批次持有读事务时，用 diesel `TransactionManager` 的 `begin_transaction` / `commit_transaction` 包装成一个守卫类型，不使用闭包式 `transaction`。
 - **原始 SQL。** 只用于 PRAGMA、`wal_checkpoint`、`VACUUM INTO`、`PRAGMA optimize` 和 diesel DSL 难以表达的少量查询（`sql_query` + `QueryableByName`，值一律绑定）。原始 SQL 集中在 `store::raw`，测试在迁移后的空库上逐条准备，确认表名与列名有效。
 - **范围。** diesel 只出现在 `quartz` crate 的 `store` 模块。`quartz-domain` 与 `quartz-protocol` 不依赖 diesel；store 负责行类型与领域类型的转换。
+- **只做持久化。** store 不含业务判断。业务核心（规则注册表、采集状态机等，01 第 5 节）以领域层的写入描述（如 `RuleSetWrite`）表达要写什么；store 提供执行这些描述的方法，在调用方给定的事务中把它们转换为 SQL。业务核心不定义仓储接口，也不持有连接；读取由外壳调用 store 完成后把领域值交给核心。
 
 diesel 不暴露 SQLite 原生句柄，所以备份不用 Backup API，改用 `VACUUM INTO '<路径>'`：它在一个读事务内写出一致且紧凑的副本，不阻塞写连接。
 

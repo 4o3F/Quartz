@@ -178,13 +178,20 @@ CREATE TABLE rule_sets (
   kind             INTEGER NOT NULL,       -- 1 classification | 2 extraction | 3 privacy | 4 precedent | 5 policy_check
   parent_id        INTEGER REFERENCES rule_sets(id), -- 同 kind；不成环
   source           INTEGER NOT NULL,       -- 1 builtin | 2 user
+  builtin_revision INTEGER,                -- 仅内置规则集保存发布修订号
   name             TEXT NOT NULL,
   enabled          INTEGER NOT NULL DEFAULT 1, -- 停用时整个子树不生效
+  deleted_utc_ms   INTEGER,                -- NULL = 活跃；删除保留所有版本
   sibling_order    INTEGER NOT NULL,       -- 同一父级下的顺序
   current_version  INTEGER NOT NULL,
   chain_id         INTEGER,                -- kind = precedent 时所属的链（12，M7）
-  created_utc_ms   INTEGER NOT NULL
+  created_utc_ms   INTEGER NOT NULL,
+  CHECK ((source = 1 AND builtin_revision IS NOT NULL) OR
+         (source <> 1 AND builtin_revision IS NULL)),
+  CHECK (builtin_revision IS NULL OR builtin_revision > 0)
 );
+CREATE INDEX rule_sets_active_parent_order
+  ON rule_sets(parent_id, sibling_order) WHERE deleted_utc_ms IS NULL;
 
 CREATE TABLE rule_set_versions (
   set_id           INTEGER NOT NULL REFERENCES rule_sets(id),

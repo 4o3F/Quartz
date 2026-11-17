@@ -166,6 +166,8 @@ crates/
 - `quartz` 不呈现窗口、对话框或错误文字，只保留 Shell 托盘；启动错误以 `quartz-protocol::CoreErrorCode` 和结构化参数交给 `quartz-ui` 本地化并展示，`quartz-i18n` 的文字查找仅用于托盘菜单和提示。托盘通过 `TrayState` 输入、`TrayCommand` 输出隔离，原生窗口、菜单和 Shell 调用集中在 `platform/windows/tray/`；以后可像 `quartz-host` 一样将该模块移到独立可执行文件。
 - `quartz` 对 `quartz-ui` 的依赖只出现在入口里一个函数调用：`quartz_ui::run(args)`。日后要拆成独立的 `quartz-ui.exe`，只需把这一行移到新的 bin crate。
 - 平台代码放在 `quartz/src/platform/windows/`，对外只暴露领域事件，不暴露 HWND、HANDLE 或 COM 类型。macOS 实现以后放在同级目录。
+- **函数式核心 + 命令式外壳（sans-IO）。** 有状态的业务组件（规则注册表、采集状态机、截止时间调度器）是不做 I/O 的纯核心：输入当前状态与一条命令或事件，输出决定（要执行的写入描述、回复、待发布的结果），不调用数据库、文件、系统 API 或线程原语。外壳（各线程的循环，组合根 `core::app` 负责装配）持有 `store`、平台句柄与通道，执行核心给出的写入，成功后再把结果交回核心。数据库只是外壳的依赖，业务核心不定义也不依赖仓储接口。核心放在 `quartz-domain`，用值做单元测试。
+- **适用边界。** 状态能放进内存、规模有限的组件采用上述模式。需要按需读取大量数据的部分（查询管线，03 第 5 节）属于外壳，直接在数据库线程上用只读连接执行。`store` 是唯一包含 diesel 与 SQL 的模块，只做持久化与行、领域类型转换，不含业务判断。
 
 `quartz` crate 内部模块：
 
@@ -176,6 +178,7 @@ crates/
 | `platform::windows::{foreground, idle, session, power, tray, process, autostart}` | Win32 采集与系统集成 |
 | `capture` | 观测事件 → 身份解析 → 隐私策略 → 状态机 → 写入命令 |
 | `store` | schema 迁移、写入、读取、保留清理 |
+| `rules::registry` | 规则注册表：规则状态的唯一写者，发布不可变规则快照（第 6.2 节） |
 | `query` | 查询管线与缓存 |
 | `ipc` | 管道服务、会话、角色权限、订阅 |
 
@@ -210,6 +213,43 @@ crates/
 - 到期回调投递给拥有该状态的模块（采集线程或以后的 selfreg 模块），由它产生 `policy_changed` 等边界。
 - 系统时间跳变（02 第 5 节）后重新计算最近截止时间。
 
+### 6.2 规则注册表的并发模型
+
+规则会被采集线程（隐私求值）和数据库线程（分类、提取、查询）同时读取，又会被界面、命令行导入和内置升级修改。并发由三个明确的模式分工处理：
+
+| 模式 | 解决的问题 | 做法 |
+|---|---|---|
+| Actor（单写者） | 修改之间的竞争 | 规则注册表由数据库线程上的 Actor 循环驱动，是规则状态的唯一写者。所有修改都是 `RegistryCommand`（`Apply`、`Toggle`、`Reorder`、`Delete`、`Revert`、`Import`、`InstallBuiltin`），附回复通道，逐条串行处理，修改可线性化。注册表本身是 sans-IO 纯核心（第 5 节），见下文“处理一条命令” |
+| RCU（读-复制-更新） | 读写之间的竞争 | 当前生效规则是不可变的 `RuleSnapshot { epoch, privacy, classification, extraction, hashes }`，以 `Arc` 共享，放在基于 `arc-swap` 的 `SnapshotCell` 中。读者用一次原子加载取得快照，不加锁、不阻塞；写者构造并编译完整的新快照后原子替换，旧快照在最后一个读者释放后回收 |
+| 乐观并发控制（OCC） | 基于旧版本的修改覆盖新版本 | 每个修改命令携带它所基于的 `base_version`。注册表与当前版本比较，不一致时返回错误码 `rule_set_stale`，客户端重新加载并显示三方对比；单写者保证“比较并写入”是原子的 |
+
+**读者的快照隔离。** 一个工作单元只使用一个快照：采集线程处理一个事件、数据库线程计算一次查询响应（含全部分页）时，开始时取一次快照，全程使用它，不会混用新旧规则。查询游标绑定的规则输入版本即快照中的哈希，与第 4 节的 `stale_cursor` 机制一致。
+
+**变更通知。** 替换快照后，注册表向采集线程的事件队列推送 `RulesChanged { epoch }`。采集线程记录当前区间求值时所用快照的 epoch；收到通知或在处理事件时发现更大的 epoch，就产生 06 第 4.1 节的 `policy_changed` 边界。通知只用于及时唤醒，正确性由 epoch 比较保证，通知延迟或合并都不会漏掉变更。
+
+**固定顺序与不变量：**
+
+**处理一条命令（sans-IO）。** 注册表核心 `RuleRegistry` 在 `quartz-domain` 中，内存里保存各规则集的当前版本与内容（数百条规则，启动时由外壳从数据库载入）。外壳的循环对每条命令执行：
+
+```text
+RegistryCommand ─▶ RuleRegistry::decide(&self, cmd) ─▶ Decision { writes: Vec<RuleSetWrite>, reply }
+                         （纯计算：OCC 检查、校验与编译）        │
+                                                              ▼
+              外壳在一个事务中用 store 执行 writes；失败则只回复错误，不进入下一步
+                                                              │ 提交成功
+                                                              ▼
+              RuleRegistry::committed(outcome) ─▶ 新快照、epoch+1、原子替换、发通知
+```
+
+`RuleSetWrite` 是领域层的写入描述枚举（提交新版本、启停、排序、标记删除、安装内置修订），只携带领域类型。核心从不调用数据库；外壳不做业务判断。
+
+1. `decide` 校验并编译新版本（正则限制见 03 第 5.5 节），并按 `base_version` 做 OCC 检查。编译失败或版本过期时不产生写入，只返回错误回复。
+2. 外壳在一个事务中执行全部写入（`rule_set_versions` 与 `rule_sets`），提交。
+3. 提交成功后外壳调用 `committed`，核心更新内存状态，构建新快照，epoch 加一，原子替换，再发通知。提交失败时不调用 `committed`，内存状态与数据库不会分歧。
+4. 提交成功但替换前崩溃时，核心启动时从数据库重建快照；数据库是唯一事实来源，快照只是它的编译视图。
+5. epoch 只在进程内单调递增，用于判断发布先后；跨进程与缓存使用内容哈希（03 第 2.7 节），两者职责不同。
+6. 启动时若某个已存版本编译失败（例如限制调整后），只停用该规则集并在规则集树上告警，其余规则照常生效。
+
 ## 7. 依赖选型
 
 用户指定的基础 crate：`windows`、`snafu`、`tokio`、`clap`、`tracing`。其余按下表选择。
@@ -225,6 +265,7 @@ crates/
 | 托盘 | `tray-icon 0.26` | 复用核心的消息循环。如果无法拿到悬停事件或需要自绘 HMENU，就改为直接调用 `Shell_NotifyIconW` |
 | 数据库 | `diesel 2.4.0`（`sqlite`、`returning_clauses_for_sqlite_3_35`）+ `diesel_migrations 2.4.0`；`libsqlite3-sys` 开 `bundled` | 只在 `store` 模块中，见 03 第 4.5、8 节。启动时检查 SQLite 版本不低于 3.51.3（WAL-reset 缺陷修复版本） |
 | 序列化 | `serde` + `serde_json` | 协议与浏览器共用 JSON |
+| 规则快照发布 | `arc-swap 1.9.5` | 只在 `rules::registry` 中，实现第 6.2 节的 RCU 快照单元 |
 | 日期 | `jiff` | [Windows 系统时区识别与内嵌 IANA 历史时区数据](https://docs.rs/jiff/1.0.0/jiff/_documentation/platform/index.html#windows) |
 | 正则 | `regex`，规则编译时设置 `size_limit` 和 `dfa_size_limit` | 防止用户正则耗尽内存 |
 | 界面文字 | `rust-i18n`（与 gpui-component 相同） | 只在 `quartz-i18n` 中声明翻译资源，见 10 第 2 节 |
@@ -235,6 +276,8 @@ crates/
 ### 7.1 错误处理
 
 错误类型定义在执行该失败操作的模块中，上层只通过 `source` 包装下层错误，不重复定义下层的失败原因。
+
+有明确接收者的操作应实现为拥有或借用该接收者的类型的方法，自由函数仅用于没有接收者的纯计算，关联函数用于构造对象。
 
 - `anyhow` 仅在 `quartz-ui` 的 GPUI 错误边界作为上游错误的 `source` 类型出现，所有内部错误均使用 `snafu`。
 - 按失败情形定义 snafu 错误类型，名称采用“动词 + 对象 + Error”；一个操作有多种失败原因时，用该操作命名的一个枚举为每种原因定义变体，并用 context selector 附加上下文（路径、调用名、规则 ID 等）。不定义整个 crate 共用的兜底错误枚举，不使用 `Box<dyn Error>`；裸名 `Error` 仅用于模块私有类型。

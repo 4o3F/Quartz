@@ -1,6 +1,9 @@
 //! Offline backup restoration with confirmation and instance exclusion.
 
-use crate::{data_directory, platform, store};
+use crate::{
+    data_directory::{self, DataDirectory},
+    platform, store,
+};
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
@@ -31,30 +34,36 @@ pub(crate) enum RestoreConfirmation {
     Confirmed,
 }
 
-pub(crate) fn restore_backup(
-    file: &std::path::Path,
+pub(crate) struct RestoreBackupCommand<'file> {
+    file: &'file std::path::Path,
     confirmation: RestoreConfirmation,
-) -> Result<(), RestoreBackupCommandError> {
-    let directory = data_directory::resolve().context(ResolveDirectorySnafu)?;
-    eprintln!(
-        "Restoring backup {} will replace {}. All records written after the backup will be lost.",
-        file.display(),
-        directory.join("quartz.db").display()
-    );
-    snafu::ensure!(
-        confirmation == RestoreConfirmation::Confirmed,
-        ConfirmationRequiredSnafu
-    );
-    data_directory::create(&directory).context(CreateDirectorySnafu)?;
-    let _instance = match platform::acquire_instance(&directory).context(LockSnafu)? {
-        platform::AcquireInstance::Acquired(instance) => instance,
-        platform::AcquireInstance::SameSession | platform::AcquireInstance::OtherSession => {
-            return CoreRunningSnafu.fail();
-        }
-    };
-    store::restore_backup(&directory, file).context(RestoreSnafu)?;
-    println!("Database backup restored.");
-    Ok(())
+}
+impl<'file> RestoreBackupCommand<'file> {
+    pub(crate) fn new(file: &'file std::path::Path, confirmation: RestoreConfirmation) -> Self {
+        Self { file, confirmation }
+    }
+    pub(crate) fn run(&self) -> Result<(), RestoreBackupCommandError> {
+        let directory = DataDirectory::resolve().context(ResolveDirectorySnafu)?;
+        eprintln!(
+            "Restoring backup {} will replace {}. All records written after the backup will be lost.",
+            self.file.display(),
+            directory.database().display()
+        );
+        snafu::ensure!(
+            self.confirmation == RestoreConfirmation::Confirmed,
+            ConfirmationRequiredSnafu
+        );
+        directory.create().context(CreateDirectorySnafu)?;
+        let _instance = match directory.acquire_instance().context(LockSnafu)? {
+            platform::AcquireInstance::Acquired(instance) => instance,
+            platform::AcquireInstance::SameSession | platform::AcquireInstance::OtherSession => {
+                return CoreRunningSnafu.fail();
+            }
+        };
+        directory.restore_backup(self.file).context(RestoreSnafu)?;
+        println!("Database backup restored.");
+        Ok(())
+    }
 }
 
 #[cfg(test)]

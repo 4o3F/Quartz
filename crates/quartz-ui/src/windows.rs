@@ -139,78 +139,81 @@ impl Render for BlankWindow {
     }
 }
 
-/// Runs the UI on the main thread and exits when its last window closes.
-///
-/// # Errors
-/// Returns theme decoding or GPUI window creation failures.
-pub fn run(options: RunOptions) -> Result<(), RunUiError> {
-    let (language, error) = match options {
-        RunOptions::Open { language } => (language, None),
-        RunOptions::CoreError { language, error } => {
-            (language, Some(CoreErrorPresentation::new(&error, language)))
-        }
-        // TODO(M3): Initialize D3D without a visible window and implement prewarm TTL and handshake.
-        RunOptions::Prewarm => return Ok(()),
-    };
-    quartz_i18n::set_locale(language);
-    gpui_kit::component::set_locale(language);
-    let themes: FluentTheme =
-        serde_json::from_str(include_str!("../themes/fluent.json")).context(DecodeThemeSnafu)?;
-    let outcome = Rc::new(RefCell::new(Ok(())));
-    let launch_outcome = Rc::clone(&outcome);
-    gpui_kit::application()
-        .with_assets(CaptionAssets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            LayoutDirection::from_locale(language).set_global(cx);
-            for theme in themes.component.themes {
-                if theme.mode.is_dark() {
-                    Theme::global_mut(cx).dark_theme = Rc::new(theme);
-                } else {
-                    Theme::global_mut(cx).light_theme = Rc::new(theme);
-                }
+impl RunOptions {
+    /// Runs the UI on the main thread and exits when its last window closes.
+    ///
+    /// # Errors
+    /// Returns theme decoding or GPUI window creation failures.
+    pub fn run(self) -> Result<(), RunUiError> {
+        let options = self;
+        let (language, error) = match options {
+            RunOptions::Open { language } => (language, None),
+            RunOptions::CoreError { language, error } => {
+                (language, Some(CoreErrorPresentation::new(&error, language)))
             }
-            Theme::sync_system_appearance(None, cx);
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
+            // TODO(M3): Initialize D3D without a visible window and implement prewarm TTL and handshake.
+            RunOptions::Prewarm => return Ok(()),
+        };
+        quartz_i18n::set_locale(language);
+        gpui_kit::component::set_locale(language);
+        let themes: FluentTheme = serde_json::from_str(include_str!("../themes/fluent.json"))
+            .context(DecodeThemeSnafu)?;
+        let outcome = Rc::new(RefCell::new(Ok(())));
+        let launch_outcome = Rc::clone(&outcome);
+        gpui_kit::application()
+            .with_assets(CaptionAssets)
+            .run(move |cx| {
+                gpui_kit::init(cx);
+                LayoutDirection::from_locale(language).set_global(cx);
+                for theme in themes.component.themes {
+                    if theme.mode.is_dark() {
+                        Theme::global_mut(cx).dark_theme = Rc::new(theme);
+                    } else {
+                        Theme::global_mut(cx).light_theme = Rc::new(theme);
+                    }
+                }
+                Theme::sync_system_appearance(None, cx);
+                cx.on_window_closed(|cx, _| {
+                    if cx.windows().is_empty() {
+                        cx.quit();
+                    }
+                })
+                .detach();
+                let options = WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                        None,
+                        if error.is_some() {
+                            size(px(900.), px(620.))
+                        } else {
+                            size(px(960.), px(640.))
+                        },
+                        cx,
+                    ))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(quartz_i18n::translate("app.name").into_owned().into()),
+                        ..TitleBar::title_bar_options()
+                    }),
+                    ..TitleBar::window_options()
+                };
+                if let Err(error) = gpui_kit::open_window(options, cx, |window, cx| {
+                    window
+                        .observe_window_appearance(|window, cx| {
+                            Theme::sync_system_appearance(Some(window), cx);
+                        })
+                        .detach();
+                    cx.new(|_| BlankWindow {
+                        tokens: themes.quartz,
+                        error,
+                    })
+                })
+                .context(OpenWindowSnafu)
+                {
+                    *launch_outcome.borrow_mut() = Err(error);
                     cx.quit();
                 }
-            })
-            .detach();
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    if error.is_some() {
-                        size(px(900.), px(620.))
-                    } else {
-                        size(px(960.), px(640.))
-                    },
-                    cx,
-                ))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(quartz_i18n::translate("app.name").into_owned().into()),
-                    ..TitleBar::title_bar_options()
-                }),
-                ..TitleBar::window_options()
-            };
-            if let Err(error) = gpui_kit::open_window(options, cx, |window, cx| {
-                window
-                    .observe_window_appearance(|window, cx| {
-                        Theme::sync_system_appearance(Some(window), cx);
-                    })
-                    .detach();
-                cx.new(|_| BlankWindow {
-                    tokens: themes.quartz,
-                    error,
-                })
-            })
-            .context(OpenWindowSnafu)
-            {
-                *launch_outcome.borrow_mut() = Err(error);
-                cx.quit();
-            }
-        });
-    outcome.replace(Ok(()))
+            });
+        outcome.replace(Ok(()))
+    }
 }
 
 #[cfg(test)]
@@ -219,7 +222,9 @@ mod tests {
 
     #[test]
     fn prewarm_exits_without_starting_a_window_loop() {
-        run(RunOptions::Prewarm).expect("M0 prewarm must succeed without a window");
+        RunOptions::Prewarm
+            .run()
+            .expect("M0 prewarm must succeed without a window");
     }
 
     #[test]

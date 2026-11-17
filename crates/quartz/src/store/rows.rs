@@ -236,6 +236,7 @@ pub(super) struct RuleSetVersionsRow {
 
 #[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
 #[diesel(table_name = rule_sets)]
+#[diesel(treat_none_as_null = true)]
 #[diesel(check_for_backend(Sqlite))]
 pub(super) struct RuleSetsRow {
     pub id: Option<i64>,
@@ -243,8 +244,10 @@ pub(super) struct RuleSetsRow {
     pub kind: RuleSetKind,
     pub parent_id: Option<i64>,
     pub source: RuleSetSource,
+    pub builtin_revision: Option<i64>,
     pub name: String,
     pub enabled: i32,
+    pub deleted_utc_ms: Option<i64>,
     pub sibling_order: i64,
     pub current_version: i64,
     pub chain_id: Option<i64>,

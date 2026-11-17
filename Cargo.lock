@@ -5084,9 +5084,12 @@ dependencies = [
  "diesel_migrations",
  "jiff",
  "libsqlite3-sys",
+ "quartz-domain",
  "quartz-i18n",
  "quartz-protocol",
  "quartz-ui",
+ "serde",
+ "serde_json",
  "sha2 0.11.1",
  "snafu",
  "tempfile",
@@ -5099,10 +5102,16 @@ dependencies = [
 name = "quartz-domain"
 version = "0.0.0"
 dependencies = [
+ "arc-swap",
  "icu_casemap",
  "icu_normalizer",
  "idna",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
  "snafu",
+ "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]

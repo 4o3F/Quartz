@@ -39,65 +39,68 @@ struct ForeignKeyViolation {
     _table: String,
 }
 
-pub(super) fn configure_writer(conn: &mut SqliteConnection) -> QueryResult<()> {
-    conn.batch_execute(WRITE_SETTINGS)
+/// SQL operations borrowing one live SQLite connection.
+pub(super) struct ConnectionSql<'connection> {
+    pub(super) connection: &'connection mut SqliteConnection,
 }
-pub(super) fn configure_reader(conn: &mut SqliteConnection) -> QueryResult<()> {
-    conn.batch_execute(READ_SETTINGS)
-}
-pub(super) fn sqlite_version(conn: &mut SqliteConnection) -> QueryResult<String> {
-    diesel::sql_query(SQLITE_VERSION)
-        .get_result::<TextValue>(conn)
-        .map(|row| row.value)
-}
-pub(super) fn applied_versions(conn: &mut SqliteConnection) -> QueryResult<Vec<String>> {
-    if diesel::sql_query(HAS_MIGRATIONS)
-        .get_result::<IntegerValue>(conn)?
-        .value
-        == 0
-    {
-        return Ok(Vec::new());
+impl<'connection> ConnectionSql<'connection> {
+    pub(super) fn new(connection: &'connection mut SqliteConnection) -> Self {
+        Self { connection }
     }
-    diesel::sql_query(APPLIED)
-        .load::<TextValue>(conn)
-        .map(|rows| rows.into_iter().map(|row| row.value).collect())
-}
-pub(super) fn backup(conn: &mut SqliteConnection, path: &str) -> QueryResult<()> {
-    diesel::sql_query(BACKUP)
-        .bind::<Text, _>(path)
-        .execute(conn)
-        .map(|_| ())
-}
-pub(super) fn is_healthy(conn: &mut SqliteConnection) -> QueryResult<bool> {
-    let checks = diesel::sql_query(INTEGRITY).load::<Integrity>(conn)?;
-    let violations = diesel::sql_query(FOREIGN_KEYS).load::<ForeignKeyViolation>(conn)?;
-    Ok(checks.len() == 1 && checks[0].integrity_check == "ok" && violations.is_empty())
-}
-
-/// The source remains protected by mode=ro while VACUUM writes the destination.
-pub(super) fn stage_backup(conn: &mut SqliteConnection, path: &str) -> QueryResult<()> {
-    conn.batch_execute(ALLOW_BACKUP)?;
-    let result = backup(conn, path);
-    conn.batch_execute(RESTORE_QUERY_ONLY)?;
-    result
-}
-
-pub(super) fn checkpoint(conn: &mut SqliteConnection) -> QueryResult<bool> {
-    #[derive(QueryableByName)]
-    struct Checkpoint {
-        #[diesel(sql_type = diesel::sql_types::Integer)]
-        busy: i32,
+    pub(super) fn configure_writer(&mut self) -> QueryResult<()> {
+        self.connection.batch_execute(WRITE_SETTINGS)
     }
-    diesel::sql_query(CHECKPOINT)
-        .get_result::<Checkpoint>(conn)
-        .map(|row| row.busy == 0)
-}
+    pub(super) fn configure_reader(&mut self) -> QueryResult<()> {
+        self.connection.batch_execute(READ_SETTINGS)
+    }
+    pub(super) fn sqlite_version(&mut self) -> QueryResult<String> {
+        diesel::sql_query(SQLITE_VERSION)
+            .get_result::<TextValue>(self.connection)
+            .map(|row| row.value)
+    }
+    pub(super) fn applied_versions(&mut self) -> QueryResult<Vec<String>> {
+        if diesel::sql_query(HAS_MIGRATIONS)
+            .get_result::<IntegerValue>(self.connection)?
+            .value
+            == 0
+        {
+            return Ok(Vec::new());
+        }
+        diesel::sql_query(APPLIED)
+            .load::<TextValue>(self.connection)
+            .map(|rows| rows.into_iter().map(|row| row.value).collect())
+    }
+    pub(super) fn backup(&mut self, path: &str) -> QueryResult<()> {
+        diesel::sql_query(BACKUP)
+            .bind::<Text, _>(path)
+            .execute(self.connection)
+            .map(|_| ())
+    }
+    pub(super) fn is_healthy(&mut self) -> QueryResult<bool> {
+        let checks = diesel::sql_query(INTEGRITY).load::<Integrity>(self.connection)?;
+        let violations =
+            diesel::sql_query(FOREIGN_KEYS).load::<ForeignKeyViolation>(self.connection)?;
+        Ok(checks.len() == 1 && checks[0].integrity_check == "ok" && violations.is_empty())
+    }
 
-pub(super) fn apply_sql(
-    conn: &mut dyn diesel::connection::BoxableConnection<diesel::sqlite::Sqlite>,
-    script: &str,
-) -> QueryResult<()> {
-    conn.batch_execute(script)
+    /// The source remains protected by mode=ro while VACUUM writes the destination.
+    pub(super) fn stage_backup(&mut self, path: &str) -> QueryResult<()> {
+        self.connection.batch_execute(ALLOW_BACKUP)?;
+        let result = self.backup(path);
+        self.connection.batch_execute(RESTORE_QUERY_ONLY)?;
+        result
+    }
+
+    pub(super) fn checkpoint(&mut self) -> QueryResult<bool> {
+        #[derive(QueryableByName)]
+        struct Checkpoint {
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            busy: i32,
+        }
+        diesel::sql_query(CHECKPOINT)
+            .get_result::<Checkpoint>(self.connection)
+            .map(|row| row.busy == 0)
+    }
 }
 
 #[cfg(test)]
@@ -106,7 +109,9 @@ mod tests {
     #[test]
     fn every_statement_prepares_on_migrated_database() {
         let mut conn = SqliteConnection::establish(":memory:").expect("open empty database");
-        super::super::migrations::apply_all(&mut conn).expect("migrate empty database");
+        super::super::migrations::Migrations
+            .apply_all(&mut conn)
+            .expect("migrate empty database");
         for sql in WRITE_SETTINGS
             .split(';')
             .chain(READ_SETTINGS.split(';'))

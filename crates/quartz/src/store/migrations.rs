@@ -67,8 +67,10 @@ pub(super) fn typed<T>(result: diesel::migration::Result<T>) -> Result<T, ApplyM
 }
 
 #[cfg(test)]
-pub(super) fn apply_all(conn: &mut SqliteConnection) -> Result<(), ApplyMigrationError> {
-    typed(conn.run_pending_migrations(Migrations)).map(|_| ())
+impl Migrations {
+    pub(super) fn apply_all(&self, conn: &mut SqliteConnection) -> Result<(), ApplyMigrationError> {
+        typed(conn.run_pending_migrations(*self)).map(|_| ())
+    }
 }
 
 // Keep SQL failures concrete at Diesel's erased migration boundary.
@@ -81,7 +83,7 @@ impl Migration<Sqlite> for SqlMigration {
         &self,
         conn: &mut dyn diesel::connection::BoxableConnection<Sqlite>,
     ) -> diesel::migration::Result<()> {
-        Ok(super::raw::apply_sql(conn, self.script)?)
+        Ok(conn.batch_execute(self.script)?)
     }
     fn revert(
         &self,

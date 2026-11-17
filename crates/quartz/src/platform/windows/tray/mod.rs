@@ -74,7 +74,7 @@ pub(super) struct Tray {
 }
 impl Tray {
     pub(super) fn create(state: TrayState) -> Result<Self, CreateTrayError> {
-        quartz_i18n::set_locale(super::language::select());
+        quartz_i18n::set_locale(super::UiLanguage::detect().as_str());
         let window = Window::create().context(WindowSnafu)?;
         let mut icon = TrayIcon::add(&window).context(IconSnafu)?;
         icon.update(state).context(StateSnafu)?;

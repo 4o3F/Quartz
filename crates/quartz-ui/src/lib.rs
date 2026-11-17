@@ -4,7 +4,7 @@
 mod windows;
 
 #[cfg(windows)]
-pub use windows::{RunOptions, RunUiError, run};
+pub use windows::{RunOptions, RunUiError};
 
 #[cfg(any(windows, test))]
 mod core_error;

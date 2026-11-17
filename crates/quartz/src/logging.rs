@@ -1,5 +1,7 @@
 //! Entry-layer tracing setup.
 
+#[cfg(any(windows, test))]
+use crate::data_directory::DataDirectory;
 use snafu::Snafu;
 use tracing_subscriber::EnvFilter;
 
@@ -8,7 +10,7 @@ use snafu::ResultExt;
 #[cfg(any(windows, test))]
 use std::{
     fs::{self, File, OpenOptions},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Mutex,
 };
 
@@ -75,36 +77,37 @@ pub(crate) enum InitFileLogError {
     },
 }
 
-/// Opens the target's append-only log and installs a synchronous subscriber.
 #[cfg(any(windows, test))]
-pub(crate) fn init_file_log(
-    data_directory: &Path,
-    target: LogTarget,
-) -> Result<(), InitFileLogError> {
-    let file = open_file_log(data_directory, target)?;
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(filter())
-        .with_ansi(false)
-        .with_writer(Mutex::new(file))
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .map_err(InitTracingError::from)
-        .context(InstallSubscriberSnafu { target })
+impl DataDirectory {
+    /// Opens the target's append-only log and installs a synchronous subscriber.
+    pub(crate) fn init_file_log(&self, target: LogTarget) -> Result<(), InitFileLogError> {
+        let file = self.open_file_log(target)?;
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_ansi(false)
+            .with_writer(Mutex::new(file))
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .map_err(InitTracingError::from)
+            .context(InstallSubscriberSnafu { target })
+    }
 }
 
 #[cfg(any(windows, test))]
-fn open_file_log(data_directory: &Path, target: LogTarget) -> Result<File, InitFileLogError> {
-    let logs = data_directory.join("logs");
-    fs::create_dir_all(&logs).context(CreateDirectorySnafu {
-        target,
-        path: &logs,
-    })?;
-    let path = logs.join(target.file_name());
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .context(OpenFileSnafu { target, path })
+impl DataDirectory {
+    fn open_file_log(&self, target: LogTarget) -> Result<File, InitFileLogError> {
+        let logs = self.logs();
+        fs::create_dir_all(&logs).context(CreateDirectorySnafu {
+            target,
+            path: &logs,
+        })?;
+        let path = logs.join(target.file_name());
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .context(OpenFileSnafu { target, path })
+    }
 }
 
 fn filter() -> EnvFilter {
@@ -154,7 +157,8 @@ mod tests {
         );
         let directory = tempfile::tempdir().expect("log data directory");
         for target in [LogTarget::Core, LogTarget::Ui] {
-            let error = init_file_log(directory.path(), target)
+            let error = DataDirectory::new(directory.path())
+                .init_file_log(target)
                 .expect_err("subscriber is already installed");
             let InitFileLogError::InstallSubscriber { source, .. } = error else {
                 panic!("expected subscriber installation failure: {error}");
@@ -174,7 +178,9 @@ mod tests {
         let directory = tempfile::tempdir().expect("log data directory");
         for target in [LogTarget::Core, LogTarget::Ui] {
             for text in ["first\n", "second\n"] {
-                let mut file = open_file_log(directory.path(), target).expect("open target log");
+                let mut file = DataDirectory::new(directory.path())
+                    .open_file_log(target)
+                    .expect("open target log");
                 file.write_all(text.as_bytes()).expect("append diagnostic");
             }
             assert_eq!(
@@ -190,8 +196,9 @@ mod tests {
         let directory = tempfile::tempdir().expect("log data directory");
         let logs = directory.path().join("logs");
         fs::write(&logs, "obstruction").expect("block log directory");
-        let error =
-            open_file_log(directory.path(), LogTarget::Core).expect_err("log directory is a file");
+        let error = DataDirectory::new(directory.path())
+            .open_file_log(LogTarget::Core)
+            .expect_err("log directory is a file");
         assert!(matches!(&error, InitFileLogError::CreateDirectory { path, .. } if path == &logs));
         assert!(
             error
@@ -201,8 +208,9 @@ mod tests {
         );
         fs::remove_file(&logs).expect("remove obstruction");
         fs::create_dir_all(logs.join("ui.log")).expect("block UI log file");
-        let error =
-            open_file_log(directory.path(), LogTarget::Ui).expect_err("log file is a directory");
+        let error = DataDirectory::new(directory.path())
+            .open_file_log(LogTarget::Ui)
+            .expect_err("log file is a directory");
         assert!(
             matches!(&error, InitFileLogError::OpenFile { path, .. } if path == &logs.join("ui.log"))
         );

@@ -124,6 +124,8 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 | `rule_sets.get` / `rule_sets.versions` | 规则集某版本的内容；版本列表 |
 | `rule_sets.set_enabled` / `rule_sets.reorder` / `rule_sets.delete` / `rule_sets.revert` | 启停（连同子树）、同级排序、删除（有子规则集时拒绝）、回退到某个旧版本（生成新版本） |
 | `rule_sets.edit` | 界面编辑器提交对某个规则集的一次修改，生成新版本；编辑内置规则时写入指定的用户覆盖规则集 |
+
+`rule_sets.set_enabled`、`reorder`、`delete`、`revert`、`edit` 与 `rules_text.import` 都是写操作，请求必须携带 `base_version`（客户端读取时看到的规则集版本；`reorder` 携带同级各规则集的版本）。核心把写操作作为命令交给规则注册表串行处理（01 第 6.2 节）；版本不一致时返回错误码 `rule_set_stale` 与当前版本号，客户端重新读取，必要时显示三方对比后再提交。
 | `rules.preview` | 预览一条规则草稿：过去 7 天命中多少段、多少小时，列出前 50 个样本 |
 | `rules.explain` | 解释一个时刻或片段：按规则集树列出每条规则、每个条件的求值结果与实际字段值（受隐私约束），标出生效规则与被遮蔽的规则 |
 | `rules_text.validate` | 校验一份 `quartz-rules/1` 文本，返回结构化错误（路径、错误码、参数），不写入 |

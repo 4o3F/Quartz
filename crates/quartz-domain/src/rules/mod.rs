@@ -1,0 +1,39 @@
+//! Typed rule files, deterministic tree resolution, and bounded offline evaluation.
+
+mod content_hash;
+mod diagnostic;
+mod evaluate;
+mod identity;
+mod model;
+mod parse;
+pub mod registry;
+mod resolve;
+
+pub use content_hash::{ContentHash, ParseContentHashError};
+pub use diagnostic::{Diagnostic, DiagnosticCode, SourceLocation};
+pub use evaluate::{
+    CompileRulesError, CompiledRules, ConditionOutcome, Evaluation, Extraction, ExtractionStatus,
+    FieldSnapshot, PrivacySources, RuleOutcome, RuleStatus, ShadowReason,
+};
+pub use identity::{
+    ParseRuleIdError, ParseRuleSetKeyError, ParseRuleTargetError, RuleId, RuleSetKey, RuleTarget,
+    RuleWriteCode,
+};
+pub use model::{
+    Action, BuiltinMetadata, CaseSensitivity, CategoryReference, Condition, Content, Disable,
+    EntryPosition, Field, MatchMode, Operator, Override, PrivacyAction, Rule, RuleBody, RuleKind,
+    RuleOrigin, RuleSet, SetHeader, WebAction,
+};
+pub use parse::{ParseContext, ParseRuleSetError, ReferenceCatalog};
+pub use resolve::{
+    EffectiveRule, EffectiveRules, Enablement, InstalledSet, Resolution, RuleProvenance,
+    SuppressedRule, SuppressionReason,
+};
+
+/// Embedded privacy rules; all language variants are evaluated together.
+pub const BUILTIN_PRIVACY: &str = include_str!("builtin-privacy.toml");
+/// Revision installed in the database at core startup.
+pub const BUILTIN_PRIVACY_REVISION: u32 = 1;
+
+#[cfg(test)]
+mod tests;
