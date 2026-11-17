@@ -1,0 +1,201 @@
+/* Quartz mockup tokens -- encodes docs/design/11-design-system.md
+ *
+ * Variable -> token mapping (chapter 11):
+ *   Section 3.1 (neutral + status): --<token with . and _ turned into ->
+ *     e.g. --text-primary = text.primary (TextFillColorPrimary),
+ *          --fill-card = fill.card, --stroke-divider = stroke.divider,
+ *          --bg-flyout = bg.flyout, --status-success = status.success.
+ *     The WinUI source name is listed beside every variable below.
+ *   Section 3.2 (accent): --accent-fill, --accent-fill-hover, --accent-text.
+ *     Values are NOT in chapter 11 (runtime UISettings): the Windows default
+ *     blue is used as a sample (AccentDark1 / AccentLight2 / AccentDark2 / AccentLight3).
+ *   Section 3.3: --cat-1..--cat-14 = cat.1..cat.14, --cat-neutral = neutral
+ *     (status.neutral). --cat-N-on = "text on swatch" (white/black, higher
+ *     WCAG contrast of the two, as chapter 11 describes).
+ *   Section 4: --font-small/--font-text/--font-display/--font-mono (4.1),
+ *     --type-* (4.2 ramp, size/line-height, Regular 400 / Semibold 600).
+ *   Section 5: --radius-control/--radius-overlay (5.1), --space-* (5.2),
+ *     --h-control-standard/compact, --h-row-standard/compact (5.3), --tl-* timeline sizes (5.3),
+ *     --w-sidebar/--w-rail/--w-details (5.4).
+ *   Section 6: --shadow-2/8/16/28/64 (ambient/key differ per theme).
+ * Hex colors are #RRGGBBAA exactly as in the chapter (valid CSS).
+ */
+
+:root,[data-theme="light"]{
+  color-scheme:light;
+  --text-primary:#000000E4; /* text.primary (TextFillColorPrimary) */
+  --text-secondary:#0000009E; /* text.secondary (TextFillColorSecondary) */
+  --text-tertiary:#00000072; /* text.tertiary (TextFillColorTertiary) */
+  --text-disabled:#0000005C; /* text.disabled (TextFillColorDisabled) */
+  --text-on-accent:#FFFFFF; /* text.on_accent (TextOnAccentFillColorPrimary) */
+  --fill-control:#FFFFFFB3; /* fill.control (ControlFillColorDefault) */
+  --fill-control-hover:#F9F9F980; /* fill.control_hover (ControlFillColorSecondary) */
+  --fill-control-pressed:#F9F9F94D; /* fill.control_pressed (ControlFillColorTertiary) */
+  --fill-control-disabled:#F9F9F94D; /* fill.control_disabled (ControlFillColorDisabled) */
+  --fill-subtle-hover:#00000009; /* fill.subtle_hover (SubtleFillColorSecondary) */
+  --fill-subtle-pressed:#00000006; /* fill.subtle_pressed (SubtleFillColorTertiary) */
+  --fill-layer:#FFFFFF80; /* fill.layer (LayerFillColorDefault) */
+  --fill-card:#FFFFFFB3; /* fill.card (CardBackgroundFillColorDefault) */
+  --fill-card-secondary:#F6F6F680; /* fill.card_secondary (CardBackgroundFillColorSecondary) */
+  --fill-smoke:#0000004D; /* fill.smoke (SmokeFillColorDefault) */
+  --bg-base:#F3F3F3; /* bg.base (SolidBackgroundFillColorBase) */
+  --bg-secondary:#EEEEEE; /* bg.secondary (SolidBackgroundFillColorSecondary) */
+  --bg-tertiary:#F9F9F9; /* bg.tertiary (SolidBackgroundFillColorTertiary) */
+  --bg-flyout:#FFFFFF; /* bg.flyout (SolidBackgroundFillColorQuarternary) */
+  --stroke-control:#0000000F; /* stroke.control (ControlStrokeColorDefault) */
+  --stroke-control-strong:#00000029; /* stroke.control_strong (ControlStrokeColorSecondary) */
+  --stroke-card:#0000000F; /* stroke.card (CardStrokeColorDefault) */
+  --stroke-surface:#75757566; /* stroke.surface (SurfaceStrokeColorDefault) */
+  --stroke-divider:#0000000F; /* stroke.divider (DividerStrokeColorDefault) */
+  --stroke-focus-outer:#000000E4; /* stroke.focus_outer (FocusStrokeColorOuter) */
+  --stroke-focus-inner:#FFFFFFB3; /* stroke.focus_inner (FocusStrokeColorInner) */
+  --status-success:#0F7B0F; /* status.success (SystemFillColorSuccess) */
+  --status-caution:#9D5D00; /* status.caution (SystemFillColorCaution) */
+  --status-critical:#C42B1C; /* status.critical (SystemFillColorCritical) */
+  --status-neutral:#00000072; /* status.neutral (SystemFillColorNeutral) */
+  --status-success-bg:#DFF6DD; /* status.success_bg (SystemFillColorSuccessBackground) */
+  --status-caution-bg:#FFF4CE; /* status.caution_bg (SystemFillColorCautionBackground) */
+  --status-critical-bg:#FDE7E9; /* status.critical_bg (SystemFillColorCriticalBackground) */
+  --cat-1:#6929C4;
+  --cat-1-on:#FFFFFF;
+  --cat-2:#1192E8;
+  --cat-2-on:#000000;
+  --cat-3:#005D5D;
+  --cat-3-on:#FFFFFF;
+  --cat-4:#9F1853;
+  --cat-4-on:#FFFFFF;
+  --cat-5:#FA4D56;
+  --cat-5-on:#000000;
+  --cat-6:#520408;
+  --cat-6-on:#FFFFFF;
+  --cat-7:#198038;
+  --cat-7-on:#FFFFFF;
+  --cat-8:#002D9C;
+  --cat-8-on:#FFFFFF;
+  --cat-9:#EE5396;
+  --cat-9-on:#000000;
+  --cat-10:#B28600;
+  --cat-10-on:#000000;
+  --cat-11:#009D9A;
+  --cat-11-on:#000000;
+  --cat-12:#012749;
+  --cat-12-on:#FFFFFF;
+  --cat-13:#8A3800;
+  --cat-13-on:#FFFFFF;
+  --cat-14:#A56EFF;
+  --cat-14-on:#000000;
+  --cat-neutral:var(--status-neutral); /* neutral */
+  --accent-fill:#005FB8; /* accent.fill = AccentDark1 (sample) */
+  --accent-text:#003E92; /* accent.text = AccentDark2 (sample) */
+  --shadow-ambient:rgba(0,0,0,.12); --shadow-key:rgba(0,0,0,.14);
+  --plot-bg:transparent; /* chart plot area: card fill in light */
+  --accent-fill-hover:color-mix(in srgb,var(--accent-fill) 90%,transparent); /* accent.fill_hover */
+  --shadow-2:0 0 2px var(--shadow-ambient),0 1px 2px var(--shadow-key);
+  --shadow-8:0 0 2px var(--shadow-ambient),0 4px 8px var(--shadow-key);
+  --shadow-16:0 0 2px var(--shadow-ambient),0 8px 16px var(--shadow-key);
+  --shadow-28:0 0 8px var(--shadow-ambient),0 14px 28px var(--shadow-key);
+  --shadow-64:0 0 8px var(--shadow-ambient),0 32px 64px var(--shadow-key);
+}
+[data-theme="dark"]{
+  color-scheme:dark;
+  --text-primary:#FFFFFF; /* text.primary (TextFillColorPrimary) */
+  --text-secondary:#FFFFFFC5; /* text.secondary (TextFillColorSecondary) */
+  --text-tertiary:#FFFFFF87; /* text.tertiary (TextFillColorTertiary) */
+  --text-disabled:#FFFFFF5D; /* text.disabled (TextFillColorDisabled) */
+  --text-on-accent:#000000; /* text.on_accent (TextOnAccentFillColorPrimary) */
+  --fill-control:#FFFFFF0F; /* fill.control (ControlFillColorDefault) */
+  --fill-control-hover:#FFFFFF15; /* fill.control_hover (ControlFillColorSecondary) */
+  --fill-control-pressed:#FFFFFF08; /* fill.control_pressed (ControlFillColorTertiary) */
+  --fill-control-disabled:#FFFFFF0B; /* fill.control_disabled (ControlFillColorDisabled) */
+  --fill-subtle-hover:#FFFFFF0F; /* fill.subtle_hover (SubtleFillColorSecondary) */
+  --fill-subtle-pressed:#FFFFFF0A; /* fill.subtle_pressed (SubtleFillColorTertiary) */
+  --fill-layer:#3A3A3A4C; /* fill.layer (LayerFillColorDefault) */
+  --fill-card:#FFFFFF0D; /* fill.card (CardBackgroundFillColorDefault) */
+  --fill-card-secondary:#FFFFFF08; /* fill.card_secondary (CardBackgroundFillColorSecondary) */
+  --fill-smoke:#0000004D; /* fill.smoke (SmokeFillColorDefault) */
+  --bg-base:#202020; /* bg.base (SolidBackgroundFillColorBase) */
+  --bg-secondary:#1C1C1C; /* bg.secondary (SolidBackgroundFillColorSecondary) */
+  --bg-tertiary:#282828; /* bg.tertiary (SolidBackgroundFillColorTertiary) */
+  --bg-flyout:#2C2C2C; /* bg.flyout (SolidBackgroundFillColorQuarternary) */
+  --stroke-control:#FFFFFF12; /* stroke.control (ControlStrokeColorDefault) */
+  --stroke-control-strong:#FFFFFF18; /* stroke.control_strong (ControlStrokeColorSecondary) */
+  --stroke-card:#00000019; /* stroke.card (CardStrokeColorDefault) */
+  --stroke-surface:#75757566; /* stroke.surface (SurfaceStrokeColorDefault) */
+  --stroke-divider:#FFFFFF15; /* stroke.divider (DividerStrokeColorDefault) */
+  --stroke-focus-outer:#FFFFFF; /* stroke.focus_outer (FocusStrokeColorOuter) */
+  --stroke-focus-inner:#000000B3; /* stroke.focus_inner (FocusStrokeColorInner) */
+  --status-success:#6CCB5F; /* status.success (SystemFillColorSuccess) */
+  --status-caution:#FCE100; /* status.caution (SystemFillColorCaution) */
+  --status-critical:#FF99A4; /* status.critical (SystemFillColorCritical) */
+  --status-neutral:#FFFFFF8B; /* status.neutral (SystemFillColorNeutral) */
+  --status-success-bg:#393D1B; /* status.success_bg (SystemFillColorSuccessBackground) */
+  --status-caution-bg:#433519; /* status.caution_bg (SystemFillColorCautionBackground) */
+  --status-critical-bg:#442726; /* status.critical_bg (SystemFillColorCriticalBackground) */
+  --cat-1:#8A3FFC;
+  --cat-1-on:#FFFFFF;
+  --cat-2:#33B1FF;
+  --cat-2-on:#000000;
+  --cat-3:#007D79;
+  --cat-3-on:#FFFFFF;
+  --cat-4:#FF7EB6;
+  --cat-4-on:#000000;
+  --cat-5:#FA4D56;
+  --cat-5-on:#000000;
+  --cat-6:#FFF1F1;
+  --cat-6-on:#000000;
+  --cat-7:#6FDC8C;
+  --cat-7-on:#000000;
+  --cat-8:#4589FF;
+  --cat-8-on:#000000;
+  --cat-9:#D02670;
+  --cat-9-on:#FFFFFF;
+  --cat-10:#D2A106;
+  --cat-10-on:#000000;
+  --cat-11:#08BDBA;
+  --cat-11-on:#000000;
+  --cat-12:#BAE6FF;
+  --cat-12-on:#000000;
+  --cat-13:#BA4E00;
+  --cat-13-on:#FFFFFF;
+  --cat-14:#D4BBFF;
+  --cat-14-on:#000000;
+  --cat-neutral:var(--status-neutral); /* neutral */
+  --accent-fill:#60CDFF; /* accent.fill = AccentLight2 (sample) */
+  --accent-text:#99EBFF; /* accent.text = AccentLight3 (sample) */
+  --shadow-ambient:rgba(0,0,0,.24); --shadow-key:rgba(0,0,0,.28);
+  --plot-bg:var(--bg-base); /* 11 3.3: dark plot area sits on bg.base, no card fill */
+  --accent-fill-hover:color-mix(in srgb,var(--accent-fill) 90%,transparent); /* accent.fill_hover */
+  --shadow-2:0 0 2px var(--shadow-ambient),0 1px 2px var(--shadow-key);
+  --shadow-8:0 0 2px var(--shadow-ambient),0 4px 8px var(--shadow-key);
+  --shadow-16:0 0 2px var(--shadow-ambient),0 8px 16px var(--shadow-key);
+  --shadow-28:0 0 8px var(--shadow-ambient),0 14px 28px var(--shadow-key);
+  --shadow-64:0 0 8px var(--shadow-ambient),0 32px 64px var(--shadow-key);
+}
+
+:root{
+  /* 4.1 font families (zh-CN fallback per 10 6.2) */
+  --font-small:"Segoe UI Variable Small","Segoe UI Variable","Segoe UI","Microsoft YaHei UI",sans-serif;
+  --font-text:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI","Microsoft YaHei UI",sans-serif;
+  --font-display:"Segoe UI Variable Display","Segoe UI Variable","Segoe UI","Microsoft YaHei UI",sans-serif;
+  --font-mono:"Cascadia Mono",Consolas,monospace;
+  /* 4.2 type ramp: weight size/line-height family */
+  --type-caption:400 12px/16px var(--font-small);
+  --type-body:400 14px/20px var(--font-text);
+  --type-body-strong:600 14px/20px var(--font-text);
+  --type-body-large:400 18px/24px var(--font-text);
+  --type-subtitle:600 20px/28px var(--font-display);
+  --type-title:600 28px/36px var(--font-display);
+  /* 5.1 radius */
+  --radius-control:4px; --radius-overlay:8px; --radius-none:0;
+  /* 5.2 spacing */
+  --space-xxs:2px; --space-xs:4px; --space-s:8px; --space-m:12px; --space-l:16px;
+  --space-xl:20px; --space-xxl:24px; --space-xxxl:32px;
+  /* 5.3 density */
+  --h-control-standard:32px; --h-control-compact:24px;
+  --h-row-standard:40px; --h-row-compact:32px;
+  --tl-main-track:24px; --tl-lane:20px; --tl-lane-gap:4px; --tl-ruler:20px; --tl-block-radius:2px;
+  /* 5.4 window layout */
+  --w-sidebar:240px; --w-rail:48px; --w-details:360px; --h-titlebar:32px;
+  /* 8 motion (unused in static mockups) */
+  --dur-hover:83ms; --dur-flyout:167ms; --dur-panel:250ms; --ease-out:cubic-bezier(0,0,0,1);
+}
