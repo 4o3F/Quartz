@@ -1,0 +1,9 @@
+_version: 2
+app.name:
+  zh-CN: Quartz
+tray.open:
+  zh-CN: 打开
+tray.exit:
+  zh-CN: 退出
+error.not_implemented:
+  zh-CN: "尚未实现：%{operation}"

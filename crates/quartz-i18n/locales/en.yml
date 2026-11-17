@@ -1,0 +1,9 @@
+_version: 2
+app.name:
+  en: Quartz
+tray.open:
+  en: Open
+tray.exit:
+  en: Exit
+error.not_implemented:
+  en: "not implemented yet: %{operation}"
