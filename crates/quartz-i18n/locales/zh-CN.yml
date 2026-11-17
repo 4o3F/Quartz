@@ -31,3 +31,183 @@ ui.core_error.backups:
   zh-CN: "迁移前备份"
 ui.core_error.restore_warning:
   zh-CN: "恢复会替换当前数据库，并丢失备份之后的记录。"
+nav.today:
+  zh-CN: "今天"
+nav.week:
+  zh-CN: "本周"
+nav.rules:
+  zh-CN: "分类与规则"
+nav.settings:
+  zh-CN: "设置"
+today.today:
+  zh-CN: "今天"
+today.stat.active:
+  zh-CN: "活跃时长"
+today.stat.focus:
+  zh-CN: "专注占比"
+today.stat.distraction:
+  zh-CN: "分心占比"
+today.stat.unclassified:
+  zh-CN: "未分类"
+today.stat.longest_focus:
+  zh-CN: "最长连续专注"
+today.stat.switches:
+  zh-CN: "每小时切换"
+today.stat.switch_count:
+  zh-CN: "%{count} 次"
+today.legend_item:
+  zh-CN: "%{name} %{duration}"
+today.hourly.title:
+  zh-CN: "按小时"
+today.ranking.title:
+  zh-CN: "排行"
+today.ranking.apps:
+  zh-CN: "应用"
+today.ranking.domains:
+  zh-CN: "域名"
+today.ranking.documents:
+  zh-CN: "文档"
+today.ranking.mixed:
+  zh-CN: "混排"
+today.pending.title:
+  zh-CN: "待标注的离开"
+today.pending.range:
+  zh-CN: "%{range} · %{duration}"
+today.pending.rest:
+  zh-CN: "休息"
+today.pending.meeting:
+  zh-CN: "会议"
+today.pending.reading:
+  zh-CN: "阅读思考"
+today.pending.dismiss:
+  zh-CN: "忽略"
+today.pending.other:
+  zh-CN: "其他…"
+timeline.title:
+  zh-CN: "时间轴"
+timeline.main_track:
+  zh-CN: "分类"
+timeline.lanes.apps:
+  zh-CN: "应用泳道"
+timeline.lanes.category:
+  zh-CN: "仅分类"
+timeline.full_day:
+  zh-CN: "整 24 小时"
+timeline.fit_activity:
+  zh-CN: "活动范围"
+timeline.block_label:
+  zh-CN: "%{name} %{duration}"
+timeline.state_label:
+  zh-CN: "%{state} %{duration}"
+timeline.state.idle:
+  zh-CN: "空闲"
+timeline.state.locked:
+  zh-CN: "已锁屏"
+timeline.state.sleep:
+  zh-CN: "睡眠"
+timeline.state.core_stopped:
+  zh-CN: "核心未运行"
+timeline.state.no_foreground:
+  zh-CN: "无前台"
+timeline.state.excluded:
+  zh-CN: "已排除"
+timeline.state.gap:
+  zh-CN: "采集缺口"
+timeline.tooltip.rule:
+  zh-CN: "规则：%{condition} → %{category}"
+timeline.tooltip.manual:
+  zh-CN: "手动标注"
+timeline.tooltip.unmatched:
+  zh-CN: "未匹配规则"
+details.week:
+  zh-CN: "近 7 天"
+details.titles:
+  zh-CN: "常见标题"
+details.why:
+  zh-CN: "为什么是这个结果"
+details.today:
+  zh-CN: "今天"
+details.merged:
+  zh-CN: "合并显示 · 原始区间 %{count} 段"
+details.rule_line:
+  zh-CN: "规则：%{condition}"
+details.rule_priority:
+  zh-CN: "%{rule} · 优先级 %{priority}"
+details.effective:
+  zh-CN: "生效"
+details.rule_set:
+  zh-CN: "规则集 %{name}"
+details.actual:
+  zh-CN: "实际值：%{value}"
+details.no_shadowed:
+  zh-CN: "未被遮蔽：没有其他规则命中"
+details.no_rule:
+  zh-CN: "没有规则命中这一段"
+details.action.classify:
+  zh-CN: "归类为…"
+details.action.privacy:
+  zh-CN: "创建隐私规则"
+duration.hm:
+  zh-CN: "%{hours} 小时 %{minutes} 分"
+duration.h:
+  zh-CN: "%{hours} 小时"
+duration.m:
+  zh-CN: "%{minutes} 分"
+duration.unit.hour:
+  zh-CN: "小时"
+duration.unit.minute:
+  zh-CN: "分"
+format.percent:
+  zh-CN: "%{value}%"
+date.month.1:
+  zh-CN: "1月"
+date.month.2:
+  zh-CN: "2月"
+date.month.3:
+  zh-CN: "3月"
+date.month.4:
+  zh-CN: "4月"
+date.month.5:
+  zh-CN: "5月"
+date.month.6:
+  zh-CN: "6月"
+date.month.7:
+  zh-CN: "7月"
+date.month.8:
+  zh-CN: "8月"
+date.month.9:
+  zh-CN: "9月"
+date.month.10:
+  zh-CN: "10月"
+date.month.11:
+  zh-CN: "11月"
+date.month.12:
+  zh-CN: "12月"
+date.weekday.mon:
+  zh-CN: "周一"
+date.weekday.tue:
+  zh-CN: "周二"
+date.weekday.wed:
+  zh-CN: "周三"
+date.weekday.thu:
+  zh-CN: "周四"
+date.weekday.fri:
+  zh-CN: "周五"
+date.weekday.sat:
+  zh-CN: "周六"
+date.weekday.sun:
+  zh-CN: "周日"
+date.month_day_weekday:
+  zh-CN: "%{month}%{day}日 %{weekday}"
+category.builtin.development:
+  zh-CN: "开发"
+category.builtin.learning:
+  zh-CN: "学习"
+category.builtin.communication:
+  zh-CN: "沟通"
+category.builtin.entertainment:
+  zh-CN: "娱乐"
+category.builtin.system:
+  zh-CN: "系统与工具"
+category.builtin.uncategorized:
+  zh-CN: "未分类"

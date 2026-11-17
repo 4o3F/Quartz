@@ -31,3 +31,183 @@ ui.core_error.backups:
   en: "Migration backups"
 ui.core_error.restore_warning:
   en: "Restoring replaces the current database. All records written after the backup will be lost."
+nav.today:
+  en: "Today"
+nav.week:
+  en: "This week"
+nav.rules:
+  en: "Categories & rules"
+nav.settings:
+  en: "Settings"
+today.today:
+  en: "Today"
+today.stat.active:
+  en: "Active time"
+today.stat.focus:
+  en: "Focus share"
+today.stat.distraction:
+  en: "Distraction share"
+today.stat.unclassified:
+  en: "Unclassified"
+today.stat.longest_focus:
+  en: "Longest focus streak"
+today.stat.switches:
+  en: "Switches per hour"
+today.stat.switch_count:
+  en: "%{count}"
+today.legend_item:
+  en: "%{name} %{duration}"
+today.hourly.title:
+  en: "By hour"
+today.ranking.title:
+  en: "Ranking"
+today.ranking.apps:
+  en: "Apps"
+today.ranking.domains:
+  en: "Domains"
+today.ranking.documents:
+  en: "Documents"
+today.ranking.mixed:
+  en: "Mixed"
+today.pending.title:
+  en: "Away to label"
+today.pending.range:
+  en: "%{range} · %{duration}"
+today.pending.rest:
+  en: "Break"
+today.pending.meeting:
+  en: "Meeting"
+today.pending.reading:
+  en: "Reading"
+today.pending.dismiss:
+  en: "Dismiss"
+today.pending.other:
+  en: "Other…"
+timeline.title:
+  en: "Timeline"
+timeline.main_track:
+  en: "Category"
+timeline.lanes.apps:
+  en: "App lanes"
+timeline.lanes.category:
+  en: "Category only"
+timeline.full_day:
+  en: "Full 24 h"
+timeline.fit_activity:
+  en: "Activity range"
+timeline.block_label:
+  en: "%{name} %{duration}"
+timeline.state_label:
+  en: "%{state} %{duration}"
+timeline.state.idle:
+  en: "Idle"
+timeline.state.locked:
+  en: "Locked"
+timeline.state.sleep:
+  en: "Asleep"
+timeline.state.core_stopped:
+  en: "Core not running"
+timeline.state.no_foreground:
+  en: "No foreground"
+timeline.state.excluded:
+  en: "Excluded"
+timeline.state.gap:
+  en: "Collection gap"
+timeline.tooltip.rule:
+  en: "Rule: %{condition} → %{category}"
+timeline.tooltip.manual:
+  en: "Manual label"
+timeline.tooltip.unmatched:
+  en: "No rule matched"
+details.week:
+  en: "Last 7 days"
+details.titles:
+  en: "Common titles"
+details.why:
+  en: "Why this result"
+details.today:
+  en: "Today"
+details.merged:
+  en: "Merged · %{count} raw intervals"
+details.rule_line:
+  en: "Rule: %{condition}"
+details.rule_priority:
+  en: "%{rule} · priority %{priority}"
+details.effective:
+  en: "Effective"
+details.rule_set:
+  en: "Rule set %{name}"
+details.actual:
+  en: "Actual: %{value}"
+details.no_shadowed:
+  en: "Not shadowed: no other rule matched"
+details.no_rule:
+  en: "No rule matched this interval"
+details.action.classify:
+  en: "Categorize as…"
+details.action.privacy:
+  en: "Create privacy rule"
+duration.hm:
+  en: "%{hours}h %{minutes}m"
+duration.h:
+  en: "%{hours}h"
+duration.m:
+  en: "%{minutes}m"
+duration.unit.hour:
+  en: "h"
+duration.unit.minute:
+  en: "m"
+format.percent:
+  en: "%{value}%"
+date.month.1:
+  en: "Jan"
+date.month.2:
+  en: "Feb"
+date.month.3:
+  en: "Mar"
+date.month.4:
+  en: "Apr"
+date.month.5:
+  en: "May"
+date.month.6:
+  en: "Jun"
+date.month.7:
+  en: "Jul"
+date.month.8:
+  en: "Aug"
+date.month.9:
+  en: "Sep"
+date.month.10:
+  en: "Oct"
+date.month.11:
+  en: "Nov"
+date.month.12:
+  en: "Dec"
+date.weekday.mon:
+  en: "Mon"
+date.weekday.tue:
+  en: "Tue"
+date.weekday.wed:
+  en: "Wed"
+date.weekday.thu:
+  en: "Thu"
+date.weekday.fri:
+  en: "Fri"
+date.weekday.sat:
+  en: "Sat"
+date.weekday.sun:
+  en: "Sun"
+date.month_day_weekday:
+  en: "%{weekday}, %{month} %{day}"
+category.builtin.development:
+  en: "Development"
+category.builtin.learning:
+  en: "Learning"
+category.builtin.communication:
+  en: "Communication"
+category.builtin.entertainment:
+  en: "Entertainment"
+category.builtin.system:
+  en: "System & tools"
+category.builtin.uncategorized:
+  en: "Unclassified"

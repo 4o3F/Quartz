@@ -18,5 +18,9 @@ serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 
+[target.'cfg(windows)'.dev-dependencies]
+raw-window-handle = "0.6.2"
+windows = { version = "0.62.2", default-features = false, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 [lints]
 workspace = true
