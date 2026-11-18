@@ -3,9 +3,9 @@
   "extends": [
     "config:recommended",
     "default:prHourlyLimitNone",
-    "default:rebaseStalePrs",
     "group:monorepos"
   ],
+  "rebaseWhen": "conflicted",
   "platformAutomerge": false,
   "lockFileMaintenance": {
     "enabled": true,
