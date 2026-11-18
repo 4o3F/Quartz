@@ -43,6 +43,10 @@
         "tooltip": [
           { "offset_y": 0, "blur": 2, "color": "ambient" },
           { "offset_y": 8, "blur": 16, "color": "key" }
+        ],
+        "overlay": [
+          { "offset_y": 0, "blur": 8, "color": "ambient" },
+          { "offset_y": 14, "blur": 28, "color": "key" }
         ]
       }
     },

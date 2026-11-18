@@ -5167,6 +5167,7 @@ dependencies = [
  "anyhow",
  "gpui-kit",
  "jiff",
+ "num-traits",
  "quartz-i18n",
  "quartz-protocol",
  "quartz-ui",
@@ -5174,6 +5175,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "tracing",
  "windows 0.62.2",
 ]
 

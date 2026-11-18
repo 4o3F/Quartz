@@ -1,10 +1,10 @@
 //! The mock-data preview window used for screenshots, optionally opened off-screen and never
 //! activated so it cannot take focus from the desktop.
 
-use std::{cell::Cell, rc::Rc, str::FromStr};
+use std::{cell::Cell, num::ParseIntError, rc::Rc, str::FromStr};
 
 use gpui_kit::{
-    App, AppContext as _, Bounds, Pixels, Point, Size, Window, WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, Pixels, Point, Window, WindowOptions, point, px, size,
 };
 use quartz_i18n::Language;
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
@@ -17,22 +17,23 @@ use windows::Win32::{
 };
 
 use super::{
-    AppShell, Page, ShellInit,
+    AppShell, Page, RangeChoice, ShellInit,
     runtime::{
         Appearance, GpuiError, GpuiSnafu, LoadThemeError, ThemeBundle, run_gpui, window_options,
     },
 };
 use crate::{
     format::{Formatter, Msg},
+    layout::{MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH},
     model::{DetailsSubject, SegmentId},
     sample::SampleDay,
+    text_scale::{LiveTextScale, ReadTextScaleError, TextScale, TextScaleSource},
 };
 
-/// The default main window size of 07 section 2.
-const WINDOW_SIZE: Size<f32> = Size {
-    width: 1280.,
-    height: 800.,
-};
+/// The default main window width of 07 section 2.
+const DEFAULT_WIDTH: u16 = 1280;
+/// The default main window height of 07 section 2.
+const DEFAULT_HEIGHT: u16 = 800;
 /// Where the hover preview puts the pointer: over the sample's hovered segment.
 const HOVER_POSITION: Point<Pixels> = point(px(900.), px(330.));
 /// A screen coordinate outside every display.
@@ -47,11 +48,15 @@ pub enum PreviewState {
     TodayDetails,
     /// Today with the tooltip of a sample segment showing.
     TodayHover,
+    /// Today with the timeline showing the whole day, where short intervals become markers.
+    TodayFullDay,
 }
 
-/// A preview state name is not one of `today`, `today-details` or `today-hover`.
+/// A preview state name is not one of `today`, `today-details`, `today-hover` or `today-full-day`.
 #[derive(Debug, Clone, PartialEq, Eq, Snafu)]
-#[snafu(display("unknown preview state {name:?}; expected today, today-details or today-hover"))]
+#[snafu(display(
+    "unknown preview state {name:?}; expected today, today-details, today-hover or today-full-day"
+))]
 pub struct ParsePreviewStateError {
     name: String,
 }
@@ -64,6 +69,7 @@ impl FromStr for PreviewState {
             "today" => Ok(Self::Today),
             "today-details" => Ok(Self::TodayDetails),
             "today-hover" => Ok(Self::TodayHover),
+            "today-full-day" => Ok(Self::TodayFullDay),
             _ => ParsePreviewStateSnafu { name }.fail(),
         }
     }
@@ -99,13 +105,72 @@ pub enum PreviewPlacement {
     Offscreen,
 }
 
+/// The preview window size in logical pixels, at least the minimum window size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PreviewSize {
+    width: u16,
+    height: u16,
+}
+
+impl Default for PreviewSize {
+    fn default() -> Self {
+        Self {
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+        }
+    }
+}
+
+/// A preview size is not `<width>x<height>` in logical pixels from 640x480 up.
+#[derive(Debug, Clone, PartialEq, Eq, Snafu)]
+#[non_exhaustive]
+pub enum ParsePreviewSizeError {
+    /// The text has no `x` between two numbers.
+    #[snafu(display("preview size {text:?} is not <width>x<height>"))]
+    Format { text: String },
+    /// A dimension is not a whole number of pixels.
+    #[snafu(display("preview size {text:?} has a dimension that is not a whole number"))]
+    Dimension { text: String, source: ParseIntError },
+    /// The window would be smaller than the minimum window size.
+    #[snafu(display(
+        "preview size {width}x{height} is below the minimum {MIN_WINDOW_WIDTH}x{MIN_WINDOW_HEIGHT}"
+    ))]
+    TooSmall { width: u16, height: u16 },
+}
+
+impl FromStr for PreviewSize {
+    type Err = ParsePreviewSizeError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let Some((width, height)) = text.split_once('x') else {
+            return FormatSnafu { text }.fail();
+        };
+        let width: u16 = width.parse().context(DimensionSnafu { text })?;
+        let height: u16 = height.parse().context(DimensionSnafu { text })?;
+        if f32::from(width) < MIN_WINDOW_WIDTH || f32::from(height) < MIN_WINDOW_HEIGHT {
+            return TooSmallSnafu { width, height }.fail();
+        }
+        Ok(Self { width, height })
+    }
+}
+
+impl PreviewSize {
+    /// The size as GPUI content size.
+    fn content_size(self) -> gpui_kit::Size<Pixels> {
+        size(px(f32::from(self.width)), px(f32::from(self.height)))
+    }
+}
+
 /// Options of the mock-data preview window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PreviewOptions {
     pub language: Language,
     pub appearance: Appearance,
     pub state: PreviewState,
     pub placement: PreviewPlacement,
+    pub size: PreviewSize,
+    /// Overrides the Windows "Text size" setting; `None` follows the system.
+    pub text_scale: Option<TextScale>,
 }
 
 /// Failures while placing the preview window off-screen.
@@ -127,6 +192,9 @@ pub enum PlaceWindowError {
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum RunPreviewError {
+    /// The Windows text size could not be read.
+    #[snafu(display("could not read the text size"))]
+    ReadTextScale { source: ReadTextScaleError },
     /// The embedded theme could not be read.
     #[snafu(display("could not load the embedded theme"))]
     LoadTheme { source: LoadThemeError },
@@ -171,12 +239,21 @@ fn place_offscreen(window: &Window) -> Result<(), PlaceWindowError> {
 }
 
 impl PreviewState {
+    /// The timeline range this state opens with.
+    const fn range(self) -> RangeChoice {
+        match self {
+            Self::TodayFullDay => RangeChoice::FullDay,
+            Self::Today | Self::TodayDetails | Self::TodayHover => RangeChoice::Activity,
+        }
+    }
+
     /// The details subject and hovered segment this state opens on the sample day.
     fn initial_view(self, sample: &SampleDay) -> (Option<DetailsSubject>, Option<SegmentId>) {
         match self {
             Self::Today => (None, None),
             Self::TodayDetails => (Some(DetailsSubject::Segment(sample.details_segment)), None),
             Self::TodayHover => (None, Some(sample.hover_segment)),
+            Self::TodayFullDay => (None, None),
         }
     }
 }
@@ -190,14 +267,22 @@ impl PreviewOptions {
         let theme = ThemeBundle::embedded().context(LoadThemeSnafu)?;
         let sample = SampleDay::new();
         let (details, hover) = self.state.initial_view(&sample);
-        let init = ShellInit {
-            day: sample.day,
-            formatter: Formatter::new(self.language),
-            tokens: theme.tokens(),
-            page: Page::Today,
-            details,
-        };
+        let tokens = theme.tokens();
+        let text_scale_source = self
+            .text_scale
+            .map_or(TextScaleSource::System, TextScaleSource::Fixed);
         run_gpui(self.language, self.appearance, theme, move |cx| {
+            // The system setting is read through WinRT, which would initialize COM on this thread
+            // as a multithreaded apartment if GPUI had not made it a single-threaded one first.
+            let init = ShellInit {
+                day: sample.day,
+                formatter: Formatter::new(self.language),
+                tokens,
+                page: Page::Today,
+                details,
+                range: self.state.range(),
+                text_scale: LiveTextScale::read(text_scale_source).context(ReadTextScaleSnafu)?,
+            };
             self.open_window(init, hover, cx)
         })
     }
@@ -209,7 +294,7 @@ impl PreviewOptions {
         hover: Option<SegmentId>,
         cx: &mut App,
     ) -> Result<(), RunPreviewError> {
-        let window_size = size(px(WINDOW_SIZE.width), px(WINDOW_SIZE.height));
+        let window_size = self.size.content_size();
         // GPUI moves bounds outside every display back onto the primary one, so the window is
         // created on-screen but hidden and moved away before it is first shown.
         let bounds = Bounds::centered(None, window_size, cx);
@@ -228,8 +313,8 @@ impl PreviewOptions {
                 placement_failure.set(Some(error));
             }
             self.appearance.observe(window);
-            cx.new(|_| {
-                let mut shell = AppShell::new(init);
+            cx.new(|cx| {
+                let mut shell = AppShell::new(init, window, cx);
                 if let Some(segment) = hover {
                     shell.show_tooltip(segment, HOVER_POSITION);
                 }
@@ -271,6 +356,51 @@ mod tests {
         assert_eq!(
             PreviewState::TodayHover.initial_view(&sample),
             (None, Some(sample.hover_segment))
+        );
+    }
+
+    #[test]
+    fn only_the_full_day_state_changes_the_timeline_range() {
+        assert_eq!("today-full-day".parse(), Ok(PreviewState::TodayFullDay));
+        assert_eq!(PreviewState::TodayFullDay.range(), RangeChoice::FullDay);
+        assert_eq!(PreviewState::TodayDetails.range(), RangeChoice::Activity);
+    }
+
+    #[test]
+    fn preview_sizes_parse_strictly_and_respect_the_minimum() {
+        assert_eq!(
+            "960x700".parse(),
+            Ok(PreviewSize {
+                width: 960,
+                height: 700
+            })
+        );
+        assert_eq!(
+            "640x480".parse(),
+            Ok(PreviewSize {
+                width: 640,
+                height: 480
+            })
+        );
+        assert!(matches!(
+            "639x480".parse::<PreviewSize>(),
+            Err(ParsePreviewSizeError::TooSmall { width: 639, .. })
+        ));
+        assert!(matches!(
+            "640x479".parse::<PreviewSize>(),
+            Err(ParsePreviewSizeError::TooSmall { height: 479, .. })
+        ));
+        assert!(matches!(
+            "960".parse::<PreviewSize>(),
+            Err(ParsePreviewSizeError::Format { .. })
+        ));
+        assert!(matches!(
+            "wide x tall".parse::<PreviewSize>(),
+            Err(ParsePreviewSizeError::Dimension { .. })
+        ));
+        assert_eq!(
+            PreviewSize::default().content_size(),
+            size(px(1280.), px(800.))
         );
     }
 

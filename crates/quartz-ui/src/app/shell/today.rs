@@ -8,18 +8,22 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px,
 };
 
-use super::AppShell;
+use super::{AppShell, Frame, stat_grid::StatGrid};
 use crate::{
     app::{
+        measure::TextMeasure,
         metrics::{Density, Ramp},
         widgets::{ButtonContent, RampExt as _, Widgets},
     },
     format::{DurationParts, Formatter, Msg},
+    layout::ChartArrangement,
     model::{DaySummary, Share},
 };
 
-/// Width of the date picker button, wide enough for the longest date of either language.
-const DATE_PICKER_WIDTH: f32 = 200.;
+/// Narrowest the date picker button gets; it grows with the formatted date (11 section 5.6).
+const DATE_PICKER_MIN_WIDTH: f32 = 120.;
+/// Widest the date picker button gets; a longer date ends with an ellipsis.
+const DATE_PICKER_MAX_WIDTH: f32 = 240.;
 
 /// What one cell of the status card shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +36,73 @@ enum StatValue {
     },
     Percent(Share),
     SwitchesPerHour(u64),
+}
+
+/// Which text of a status value a segment is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentRole {
+    Number,
+    Unit,
+}
+
+/// One run of text of a status value with its type step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatSegment {
+    text: String,
+    ramp: Ramp,
+    role: SegmentRole,
+}
+
+impl StatValue {
+    /// The text runs of the value, such as `7` `小时` `5` `分`.
+    fn segments(self, formatter: Formatter) -> Vec<StatSegment> {
+        let whole = |text: String, ramp| {
+            vec![StatSegment {
+                text,
+                ramp,
+                role: SegmentRole::Number,
+            }]
+        };
+        match self {
+            Self::Percent(share) => whole(formatter.percent(share), Ramp::Subtitle),
+            Self::SwitchesPerHour(rate) => whole(formatter.switches(rate), Ramp::Subtitle),
+            Self::Duration {
+                duration,
+                number,
+                unit,
+            } => {
+                let (hours, minutes) = (
+                    formatter.text(Msg::UnitHour),
+                    formatter.text(Msg::UnitMinute),
+                );
+                let pairs = match DurationParts::from_duration(duration) {
+                    DurationParts::Minutes(count) => vec![(count, minutes)],
+                    DurationParts::Hours(count) => vec![(count, hours)],
+                    DurationParts::HoursMinutes {
+                        hours: hour_count,
+                        minutes: minute_count,
+                    } => vec![(hour_count, hours), (minute_count, minutes)],
+                };
+                pairs
+                    .into_iter()
+                    .flat_map(|(count, label)| {
+                        [
+                            StatSegment {
+                                text: count.to_string(),
+                                ramp: number,
+                                role: SegmentRole::Number,
+                            },
+                            StatSegment {
+                                text: label,
+                                ramp: unit,
+                                role: SegmentRole::Unit,
+                            },
+                        ]
+                    })
+                    .collect()
+            }
+        }
+    }
 }
 
 /// One cell of the status card.
@@ -87,10 +158,15 @@ impl AppShell {
     pub(super) fn render_today(
         &self,
         ui: &Widgets<'_>,
-        main_width: Pixels,
+        frame: &Frame<'_>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let space = &ui.metrics.space;
+        let arrangement = frame.layout.class.chart_arrangement();
+        let charts = div().flex().gap(space.s).map(|row| match arrangement {
+            ChartArrangement::SideBySide => row.flex_row(),
+            ChartArrangement::Stacked => row.flex_col(),
+        });
         let content = div()
             .flex()
             .flex_col()
@@ -102,15 +178,12 @@ impl AppShell {
             .pt(space.xxxl)
             .pb(space.xxl)
             .child(self.render_date_bar(ui))
-            .child(self.render_status(ui))
-            .child(self.render_timeline(ui, main_width, cx))
+            .child(self.render_status(ui, frame.measure))
+            .child(self.render_timeline(ui, frame, cx))
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(space.s)
-                    .child(self.render_hourly(ui))
-                    .child(self.render_ranking(ui, cx)),
+                charts
+                    .child(self.render_hourly(ui, frame, cx))
+                    .child(self.render_ranking(ui, frame, cx)),
             )
             .children(self.render_pending(ui));
         div()
@@ -140,9 +213,18 @@ impl AppShell {
                     density,
                     ButtonContent::Icon(IconName::Calendar),
                 )
-                .w(px(DATE_PICKER_WIDTH))
+                .min_w(px(DATE_PICKER_MIN_WIDTH))
+                .max_w(px(DATE_PICKER_MAX_WIDTH))
                 .justify_start()
-                .child(div().flex_1().child(self.formatter.date(self.day.date())))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(self.formatter.date(self.day.date())),
+                )
                 .child(ui.icon(
                     IconName::ChevronDown,
                     density,
@@ -161,108 +243,117 @@ impl AppShell {
             ))
     }
 
-    fn render_status(&self, ui: &Widgets<'_>) -> impl IntoElement {
-        let divider = ui.palette.stroke_divider;
-        let cells = stat_cells(self.day.summary())
+    /// The cells in equal columns: the largest of 6, 3, 2 or 1 columns in which the widest cell
+    /// still fits the width the card gives the grid (07 section 2.1).
+    fn render_status(&self, ui: &Widgets<'_>, measure: &TextMeasure<'_>) -> impl IntoElement {
+        let views: Vec<StatCellView> = stat_cells(self.day.summary())
             .into_iter()
-            .enumerate()
-            .map(|(index, cell)| {
-                let cell = self.stat_cell(ui, cell);
-                if index == 0 {
-                    cell.pl(px(0.))
-                } else {
-                    cell.border_l_1().border_color(divider)
-                }
-            });
+            .map(|cell| self.stat_cell(ui, measure, cell))
+            .collect();
+        let widest = views
+            .iter()
+            .fold(0., |widest, view| f32::max(widest, view.width));
+        let height = views
+            .iter()
+            .fold(px(0.), |height, view| height.max(view.height));
+        let cells = views
+            .into_iter()
+            .map(|view| view.element.into_any_element())
+            .collect();
         ui.card()
             .flex()
             .flex_col()
             .gap(ui.metrics.space.s)
             .px(ui.metrics.space.l)
             .py(ui.metrics.space.m)
-            .child(div().flex().flex_row().children(cells))
+            .child(StatGrid::new(
+                cells,
+                widest,
+                height,
+                ui.metrics.space.l,
+                ui.metrics.space.s,
+            ))
             .child(self.render_share_bar(ui))
     }
 
-    /// One status cell; the caller sets every cell but the first off with a divider.
-    fn stat_cell(&self, ui: &Widgets<'_>, cell: StatCell) -> Div {
+    /// One status cell with its content width and height.
+    fn stat_cell(
+        &self,
+        ui: &Widgets<'_>,
+        measure: &TextMeasure<'_>,
+        cell: StatCell,
+    ) -> StatCellView {
         let palette = ui.palette;
-        let value = match cell.value {
-            StatValue::Duration {
-                duration,
-                number,
-                unit,
-            } => duration_value(ui, self.formatter, duration, number, unit),
-            StatValue::Percent(share) => text_value(ui, self.formatter.percent(share)),
-            StatValue::SwitchesPerHour(rate) => text_value(ui, self.formatter.switches(rate)),
-        };
-        div()
+        let segments = cell.value.segments(self.formatter);
+        let gap = f32::from(ui.metrics.space.xxs);
+        let value_width: f32 = segments
+            .iter()
+            .map(|segment| measure.width(&segment.text, segment.ramp) + gap)
+            .sum();
+        let trailing_width = cell.trailing.map_or(0., |_| {
+            f32::from(ui.metrics.density(Density::Compact).icon_size)
+        });
+        let label = self.formatter.text(cell.label);
+        let width = (value_width + trailing_width).max(measure.width(&label, Ramp::Caption));
+        // Baseline alignment of mixed sizes can add a few pixels above the tallest line.
+        let value_height = segments.iter().fold(px(0.), |height, segment| {
+            height.max(ui.line_height(segment.ramp))
+        }) + ui.metrics.space.xs;
+        let height = value_height + ui.line_height(Ramp::Caption);
+        let value = div()
+            .flex()
+            .flex_row()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .items_baseline()
+            .gap(ui.metrics.space.xxs)
+            .children(segments.into_iter().map(|segment| {
+                let color = match segment.role {
+                    SegmentRole::Number => palette.text_primary,
+                    SegmentRole::Unit => palette.text_secondary,
+                };
+                div()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .ramp(ui, segment.ramp)
+                    .tabular_figures()
+                    .text_color(color)
+                    .child(segment.text)
+            }));
+        let element = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.))
-            .px(ui.metrics.space.l)
+            .overflow_hidden()
             .child(value.when_some(cell.trailing, |value, icon| {
                 value.child(ui.icon(icon, Density::Compact, palette.text_secondary))
             }))
             .child(
                 div()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .ramp(ui, Ramp::Caption)
                     .text_color(palette.text_secondary)
-                    .child(self.formatter.text(cell.label)),
-            )
+                    .child(label),
+            );
+        StatCellView {
+            element,
+            width,
+            height,
+        }
     }
 }
 
-/// Number and unit pairs in different sizes, such as `7` `小时` `5` `分`.
-fn duration_value(
-    ui: &Widgets<'_>,
-    formatter: Formatter,
-    duration: Duration,
-    number: Ramp,
-    unit: Ramp,
-) -> Div {
-    let (hours, minutes) = (
-        formatter.text(Msg::UnitHour),
-        formatter.text(Msg::UnitMinute),
-    );
-    let pairs = match DurationParts::from_duration(duration) {
-        DurationParts::Minutes(count) => vec![(count, minutes)],
-        DurationParts::Hours(count) => vec![(count, hours)],
-        DurationParts::HoursMinutes {
-            hours: hour_count,
-            minutes: minute_count,
-        } => vec![(hour_count, hours), (minute_count, minutes)],
-    };
-    let row = div()
-        .flex()
-        .flex_row()
-        .items_baseline()
-        .gap(ui.metrics.space.xxs);
-    row.children(pairs.into_iter().flat_map(|(count, label)| {
-        [
-            div()
-                .ramp(ui, number)
-                .text_color(ui.palette.text_primary)
-                .child(count.to_string()),
-            div()
-                .ramp(ui, unit)
-                .text_color(ui.palette.text_secondary)
-                .mr(ui.metrics.space.xxs)
-                .child(label),
-        ]
-    }))
-}
-
-/// A status value set as one subtitle string.
-fn text_value(ui: &Widgets<'_>, text: String) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_baseline()
-        .ramp(ui, Ramp::Subtitle)
-        .text_color(ui.palette.text_primary)
-        .child(text)
+/// A status cell ready to place, with the room its content needs.
+struct StatCellView {
+    element: Div,
+    width: f32,
+    height: Pixels,
 }
 
 #[cfg(test)]
@@ -279,5 +370,31 @@ mod tests {
             .collect();
         assert_eq!(opening, [Msg::StatUnclassified]);
         assert_eq!(cells.first().map(|cell| cell.label), Some(Msg::StatActive));
+    }
+
+    #[test]
+    fn duration_values_alternate_numbers_and_units_and_text_values_are_one_run() {
+        let formatter = Formatter::new(quartz_i18n::Language::English);
+        let value = StatValue::Duration {
+            duration: Duration::from_secs(7 * 3600 + 5 * 60),
+            number: Ramp::Title,
+            unit: Ramp::BodyLarge,
+        };
+        let roles: Vec<SegmentRole> = value
+            .segments(formatter)
+            .iter()
+            .map(|segment| segment.role)
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                SegmentRole::Number,
+                SegmentRole::Unit,
+                SegmentRole::Number,
+                SegmentRole::Unit
+            ]
+        );
+        let percent = StatValue::Percent(Share::of(Duration::from_secs(1), Duration::from_secs(2)));
+        assert_eq!(percent.segments(formatter).len(), 1);
     }
 }

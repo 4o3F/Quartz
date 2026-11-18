@@ -7,12 +7,14 @@ use gpui_kit::{
     App, Bounds, Pixels, TitlebarOptions, Window, WindowBounds, WindowOptions,
     base::LayoutDirection,
     component::{Theme, ThemeMode, ThemeSet, TitleBar},
+    px, size,
 };
 use quartz_i18n::Language;
 use serde::Deserialize;
 use snafu::{ResultExt as _, Snafu};
 
 use super::tokens::{LoadPaletteError, Tokens};
+use crate::layout::{MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
 
 const THEME_JSON: &str = include_str!("../../themes/fluent.json");
 
@@ -143,10 +145,12 @@ impl Appearance {
     }
 }
 
-/// Options of a window with the custom Quartz title bar.
+/// Options of a window with the custom Quartz title bar and the minimum window size of 07
+/// section 2.3.
 pub(crate) fn window_options(title: String, bounds: Bounds<Pixels>) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
         titlebar: Some(TitlebarOptions {
             title: Some(title.into()),
             ..TitleBar::title_bar_options()

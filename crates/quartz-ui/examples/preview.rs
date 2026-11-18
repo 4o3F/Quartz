@@ -1,9 +1,12 @@
 //! Opens the main window on the sample day.
 //!
-//! `QUARTZ_PREVIEW_THEME=system|light|dark`, `QUARTZ_PREVIEW_STATE=today|today-details|today-hover`,
+//! `QUARTZ_PREVIEW_THEME=system|light|dark`, `QUARTZ_PREVIEW_STATE=today|today-details|today-hover|today-full-day`,
 //! `QUARTZ_PREVIEW_LANG=zh-CN|en|en-XA`, `QUARTZ_PREVIEW_OFFSCREEN=0|1` (with 1 the window is
-//! created hidden, moved off every display and shown without activation). Unset variables take the
-//! first value; any other value is an error written to standard error.
+//! created hidden, moved off every display and shown without activation),
+//! `QUARTZ_PREVIEW_SIZE=<width>x<height>` in logical pixels from 640x480 up (default 1280x800) and
+//! `QUARTZ_PREVIEW_TEXT_SCALE=<factor>` from 1.0 to 2.25 (default: the Windows "Text size"
+//! setting). Unset variables take the first value; any other value is an error written to
+//! standard error.
 //!
 //! GUI subsystem on Windows so launching it never opens a console window.
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -14,8 +17,9 @@ mod preview {
 
     use quartz_i18n::{Language, ParseLanguageError};
     use quartz_ui::{
-        Appearance, ParseAppearanceError, ParsePreviewStateError, PreviewOptions, PreviewPlacement,
-        PreviewState, RunPreviewError,
+        Appearance, ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError,
+        ParseTextScaleError, PreviewOptions, PreviewPlacement, PreviewSize, PreviewState,
+        RunPreviewError, TextScale,
     };
     use snafu::{IntoError, ResultExt as _, Snafu};
 
@@ -28,6 +32,10 @@ mod preview {
         State { source: ParsePreviewStateError },
         #[snafu(display("QUARTZ_PREVIEW_LANG"))]
         Language { source: ParseLanguageError },
+        #[snafu(display("QUARTZ_PREVIEW_SIZE"))]
+        Size { source: ParsePreviewSizeError },
+        #[snafu(display("QUARTZ_PREVIEW_TEXT_SCALE"))]
+        TextScale { source: ParseTextScaleError },
         #[snafu(display("QUARTZ_PREVIEW_OFFSCREEN must be 0 or 1, not {value:?}"))]
         Offscreen { value: String },
         #[snafu(display("{variable} is not valid Unicode: {value:?}"))]
@@ -90,6 +98,10 @@ mod preview {
             appearance: setting("QUARTZ_PREVIEW_THEME", Appearance::System, ThemeSnafu)?,
             state: setting("QUARTZ_PREVIEW_STATE", PreviewState::Today, StateSnafu)?,
             placement,
+            size: setting("QUARTZ_PREVIEW_SIZE", PreviewSize::default(), SizeSnafu)?,
+            text_scale: variable("QUARTZ_PREVIEW_TEXT_SCALE")?
+                .map(|value| value.parse::<TextScale>().context(TextScaleSnafu))
+                .transpose()?,
         })
     }
 

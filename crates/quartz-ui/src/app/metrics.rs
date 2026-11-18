@@ -5,6 +5,8 @@
 use gpui_kit::{FontFallbacks, FontWeight, Pixels, SharedString};
 use serde::Deserialize;
 
+use crate::layout::{NavLayout, ShellSizes};
+
 /// Corner radii (11 section 5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 pub(crate) struct Radius {
@@ -164,6 +166,8 @@ pub(crate) struct ShadowLayer {
 pub(crate) struct Shadows {
     /// `shadow.16`: tooltips and the timeline hover card.
     pub(crate) tooltip: Vec<ShadowLayer>,
+    /// `shadow.28`: flyouts and the overlay details panel (11 section 5.5).
+    pub(crate) overlay: Vec<ShadowLayer>,
 }
 
 /// All theme-independent tokens.
@@ -189,6 +193,29 @@ impl Metrics {
             Density::Standard => &self.density.standard,
             Density::Compact => &self.density.compact,
         }
+    }
+
+    /// The width of the navigation in `layout`.
+    #[must_use]
+    pub(crate) const fn nav_width(&self, layout: NavLayout) -> Pixels {
+        match layout {
+            NavLayout::Expanded => self.layout.nav_width,
+            NavLayout::Rail => self.layout.rail_width,
+        }
+    }
+
+    /// The sizes the shell layout decision needs.
+    #[must_use]
+    pub(crate) fn shell_sizes(&self) -> ShellSizes {
+        ShellSizes::new(
+            f32::from(self.layout.nav_width),
+            f32::from(self.layout.rail_width),
+            f32::from(self.layout.panel_width),
+            f32::from(self.space.xxl),
+            f32::from(self.space.l),
+            f32::from(self.layout.divider),
+            f32::from(self.space.s),
+        )
     }
 
     /// One step of the type ramp.

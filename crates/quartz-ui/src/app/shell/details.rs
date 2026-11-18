@@ -2,48 +2,51 @@
 //! explanation tree and actions.
 
 use gpui_kit::{
-    ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, assets::IconName, div, px,
-    relative,
+    ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement as _, ParentElement as _,
+    Stateful, StatefulInteractiveElement as _, Styled as _, assets::IconName, div,
+    prelude::FluentBuilder as _, px, relative,
 };
 
 use super::AppShell;
 use crate::{
     app::{
+        measure::TextMeasure,
         metrics::{Density, Ramp},
-        widgets::{ButtonContent, RampExt as _, Widgets},
+        widgets::{ButtonContent, PROPORTION_BAR_MIN_WIDTH, RampExt as _, Widgets},
     },
     format::{Arg, Msg, SourceText},
+    layout::{ColumnRange, PanelPlacement},
     model::{BarDay, Details, Explanation, IntervalCard, Share},
 };
 
 /// Height of the 7-day chart.
 const WEEK_CHART_HEIGHT: f32 = 88.;
-/// Width of one day's bar.
-const WEEK_BAR_WIDTH: f32 = 36.;
 /// Rows of the common titles list.
 const TITLE_ROWS: usize = 4;
-/// Height of one common title row.
+/// Smallest height of one common title row; it grows with the text.
 const TITLE_ROW_HEIGHT: f32 = 28.;
-/// Width of a title's proportion bar.
-const TITLE_BAR_WIDTH: f32 = 56.;
 /// Height of a title's proportion bar.
 const TITLE_BAR_HEIGHT: f32 = 4.;
-/// Width of a title's duration column.
-const TITLE_VALUE_WIDTH: f32 = 72.;
+/// The duration column of the common titles: at least a short duration, at most a long one
+/// (11 section 5.6).
+const TITLE_VALUE_RANGE: ColumnRange = ColumnRange::new(32., 96.);
 
 impl AppShell {
+    /// The panel; `placement` decides whether it takes width from the main area or floats over it.
     pub(super) fn render_details(
         &self,
         ui: &Widgets<'_>,
+        measure: &TextMeasure<'_>,
         details: &Details,
+        placement: PanelPlacement,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let palette = ui.palette;
         let space = &ui.metrics.space;
         let color = palette.category(self.day.category(details.category).color);
         let body = div()
             .id("details-scroll")
+            .track_scroll(&self.details_scroll)
             .flex()
             .flex_col()
             .flex_1()
@@ -59,13 +62,18 @@ impl AppShell {
                     .map(|interval| self.interval_card(ui, interval)),
             )
             .child(self.section(ui, Msg::DetailsWeek, self.week_chart(ui, details, color)))
-            .child(self.section(ui, Msg::DetailsTitles, self.titles(ui, details, color)))
+            .child(self.section(
+                ui,
+                Msg::DetailsTitles,
+                self.titles(ui, measure, details, color),
+            ))
             .child(self.section(
                 ui,
                 Msg::DetailsWhy,
                 self.explanation(ui, details.explanation.as_ref()),
             ));
         div()
+            .id("details-panel")
             .flex()
             .flex_col()
             .flex_shrink_0()
@@ -74,6 +82,13 @@ impl AppShell {
             .bg(palette.fill_layer)
             .border_l_1()
             .border_color(palette.stroke_divider)
+            .when(placement == PanelPlacement::Overlay, |panel| {
+                panel.shadow(ui.shadows(&ui.metrics.shadow.overlay))
+            })
+            .track_focus(&self.panel_focus)
+            .on_key_down(cx.listener(|this, event, window, cx| {
+                this.dismiss_overlay_on_escape(event, window, cx);
+            }))
             .child(self.details_header(ui, details, cx))
             .child(body)
             .child(self.details_actions(ui))
@@ -121,12 +136,13 @@ impl AppShell {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(close_size)
+                    .min_w(close_size)
+                    .min_h(close_size)
                     .rounded(ui.metrics.radius.control)
                     .cursor_pointer()
                     .hover(ui.subtle_hover())
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.close_details(cx);
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.close_details(window, cx);
                     }))
                     .child(ui.icon(IconName::Close, Density::Compact, palette.text_primary)),
             )
@@ -269,12 +285,13 @@ impl AppShell {
                 div()
                     .flex()
                     .flex_1()
-                    .justify_center()
+                    .min_w(px(0.))
                     .items_end()
                     .h_full()
+                    .px(ui.metrics.space.xs)
                     .child(
                         div()
-                            .w(px(WEEK_BAR_WIDTH))
+                            .w_full()
                             .h(px(height))
                             .rounded_t(ui.metrics.timeline.block_radius)
                             .bg(color),
@@ -309,7 +326,13 @@ impl AppShell {
             .child(labels)
     }
 
-    fn titles(&self, ui: &Widgets<'_>, details: &Details, color: Hsla) -> Div {
+    fn titles(
+        &self,
+        ui: &Widgets<'_>,
+        measure: &TextMeasure<'_>,
+        details: &Details,
+        color: Hsla,
+    ) -> Div {
         let palette = ui.palette;
         let bar_radius = ui.metrics.timeline.block_radius;
         let longest = details
@@ -318,14 +341,23 @@ impl AppShell {
             .map(|row| row.total)
             .max()
             .unwrap_or_default();
-        div().flex().flex_col().gap(ui.metrics.space.xs).children(
-            details.titles.iter().take(TITLE_ROWS).map(|row| {
+        let rows = || details.titles.iter().take(TITLE_ROWS);
+        let durations: Vec<String> = rows()
+            .map(|row| self.formatter.duration(row.total))
+            .collect();
+        let value_width = TITLE_VALUE_RANGE
+            .select(measure.widths(durations.iter().map(String::as_str), Ramp::Caption));
+        div()
+            .flex()
+            .flex_col()
+            .gap(ui.metrics.space.xs)
+            .children(rows().zip(durations).map(|(row, duration)| {
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(ui.metrics.space.m)
-                    .h(px(TITLE_ROW_HEIGHT))
+                    .min_h(ui.height_for_text(px(TITLE_ROW_HEIGHT), Ramp::Caption))
                     .child(
                         div()
                             .flex_1()
@@ -338,9 +370,9 @@ impl AppShell {
                     )
                     .child(
                         div()
-                            .w(px(TITLE_BAR_WIDTH))
+                            .flex_1()
+                            .min_w(px(PROPORTION_BAR_MIN_WIDTH))
                             .h(px(TITLE_BAR_HEIGHT))
-                            .flex_shrink_0()
                             .rounded(bar_radius)
                             .bg(palette.fill_subtle_hover)
                             .child(
@@ -353,16 +385,23 @@ impl AppShell {
                     )
                     .child(
                         div()
-                            .w(px(TITLE_VALUE_WIDTH))
+                            .w(px(value_width))
                             .flex_shrink_0()
                             .flex()
                             .justify_end()
                             .ramp(ui, Ramp::Caption)
+                            .tabular_figures()
                             .text_color(palette.text_secondary)
-                            .child(self.formatter.duration(row.total)),
+                            .child(
+                                div()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(duration),
+                            ),
                     )
-            }),
-        )
+            }))
     }
 
     /// The explain tree: rule, rule set, the matched condition with its actual value.

@@ -31,9 +31,13 @@ mod format;
 #[cfg(windows)]
 mod launch;
 #[cfg(any(windows, test))]
+mod layout;
+#[cfg(any(windows, test))]
 mod model;
 #[cfg(all(feature = "preview", any(windows, test)))]
 mod sample;
+#[cfg(any(windows, test))]
+mod text_scale;
 #[cfg(any(windows, test))]
 mod timeline_scale;
 
@@ -41,8 +45,12 @@ mod timeline_scale;
 pub use app::{Appearance, GpuiError, LoadPaletteError, LoadThemeError};
 #[cfg(all(windows, feature = "preview"))]
 pub use app::{
-    ParseAppearanceError, ParsePreviewStateError, PlaceWindowError, PreviewOptions,
-    PreviewPlacement, PreviewState, RunPreviewError,
+    ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError, PlaceWindowError,
+    PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, RunPreviewError,
 };
 #[cfg(windows)]
 pub use launch::{RunOptions, RunUiError};
+#[cfg(all(windows, feature = "preview"))]
+pub use text_scale::{ParseTextScaleError, TextScale};
+#[cfg(windows)]
+pub use text_scale::{ReadTextScaleError, ValidateTextScaleError};

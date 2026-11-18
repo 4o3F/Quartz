@@ -6,40 +6,51 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px,
 };
 
-use super::{AppShell, NavLayout, Page};
-use crate::app::{
-    metrics::{Density, Ramp},
-    widgets::{RampExt as _, Widgets},
+use super::{AppShell, Page};
+use crate::{
+    app::{
+        metrics::{Density, Ramp},
+        widgets::{RampExt as _, Widgets},
+    },
+    layout::{NavLayout, ShellLayout, WindowClass},
 };
 
-/// Height of a navigation item, as in the WinUI navigation view.
+/// Smallest height of a navigation item, as in the WinUI navigation view; it grows with the text.
 const ITEM_HEIGHT: f32 = 36.;
 
 impl AppShell {
-    pub(super) fn render_nav(&self, ui: &Widgets<'_>, cx: &mut Context<Self>) -> impl IntoElement {
-        let layout = self.nav_layout();
+    /// Only the Expanded class has a collapse button: the other classes always show the rail.
+    pub(super) fn render_nav(
+        &self,
+        ui: &Widgets<'_>,
+        shell: ShellLayout,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let layout = shell.nav;
         let space = &ui.metrics.space;
         div()
             .flex()
             .flex_col()
             .flex_shrink_0()
-            .w(layout.width(ui.metrics))
+            .w(ui.metrics.nav_width(layout))
             .h_full()
             .p(space.xs)
             .gap(space.xxs)
-            .child(
-                div()
-                    .id("nav-toggle")
-                    .flex()
-                    .items_center()
-                    .h(px(ITEM_HEIGHT))
-                    .px(space.m)
-                    .rounded(ui.metrics.radius.control)
-                    .cursor_pointer()
-                    .hover(ui.subtle_hover())
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_nav(cx)))
-                    .child(ui.icon(IconName::Menu, Density::Compact, ui.palette.text_primary)),
-            )
+            .when(shell.class == WindowClass::Expanded, |nav| {
+                nav.child(
+                    div()
+                        .id("nav-toggle")
+                        .flex()
+                        .items_center()
+                        .min_h(px(ITEM_HEIGHT))
+                        .px(space.m)
+                        .rounded(ui.metrics.radius.control)
+                        .cursor_pointer()
+                        .hover(ui.subtle_hover())
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_nav(cx)))
+                        .child(ui.icon(IconName::Menu, Density::Compact, ui.palette.text_primary)),
+                )
+            })
             .child(
                 div().flex().flex_col().gap(space.xxs).children(
                     Page::NAV_ITEMS
@@ -67,7 +78,7 @@ impl AppShell {
             .flex_row()
             .items_center()
             .gap(ui.metrics.space.m)
-            .h(px(ITEM_HEIGHT))
+            .min_h(px(ITEM_HEIGHT))
             .px(ui.metrics.space.m)
             .rounded(ui.metrics.radius.control)
             .ramp(ui, Ramp::Body)
@@ -81,7 +92,14 @@ impl AppShell {
             .on_click(cx.listener(move |this, _, _, cx| this.set_page(page, cx)))
             .child(ui.icon(page.icon(), Density::Compact, palette.text_primary))
             .when(layout == NavLayout::Expanded, |item| {
-                item.child(self.formatter.text(page.label()))
+                item.child(
+                    div()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(self.formatter.text(page.label())),
+                )
             })
     }
 }

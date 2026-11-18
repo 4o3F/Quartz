@@ -5,6 +5,7 @@
 //! data layer later fills the same [`model`](crate::model) types from protocol messages; [`AppShell`]
 //! reads only these view models.
 
+mod measure;
 mod metrics;
 #[cfg(feature = "preview")]
 mod preview;
@@ -16,12 +17,12 @@ mod widgets;
 pub(crate) use metrics::Ramp;
 #[cfg(feature = "preview")]
 pub use preview::{
-    ParseAppearanceError, ParsePreviewStateError, PlaceWindowError, PreviewOptions,
-    PreviewPlacement, PreviewState, RunPreviewError,
+    ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError, PlaceWindowError,
+    PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, RunPreviewError,
 };
 pub use runtime::{Appearance, GpuiError, LoadThemeError};
 pub(crate) use runtime::{GpuiSnafu, ThemeBundle, run_gpui, window_options};
-pub(crate) use shell::{AppShell, Page, ShellInit};
+pub(crate) use shell::{AppShell, Page, RangeChoice, ShellInit};
 pub use tokens::LoadPaletteError;
 pub(crate) use tokens::Tokens;
 pub(crate) use widgets::{RampExt, Widgets};

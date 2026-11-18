@@ -2,15 +2,19 @@
 
 use std::time::Duration;
 
-use gpui_kit::{Div, IntoElement, ParentElement as _, Styled as _, div, px, relative};
+use gpui_kit::{
+    AnyElement, Context, Div, IntoElement, ParentElement as _, Styled as _, div,
+    prelude::FluentBuilder as _, px, relative,
+};
 
-use super::AppShell;
+use super::{AppShell, Frame, LayerCx};
 use crate::{
     app::{
         metrics::Ramp,
         widgets::{RampExt as _, Widgets},
     },
     format::{Arg, Msg},
+    layout::{ChartArrangement, ColumnRange},
     model::{HourlyBar, SECONDS_PER_MINUTE, Share},
 };
 
@@ -20,16 +24,47 @@ const SHARE_BAR_HEIGHT: f32 = 8.;
 const CHART_HEIGHT: f32 = 120.;
 /// The time a full-height hourly bar stands for.
 const CHART_SCALE: Duration = Duration::from_hours(1);
-/// Width of one hourly bar.
-const BAR_WIDTH: f32 = 24.;
-/// Width of the value axis labels left of the plot.
-const AXIS_LABEL_WIDTH: f32 = 36.;
+/// Width of the value axis label column: as wide as its widest label (11 section 5.6), but at
+/// least this much so the plot does not jump between languages.
+const AXIS_COLUMN_RANGE: ColumnRange = ColumnRange::new(24., 72.);
+/// Space between the hour labels of the bar axis.
+const HOUR_LABEL_GAP: f32 = 4.;
+/// Hours per label the axis tries, finest first; each divides 24 so labels stay evenly spread.
+const HOUR_STRIDES: [u8; 7] = [1, 2, 3, 4, 6, 8, 12];
+/// The stride used when even the coarsest tried one does not fit: one label at noon-sized spacing.
+const COARSEST_HOUR_STRIDE: u8 = 12;
+
+/// Which hours of the bar axis carry a label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HourStride(u8);
+
+impl HourStride {
+    /// The finest stride whose labels `label_width` wide fit in bar slots `slot_width` wide.
+    fn fit(slot_width: f32, label_width: f32) -> Self {
+        let needed = label_width + HOUR_LABEL_GAP;
+        let stride = HOUR_STRIDES
+            .into_iter()
+            .find(|stride| slot_width * f32::from(*stride) >= needed)
+            .unwrap_or(COARSEST_HOUR_STRIDE);
+        Self(stride)
+    }
+
+    /// Whether the bar of `hour` is labeled.
+    fn labels(self, hour: u32) -> bool {
+        hour.is_multiple_of(u32::from(self.0))
+    }
+}
 
 /// One labeled gridline of the hourly chart, as a fraction of the plot height from the top.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Gridline {
     value: Duration,
     from_top: f32,
+}
+
+/// Whole minutes in `value`.
+fn minutes_of(value: Duration) -> u64 {
+    value.as_secs() / u64::from(SECONDS_PER_MINUTE)
 }
 
 /// Gridlines at the full scale, half of it and zero.
@@ -95,8 +130,23 @@ impl AppShell {
             .child(legend)
     }
 
-    pub(super) fn render_hourly(&self, ui: &Widgets<'_>) -> impl IntoElement {
+    pub(super) fn render_hourly(
+        &self,
+        ui: &Widgets<'_>,
+        frame: &Frame<'_>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let bars = self.day.hourly();
+        let lines = gridlines();
+        let labels: Vec<String> = lines
+            .iter()
+            .map(|line| self.formatter.whole_minutes(minutes_of(line.value)))
+            .collect();
+        let axis_width = AXIS_COLUMN_RANGE.select(
+            frame
+                .measure
+                .widths(labels.iter().map(String::as_str), Ramp::Caption),
+        );
         let plot =
             ui.plot_area()
                 .flex()
@@ -107,14 +157,14 @@ impl AppShell {
                         .relative()
                         .h(px(CHART_HEIGHT))
                         .children(
-                            gridlines()
-                                .into_iter()
-                                .flat_map(|line| self.gridline(ui, line)),
+                            lines.into_iter().zip(labels).flat_map(|(line, label)| {
+                                self.gridline(ui, line, label, axis_width)
+                            }),
                         )
                         .child(
                             div()
                                 .absolute()
-                                .left(px(AXIS_LABEL_WIDTH))
+                                .left(px(axis_width))
                                 .right(px(0.))
                                 .top(px(0.))
                                 .h_full()
@@ -128,31 +178,19 @@ impl AppShell {
                 )
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .pl(px(AXIS_LABEL_WIDTH))
-                        .pt(ui.metrics.space.xs)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_1()
-                                .children(bars.iter().map(|bar| {
-                                    div()
-                                        .flex_1()
-                                        .flex()
-                                        .justify_center()
-                                        .ramp(ui, Ramp::Caption)
-                                        .text_color(ui.palette.text_tertiary)
-                                        .child(bar.hour.to_string())
-                                })),
-                        ),
+                        .relative()
+                        .ml(px(axis_width))
+                        .mt(ui.metrics.space.xs)
+                        .h(ui.line_height(Ramp::Caption))
+                        .child(self.bounds_layer(cx, |layer| layer.shell.hour_labels(layer))),
                 );
         ui.card()
             .flex()
             .flex_col()
-            .flex_1()
-            .min_w(px(0.))
+            .map(|card| match frame.layout.class.chart_arrangement() {
+                ChartArrangement::SideBySide => card.flex_1().min_w(px(0.)),
+                ChartArrangement::Stacked => card.w_full(),
+            })
             .gap(ui.metrics.space.s)
             .p(ui.metrics.space.l)
             .child(
@@ -163,15 +201,50 @@ impl AppShell {
             .child(plot)
     }
 
-    /// A horizontal gridline with its value label centered on it.
-    fn gridline(&self, ui: &Widgets<'_>, line: Gridline) -> [Div; 2] {
+    /// The hour labels under the bars, thinned to the stride that fits the width the layout gave
+    /// the row in this frame.
+    fn hour_labels(&self, layer: &LayerCx<'_>) -> AnyElement {
+        layer.with_ui(|ui, measure, _| {
+            let bars = self.day.hourly();
+            let slot = f32::from(layer.bounds.size.width)
+                / f32::from(u8::try_from(bars.len()).expect("a day has 24 hourly bars"));
+            let stride = HourStride::fit(slot, measure.width("00", Ramp::Caption));
+            div()
+                .flex()
+                .flex_row()
+                .size_full()
+                .children(bars.iter().map(|bar| {
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .justify_center()
+                        .ramp(ui, Ramp::Caption)
+                        .tabular_figures()
+                        .whitespace_nowrap()
+                        .text_color(ui.palette.text_tertiary)
+                        .when(stride.labels(bar.hour), |slot| {
+                            slot.child(bar.hour.to_string())
+                        })
+                }))
+                .into_any_element()
+        })
+    }
+
+    /// A horizontal gridline with its value `label` centered on it, in a column `axis_width` wide.
+    fn gridline(
+        &self,
+        ui: &Widgets<'_>,
+        line: Gridline,
+        label: String,
+        axis_width: f32,
+    ) -> [Div; 2] {
         let top = px(line.from_top * CHART_HEIGHT);
-        let label_height = ui.metrics.ramp(Ramp::Caption).line_height;
-        let minutes = line.value.as_secs() / u64::from(SECONDS_PER_MINUTE);
+        let label_height = ui.line_height(Ramp::Caption);
         [
             div()
                 .absolute()
-                .left(px(AXIS_LABEL_WIDTH))
+                .left(px(axis_width))
                 .right(px(0.))
                 .top(top)
                 .h(ui.metrics.layout.divider)
@@ -179,11 +252,15 @@ impl AppShell {
             div()
                 .absolute()
                 .left(px(0.))
-                .w(px(AXIS_LABEL_WIDTH))
+                .w(px(axis_width))
                 .ramp(ui, Ramp::Caption)
+                .tabular_figures()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
                 .text_color(ui.palette.text_tertiary)
                 .top(top - label_height / 2.)
-                .child(self.formatter.whole_minutes(minutes)),
+                .child(label),
         ]
     }
 
@@ -193,7 +270,7 @@ impl AppShell {
             .flex()
             .flex_col_reverse()
             .gap(ui.metrics.timeline.block_gap)
-            .w(px(BAR_WIDTH))
+            .w_full()
             .rounded_t(ui.metrics.timeline.block_radius)
             .overflow_hidden()
             .children(bar.parts.iter().map(|part| {
@@ -210,9 +287,10 @@ impl AppShell {
             .flex()
             .flex_col()
             .justify_end()
-            .items_center()
             .flex_1()
+            .min_w(px(0.))
             .h_full()
+            .px(ui.metrics.space.xxs)
             .child(stack)
     }
 }
@@ -227,5 +305,21 @@ mod tests {
         let tops: Vec<f32> = lines.iter().map(|line| line.from_top).collect();
         assert_eq!(tops, [0., 0.5, 1.]);
         assert_eq!(lines.first().map(|line| line.value), Some(CHART_SCALE));
+    }
+
+    #[test]
+    fn hour_labels_thin_out_as_the_bars_get_narrower() {
+        let label = 14.;
+        assert_eq!(HourStride::fit(30., label), HourStride(1));
+        assert_eq!(
+            HourStride::fit(13., label),
+            HourStride(2),
+            "13 px slots cannot hold 18 px labels"
+        );
+        assert_eq!(HourStride::fit(7., label), HourStride(3));
+        assert_eq!(HourStride::fit(1., label), HourStride(COARSEST_HOUR_STRIDE));
+        let every_third = HourStride(3);
+        let labeled: Vec<u32> = (0..24).filter(|hour| every_third.labels(*hour)).collect();
+        assert_eq!(labeled, [0, 3, 6, 9, 12, 15, 18, 21]);
     }
 }

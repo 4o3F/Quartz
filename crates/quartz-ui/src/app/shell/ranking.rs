@@ -8,13 +8,14 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px, relative,
 };
 
-use super::AppShell;
+use super::{AppShell, Frame};
 use crate::{
     app::{
         metrics::{Density, Ramp},
-        widgets::{RampExt as _, Segment, Widgets},
+        widgets::{PROPORTION_BAR_MIN_WIDTH, RampExt as _, Segment, Widgets},
     },
     format::Msg,
+    layout::{ChartArrangement, ColumnRange},
     model::{CategoryId, RankKey, RankRow, RankingKind, Share},
 };
 
@@ -22,10 +23,8 @@ use crate::{
 const RANKING_ROWS: usize = 5;
 /// Height of the proportion bar.
 const BAR_HEIGHT: f32 = 6.;
-/// Width of the duration column.
-const VALUE_WIDTH: f32 = 84.;
-/// Width of the name column.
-const NAME_WIDTH: f32 = 150.;
+/// The duration column: as wide as its widest duration, within this range (11 section 5.6).
+const VALUE_RANGE: ColumnRange = ColumnRange::new(32., 96.);
 
 /// The proportion bar of one row: its width relative to the longest row and its category parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +46,17 @@ impl RankBar {
     }
 }
 
+/// The parts of a ranking row that depend on the other rows or on measuring.
+#[derive(Debug, Clone, PartialEq)]
+struct RankCell {
+    /// Position of the row, for its element id.
+    index: usize,
+    /// The formatted total.
+    duration: String,
+    /// The width of the duration column, shared by every row.
+    value_width: f32,
+}
+
 /// Ranking tabs in display order with their element ids.
 const TABS: [(RankingKind, &str); 4] = [
     (RankingKind::Apps, "ranking-apps"),
@@ -59,16 +69,36 @@ impl AppShell {
     pub(super) fn render_ranking(
         &self,
         ui: &Widgets<'_>,
+        frame: &Frame<'_>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let rows = self.day.ranking(self.ranking);
+        let shown = || rows.iter().take(RANKING_ROWS);
         let longest = rows.iter().map(|row| row.total).max().unwrap_or_default();
-        let list = div().flex().flex_col().children(
-            rows.iter()
-                .take(RANKING_ROWS)
-                .enumerate()
-                .map(|(index, row)| self.rank_row(ui, index, row, RankBar::of(row, longest), cx)),
+        let durations: Vec<String> = shown()
+            .map(|row| self.formatter.duration(row.total))
+            .collect();
+        let value_width = VALUE_RANGE.select(
+            frame
+                .measure
+                .widths(durations.iter().map(String::as_str), Ramp::Caption),
         );
+        let list = div()
+            .flex()
+            .flex_col()
+            .children(
+                shown()
+                    .zip(durations)
+                    .enumerate()
+                    .map(|(index, (row, duration))| {
+                        let cell = RankCell {
+                            index,
+                            duration,
+                            value_width,
+                        };
+                        self.rank_row(ui, row, cell, RankBar::of(row, longest), cx)
+                    }),
+            );
         let tabs = ui.segmented(
             "ranking-tabs",
             TABS.map(|(kind, id)| Segment {
@@ -87,15 +117,19 @@ impl AppShell {
         ui.card()
             .flex()
             .flex_col()
-            .flex_1()
-            .min_w(px(0.))
+            .map(|card| match frame.layout.class.chart_arrangement() {
+                ChartArrangement::SideBySide => card.flex_1().min_w(px(0.)),
+                ChartArrangement::Stacked => card.w_full(),
+            })
             .gap(ui.metrics.space.s)
             .p(ui.metrics.space.l)
             .child(
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_center()
+                    .gap(ui.metrics.space.s)
                     .child(
                         div()
                             .flex_1()
@@ -110,8 +144,8 @@ impl AppShell {
     fn rank_row(
         &self,
         ui: &Widgets<'_>,
-        index: usize,
         row: &RankRow,
+        cell: RankCell,
         bar: RankBar,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -127,34 +161,39 @@ impl AppShell {
             RankKey::Document(_) => IconName::FileText,
         };
         div()
-            .id(("rank", index))
+            .id(("rank", cell.index))
             .relative()
             .flex()
             .flex_row()
             .items_center()
             .gap(space.m)
-            .h(row_height)
+            .min_h(row_height)
             .px(space.s)
             .rounded(ui.metrics.radius.control)
             .when(selected, |row| row.bg(palette.fill_subtle_hover))
             .when(!selected, |row| row.hover(ui.subtle_hover()))
             .when_some(subject, |row, subject| {
-                row.cursor_pointer()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.select(subject, cx);
-                    }))
+                row.cursor_pointer().on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        this.select(subject, window, cx);
+                    },
+                ))
             })
             .child(ui.indicator_bar(accent, row_height))
             .child(
                 div()
                     .flex()
                     .flex_row()
+                    .flex_1()
+                    .min_w(px(0.))
                     .items_center()
                     .gap(space.s)
-                    .w(px(NAME_WIDTH))
-                    .flex_shrink_0()
                     .ml(space.xs)
-                    .child(ui.icon(icon, Density::Compact, palette.text_secondary))
+                    .child(div().flex_shrink_0().child(ui.icon(
+                        icon,
+                        Density::Compact,
+                        palette.text_secondary,
+                    )))
                     .child(
                         div()
                             .min_w(px(0.))
@@ -167,6 +206,7 @@ impl AppShell {
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(PROPORTION_BAR_MIN_WIDTH))
                     .h(px(BAR_HEIGHT))
                     .rounded_full()
                     .bg(palette.fill_subtle_hover)
@@ -174,13 +214,21 @@ impl AppShell {
             )
             .child(
                 div()
-                    .w(px(VALUE_WIDTH))
+                    .w(px(cell.value_width))
                     .flex_shrink_0()
                     .flex()
                     .justify_end()
                     .ramp(ui, Ramp::Caption)
+                    .tabular_figures()
                     .text_color(palette.text_secondary)
-                    .child(self.formatter.duration(row.total)),
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(cell.duration),
+                    ),
             )
     }
 

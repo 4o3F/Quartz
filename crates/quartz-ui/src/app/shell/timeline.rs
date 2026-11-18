@@ -1,44 +1,49 @@
 //! The timeline: category main track, per-application swimlanes, axis, hover and selection
-//! (07 section 4, 11 sections 3.4 and 5.3). Blocks are positioned by fractions of the plot width
-//! (see [`crate::timeline_scale`]), so the layout never needs the plot's pixel size and nothing
-//! redraws while idle.
+//! (07 section 4, 11 sections 3.4 and 5.3). The plot is built during prepaint of the frame from
+//! the bounds the layout gave it, so blocks, ticks and labels are placed in logical pixels on
+//! the physical pixel grid of that frame (see [`crate::timeline_scale`]); nothing lags a resize
+//! and nothing is drawn empty first.
 
 use gpui_kit::{
-    ClickEvent, Context, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
+    AnyElement, ClickEvent, Context, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
     MouseMoveEvent, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
     Styled as _, anchored, assets::IconName, div, pattern_slash, point,
-    prelude::FluentBuilder as _, px, relative,
+    prelude::FluentBuilder as _, px,
 };
 
-use super::{AppShell, HoverTarget, LaneMode, RangeChoice};
+use super::{AppShell, Frame, HoverTarget, LaneMode, LayerCx, RangeChoice};
 use crate::{
     app::{
-        metrics::{Density, Metrics, Ramp},
+        measure::TextMeasure,
+        metrics::{Density, Ramp},
         widgets::{ButtonContent, RampExt as _, Segment as SegmentedItem, Widgets},
     },
     format::{Arg, Msg, SourceText},
+    layout::{ColumnRange, LABEL_COLUMN_MAX_WIDTH},
     model::{
         CategoryId, ClockAnomaly, DetailsSubject, Lane, MainBlock, Segment, StateBlock, StateKind,
         TimeSpan,
     },
-    timeline_scale::{View, ZoomStep, fitting_label},
+    timeline_scale::{
+        BuildPlotGridError, Interval, PixelPlacement, PlotGrid, RowTiles, ScaleFactor, Tick,
+        TickBudget, View, ZoomStep,
+    },
 };
 
-/// Width of the label column left of the plot.
-const LABEL_WIDTH: f32 = 140.;
-/// Narrowest plot width assumed when choosing block labels.
-const MIN_PLOT_WIDTH: f32 = 200.;
-/// Width of a tick label, centered on its tick.
-const AXIS_LABEL_WIDTH: f32 = 40.;
-/// Narrowest painted block, so one-pixel blocks stay visible.
-const MIN_BLOCK_WIDTH: f32 = 2.;
-/// Horizontal padding of block text; `timeline_scale` reserves twice this when fitting labels.
+/// The label column left of the plot: as wide as its widest label (11 section 5.6), within this
+/// range; longer application names are ellipsized.
+const LABEL_COLUMN_RANGE: ColumnRange = ColumnRange::new(72., LABEL_COLUMN_MAX_WIDTH);
+/// Widest text an axis tick label shows, for measuring; digits are equally wide (11 section 4.1).
+const TICK_LABEL_SAMPLE: &str = "00:00";
+/// Horizontal padding of block text; the label has to fit between the paddings.
 const BLOCK_TEXT_PADDING: f32 = 6.;
-/// Width of the hover tooltip.
-const TOOLTIP_WIDTH: f32 = 260.;
+/// Narrowest the hover tooltip gets (11 section 5.6).
+const TOOLTIP_MIN_WIDTH: f32 = 200.;
+/// Widest the hover tooltip gets before its text wraps (11 section 5.6).
+const TOOLTIP_MAX_WIDTH: f32 = 320.;
 /// Offset of the tooltip from the pointer.
 const TOOLTIP_OFFSET: (f32, f32) = (12., 16.);
-/// Height of a category chip.
+/// Smallest height of a category chip; it grows with the text.
 const CHIP_HEIGHT: f32 = 20.;
 
 /// Lane-mode choices in display order with their element ids and labels.
@@ -58,13 +63,32 @@ enum BlockHover {
     Hovered,
 }
 
-/// Estimated plot width, used only to decide which labels fit inside blocks: the page width
-/// without the page margins, the card padding, the label column and the plot padding.
-fn estimated_plot_width(main_width: Pixels, metrics: &Metrics) -> f32 {
-    let space = &metrics.space;
-    let page = f32::from(main_width).min(f32::from(metrics.layout.max_content_width));
-    let chrome = 2. * f32::from(space.xxl) + 2. * f32::from(space.l) + f32::from(space.m);
-    (page - chrome - LABEL_WIDTH).max(MIN_PLOT_WIDTH)
+/// What the plot derives from its bounds in the frame it is laid out: the pixel grid and the
+/// ticks that fit.
+#[derive(Debug, Clone, PartialEq)]
+struct PlotGeometry {
+    width: f32,
+    grid: PlotGrid,
+    tick_label_width: f32,
+    ticks: Vec<Tick>,
+}
+
+impl PlotGeometry {
+    /// The geometry of a plot `width` wide showing `view`.
+    fn new(
+        width: f32,
+        scale: ScaleFactor,
+        block_gap: f32,
+        tick_label_width: f32,
+        view: View,
+    ) -> Result<Self, BuildPlotGridError> {
+        Ok(Self {
+            width,
+            grid: PlotGrid::new(width, scale, block_gap)?,
+            tick_label_width,
+            ticks: view.ticks(TickBudget::fit(width, tick_label_width)),
+        })
+    }
 }
 
 impl AppShell {
@@ -106,14 +130,43 @@ impl AppShell {
         }
     }
 
+    /// The height of the main track row.
+    fn track_height(ui: &Widgets<'_>) -> Pixels {
+        ui.height_for_text(ui.metrics.timeline.main_track_height, Ramp::Caption)
+    }
+
+    /// The height of one lane row.
+    fn lane_height(ui: &Widgets<'_>) -> Pixels {
+        ui.height_for_text(ui.metrics.timeline.lane_height, Ramp::Caption)
+    }
+
+    /// The height of the axis row: the token or, when text has grown, the caption line and the
+    /// space above it.
+    fn axis_height(ui: &Widgets<'_>) -> Pixels {
+        ui.metrics
+            .timeline
+            .axis_height
+            .max(ui.line_height(Ramp::Caption) + ui.metrics.space.xs)
+    }
+
+    /// The height of the plot box: the rows between the vertical plot padding.
+    fn plot_height(&self, ui: &Widgets<'_>) -> Pixels {
+        let sizes = &ui.metrics.timeline;
+        let lanes = self.visible_lanes().len();
+        let lane_rows = (sizes.lane_gap + Self::lane_height(ui))
+            * f32::from(
+                u16::try_from(lanes).expect("a day has far fewer than 65536 application lanes"),
+            );
+        2. * ui.metrics.space.xs + Self::track_height(ui) + lane_rows + Self::axis_height(ui)
+    }
+
     pub(super) fn render_timeline(
         &self,
         ui: &Widgets<'_>,
-        main_width: Pixels,
+        frame: &Frame<'_>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let view = self.view();
-        let plot_width = estimated_plot_width(main_width, ui.metrics);
+        let label_width = self.label_column_width(ui, frame.measure);
         ui.card()
             .flex()
             .flex_col()
@@ -124,9 +177,23 @@ impl AppShell {
                 div()
                     .flex()
                     .flex_row()
-                    .child(self.label_column(ui))
-                    .child(self.plot(ui, view, plot_width, cx)),
+                    .gap(ui.metrics.space.s)
+                    .child(self.label_column(ui, label_width))
+                    .child(self.plot(ui, cx)),
             )
+    }
+
+    /// The width of the label column: the widest of the main track label and the lane labels
+    /// (icon, gap and name).
+    fn label_column_width(&self, ui: &Widgets<'_>, measure: &TextMeasure<'_>) -> f32 {
+        let main = measure.width(&self.formatter.text(Msg::TimelineMainTrack), Ramp::Caption);
+        let icon = f32::from(ui.metrics.density(Density::Compact).icon_size)
+            + f32::from(ui.metrics.space.s);
+        let lanes = self
+            .visible_lanes()
+            .iter()
+            .map(|lane| icon + measure.width(&self.day.app(lane.app).short_name, Ramp::Caption));
+        LABEL_COLUMN_RANGE.select(std::iter::once(main).chain(lanes))
     }
 
     fn timeline_header(&self, ui: &Widgets<'_>, cx: &mut Context<Self>) -> Div {
@@ -143,13 +210,15 @@ impl AppShell {
                     .ramp(ui, Ramp::Subtitle)
                     .child(self.formatter.text(Msg::TimelineTitle)),
             )
-            .children(self.day.activity_range().map(|range| {
+            .child(
+                // The span the plot shows, which is not the activity range after a zoom, in
+                // the full-day view, or with the activity margins (07 section 4.1).
                 div()
                     .ramp(ui, Ramp::Caption)
                     .text_color(ui.palette.text_secondary)
                     .mr(ui.metrics.space.s)
-                    .child(range.to_string())
-            }))
+                    .child(self.view().span().to_string()),
+            )
             .child(ui.segmented(
                 "timeline-lanes",
                 LANE_MODES.map(|(mode, id, label)| SegmentedItem {
@@ -183,18 +252,18 @@ impl AppShell {
     }
 
     /// The label column; its rows mirror the plot rows exactly.
-    fn label_column(&self, ui: &Widgets<'_>) -> Div {
+    fn label_column(&self, ui: &Widgets<'_>, width: f32) -> Div {
         let palette = ui.palette;
         let sizes = &ui.metrics.timeline;
         div()
             .flex()
             .flex_col()
             .flex_shrink_0()
-            .w(px(LABEL_WIDTH))
+            .w(px(width))
             .py(ui.metrics.space.xs)
             .child(
                 div()
-                    .h(sizes.main_track_height)
+                    .h(Self::track_height(ui))
                     .flex()
                     .items_center()
                     .ramp(ui, Ramp::Caption)
@@ -204,7 +273,7 @@ impl AppShell {
             .children(self.visible_lanes().iter().map(|lane| {
                 let app = self.day.app(lane.app);
                 div()
-                    .h(sizes.lane_height)
+                    .h(Self::lane_height(ui))
                     .mt(sizes.lane_gap)
                     .flex()
                     .flex_row()
@@ -212,84 +281,124 @@ impl AppShell {
                     .gap(ui.metrics.space.s)
                     .ramp(ui, Ramp::Caption)
                     .text_color(palette.text_secondary)
-                    .child(ui.icon(app.glyph.into(), Density::Compact, palette.text_secondary))
-                    .child(app.short_name.clone())
+                    .child(div().flex_shrink_0().child(ui.icon(
+                        app.glyph.into(),
+                        Density::Compact,
+                        palette.text_secondary,
+                    )))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(app.short_name.clone()),
+                    )
             }))
-            .child(div().h(sizes.axis_height))
+            .child(div().h(Self::axis_height(ui)))
     }
 
-    fn plot(&self, ui: &Widgets<'_>, view: View, plot_width: f32, cx: &mut Context<Self>) -> Div {
-        let rows = div()
-            .flex()
-            .flex_col()
-            .py(ui.metrics.space.xs)
-            .child(self.main_track(ui, view, plot_width, cx))
-            .children(
-                self.visible_lanes()
-                    .iter()
-                    .map(|lane| self.lane_row(ui, view, lane, cx)),
-            )
-            .child(self.axis(ui, view));
+    /// The plot box. Its content is built from the bounds the layout gives the box in this
+    /// frame, so nothing lags a resize, a navigation change or a text size change.
+    fn plot(&self, ui: &Widgets<'_>, cx: &mut Context<Self>) -> Div {
         ui.plot_area()
             .relative()
             .flex_1()
             .min_w(px(0.))
+            .h(self.plot_height(ui))
             .overflow_hidden()
-            .children(self.gridlines(ui, view))
-            .child(rows)
-            .children(self.selection_overlay(ui, view))
+            .child(self.bounds_layer(cx, |layer| layer.shell.plot_content(layer)))
     }
 
-    fn gridlines(&self, ui: &Widgets<'_>, view: View) -> Vec<Div> {
-        view.ticks()
-            .into_iter()
+    fn plot_content(&self, layer: &LayerCx<'_>) -> AnyElement {
+        layer.with_ui(|ui, measure, scale| {
+            let view = self.view();
+            let Ok(geometry) = PlotGeometry::new(
+                f32::from(layer.bounds.size.width),
+                scale,
+                f32::from(ui.metrics.timeline.block_gap),
+                measure.width(TICK_LABEL_SAMPLE, Ramp::Caption),
+                view,
+            ) else {
+                // Narrower than one marker: nothing can be drawn inside (07 section 4.3).
+                return div().size_full().into_any_element();
+            };
+            let rows = div()
+                .flex()
+                .flex_col()
+                .py(ui.metrics.space.xs)
+                .child(self.main_track(ui, measure, &geometry, layer))
+                .children(
+                    self.visible_lanes()
+                        .iter()
+                        .map(|lane| self.lane_row(ui, view, &geometry, lane, layer)),
+                )
+                .child(self.axis(ui, &geometry));
+            div()
+                .relative()
+                .size_full()
+                .children(self.gridlines(ui, &geometry))
+                .child(rows)
+                .children(self.selection_overlay(ui, view, &geometry))
+                .into_any_element()
+        })
+    }
+
+    fn gridlines(&self, ui: &Widgets<'_>, geometry: &PlotGeometry) -> Vec<Div> {
+        geometry
+            .ticks
+            .iter()
             .map(|tick| {
                 div()
                     .absolute()
                     .top(px(0.))
                     .bottom(px(0.))
-                    .left(relative(tick.fraction))
+                    .left(px(geometry.grid.snap(tick.fraction)))
                     .w(ui.metrics.layout.divider)
                     .bg(ui.palette.stroke_divider)
             })
             .collect()
     }
 
-    fn axis(&self, ui: &Widgets<'_>, view: View) -> Div {
-        let labels = view
-            .ticks()
-            .into_iter()
-            .filter(|tick| tick.has_room_for_label())
+    fn axis(&self, ui: &Widgets<'_>, geometry: &PlotGeometry) -> Div {
+        let label_width = geometry.tick_label_width;
+        let labels = geometry
+            .ticks
+            .iter()
+            .filter(|tick| tick.has_room_for_label(geometry.width, label_width))
             .map(|tick| {
                 div()
                     .absolute()
                     .top(ui.metrics.space.xs)
-                    .left(relative(tick.fraction))
-                    .ml(px(-AXIS_LABEL_WIDTH / 2.))
-                    .w(px(AXIS_LABEL_WIDTH))
+                    .left(px(geometry.grid.snap(tick.fraction) - label_width / 2.))
+                    .w(px(label_width))
                     .flex()
                     .justify_center()
                     .ramp(ui, Ramp::Caption)
+                    .tabular_figures()
+                    .whitespace_nowrap()
                     .text_color(ui.palette.text_tertiary)
                     .child(tick.time.to_string())
             });
-        div()
-            .relative()
-            .h(ui.metrics.timeline.axis_height)
-            .children(labels)
+        div().relative().h(Self::axis_height(ui)).children(labels)
     }
 
-    fn selection_overlay(&self, ui: &Widgets<'_>, view: View) -> Option<Div> {
+    fn selection_overlay(
+        &self,
+        ui: &Widgets<'_>,
+        view: View,
+        geometry: &PlotGeometry,
+    ) -> Option<Div> {
         let interval = self.details.as_ref()?.content.interval.as_ref()?;
-        let placement = view.place(interval.span)?;
+        let (left, width) = geometry.grid.span(view.place(interval.span)?);
         let accent = ui.palette.accent_fill;
         Some(
             div()
                 .absolute()
                 .top(px(0.))
                 .bottom(px(0.))
-                .left(relative(placement.left))
-                .w(relative(placement.width))
+                .left(px(left))
+                .w(px(width))
                 .bg(accent.opacity(ui.metrics.opacity.selection))
                 .border_l_1()
                 .border_r_1()
@@ -305,15 +414,15 @@ impl AppShell {
         }
     }
 
-    fn with_hover<E>(&self, element: E, target: HoverTarget, cx: &mut Context<Self>) -> E
+    fn with_hover<E>(&self, element: E, target: HoverTarget, layer: &LayerCx<'_>) -> E
     where
         E: gpui_kit::StatefulInteractiveElement,
     {
         element
-            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            .on_mouse_move(layer.listen(move |this, event: &MouseMoveEvent, _, cx| {
                 this.set_hover(target, event.position, cx);
             }))
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            .on_hover(layer.listen(move |this, hovered: &bool, _, cx| {
                 if !*hovered {
                     this.clear_hover(target, cx);
                 }
@@ -323,43 +432,47 @@ impl AppShell {
     fn main_track(
         &self,
         ui: &Widgets<'_>,
-        view: View,
-        plot_width: f32,
-        cx: &mut Context<Self>,
+        measure: &TextMeasure<'_>,
+        geometry: &PlotGeometry,
+        layer: &LayerCx<'_>,
     ) -> Div {
-        let blocks = self.day.main_track().iter().filter_map(|block| {
+        let view = self.view();
+        let mut intervals = Vec::new();
+        for block in self.day.main_track() {
             let span = block.span();
-            let placement = view.place(span)?;
+            let Some(placement) = view.place(span) else {
+                continue;
+            };
+            let pixels = geometry.grid.place(placement);
             let target = HoverTarget::MainBlock(span.start());
-            let pixels = placement.width * plot_width;
-            let body = block_body(ui, self.block_hover(target));
+            let body = block_body(ui, self.block_hover(target), pixels);
             let body = match block {
                 MainBlock::Active { category, .. } => {
-                    self.active_block(ui, body, *category, span, pixels)
+                    self.active_block(ui, measure, body, *category, span, pixels)
                 }
-                MainBlock::State(state) => self.state_block(ui, body, state, pixels),
+                MainBlock::State(state) => self.state_block(ui, measure, body, state, pixels),
             };
-            let tile = tile(
-                ("main-block", span.start().seconds()),
-                placement.left,
-                placement.width,
-            )
-            .child(body);
-            Some(self.with_hover(tile, target, cx))
-        });
+            let tile = tile(("main-block", span.start().seconds()), pixels).child(body);
+            intervals.push(Interval {
+                placement: pixels,
+                duration: span.duration(),
+                item: self.with_hover(tile, target, layer),
+            });
+        }
         div()
             .relative()
-            .h(ui.metrics.timeline.main_track_height)
-            .children(blocks.collect::<Vec<_>>())
+            .h(Self::track_height(ui))
+            .children(RowTiles::arrange(intervals).into_paint_order())
     }
 
     fn active_block(
         &self,
         ui: &Widgets<'_>,
+        measure: &TextMeasure<'_>,
         body: Div,
         category: CategoryId,
         span: TimeSpan,
-        pixels: f32,
+        block: PixelPlacement,
     ) -> Div {
         let category = self.day.category(category);
         let color = ui.palette.category(category.color);
@@ -374,13 +487,20 @@ impl AppShell {
         block_text(
             ui,
             body.bg(color),
-            fitting_label(pixels, &name, &full),
+            measure.fit_block_label(block, BLOCK_TEXT_PADDING, &name, &full),
             ui.palette.text_on(color),
         )
     }
 
     /// A state block styled per 11 section 3.4.
-    fn state_block(&self, ui: &Widgets<'_>, body: Div, state: &StateBlock, pixels: f32) -> Div {
+    fn state_block(
+        &self,
+        ui: &Widgets<'_>,
+        measure: &TextMeasure<'_>,
+        body: Div,
+        state: &StateBlock,
+        block: PixelPlacement,
+    ) -> Div {
         let palette = ui.palette;
         let metrics = ui.metrics;
         let body = match state.kind {
@@ -415,7 +535,7 @@ impl AppShell {
                     body.bg(palette
                         .status_neutral
                         .opacity(metrics.opacity.neutral_state)),
-                    fitting_label(pixels, &name, &full),
+                    measure.fit_block_label(block, BLOCK_TEXT_PADDING, &name, &full),
                     palette.text_primary,
                 )
             }
@@ -433,27 +553,42 @@ impl AppShell {
         })
     }
 
-    fn lane_row(&self, ui: &Widgets<'_>, view: View, lane: &Lane, cx: &mut Context<Self>) -> Div {
-        let blocks = self.day.lane_segments(lane).filter_map(|segment| {
-            let placement = view.place(segment.span)?;
+    fn lane_row(
+        &self,
+        ui: &Widgets<'_>,
+        view: View,
+        geometry: &PlotGeometry,
+        lane: &Lane,
+        layer: &LayerCx<'_>,
+    ) -> Div {
+        let mut intervals = Vec::new();
+        for segment in self.day.lane_segments(lane) {
+            let Some(placement) = view.place(segment.span) else {
+                continue;
+            };
+            let pixels = geometry.grid.place(placement);
             let id = segment.id;
             let target = HoverTarget::Segment(id);
             let color = ui
                 .palette
                 .category(self.day.category(segment.category).color);
-            let tile = tile(("segment", id.get()), placement.left, placement.width)
+            let tile = tile(("segment", id.get()), pixels)
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.select(DetailsSubject::Segment(id), cx);
+                .on_click(layer.listen(move |this, _: &ClickEvent, window, cx| {
+                    this.select(DetailsSubject::Segment(id), window, cx);
                 }))
-                .child(block_body(ui, self.block_hover(target)).bg(color));
-            Some(self.with_hover(tile, target, cx))
-        });
+                .child(block_body(ui, self.block_hover(target), pixels).bg(color));
+            intervals.push(Interval {
+                placement: pixels,
+                duration: segment.span.duration(),
+                item: self.with_hover(tile, target, layer),
+            });
+        }
         div()
             .relative()
             .mt(ui.metrics.timeline.lane_gap)
-            .h(ui.metrics.timeline.lane_height)
-            .children(blocks.collect::<Vec<_>>())
+            .h(Self::lane_height(ui))
+            .children(RowTiles::arrange(intervals).into_paint_order())
     }
 
     pub(super) fn render_tooltip(&self, ui: &Widgets<'_>) -> Option<impl IntoElement> {
@@ -480,7 +615,8 @@ impl AppShell {
                 .snap_to_window_with_margin(ui.metrics.space.s)
                 .child(
                     ui.flyout()
-                        .w(px(TOOLTIP_WIDTH))
+                        .min_w(px(TOOLTIP_MIN_WIDTH))
+                        .max_w(px(TOOLTIP_MAX_WIDTH))
                         .p(ui.metrics.space.m)
                         .flex()
                         .flex_col()
@@ -571,7 +707,7 @@ impl AppShell {
             .self_start()
             .gap(ui.metrics.space.s)
             .px(ui.metrics.space.s)
-            .h(px(CHIP_HEIGHT))
+            .min_h(px(CHIP_HEIGHT))
             .rounded(ui.metrics.radius.control)
             .bg(ui.palette.fill_control_hover)
             .ramp(ui, Ramp::Caption)
@@ -580,28 +716,29 @@ impl AppShell {
     }
 }
 
-/// Hit area of one timeline block, placed by plot fractions. The painted body inside leaves a
+/// Hit area of one timeline block or marker, placed in pixels of the plot. It blocks the mouse
+/// from the tiles beneath it, so one click reaches one handler, but lets the wheel through. The painted body inside leaves a
 /// background gap on its right (11 section 3.3); blocks have square corners so touching blocks
-/// never leave notches, and the minimum width keeps one-pixel blocks solid.
-fn tile(id: impl Into<ElementId>, left: f32, width: f32) -> Stateful<Div> {
+/// never leave notches.
+fn tile(id: impl Into<ElementId>, block: PixelPlacement) -> Stateful<Div> {
     div()
         .id(id)
+        .block_mouse_except_scroll()
         .flex()
         .absolute()
         .top(px(0.))
         .h_full()
-        .left(relative(left))
-        .w(relative(width))
-        .min_w(px(MIN_BLOCK_WIDTH))
+        .left(px(block.left()))
+        .w(px(block.width()))
 }
 
 /// Painted body of a block; the hover outline is an overlay so it never eats into narrow blocks.
-fn block_body(ui: &Widgets<'_>, hover: BlockHover) -> Div {
+fn block_body(ui: &Widgets<'_>, hover: BlockHover, block: PixelPlacement) -> Div {
     div()
         .relative()
         .flex_1()
         .h_full()
-        .mr(ui.metrics.timeline.block_gap)
+        .mr(px(block.gap()))
         .overflow_hidden()
         .when(hover == BlockHover::Hovered, |body| {
             body.child(
@@ -629,21 +766,4 @@ fn block_text(ui: &Widgets<'_>, body: Div, label: Option<String>, color: Hsla) -
                 .child(text),
         )
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::ThemeBundle;
-
-    #[test]
-    fn plot_width_estimate_follows_the_page_width_up_to_the_content_limit() {
-        let tokens = ThemeBundle::embedded().expect("embedded theme").tokens();
-        let metrics = tokens.metrics();
-        // 1200 px content minus 2 x 24 page margin, 2 x 16 card padding, 12 plot padding and
-        // the 140 px label column.
-        assert!((estimated_plot_width(px(1600.), metrics) - 968.).abs() < f32::EPSILON);
-        assert!((estimated_plot_width(px(992.), metrics) - 760.).abs() < f32::EPSILON);
-        assert!((estimated_plot_width(px(100.), metrics) - MIN_PLOT_WIDTH).abs() < f32::EPSILON);
-    }
 }

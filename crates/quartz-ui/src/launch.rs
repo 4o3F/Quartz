@@ -19,6 +19,7 @@ use crate::{
     },
     core_error::{CoreErrorPresentation, RecoveryLine},
     format::{Formatter, Msg},
+    text_scale::{LiveTextScale, ReadTextScaleError, TextScaleChange, TextScaleSource},
 };
 
 /// Size of the placeholder main window.
@@ -57,6 +58,9 @@ pub enum RunUiError {
     /// The embedded theme could not be read.
     #[snafu(display("could not load the embedded theme"))]
     LoadTheme { source: LoadThemeError },
+    /// The Windows text size could not be read.
+    #[snafu(display("could not read the text size"))]
+    ReadTextScale { source: ReadTextScaleError },
     /// GPUI could not create the application window.
     #[snafu(display("could not open UI window"))]
     OpenWindow { source: GpuiError },
@@ -85,12 +89,13 @@ struct LaunchWindow {
     tokens: Rc<Tokens>,
     title: String,
     content: WindowContent,
+    text_scale: LiveTextScale,
 }
 
 impl Render for LaunchWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Rc::clone(&self.tokens);
-        let ui = Widgets::new(&tokens, cx.theme().mode);
+        let ui = Widgets::new(&tokens, cx.theme().mode, self.text_scale.current());
         let space = &ui.metrics.space;
         let mut content = div()
             .id("launch-content")
@@ -164,6 +169,9 @@ impl RunOptions {
         let tokens = theme.tokens();
         let appearance = Appearance::System;
         run_gpui(language, appearance, theme, move |cx| {
+            // Read here, once GPUI has made this thread a single-threaded COM apartment.
+            let text_scale =
+                LiveTextScale::read(TextScaleSource::System).context(ReadTextScaleSnafu)?;
             let title = formatter.text(Msg::AppName);
             let window_size = content.size();
             let bounds = Bounds::centered(
@@ -176,10 +184,19 @@ impl RunOptions {
                 cx,
                 move |window, cx| {
                     appearance.observe(window);
-                    cx.new(|_| LaunchWindow {
-                        tokens,
-                        title,
-                        content,
+                    cx.new(|cx| {
+                        cx.observe_window_activation(window, |this: &mut LaunchWindow, _, cx| {
+                            if this.text_scale.refresh() == TextScaleChange::Changed {
+                                cx.notify();
+                            }
+                        })
+                        .detach();
+                        LaunchWindow {
+                            tokens,
+                            title,
+                            content,
+                            text_scale,
+                        }
                     })
                 },
             )
