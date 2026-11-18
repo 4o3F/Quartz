@@ -1,10 +1,10 @@
 //! Value inputs, transactional write descriptions and sanitized shell effects.
 
 use super::{
-    BatchId, BrowserContext, CapturedFields, Deadline, DeadlineKind, ForegroundGeneration,
-    IdleException, IdleRecord, IdleSample, MonoInstant, ObservationId, PrivacyContext, ProcessId,
-    ReadLastInputError, RowId, RunId, SegmentId, SessionKey, TimeRange, Timestamp, UtcInstant,
-    WindowFacts, WindowId, WindowInstance, WriteBatch,
+    BatchId, BrowserContext, CapturedFields, Deadline, ForegroundGeneration, IdleException,
+    IdleRecord, IdleSample, MonoInstant, ObservationId, PrivacyContext, ProcessId,
+    ReadLastInputError, RowId, RunId, SchedulerKind, SegmentId, SessionKey, TimeRange, Timestamp,
+    UtcInstant, WindowFacts, WindowId, WindowInstance, WriteBatch,
 };
 use crate::rules::registry::RuleSnapshot;
 use std::{collections::BTreeSet, sync::Arc};
@@ -339,14 +339,18 @@ pub enum CaptureWrite {
     /// Saves or clears a policy deadline in the same transaction as its capture boundary.
     SetDeadline {
         /// Owner of this registered policy deadline.
-        owner: DeadlineKind,
+        owner: SchedulerKind,
         /// Paired clock readings at this boundary.
         at: UtcInstant,
     },
-    /// Clears a persisted policy deadline.
+    /// Persists the complete timed policy in the same transaction as its deadline.
+    SetTimedState(super::TimedState),
+    /// Deletes a complete persisted policy on cancellation or expiration.
+    ClearTimedPolicy(super::TimedPolicyKind),
+    /// Clears a persisted scheduler deadline.
     ClearDeadline {
         /// Owner of this registered policy deadline.
-        owner: DeadlineKind,
+        owner: SchedulerKind,
     },
     /// Stores an identity-free unknown range.
     RecordGap(CaptureGap),
@@ -400,7 +404,7 @@ pub enum CaptureEffect {
     /// Run a last-input query at the adaptive deadline.
     CheckIdle,
     /// Re-evaluate timed policy and supply a fresh observation.
-    PolicyExpired(DeadlineKind),
+    PolicyExpired(super::TimedPolicyKind),
     /// Sanitized current state for subscriptions and tray rendering.
     StateChanged(CaptureState),
     /// Review detected a missed foreground/title notification.
@@ -454,12 +458,18 @@ pub enum CaptureEvent {
     /// Register a persisted or elapsed-time policy deadline.
     RegisterDeadline {
         /// Owner of this registered policy deadline.
-        owner: DeadlineKind,
+        owner: SchedulerKind,
         /// Deadline in its explicit clock domain.
         deadline: Deadline,
     },
-    /// Cancel a policy deadline.
-    CancelDeadline(DeadlineKind),
+    /// Install fresh timed policy evidence and persist its value and deadline.
+    SetTimedState(super::TimedState),
+    /// Restore policy and its original grant start; browser audible needs fresh evidence.
+    RestoreTimedState(super::TimedState),
+    /// Cancel a complete persisted policy.
+    CancelTimedPolicy(super::TimedPolicyKind),
+    /// Cancel a scheduler-only deadline.
+    CancelDeadline(SchedulerKind),
     /// Main-thread queue lost events.
     EventOverload,
     /// Persistence shell discarded this range; no queued observations may fill it.

@@ -5,25 +5,34 @@ use std::collections::BTreeMap;
 
 /// Owner and purpose of a replaceable deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DeadlineKind {
+pub enum SchedulerKind {
     /// Combined confirmation and foreground review wakeup.
     Maintenance,
     /// Adaptive last-input check.
     Idle,
-    /// User pause expiration.
-    Pause,
-    /// Session privacy expiration.
-    Privacy,
-    /// Keep-timing expiration.
-    KeepTiming,
-    /// Application idle exemption expiration.
-    AppExemption,
-    /// Audible idle exemption expiration.
-    Audible,
     /// Browser privacy context wait limit.
     PrivacyContext,
     /// UTC midnight foreground boundary.
     Midnight,
+}
+
+/// A scheduler slot or a persisted policy's expiration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DeadlineKind {
+    /// Derived or temporary capture scheduling.
+    Scheduler(SchedulerKind),
+    /// Expiration owned by a complete persisted policy.
+    Policy(super::TimedPolicyKind),
+}
+impl From<SchedulerKind> for DeadlineKind {
+    fn from(kind: SchedulerKind) -> Self {
+        Self::Scheduler(kind)
+    }
+}
+impl From<super::TimedPolicyKind> for DeadlineKind {
+    fn from(kind: super::TimedPolicyKind) -> Self {
+        Self::Policy(kind)
+    }
 }
 
 /// Deadline clock domain; persisted policy deadlines use UTC.
@@ -56,12 +65,12 @@ impl Deadline {
 pub struct DeadlineScheduler(BTreeMap<DeadlineKind, Deadline>);
 impl DeadlineScheduler {
     /// Replaces the deadline owned by this kind.
-    pub fn register(&mut self, owner: DeadlineKind, deadline: Deadline) {
-        self.0.insert(owner, deadline);
+    pub fn register(&mut self, owner: impl Into<DeadlineKind>, deadline: Deadline) {
+        self.0.insert(owner.into(), deadline);
     }
     /// Removes an owner's deadline.
-    pub fn cancel(&mut self, owner: DeadlineKind) {
-        self.0.remove(&owner);
+    pub fn cancel(&mut self, owner: impl Into<DeadlineKind>) {
+        self.0.remove(&owner.into());
     }
     /// Returns only the nearest timer target, resolving UTC against the supplied clock pair.
     pub fn next(&self, now: Timestamp) -> Result<Option<MonoInstant>, AdvanceTimeError> {

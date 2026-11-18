@@ -741,8 +741,8 @@ fn browser_context_evaluates_delayed_titles_and_domain_only_drops_windows_title(
 fn deadline_scheduler_expiration_cancellation_empty_and_clock_recalculation() {
     let mut deadlines = DeadlineScheduler::default();
     assert_eq!(deadlines.next(at(0)).expect("valid timer deadline"), None);
-    deadlines.register(DeadlineKind::Pause, Deadline::Utc(utc(100)));
-    deadlines.register(DeadlineKind::KeepTiming, Deadline::Mono(mono(200)));
+    deadlines.register(TimedPolicyKind::Pause, Deadline::Utc(utc(100)));
+    deadlines.register(TimedPolicyKind::KeepTiming, Deadline::Mono(mono(200)));
     assert_eq!(
         deadlines.next(at(0)).expect("valid timer deadline"),
         Some(mono(100))
@@ -756,20 +756,24 @@ fn deadline_scheduler_expiration_cancellation_empty_and_clock_recalculation() {
             .expect("valid timer deadline"),
         Some(mono(200))
     );
-    assert_eq!(deadlines.take_due(at(100)), vec![DeadlineKind::Pause]);
-    deadlines.cancel(DeadlineKind::KeepTiming);
+    assert_eq!(
+        deadlines.take_due(at(100)),
+        vec![DeadlineKind::Policy(TimedPolicyKind::Pause)]
+    );
+    deadlines.cancel(TimedPolicyKind::KeepTiming);
     assert_eq!(deadlines.next(at(100)).expect("valid timer deadline"), None);
     let mut fixture = Fixture::active();
     let step = fixture.send(
         at(10),
-        CaptureEvent::RegisterDeadline {
-            owner: DeadlineKind::Privacy,
-            deadline: Deadline::Utc(utc(5)),
-        },
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::Privacy(PrivacyMode::Private),
+            started: utc(0),
+            until: utc(5),
+        }),
     );
     assert!(
         step.effects
-            .contains(&CaptureEffect::PolicyExpired(DeadlineKind::Privacy))
+            .contains(&CaptureEffect::PolicyExpired(TimedPolicyKind::Privacy))
     );
     fixture.finish(at(20));
 }
@@ -1141,10 +1145,11 @@ fn privacy_relaxation_does_not_restore_cached_dropped_title_and_expiry_splits_no
     let _ = fixture.hook(at(10), 2, foreground);
     let _ = fixture.send(
         at(20),
-        CaptureEvent::RegisterDeadline {
-            owner: DeadlineKind::Privacy,
-            deadline: Deadline::Utc(utc(30)),
-        },
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::Privacy(PrivacyMode::Private),
+            started: utc(20),
+            until: utc(30),
+        }),
     );
     let expiry = fixture.send(at(30), CaptureEvent::Wake);
     assert!(expiry.writes.iter().any(|write| matches!(

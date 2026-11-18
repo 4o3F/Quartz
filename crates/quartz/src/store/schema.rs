@@ -225,6 +225,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    timed_policies (kind) {
+        kind -> Integer,
+        privacy_mode -> Nullable<Integer>,
+        application_id -> Nullable<BigInt>,
+        started_utc_ms -> BigInt,
+        until_utc_ms -> BigInt,
+    }
+}
+
+diesel::table! {
     titles (id) {
         id -> Nullable<BigInt>,
         text -> Text,
@@ -284,6 +294,7 @@ diesel::joinable!(intervals -> clock_segments (clock_segment_id));
 diesel::joinable!(intervals -> titles (title_id));
 diesel::joinable!(intervals -> window_instances (window_instance_id));
 diesel::joinable!(rule_set_versions -> rule_sets (set_id));
+diesel::joinable!(timed_policies -> applications (application_id));
 diesel::joinable!(web_intervals -> browser_streams (stream_id));
 diesel::joinable!(web_intervals -> domains (domain_id));
 diesel::joinable!(web_intervals -> intervals (interval_id));
@@ -309,6 +320,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     rule_set_versions,
     rule_sets,
     settings,
+    timed_policies,
     titles,
     web_intervals,
     window_instances,

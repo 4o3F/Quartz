@@ -4,9 +4,23 @@ mod handle;
 mod instance;
 mod language;
 mod process;
+mod sources;
 mod tray;
 
+use crate::{
+    capture::PersistenceState,
+    core::{
+        app::{
+            CaptureIndicator, JoinWorkersError, MainCommand, RequestShutdownError,
+            StartWorkersError, Worker, Workers,
+        },
+        sources::ClockReader,
+    },
+};
+use quartz_domain::capture::{CaptureEffect, CaptureState, RunEndReason};
 use quartz_protocol::{CoreError, CoreErrorCode};
+use sources::{Sources, SystemClock, SystemIngress, UnsupportedForegroundPort};
+use std::sync::Arc;
 use std::{fs, path::PathBuf, process::ExitCode};
 
 use snafu::{ResultExt, Snafu};
@@ -18,13 +32,11 @@ use windows::Win32::{
 
 use crate::{
     data_directory::{self, DataDirectory},
-    logging,
-    rules::registry::{OpenRegistryShellError, RegistryShell},
-    store,
+    logging, store,
     ui_state::UiState,
 };
 pub(crate) use instance::{AcquireInstance, AcquireInstanceError};
-use tray::{CreateTrayError, Tray, TrayCommand, TrayState, TrayTooltip};
+use tray::{CreateTrayError, Tray, TrayCommand, TrayIconState, TrayState, TrayTooltip};
 
 pub(crate) use language::UiLanguage;
 
@@ -32,8 +44,24 @@ pub(crate) use language::UiLanguage;
 enum StartCoreError {
     #[snafu(display("could not open core database"))]
     OpenStore { source: store::OpenStoreError },
-    #[snafu(display("could not initialize rule registry"))]
-    OpenRegistry { source: OpenRegistryShellError },
+    #[snafu(display("could not start capture workers"))]
+    StartWorkers { source: StartWorkersError },
+    #[snafu(display("could not initialize capture system sources"))]
+    ObserveSystem { source: sources::ObserveSystemError },
+    #[snafu(display("could not read startup clock"))]
+    ReadClock {
+        source: crate::core::sources::ReadClockError,
+    },
+    #[snafu(display("could not resolve Windows session identity"))]
+    SessionId { source: windows::core::Error },
+    #[snafu(display("could not create installation identity"))]
+    CreateDeviceId { source: windows::core::Error },
+    #[snafu(display("could not load installation identity"))]
+    LoadDeviceId { source: store::LoadDeviceIdError },
+    #[snafu(display("could not stop capture workers"))]
+    StopWorkers { source: JoinWorkersError },
+    #[snafu(display("could not request capture shutdown"))]
+    RequestShutdown { source: RequestShutdownError },
     #[snafu(display("could not resolve core data directory"))]
     DataDirectory {
         source: data_directory::ResolveDataDirectoryError,
@@ -51,9 +79,14 @@ enum StartCoreError {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(display("could not wait for core messages and UI process (MsgWaitForMultipleObjects)"))]
-struct WaitCoreEventsError {
-    source: windows::core::Error,
+#[snafu(module(wait_error))]
+enum WaitCoreEventsError {
+    #[snafu(display("could not wait for core messages (MsgWaitForMultipleObjects)"))]
+    Wait { source: windows::core::Error },
+    #[snafu(display("could not observe system event"))]
+    Observe { source: sources::ObserveSystemError },
+    #[snafu(display("{worker} worker failed"))]
+    WorkerFailed { worker: Worker },
 }
 
 impl StartCoreError {
@@ -104,14 +137,35 @@ impl DataDirectory {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CoreExit {
+    UserExit,
+    Shutdown,
+    SessionEnded,
+}
+impl CoreExit {
+    fn reason(self) -> RunEndReason {
+        match self {
+            Self::UserExit => RunEndReason::UserExit,
+            Self::Shutdown | Self::SessionEnded => RunEndReason::Shutdown,
+        }
+    }
+}
+
 /// Owns child-process tracking while the core runs on the main thread.
 #[derive(Debug)]
 pub(crate) struct CoreProcess {
     ui: UiState<process::UiProcess>,
+    capture: Option<CaptureState>,
+    persistence: PersistenceState,
 }
 impl CoreProcess {
     pub(crate) fn new() -> Self {
-        Self { ui: UiState::None }
+        Self {
+            ui: UiState::None,
+            capture: None,
+            persistence: PersistenceState::Ready,
+        }
     }
     /// Runs the Windows core on the calling main thread and reports startup failures.
     pub(crate) fn run(mut self) -> ExitCode {
@@ -132,6 +186,7 @@ impl CoreProcess {
         data_directory
             .init_file_log(logging::LogTarget::Core)
             .context(InitLogSnafu)?;
+        logging::install_core_panic_log();
         let _instance = match data_directory
             .acquire_instance()
             .context(AcquireInstanceSnafu)?
@@ -149,21 +204,74 @@ impl CoreProcess {
             ..TrayState::default()
         })
         .context(CreateTraySnafu)?;
-        let store = store::Store::open(&data_directory).context(OpenStoreSnafu)?;
-        let _registry = RegistryShell::open(store).context(OpenRegistrySnafu)?;
-        if let Err(error) = tray.update(TrayState::default()) {
+        let mut store = store::Store::open(&data_directory).context(OpenStoreSnafu)?;
+        let proposed = windows::core::GUID::new().context(CreateDeviceIdSnafu)?;
+        let device_id = store
+            .installation_id(&format!("{proposed:?}"))
+            .context(LoadDeviceIdSnafu)?;
+        let session_id = sources::SystemMessage::session_id().context(SessionIdSnafu)?;
+        let metadata = store::capture::RunMetadata {
+            device_id,
+            win_session_id: store::capture::WindowsSessionId::new(session_id),
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        };
+        // SAFETY: The main-thread message queue exists after Tray::create.
+        let main_thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        let wake = Arc::new(move || {
+            // SAFETY: This posts a pointer-free typed wakeup to the main thread's existing queue.
+            if let Err(error) = unsafe {
+                WindowsAndMessaging::PostThreadMessageW(
+                    main_thread,
+                    u32::from(tray::window::AppMessage::WakeWorkers),
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                )
+            } {
+                tracing::error!(%error, "could not wake main thread; exiting core");
+                std::process::exit(1);
+            }
+        });
+        let workers =
+            Workers::start(store, metadata, sources::clock(), wake).context(StartWorkersSnafu)?;
+        let ingress = SystemIngress::new(workers.sender.clone(), workers.shutdown_port());
+        tray.attach_capture(ingress.clone());
+        let mut sources = match Sources::start(tray.raw_window(), ingress) {
+            Ok(sources) => sources,
+            Err(error) => {
+                let at = SystemClock.read().context(ReadClockSnafu)?;
+                let _ = workers.request_shutdown(at, RunEndReason::Shutdown);
+                let _ = workers.join();
+                return Err(error).context(ObserveSystemSnafu);
+            }
+        };
+        if let Err(error) = tray.update(self.tray_state(TrayTooltip::Ready)) {
             tracing::error!(?error, "could not update tray state");
         }
         tracing::info!("core message loop started");
-        // TODO(M2): Push runtime failures as structured state over the pipe and select the warning tray icon.
-        let result = self.message_loop(&mut tray);
+        let result = self.message_loop(&mut tray, &workers, &mut sources);
         self.ui = UiState::None;
+        let exit = result.as_ref().copied().unwrap_or(CoreExit::Shutdown);
+        let reason = exit.reason();
+        let now = SystemClock.read().context(ReadClockSnafu)?;
+        let request = match exit {
+            CoreExit::SessionEnded => Ok(()),
+            _ => workers.request_shutdown(now, reason),
+        };
+        let joined = workers.join();
+        drop(sources);
         result.context(RunMessageLoopSnafu)?;
+        request.context(RequestShutdownSnafu)?;
+        joined.context(StopWorkersSnafu)?;
         drop(tray);
         tracing::info!("core stopped");
         Ok(())
     }
-    fn message_loop(&mut self, tray: &mut Tray) -> Result<(), WaitCoreEventsError> {
+    fn message_loop(
+        &mut self,
+        tray: &mut Tray,
+        workers: &Workers,
+        sources: &mut Sources,
+    ) -> Result<CoreExit, WaitCoreEventsError> {
         loop {
             let mut message = MSG::default();
             // SAFETY: message is writable MSG storage. Drain the entire queue before waiting again,
@@ -172,13 +280,44 @@ impl CoreProcess {
                 .as_bool()
             {
                 if message.message == WM_QUIT {
-                    return Ok(());
+                    return Ok(CoreExit::Shutdown);
                 }
                 // SAFETY: The message was retrieved for this thread. The callback records actions
                 // without borrowing the UI state or tray across this reentrant Windows call.
                 unsafe {
                     let _ = WindowsAndMessaging::TranslateMessage(&message);
                     WindowsAndMessaging::DispatchMessageW(&message);
+                }
+            }
+            while let Ok(command) = workers.commands.try_recv() {
+                match command {
+                    MainCommand::Persistence(state) => self.persistence = state,
+                    MainCommand::Fatal(worker) => {
+                        tracing::error!(?worker, "stopping core after worker failure");
+                        return Err(WaitCoreEventsError::WorkerFailed { worker });
+                    }
+                    MainCommand::Effect(effect) => match effect {
+                        CaptureEffect::StateChanged(state) => self.capture = Some(state),
+                        CaptureEffect::ScheduleTimer(timer) => {
+                            sources.timer(timer).context(wait_error::ObserveSnafu)?
+                        }
+                        CaptureEffect::QuerySession => {
+                            sources.query_session().context(wait_error::ObserveSnafu)?
+                        }
+                        CaptureEffect::CheckIdle => {
+                            sources.check_idle().context(wait_error::ObserveSnafu)?
+                        }
+                        CaptureEffect::IdleSampleFailed(error) => {
+                            tracing::warn!(%error, "idle sample was rejected")
+                        }
+                        CaptureEffect::RebindHooks { .. } | CaptureEffect::ReviewForeground => {
+                            UnsupportedForegroundPort.dispatch(&effect)
+                        }
+                        _ => {}
+                    },
+                }
+                if let Err(error) = tray.update(self.tray_state(TrayTooltip::Ready)) {
+                    tracing::error!(%error, "could not update capture tray state");
                 }
             }
             loop {
@@ -188,7 +327,11 @@ impl CoreProcess {
                 }
                 for event in events {
                     match event {
-                        TrayCommand::Exit => return Ok(()),
+                        TrayCommand::Exit => return Ok(CoreExit::UserExit),
+                        TrayCommand::EndSession => return Ok(CoreExit::SessionEnded),
+                        TrayCommand::Deadline(at) => {
+                            sources.fired(at).context(wait_error::ObserveSnafu)?
+                        }
                         TrayCommand::OpenUi => self.open_ui(tray),
                     }
                 }
@@ -209,28 +352,39 @@ impl CoreProcess {
                 )
             };
             if result == WAIT_FAILED {
-                return Err(windows::core::Error::from_thread()).context(WaitCoreEventsSnafu);
+                return Err(windows::core::Error::from_thread()).context(wait_error::WaitSnafu);
             }
             if handles.is_some() && result == WAIT_OBJECT_0 {
                 if let UiState::Starting(process) = &self.ui {
                     process.log_exit();
                 }
                 self.ui.exited();
-                if let Err(error) = tray.update(TrayState::default()) {
+                if let Err(error) = tray.update(self.tray_state(TrayTooltip::Ready)) {
                     tracing::error!(?error, "could not restore tray tooltip");
                 }
             }
         }
+    }
+    fn tray_state(&self, tooltip: TrayTooltip) -> TrayState {
+        let indicator = CaptureIndicator::from_state(self.capture.as_ref(), self.persistence);
+        let icon = match indicator {
+            CaptureIndicator::Normal => TrayIconState::Normal,
+            _ => TrayIconState::Warning,
+        };
+        let tooltip = match indicator {
+            CaptureIndicator::Normal => tooltip,
+            CaptureIndicator::PersistenceFailed => TrayTooltip::PersistenceFailed,
+            CaptureIndicator::SessionUnavailable => TrayTooltip::SessionUnavailable,
+            CaptureIndicator::CaptureGap => TrayTooltip::CaptureGap,
+        };
+        TrayState { icon, tooltip }
     }
     fn open_ui(&mut self, tray: &mut Tray) {
         if let Err(error) = self.ui.open(process::UiProcess::launch) {
             tracing::error!(?error, "could not launch UI");
             return;
         }
-        if let Err(error) = tray.update(TrayState {
-            tooltip: TrayTooltip::Opening,
-            ..TrayState::default()
-        }) {
+        if let Err(error) = tray.update(self.tray_state(TrayTooltip::Opening)) {
             tracing::error!(?error, "could not set opening tooltip");
         }
     }

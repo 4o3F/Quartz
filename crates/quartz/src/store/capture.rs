@@ -7,8 +7,10 @@ mod gaps;
 mod intervals;
 mod recovery;
 mod runs;
+mod timed;
 mod windows;
 pub(crate) use errors::{CaptureColumn, DecodeCaptureRowError, ExecuteCaptureBatchError};
+#[cfg(any(windows, test))]
 pub(crate) use recovery::{CaptureStartup, RecoverCaptureError};
 #[cfg(test)]
 mod tests;
@@ -61,6 +63,16 @@ pub(crate) enum LogicalKey {
     Window(WindowId),
     Interval(RowId),
     Availability(RowId),
+}
+impl std::fmt::Display for LogicalKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Segment(id) => write!(formatter, "segment {}", id.get()),
+            Self::Window(id) => write!(formatter, "window {}", id.get()),
+            Self::Interval(id) => write!(formatter, "interval {}", id.get()),
+            Self::Availability(id) => write!(formatter, "availability {}", id.get()),
+        }
+    }
 }
 /// Installation and process metadata supplied when opening a capture run.
 #[derive(Debug, Clone)]
@@ -123,27 +135,36 @@ impl<'connection> Capture<'connection> {
         run: RunId,
         write: &CaptureWrite,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        use CaptureWrite::*;
         match write {
-            OpenRun { run, at } => self.open_run(*run, *at),
-            CloseRun { run, at, reason } => self.close_run(*run, *at, *reason),
-            OpenClockSegment { segment, at } => self.open_clock_segment(run, *segment, *at),
-            CloseClockSegment {
+            CaptureWrite::OpenRun { run, at } => self.open_run(*run, *at),
+            CaptureWrite::CloseRun { run, at, reason } => self.close_run(*run, *at, *reason),
+            CaptureWrite::OpenClockSegment { segment, at } => {
+                self.open_clock_segment(run, *segment, *at)
+            }
+            CaptureWrite::CloseClockSegment {
                 segment,
                 at,
                 reason,
             } => self.close_clock_segment(run, *segment, *at, *reason),
-            ObserveWindow { instance, at } => self.observe_window(run, instance, *at),
-            RetireWindow { instance, at } => self.retire_window(run, *instance, *at),
-            OpenInterval(row) => self.open_interval(run, row),
-            CloseInterval { id, at, reason } => self.close_interval(run, *id, *at, *reason),
-            OpenAvailability(row) => self.open_availability(run, row),
-            CloseAvailability { id, at, reason } => self.close_availability(run, *id, *at, *reason),
-            Checkpoint(point) => self.checkpoint(point),
-            SettlePersistedRows { run, segment, at } => self.settle_persisted(*run, *segment, *at),
-            SetDeadline { owner, at } => self.set_deadline(*owner, *at),
-            ClearDeadline { owner } => self.clear_deadline(*owner),
-            RecordGap(gap) => self.record_gap(run, gap),
+            CaptureWrite::ObserveWindow { instance, at } => self.observe_window(run, instance, *at),
+            CaptureWrite::RetireWindow { instance, at } => self.retire_window(run, *instance, *at),
+            CaptureWrite::OpenInterval(row) => self.open_interval(run, row),
+            CaptureWrite::CloseInterval { id, at, reason } => {
+                self.close_interval(run, *id, *at, *reason)
+            }
+            CaptureWrite::OpenAvailability(row) => self.open_availability(run, row),
+            CaptureWrite::CloseAvailability { id, at, reason } => {
+                self.close_availability(run, *id, *at, *reason)
+            }
+            CaptureWrite::Checkpoint(point) => self.checkpoint(point),
+            CaptureWrite::SettlePersistedRows { run, segment, at } => {
+                self.settle_persisted(*run, *segment, *at)
+            }
+            CaptureWrite::SetDeadline { owner, at } => self.set_deadline(*owner, *at),
+            CaptureWrite::SetTimedState(state) => self.set_timed_state(state),
+            CaptureWrite::ClearTimedPolicy(kind) => self.clear_timed_policy(*kind),
+            CaptureWrite::ClearDeadline { owner } => self.clear_deadline(*owner),
+            CaptureWrite::RecordGap(gap) => self.record_gap(run, gap),
         }
     }
     fn run_keys(&mut self, run: RunId) -> &mut RunKeys {

@@ -6,7 +6,8 @@ use crate::store::{
     rows::{ApplicationsRow, WindowInstancesRow},
     schema::{applications, window_instances},
 };
-use diesel::prelude::*;
+use diesel::NullableExpressionMethods;
+use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl};
 use quartz_domain::capture::{AppIdentity, RunId, Timestamp, WindowId, WindowInstance};
 
 impl Capture<'_> {

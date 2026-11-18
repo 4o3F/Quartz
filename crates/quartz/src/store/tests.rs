@@ -1,4 +1,5 @@
 use super::*;
+use diesel::prelude::*;
 use diesel::{
     connection::SimpleConnection,
     sql_types::{Integer, Text},
@@ -65,6 +66,8 @@ fn enum_labels_match_every_rust_enum_exactly() {
         labels::<enums::AnnotationKind>(),
         labels::<enums::DataSource>(),
         labels::<enums::GapReason>(),
+        labels::<enums::TimedPolicyKind>(),
+        labels::<enums::PrivacyMode>(),
     ]
     .concat();
     actual.sort();
@@ -110,6 +113,8 @@ fn every_enum_code_round_trips() {
     check::<enums::AnnotationKind>();
     check::<enums::DataSource>();
     check::<enums::GapReason>();
+    check::<enums::TimedPolicyKind>();
+    check::<enums::PrivacyMode>();
 }
 
 #[test]
@@ -418,4 +423,56 @@ impl ConnectionSql<'_> {
     fn schema_entries(&mut self) -> Vec<SchemaEntry> {
         diesel::sql_query("SELECT name, sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name").load(self.connection).expect("read schema")
     }
+}
+
+#[test]
+fn timed_policy_constraints_enforce_scope_mode_order_and_foreign_keys() {
+    use diesel::result::{DatabaseErrorKind, Error};
+    let mut conn = empty();
+    conn.batch_execute("PRAGMA foreign_keys = ON; INSERT INTO applications (id, identity_key, kind, exe_path, display_name, first_seen_utc_ms) VALUES (1, 'exe:test', 1, 'test', 'test', 0);").expect("application scope");
+    for values in [
+        "(1, NULL, NULL, 0, 100)",
+        "(2, 3, NULL, 0, 100)",
+        "(3, NULL, NULL, 0, 100)",
+        "(4, NULL, 1, 0, 100)",
+        "(5, NULL, 1, 0, 100)",
+    ] {
+        conn.batch_execute(&format!("INSERT INTO timed_policies VALUES {values}"))
+            .expect("valid policy");
+    }
+    conn.batch_execute("DELETE FROM timed_policies")
+        .expect("clear policies");
+    for values in [
+        "(2, NULL, NULL, 0, 100)",
+        "(1, 1, NULL, 0, 100)",
+        "(3, NULL, 1, 0, 100)",
+        "(4, NULL, NULL, 0, 100)",
+        "(5, NULL, NULL, 0, 100)",
+        "(2, 4, NULL, 0, 100)",
+        "(6, NULL, NULL, 0, 100)",
+        "(1, NULL, NULL, 100, 0)",
+        "(1, NULL, NULL, NULL, 100)",
+        "(1, NULL, NULL, 0, NULL)",
+    ] {
+        let error = conn
+            .batch_execute(&format!("INSERT INTO timed_policies VALUES {values}"))
+            .expect_err("invalid policy");
+        assert!(
+            matches!(
+                error,
+                Error::DatabaseError(
+                    DatabaseErrorKind::CheckViolation | DatabaseErrorKind::NotNullViolation,
+                    _
+                )
+            ),
+            "{values}: {error}"
+        );
+    }
+    let error = conn
+        .batch_execute("INSERT INTO timed_policies VALUES (4, NULL, 99, 0, 100)")
+        .expect_err("unknown application");
+    assert!(matches!(
+        error,
+        Error::DatabaseError(DatabaseErrorKind::ForeignKeyViolation, _)
+    ));
 }

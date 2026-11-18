@@ -2,16 +2,12 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "capture persistence is wired into the database thread in D2"
-    )
-)]
+#[cfg(any(windows, test))]
 mod capture;
 #[cfg(windows)]
 mod commands;
+#[cfg(any(windows, test))]
+mod core;
 mod data_directory;
 mod logging;
 mod platform;

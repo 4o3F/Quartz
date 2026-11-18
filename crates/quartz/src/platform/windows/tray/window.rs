@@ -16,22 +16,25 @@ use windows::{
             },
         },
     },
-    core::w,
+    core::{PCWSTR, w},
 };
 
 /// Private messages delivered to the core's hidden window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-pub(super) enum AppMessage {
+#[derive(num_enum::IntoPrimitive)]
+pub(in crate::platform::windows) enum AppMessage {
     TrayCallback = WM_APP + 1,
     WakeCore = WM_APP + 2,
+    WakeWorkers = WM_APP + 3,
 }
 
 impl AppMessage {
     fn from_raw(message: u32) -> Option<Self> {
         match message {
-            value if value == Self::TrayCallback as u32 => Some(Self::TrayCallback),
-            value if value == Self::WakeCore as u32 => Some(Self::WakeCore),
+            value if value == u32::from(Self::TrayCallback) => Some(Self::TrayCallback),
+            value if value == u32::from(Self::WakeCore) => Some(Self::WakeCore),
+            value if value == u32::from(Self::WakeWorkers) => Some(Self::WakeWorkers),
             _ => None,
         }
     }
@@ -47,6 +50,8 @@ pub(super) enum CoreEvent {
     ShowTrayMenu,
     RestoreTray,
     Quit,
+    EndSession,
+    Deadline(quartz_domain::capture::Timestamp),
 }
 
 impl CoreEvent {
@@ -60,7 +65,7 @@ impl CoreEvent {
                 NIN_POPUPOPEN | WM_MOUSEMOVE => None,
                 _ => None,
             },
-            Some(AppMessage::WakeCore) => None,
+            Some(AppMessage::WakeCore | AppMessage::WakeWorkers) => None,
             None if message == taskbar_created => Some(Self::RestoreTray),
             None if matches!(message, WM_CLOSE | WM_DESTROY) => Some(Self::Quit),
             None => None,
@@ -68,23 +73,59 @@ impl CoreEvent {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
+enum WindowRole {
+    Tray,
+    System,
+}
+impl WindowRole {
+    fn class_name(self) -> PCWSTR {
+        match self {
+            Self::Tray => w!("Quartz.Core"),
+            Self::System => w!("Quartz.SystemSources"),
+        }
+    }
+    fn parent(self) -> Option<HWND> {
+        match self {
+            Self::Tray => None,
+            Self::System => Some(WindowsAndMessaging::HWND_MESSAGE),
+        }
+    }
+    fn observes(self, message: u32) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            WM_POWERBROADCAST, WM_TIMECHANGE, WM_WTSSESSION_CHANGE,
+        };
+        match self {
+            Self::Tray => message == WM_TIMECHANGE,
+            Self::System => matches!(message, WM_POWERBROADCAST | WM_WTSSESSION_CHANGE),
+        }
+    }
+}
+
 struct WindowState {
+    role: WindowRole,
     taskbar_created: u32,
     events: RefCell<VecDeque<CoreEvent>>,
+    ingress: RefCell<Option<super::super::sources::SystemIngress>>,
 }
 
 impl WindowState {
+    #[cfg(test)]
     fn new(taskbar_created: u32) -> Self {
+        Self::with_role(taskbar_created, WindowRole::Tray)
+    }
+    fn with_role(taskbar_created: u32, role: WindowRole) -> Self {
         Self {
+            role,
             taskbar_created,
             events: RefCell::new(VecDeque::new()),
+            ingress: RefCell::new(None),
         }
     }
 
     fn enqueue(&self, event: CoreEvent) {
         let mut events = self.events.borrow_mut();
-        // Deduplication bounds the queue to the four CoreEvent variants.
+        // Semantic actions are deduplicated; the one-shot timer has at most one pending deadline.
         if !events.contains(&event) {
             if event == CoreEvent::Quit {
                 events.push_front(event);
@@ -113,8 +154,7 @@ pub(in crate::platform::windows) enum CreateCoreWindowError {
     CreateWindow { source: windows::core::Error },
 }
 
-#[derive(Debug)]
-pub(super) struct Window {
+pub(in crate::platform::windows) struct Window {
     handle: HWND,
     instance: HINSTANCE,
     // Drop destroys the window and clears its borrowed pointer before releasing this Box.
@@ -127,6 +167,12 @@ impl Window {
     /// # Errors
     /// Returns executable-module lookup, message or class registration, or window creation failures.
     pub(super) fn create() -> Result<Self, CreateCoreWindowError> {
+        Self::create_with(WindowRole::Tray)
+    }
+    pub(in crate::platform::windows) fn create_system() -> Result<Self, CreateCoreWindowError> {
+        Self::create_with(WindowRole::System)
+    }
+    fn create_with(role: WindowRole) -> Result<Self, CreateCoreWindowError> {
         // SAFETY: A null module name requests the current executable; it remains loaded until exit.
         let instance = unsafe { LibraryLoader::GetModuleHandleW(None) }
             .context(GetModuleHandleSnafu)?
@@ -140,7 +186,7 @@ impl Window {
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_procedure),
             hInstance: instance,
-            lpszClassName: w!("Quartz.Core"),
+            lpszClassName: role.class_name(),
             ..Default::default()
         };
         // SAFETY: Class storage is initialized; the callback and class name live for the process lifetime.
@@ -150,22 +196,22 @@ impl Window {
         let mut window = Self {
             handle: HWND::default(),
             instance,
-            state: Box::new(WindowState::new(taskbar_created)),
+            state: Box::new(WindowState::with_role(taskbar_created, role)),
         };
-        // SAFETY: The class was registered above; no parent means a top-level window. Omitting
-        // WS_VISIBLE keeps it hidden while allowing Explorer's TaskbarCreated broadcasts.
+        // SAFETY: The registered class uses a hidden top-level tray window or HWND_MESSAGE
+        // for explicitly registered system sources. Neither role sets WS_VISIBLE.
         // The boxed state has a stable address and outlives every callback for this window.
         window.handle = unsafe {
             WindowsAndMessaging::CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
-                w!("Quartz.Core"),
+                role.class_name(),
                 w!("Quartz"),
                 WINDOW_STYLE::default(),
                 0,
                 0,
                 0,
                 0,
-                None,
+                role.parent(),
                 None,
                 Some(instance),
                 Some(std::ptr::from_ref(window.state.as_ref()).cast()),
@@ -175,7 +221,14 @@ impl Window {
         Ok(window)
     }
 
-    pub(super) fn raw(&self) -> HWND {
+    pub(in crate::platform::windows) fn attach_capture(
+        &self,
+        ingress: super::super::sources::SystemIngress,
+    ) {
+        *self.state.ingress.borrow_mut() = Some(ingress);
+    }
+
+    pub(in crate::platform::windows) fn raw(&self) -> HWND {
         self.handle
     }
 
@@ -196,7 +249,10 @@ impl Drop for Window {
                 WindowsAndMessaging::SetWindowLongPtrW(self.handle, GWLP_USERDATA, 0);
                 let _ = WindowsAndMessaging::DestroyWindow(self.handle);
             }
-            let _ = WindowsAndMessaging::UnregisterClassW(w!("Quartz.Core"), Some(self.instance));
+            let _ = WindowsAndMessaging::UnregisterClassW(
+                self.state.role.class_name(),
+                Some(self.instance),
+            );
         }
     }
 }
@@ -247,6 +303,53 @@ impl CallbackWindow {
                 // SAFETY: Only create() installs this pointer, and Window keeps the Box alive until
                 // after destruction. RefCell accesses stay on this same window-owning thread.
                 let state = unsafe { &*state };
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    WM_ENDSESSION, WM_QUERYENDSESSION, WM_TIMER,
+                };
+                if state.role.observes(message)
+                    && let Some(ingress) = state.ingress.borrow().as_ref()
+                    && let Err(error) = ingress.message(message, wparam)
+                {
+                    tracing::error!(%error, "could not observe system message; exiting core");
+                    std::process::exit(1);
+                }
+                if message == WM_QUERYENDSESSION {
+                    return LRESULT(1);
+                }
+                if message == WM_ENDSESSION && wparam.0 != 0 {
+                    if let Some(ingress) = state.ingress.borrow().as_ref()
+                        && let Err(error) = ingress.end_session()
+                    {
+                        tracing::error!(%error, "could not settle capture before session end; exiting core");
+                        std::process::exit(1);
+                    }
+                    state.enqueue(CoreEvent::EndSession);
+                    return LRESULT(0);
+                }
+                if message == WM_TIMER {
+                    // SAFETY: Cancel the window timer before returning to any nested message loop.
+                    unsafe {
+                        let _ = WindowsAndMessaging::KillTimer(Some(window), wparam.0);
+                    }
+                    use crate::core::sources::ClockReader;
+                    match super::super::sources::SystemClock.read() {
+                        Ok(at) => {
+                            if let Some(ingress) = state.ingress.borrow().as_ref()
+                                && let Err(error) = ingress
+                                    .observe_at(at, quartz_domain::capture::CaptureEvent::Wake)
+                            {
+                                tracing::error!(%error, "could not deliver timer observation; exiting core");
+                                std::process::exit(1);
+                            }
+                            state.enqueue(CoreEvent::Deadline(at));
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "could not timestamp timer");
+                            state.enqueue(CoreEvent::Quit);
+                        }
+                    }
+                    return LRESULT(0);
+                }
                 if let Some(event) = CoreEvent::from_message(message, lparam, state.taskbar_created)
                 {
                     state.enqueue(event);
@@ -255,7 +358,7 @@ impl CallbackWindow {
                     let _ = unsafe {
                         WindowsAndMessaging::PostMessageW(
                             Some(window),
-                            AppMessage::WakeCore as u32,
+                            u32::from(AppMessage::WakeCore),
                             WPARAM(0),
                             LPARAM(0),
                         )
@@ -293,7 +396,7 @@ mod tests {
     #[test]
     fn custom_message_ids_round_trip() {
         for message in [AppMessage::TrayCallback, AppMessage::WakeCore] {
-            assert_eq!(AppMessage::from_raw(message as u32), Some(message));
+            assert_eq!(AppMessage::from_raw(u32::from(message)), Some(message));
         }
         assert_eq!(AppMessage::from_raw(WM_CLOSE), None);
     }
@@ -301,7 +404,7 @@ mod tests {
     #[test]
     fn window_messages_translate_to_core_events() {
         let taskbar_created = 0xc000;
-        let tray_callback = AppMessage::TrayCallback as u32;
+        let tray_callback = u32::from(AppMessage::TrayCallback);
         for (message, parameter, expected) in [
             (tray_callback, NIN_SELECT as isize, Some(CoreEvent::OpenUi)),
             (
@@ -335,7 +438,7 @@ mod tests {
             (taskbar_created, 0, Some(CoreEvent::RestoreTray)),
             (WM_CLOSE, 0, Some(CoreEvent::Quit)),
             (WM_DESTROY, 0, Some(CoreEvent::Quit)),
-            (AppMessage::WakeCore as u32, 0, None),
+            (u32::from(AppMessage::WakeCore), 0, None),
             (WM_APP + 3, 0, None),
         ] {
             assert_eq!(

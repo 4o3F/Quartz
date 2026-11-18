@@ -12,9 +12,9 @@ use super::{
     ClockChange, ClockEndReason, Deadline, DeadlineKind, DeadlineScheduler, Foreground,
     ForegroundGeneration, GapReason, IdleRecord, IdleSample, IntervalEndReason, IntervalFact,
     NoForegroundReason, ObservationId, ObservationSource, OpenInterval, PolicyObservation,
-    PrivacyContext, RowId, RunEndReason, RunId, SegmentRange, SessionStatus, StopChange,
-    StopReason, TimeRange, Timer, Timestamp, WebRowExtension, WindowId, WindowInstances,
-    ids::IdAllocator, limits,
+    PrivacyContext, RowId, RunEndReason, RunId, SchedulerKind, SegmentRange, SessionStatus,
+    StopChange, StopReason, TimeRange, TimedPolicyKind, Timer, Timestamp, WebRowExtension,
+    WindowId, WindowInstances, ids::IdAllocator, limits,
 };
 use crate::rules::registry::{RuleSnapshot, SnapshotEpoch};
 use std::collections::BTreeSet;
@@ -71,12 +71,15 @@ pub struct CaptureCore {
     phase: Phase,
     tracker: ForegroundTracker,
     availability: AvailabilitySet,
+    pending_availability: Vec<AvailabilityEvidence>,
     review_history: ReviewHistory,
     deferred: DeferredBrowser,
     epoch: Option<SnapshotEpoch>,
     windows: WindowInstances,
     allowed_windows: BTreeSet<WindowId>,
     deadlines: DeadlineScheduler,
+    timed: super::timed::TimedStates,
+    persisted_deadlines: BTreeSet<SchedulerKind>,
 }
 impl CaptureCore {
     /// Starts a run and its first segment, requesting session initialization before foreground capture.
@@ -94,10 +97,10 @@ impl CaptureCore {
         let clock = ClockSegment::new(run, at, &mut ids);
         let mut deadlines = DeadlineScheduler::default();
         deadlines.register(
-            DeadlineKind::Maintenance,
+            SchedulerKind::Maintenance,
             Deadline::Mono(clock.maintenance_deadline),
         );
-        deadlines.register(DeadlineKind::Midnight, Deadline::Utc(midnight));
+        deadlines.register(SchedulerKind::Midnight, Deadline::Utc(midnight));
         let mut core = Self {
             clock,
             ledger: BatchLedger::new(),
@@ -105,12 +108,15 @@ impl CaptureCore {
             phase: Phase::startup(),
             tracker: ForegroundTracker::new(),
             availability: AvailabilitySet::new(at),
+            pending_availability: Vec::new(),
             review_history: ReviewHistory::default(),
             deferred: DeferredBrowser::default(),
             epoch: None,
             windows: WindowInstances::default(),
             allowed_windows: BTreeSet::new(),
             deadlines,
+            timed: super::timed::TimedStates::default(),
+            persisted_deadlines: BTreeSet::new(),
         };
         let mut step = CaptureStep {
             writes: vec![
@@ -188,6 +194,12 @@ impl CaptureCore {
         ) {
             self.flush_deferred(BrowserResolution::Discard, step);
         }
+        if !matches!(
+            event,
+            CaptureEvent::PersistenceGap { .. } | CaptureEvent::BatchDiscarded(_)
+        ) {
+            self.restore_availability(at, step);
+        }
         self.adopt_rules(at, rules, event, step);
         // Every input can arrive after midnight even if its timer notification was delayed.
         if self.deferred.is_empty()
@@ -253,8 +265,22 @@ impl CaptureCore {
             CaptureEvent::RegisterDeadline { owner, deadline } => {
                 self.register_deadline(owner, deadline, at, rules, step)
             }
+            CaptureEvent::SetTimedState(state) => {
+                self.set_timed_state(state, super::timed::GrantEvidence::Live, at, rules, step)
+            }
+            CaptureEvent::RestoreTimedState(state) => self.set_timed_state(
+                state,
+                super::timed::GrantEvidence::Restored,
+                at,
+                rules,
+                step,
+            ),
+            CaptureEvent::CancelTimedPolicy(owner) => {
+                self.cancel_timed_state(owner, at, rules, step)
+            }
             CaptureEvent::CancelDeadline(owner) => {
                 self.deadlines.cancel(owner);
+                self.persisted_deadlines.remove(&owner);
                 step.writes.push(CaptureWrite::ClearDeadline { owner });
             }
             CaptureEvent::EventOverload => {
@@ -275,11 +301,16 @@ impl CaptureCore {
         &mut self,
         generation: ForegroundGeneration,
         source: ObservationSource,
-        foreground: Foreground,
+        mut foreground: Foreground,
         at: Timestamp,
         rules: &Arc<RuleSnapshot>,
         step: &mut CaptureStep,
     ) {
+        if let Foreground::Window { privacy, .. } = &mut foreground
+            && let Some(mode) = self.timed.privacy(at)
+        {
+            privacy.mode = mode;
+        }
         let waiting = matches!(
             &foreground,
             Foreground::Window {
@@ -296,7 +327,7 @@ impl CaptureCore {
             }
             if self.deferred.is_empty() {
                 self.deadlines.register(
-                    DeadlineKind::PrivacyContext,
+                    SchedulerKind::PrivacyContext,
                     Deadline::Mono(at.mono.advance(limits::PRIVACY_CONTEXT_WAIT)),
                 );
             }
@@ -356,9 +387,56 @@ impl CaptureCore {
             step.effects.push(CaptureEffect::ReviewForeground);
         }
     }
+    fn set_timed_state(
+        &mut self,
+        state: super::TimedState,
+        evidence: super::timed::GrantEvidence,
+        at: Timestamp,
+        rules: &RuleSnapshot,
+        step: &mut CaptureStep,
+    ) {
+        let state = state
+            .normalized()
+            .expect("timed state validated before transition");
+        let owner = state.owner();
+        let until = state.until;
+        if owner == TimedPolicyKind::Privacy {
+            self.tracker.expire_privacy();
+        }
+        self.timed.install(state.clone(), evidence);
+        step.writes.push(CaptureWrite::SetTimedState(state));
+        if owner == TimedPolicyKind::Pause && until > at.utc {
+            self.stop(StopChange::Begin(StopReason::Paused), at, step);
+        }
+        self.deadlines.register(owner, Deadline::Utc(until));
+        self.wake(at, rules, step);
+        if until > at.utc {
+            self.policy_boundary(at, PolicyObservation::Refresh, rules, step);
+        }
+        step.effects.push(CaptureEffect::CheckIdle);
+    }
+    fn cancel_timed_state(
+        &mut self,
+        owner: TimedPolicyKind,
+        at: Timestamp,
+        rules: &RuleSnapshot,
+        step: &mut CaptureStep,
+    ) {
+        self.deadlines.cancel(owner);
+        self.timed.remove(owner);
+        step.writes.push(CaptureWrite::ClearTimedPolicy(owner));
+        if owner == TimedPolicyKind::Pause {
+            self.stop(StopChange::End(StopReason::Paused), at, step);
+        }
+        if owner == TimedPolicyKind::Privacy {
+            self.tracker.expire_privacy();
+        }
+        self.policy_boundary(at, PolicyObservation::Refresh, rules, step);
+        step.effects.push(CaptureEffect::CheckIdle);
+    }
     fn register_deadline(
         &mut self,
-        owner: DeadlineKind,
+        owner: SchedulerKind,
         deadline: Deadline,
         at: Timestamp,
         rules: &RuleSnapshot,
@@ -366,6 +444,7 @@ impl CaptureCore {
     ) {
         self.deadlines.register(owner, deadline);
         if let Deadline::Utc(utc) = deadline {
+            self.persisted_deadlines.insert(owner);
             step.writes
                 .push(CaptureWrite::SetDeadline { owner, at: utc });
         }
@@ -380,15 +459,25 @@ impl CaptureCore {
         self.phase.take_interval();
         self.phase.take_waiting();
         self.review_history.ranges.clear();
-        let masks = self.availability.reopen_evidence();
+        for evidence in self.availability.reopen_evidence() {
+            self.pending_availability
+                .retain(|pending| pending.reason != evidence.reason);
+            self.pending_availability.push(evidence);
+        }
         let boundary = Timestamp {
             utc: lost_through.utc.max(self.clock.anchor.utc),
             mono: lost_through.mono.max(self.clock.anchor.mono),
         };
-        for AvailabilityEvidence { reason, idle } in masks {
+        self.begin_gap(boundary, reason, step);
+    }
+    fn restore_availability(&mut self, at: Timestamp, step: &mut CaptureStep) {
+        // Loss feedback must not allocate another batch while an in-flight transaction fills the budget.
+        // Rebuild masks on subsequent work or a durable acknowledgement instead.
+        let boundary = self.clock.anchor.project(at.mono);
+        for AvailabilityEvidence { reason, idle } in std::mem::take(&mut self.pending_availability)
+        {
             self.open_availability(reason, boundary, idle, step);
         }
-        self.begin_gap(boundary, reason, step);
     }
     fn shutdown(&mut self, at: Timestamp, step: &mut CaptureStep) {
         self.finish_waiting(at, IntervalEndReason::Shutdown);
@@ -510,6 +599,12 @@ impl CaptureCore {
             self.clock.anchor.checked_project(at.mono)?;
             if let CaptureEvent::RegisterDeadline { deadline, .. } = event {
                 deadline.mono_at(at)?;
+            }
+            if let CaptureEvent::SetTimedState(state) | CaptureEvent::RestoreTimedState(state) =
+                event
+            {
+                let state = state.clone().normalized()?;
+                Deadline::Utc(state.until).mono_at(at)?;
             }
             if let CaptureEvent::Idle(sample) = event {
                 at.mono.checked_add(sample.policy.threshold)?;
@@ -822,6 +917,13 @@ impl CaptureCore {
         } else {
             ReviewExpectation::Unexpected
         };
+        let application = match &reading.foreground {
+            Foreground::Window { facts, .. } => Some(&facts.app),
+            Foreground::None(_) => None,
+        };
+        if self.tracker.app() != application {
+            step.effects.push(CaptureEffect::CheckIdle);
+        }
         self.review_foreground(reading.at, reading.source, step);
         self.split_foreground(reading.at, step);
         let observed = reading.evaluate(&mut self.windows, context);
@@ -953,10 +1055,15 @@ impl CaptureCore {
         let cached = matches!(foreground, PolicyObservation::Refresh);
         if cached && self.phase.needs_review() {
             self.phase.wait(at);
-        } else if let Some(foreground) = match foreground {
+        } else if let Some(mut foreground) = match foreground {
             PolicyObservation::Refresh => self.tracker.current(),
             PolicyObservation::Observed(foreground) => Some(foreground),
         } {
+            if let Foreground::Window { privacy, .. } = &mut foreground
+                && let Some(mode) = self.timed.privacy(at)
+            {
+                privacy.mode = mode;
+            }
             let needs_review = self.phase.needs_review();
             let fingerprint = self.tracker.fingerprint();
             self.foreground(
@@ -1058,7 +1165,7 @@ impl CaptureCore {
         }
         self.phase.request_review();
         self.deadlines.register(
-            DeadlineKind::Midnight,
+            SchedulerKind::Midnight,
             Deadline::Utc(
                 at.next_midnight()
                     .expect("validated UTC calendar has a next day"),
@@ -1070,9 +1177,22 @@ impl CaptureCore {
         if !self.phase.initialized() {
             return;
         }
+        let mut sample = sample;
+        let app = if self.phase.ready()
+            && !self.phase.needs_review()
+            && self.phase.reasons().is_empty()
+            && self.deferred.is_empty()
+        {
+            self.tracker.app()
+        } else {
+            None
+        };
+        sample.exceptions.extend(self.timed.grants(at, app));
         let decision = sample.decide(at);
-        self.deadlines
-            .register(DeadlineKind::Idle, Deadline::Mono(decision.next_check_mono));
+        self.deadlines.register(
+            SchedulerKind::Idle,
+            Deadline::Mono(decision.next_check_mono),
+        );
         match self
             .availability
             .apply_idle(decision, at, self.clock.anchor)
@@ -1133,52 +1253,75 @@ impl CaptureCore {
         let due = self.deadlines.take_due(at);
         for owner in due {
             match owner {
-                DeadlineKind::Maintenance => {
-                    self.flush_deferred(BrowserResolution::Discard, step);
-                    if at.mono > self.clock.maintenance_deadline.advance(limits::BATCH_WAIT) {
-                        self.begin_gap(self.clock.last_at, GapReason::EventOverload, step);
-                    }
-                    self.checkpoint(at, step);
-                    self.clock.maintenance_deadline = at.mono.advance(limits::CHECKPOINT_PERIOD);
-                    step.effects.push(CaptureEffect::ReviewForeground);
-                    self.deadlines.register(
-                        owner,
-                        Deadline::Mono(at.mono.advance(limits::CHECKPOINT_PERIOD)),
-                    );
-                }
-                DeadlineKind::Midnight => {
-                    if self.deferred.is_empty() {
-                        self.split_foreground(at, step);
-                    }
-                    self.deadlines.register(
-                        owner,
-                        Deadline::Utc(
-                            at.next_midnight()
-                                .expect("validated UTC calendar has a next day"),
-                        ),
-                    );
-                }
-                DeadlineKind::Idle => step.effects.push(CaptureEffect::CheckIdle),
-                DeadlineKind::PrivacyContext => {
-                    self.flush_deferred(BrowserResolution::Discard, step)
-                }
-                _ => {
-                    step.writes.push(CaptureWrite::ClearDeadline { owner });
-                    if owner == DeadlineKind::Pause {
-                        self.stop(StopChange::End(StopReason::Paused), at, step);
-                    }
-                    if owner == DeadlineKind::Privacy {
-                        self.tracker.expire_privacy();
-                    }
-                    self.policy_boundary(at, PolicyObservation::Refresh, rules, step);
-                    step.effects.push(CaptureEffect::PolicyExpired(owner));
-                    step.effects.push(CaptureEffect::CheckIdle);
-                }
+                DeadlineKind::Scheduler(owner) => self.wake_scheduler(owner, at, step),
+                DeadlineKind::Policy(owner) => self.expire_policy(owner, at, rules, step),
             }
         }
     }
+    fn wake_scheduler(&mut self, owner: SchedulerKind, at: Timestamp, step: &mut CaptureStep) {
+        if self.persisted_deadlines.remove(&owner) {
+            step.writes.push(CaptureWrite::ClearDeadline { owner });
+        }
+        match owner {
+            SchedulerKind::Maintenance => {
+                self.flush_deferred(BrowserResolution::Discard, step);
+                if at.mono > self.clock.maintenance_deadline.advance(limits::BATCH_WAIT) {
+                    self.begin_gap(self.clock.last_at, GapReason::EventOverload, step);
+                }
+                self.checkpoint(at, step);
+                self.clock.maintenance_deadline = at.mono.advance(limits::CHECKPOINT_PERIOD);
+                step.effects.push(CaptureEffect::ReviewForeground);
+                self.deadlines.register(
+                    owner,
+                    Deadline::Mono(at.mono.advance(limits::CHECKPOINT_PERIOD)),
+                );
+            }
+            SchedulerKind::Midnight => {
+                if self.deferred.is_empty() {
+                    self.split_foreground(at, step);
+                }
+                self.deadlines.register(
+                    owner,
+                    Deadline::Utc(
+                        at.next_midnight()
+                            .expect("validated UTC calendar has a next day"),
+                    ),
+                );
+            }
+            SchedulerKind::Idle => step.effects.push(CaptureEffect::CheckIdle),
+            SchedulerKind::PrivacyContext => self.flush_deferred(BrowserResolution::Discard, step),
+        }
+    }
+    fn expire_policy(
+        &mut self,
+        owner: TimedPolicyKind,
+        at: Timestamp,
+        rules: &RuleSnapshot,
+        step: &mut CaptureStep,
+    ) {
+        step.writes.push(CaptureWrite::ClearTimedPolicy(owner));
+        self.timed.remove(owner);
+        if owner == TimedPolicyKind::Pause {
+            self.stop(StopChange::End(StopReason::Paused), at, step);
+        }
+        if owner == TimedPolicyKind::Privacy {
+            self.tracker.expire_privacy();
+        }
+        self.policy_boundary(at, PolicyObservation::Refresh, rules, step);
+        step.effects.push(CaptureEffect::PolicyExpired(owner));
+        step.effects.push(CaptureEffect::CheckIdle);
+    }
+
     fn flush_deferred(&mut self, context: BrowserResolution, step: &mut CaptureStep) {
-        self.deadlines.cancel(DeadlineKind::PrivacyContext);
+        self.deadlines.cancel(SchedulerKind::PrivacyContext);
+        if self
+            .persisted_deadlines
+            .remove(&SchedulerKind::PrivacyContext)
+        {
+            step.writes.push(CaptureWrite::ClearDeadline {
+                owner: SchedulerKind::PrivacyContext,
+            });
+        }
         while let Some(mut pending) = self.deferred.pop() {
             if let Foreground::Window { privacy, .. } = &mut pending.foreground {
                 privacy.browser = match &context {

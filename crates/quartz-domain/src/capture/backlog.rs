@@ -67,7 +67,22 @@ pub struct WriteBacklog {
     failure: BacklogFailure,
     capacity: usize,
     retention: Duration,
+    reservation: Reservation,
 }
+/// A database transaction retains its prefix while producers can replace the remaining suffix.
+#[derive(Debug, Default)]
+enum Reservation {
+    #[default]
+    None,
+    Batches {
+        through: BatchId,
+    },
+    Gap {
+        stored: StoredGap,
+        structural_commands: usize,
+    },
+}
+
 impl Default for WriteBacklog {
     fn default() -> Self {
         Self::new()
@@ -83,6 +98,40 @@ impl WriteBacklog {
             failure: BacklogFailure::QueueFull,
             capacity: WRITE_QUEUE_CAPACITY,
             retention: limits::BACKLOG_RETENTION,
+            reservation: Reservation::None,
+        }
+    }
+    /// Pins the selected prefix until its database transaction commits or fails.
+    pub fn reserve_batches(&mut self, through: BatchId) {
+        assert!(matches!(self.reservation, Reservation::None));
+        assert!(self.queue.iter().any(|queued| queued.batch.id == through));
+        self.reservation = Reservation::Batches { through };
+    }
+    /// Pins the current gap and structural prefix while the database repairs it.
+    pub fn reserve_gap(&mut self) {
+        assert!(matches!(self.reservation, Reservation::None));
+        let stored = self
+            .first_gap()
+            .expect("gap reservation requires a front gap");
+        self.reservation = Reservation::Gap {
+            stored,
+            structural_commands: self.structural.len(),
+        };
+    }
+    /// Releases a failed transaction without acknowledging its writes.
+    pub fn release_reservation(&mut self) {
+        self.reservation = Reservation::None;
+    }
+    fn reserved_batches(&self) -> usize {
+        match self.reservation {
+            Reservation::Batches { through } => {
+                self.queue
+                    .iter()
+                    .position(|queued| queued.batch.id == through)
+                    .expect("reserved prefix remains queued")
+                    + 1
+            }
+            _ => 0,
         }
     }
     /// Records a failure without consuming the uncommitted front transaction.
@@ -163,7 +212,16 @@ impl WriteBacklog {
     pub fn committed_gap(&mut self, run: RunId, gap: CaptureGap) -> bool {
         if self.gaps.front() == Some(&StoredGap { run, gap }) {
             self.gaps.pop_front();
-            self.structural.clear();
+            match self.reservation {
+                Reservation::Gap {
+                    structural_commands,
+                    ..
+                } => {
+                    self.structural.drain(..structural_commands);
+                }
+                _ => self.structural.clear(),
+            }
+            self.release_reservation();
             true
         } else {
             false
@@ -172,13 +230,16 @@ impl WriteBacklog {
     /// Removes exactly the successfully committed front transaction.
     #[must_use]
     pub fn committed(&mut self, batch: BatchId) -> bool {
-        if self.gaps.is_empty()
+        if (self.gaps.is_empty() || matches!(self.reservation, Reservation::Batches { .. }))
             && self
                 .queue
                 .front()
                 .is_some_and(|queued| queued.batch.id == batch)
         {
             self.queue.pop_front();
+            if matches!(self.reservation, Reservation::Batches { through } if through == batch) {
+                self.release_reservation();
+            }
             true
         } else {
             false
@@ -188,7 +249,7 @@ impl WriteBacklog {
     pub fn push(&mut self, mut batch: WriteBatch, now: Timestamp) -> BacklogOutcome {
         let mut outcome = BacklogOutcome::default();
         let mut queued_at = now;
-        if batch.replaceable() {
+        if batch.replaceable() && self.queue.len() > self.reserved_batches() {
             // A checkpoint only replaces a checkpoint for the same exact open-row set.
             // Intervening close/open transactions must retain their ordering.
             if let Some(QueuedBatch {
@@ -230,7 +291,8 @@ impl WriteBacklog {
         }
         // All dependent transactions are discarded together: retaining a close whose
         // matching open was discarded would leave the database with dangling row keys.
-        while let Some(QueuedBatch { batch, .. }) = self.queue.pop_front() {
+        let mut discarded = self.queue.split_off(self.reserved_batches());
+        while let Some(QueuedBatch { batch, .. }) = discarded.pop_front() {
             outcome.discarded.push(batch.id);
             self.structural
                 .extend(batch.writes.into_iter().filter(|write| {
@@ -240,6 +302,10 @@ impl WriteBacklog {
                             | CaptureWrite::CloseRun { .. }
                             | CaptureWrite::OpenClockSegment { .. }
                             | CaptureWrite::CloseClockSegment { .. }
+                            | CaptureWrite::SetTimedState(_)
+                            | CaptureWrite::SetDeadline { .. }
+                            | CaptureWrite::ClearDeadline { .. }
+                            | CaptureWrite::ClearTimedPolicy(_)
                     )
                 }));
             for covered in batch.coverage {
@@ -260,6 +326,7 @@ impl WriteBacklog {
             run: last_run,
             gap: last,
         }) = self.gaps.back_mut()
+            && !matches!(self.reservation, Reservation::Gap { stored, .. } if stored.run == *last_run && stored.gap == *last)
             && *last_run == run
             && last.segment == gap.segment
             && last.reason == gap.reason

@@ -11,6 +11,12 @@ error.not_implemented:
   en: "not implemented yet: %{operation}"
 tray.upgrading:
   en: "Upgrading database…"
+tray.persistence_failed:
+  en: "Can't save records. Retrying…"
+tray.session_unavailable:
+  en: "Session status unavailable. Capture stopped, retrying…"
+tray.capture_gap:
+  en: "Some activity wasn't recorded"
 ui.core_error.newer_database.title:
   en: "Database version is newer"
 ui.core_error.newer_database.message:

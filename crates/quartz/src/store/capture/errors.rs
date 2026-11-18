@@ -13,13 +13,20 @@ pub(crate) struct CaptureColumn {
 }
 impl std::fmt::Display for CaptureColumn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{} (row {:?})", self.table, self.column, self.row_id)
+        match self.row_id {
+            Some(id) => write!(f, "{}.{} (row {id})", self.table, self.column),
+            None => write!(f, "{}.{}", self.table, self.column),
+        }
     }
 }
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub(crate) enum DecodeCaptureRowError {
+    #[snafu(display("stored timed policy exceeds its single-grant limit"))]
+    ExcessiveTimedGrant,
+    #[snafu(display("invalid application identity at {field}"))]
+    ApplicationIdentity { field: CaptureColumn },
     #[snafu(display("missing value at {field}"))]
     MissingValue { field: CaptureColumn },
     #[snafu(display("invalid integer {value} at {field}; expected {target}"))]
@@ -50,7 +57,7 @@ pub(crate) enum DecodeCaptureRowError {
         value: i32,
         source: crate::store::enums::ConvertTitleStatusError,
     },
-    #[snafu(display("invalid deadline {value:?} in settings[{key:?}]"))]
+    #[snafu(display("invalid deadline {value} in settings[{key}]"))]
     Deadline {
         key: &'static str,
         value: String,
@@ -77,28 +84,28 @@ pub(crate) enum ExecuteCaptureBatchError {
         value: u128,
         source: TryFromIntError,
     },
-    #[snafu(display("unknown logical key {key:?} in run {run:?}"))]
+    #[snafu(display("unknown logical key {key} in run {run}", run = run.get()))]
     MissingKey { run: RunId, key: LogicalKey },
-    #[snafu(display("duplicate key {key:?} in run {run:?}: {existing:?} and {replacement:?}"))]
+    #[snafu(display("duplicate key {key} in run {run}: {existing} and {replacement}", run = run.get()))]
     DuplicateKey {
         run: RunId,
         key: LogicalKey,
         existing: i64,
         replacement: i64,
     },
-    #[snafu(display("no logical key for {table} row {row_id:?} in run {run:?}"))]
+    #[snafu(display("no logical key for {table} row {row_id} in run {run}", run = run.get()))]
     MissingMapping {
         run: RunId,
         table: &'static str,
         row_id: i64,
     },
-    #[snafu(display("expected one open {table} row {row_id:?}, affected {affected_rows}"))]
+    #[snafu(display("expected one open {table} row {row_id}, affected {affected_rows}"))]
     MissingOpenRow {
         table: &'static str,
         row_id: i64,
         affected_rows: usize,
     },
-    #[snafu(display("invalid capture range {start:?} to {end:?} at {field}"))]
+    #[snafu(display("invalid capture range at {field}: UTC {start_utc} to {end_utc}, monotonic {start_mono} to {end_mono}", start_utc = start.utc.get(), end_utc = end.utc.get(), start_mono = start.mono.get(), end_mono = end.mono.get()))]
     Range {
         field: CaptureColumn,
         start: Timestamp,

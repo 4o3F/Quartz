@@ -18,11 +18,12 @@ mod phase;
 mod privacy;
 mod recovery;
 mod time;
+mod timed;
 mod window;
 
 pub use backlog::{BacklogFailure, BacklogOutcome, StoredGap, WriteBacklog, WriteBatch};
 pub use core::{CaptureCore, StartCaptureError, StartedCapture, StepCaptureError};
-pub use deadlines::{Deadline, DeadlineKind, DeadlineScheduler};
+pub use deadlines::{Deadline, DeadlineKind, DeadlineScheduler, SchedulerKind};
 pub use idle::{
     ExceptionGrant, IdleDecision, IdleException, IdlePolicy, IdleRecord, IdleSample, IdleStatus,
     LastInput, ReadLastInputError,
@@ -34,6 +35,7 @@ pub use privacy::{
 };
 pub use recovery::{ConfirmedAvailability, ConfirmedInterval, ConfirmedSegment, RecoverableRun};
 pub use time::{AdvanceTimeError, MonoInstant, TimeRange, Timestamp, UtcInstant};
+pub use timed::{TimedPolicy, TimedPolicyKind, TimedState};
 pub use window::{
     AppIdentity, ForegroundGeneration, InstanceGeneration, ProcessId, Title, TitleStatus,
     WindowFacts, WindowHandle, WindowInstance, WindowInstances,

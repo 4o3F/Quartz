@@ -233,7 +233,22 @@
      }
  }
  
-@@ -236,16 +236,16 @@
+@@ -226,11 +226,11 @@
+ 
+ diesel::table! {
+     timed_policies (kind) {
+-        kind -> Nullable<BigInt>,
++        kind -> Integer,
+         privacy_mode -> Nullable<Integer>,
+         application_id -> Nullable<BigInt>,
+-        started_utc_ms -> Integer,
+-        until_utc_ms -> Integer,
++        started_utc_ms -> BigInt,
++        until_utc_ms -> BigInt,
+     }
+ }
+ 
+@@ -246,16 +246,16 @@
          id -> Nullable<BigInt>,
          stream_id -> BigInt,
          interval_id -> BigInt,
@@ -256,7 +271,7 @@
          audible -> Integer,
          link_status -> Integer,
          web_level -> Integer,
-@@ -260,14 +260,14 @@
+@@ -270,14 +270,14 @@
          id -> Nullable<BigInt>,
          run_id -> BigInt,
          app_id -> BigInt,

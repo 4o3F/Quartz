@@ -9,7 +9,9 @@ use crate::store::{
     rows::{AvailabilityIntervalsRow, CaptureRunsRow, ClockSegmentsRow, IntervalsRow},
     schema::{availability_intervals, capture_runs, clock_segments, intervals, settings, titles},
 };
-use diesel::prelude::*;
+use diesel::prelude::{
+    ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper,
+};
 use quartz_domain::capture::{
     self as domain, ConfirmedAvailability, ConfirmedInterval, ConfirmedSegment, RecoverableRun,
     RowId, RunId, SegmentId, Timestamp, WindowId,
@@ -55,7 +57,7 @@ impl From<DecodeCaptureRowError> for LoadCaptureStartupError {
 }
 #[derive(Debug)]
 pub(crate) struct PersistedDeadline {
-    pub owner: domain::DeadlineKind,
+    pub owner: domain::SchedulerKind,
     pub at: domain::UtcInstant,
 }
 #[derive(Debug)]
@@ -63,6 +65,7 @@ pub(crate) struct CaptureStartup {
     pub next_run: RunId,
     pub last_segment: Option<SegmentId>,
     pub deadlines: Vec<PersistedDeadline>,
+    pub policies: Vec<domain::TimedState>,
 }
 #[derive(Debug)]
 struct RecoveryRowIds {
@@ -105,20 +108,16 @@ impl Capture<'_> {
                 })
                 .transpose()?,
             deadlines: self.load_deadlines()?,
+            policies: self.load_timed_states()?,
         })
     }
     fn load_deadlines(&mut self) -> Result<Vec<PersistedDeadline>, LoadCaptureStartupError> {
         let mut deadlines = Vec::new();
         for owner in [
-            domain::DeadlineKind::Maintenance,
-            domain::DeadlineKind::Idle,
-            domain::DeadlineKind::Pause,
-            domain::DeadlineKind::Privacy,
-            domain::DeadlineKind::KeepTiming,
-            domain::DeadlineKind::AppExemption,
-            domain::DeadlineKind::Audible,
-            domain::DeadlineKind::PrivacyContext,
-            domain::DeadlineKind::Midnight,
+            domain::SchedulerKind::Maintenance,
+            domain::SchedulerKind::Idle,
+            domain::SchedulerKind::PrivacyContext,
+            domain::SchedulerKind::Midnight,
         ] {
             let key = Self::deadline_key(owner);
             if let Some(value) = settings::table

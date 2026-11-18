@@ -37,6 +37,17 @@ CREATE TABLE applications (
   first_seen_utc_ms INTEGER NOT NULL
 );
 
+CREATE TABLE timed_policies (
+  kind             INTEGER PRIMARY KEY CHECK (kind IN (1, 2, 3, 4, 5)), -- pause | privacy | keep_timing | app_exemption | audible
+  privacy_mode     INTEGER CHECK (privacy_mode IN (1, 2, 3)), -- normal | private | no_titles
+  application_id   INTEGER REFERENCES applications(id),
+  started_utc_ms   INTEGER NOT NULL,
+  until_utc_ms     INTEGER NOT NULL,
+  CHECK ((kind = 2 AND privacy_mode IS NOT NULL) OR (kind <> 2 AND privacy_mode IS NULL)),
+  CHECK ((kind IN (4, 5) AND application_id IS NOT NULL) OR (kind NOT IN (4, 5) AND application_id IS NULL)),
+  CHECK (until_utc_ms >= started_utc_ms)
+);
+
 CREATE TABLE window_instances (
   id               INTEGER PRIMARY KEY,
   run_id           INTEGER NOT NULL REFERENCES capture_runs(id),
@@ -490,3 +501,13 @@ SELECT t.*,
        strftime('%Y-%m-%d %H:%M:%f', t.updated_utc_ms / 1000.0, 'unixepoch', 'localtime') AS updated_local
 FROM annotations t
 LEFT JOIN enum_labels e_kind ON e_kind.enum_name = 'annotations.kind' AND e_kind.code = t.kind;
+
+INSERT INTO enum_labels (enum_name, code, label) VALUES
+  ('timed_policies.kind', 1, 'pause'),
+  ('timed_policies.kind', 2, 'privacy'),
+  ('timed_policies.kind', 3, 'keep_timing'),
+  ('timed_policies.kind', 4, 'app_exemption'),
+  ('timed_policies.kind', 5, 'audible'),
+  ('timed_policies.privacy_mode', 1, 'normal'),
+  ('timed_policies.privacy_mode', 2, 'private'),
+  ('timed_policies.privacy_mode', 3, 'no_titles');

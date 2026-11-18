@@ -275,7 +275,24 @@ CREATE TABLE settings (
 ) WITHOUT ROWID;
 ```
 
-`settings` 只保存配置值和截止时间，不保存规则状态或关系状态。
+`settings` 只保存配置值和其他需要持久化的调度截止时间。五种限时策略的状态和截止时间统一保存在 `timed_policies`，不在 `settings` 重复保存。
+
+```sql
+CREATE TABLE timed_policies (
+    kind INTEGER PRIMARY KEY CHECK (kind IN (1, 2, 3, 4, 5)),
+    privacy_mode INTEGER CHECK (privacy_mode IN (1, 2, 3)),
+    application_id INTEGER REFERENCES applications(id),
+    started_utc_ms INTEGER NOT NULL,
+    until_utc_ms INTEGER NOT NULL,
+    CHECK ((kind = 2 AND privacy_mode IS NOT NULL) OR
+           (kind <> 2 AND privacy_mode IS NULL)),
+    CHECK ((kind IN (4, 5) AND application_id IS NOT NULL) OR
+           (kind NOT IN (4, 5) AND application_id IS NULL)),
+    CHECK (until_utc_ms >= started_utc_ms)
+);
+```
+
+`kind` 依次为 `pause`、`privacy`、`keep_timing`、`app_exemption`、`audible`；`privacy_mode` 依次为 `normal`、`private`、`no_titles`，标签登记在 `enum_labels`。应用作用域引用 `applications`，授权时按应用身份插入或复用该行。
 
 schema 版本由 diesel 的 `__diesel_schema_migrations` 表记录，不另建版本表，见第 8 节。
 
@@ -302,11 +319,13 @@ CREATE TABLE data_day_versions (
 
 `classification_version`、`extractor_version`、`privacy_version` 是对应类型**生效规则列表**的内容哈希（由各规则集当前版本的 `content_hash` 按解析顺序组合而成），不是手动递增的计数器：任何导入、编辑、启停、调整顺序都会自然改变哈希，回退到旧状态时哈希也恢复，可以复用缓存。`stats_policy_version` 仍保存在 `settings` 中，修改统计口径的事务里加一。
 
-`settings.metadata_version` 在应用显示名、浏览器 profile 标签、分类名称、颜色、倾向或层级变化时，在同一事务加一。日缓存、托盘摘要和 `day` 订阅同时失效。限时状态也保存在 `settings`：暂停、隐私模式、保持计时和空闲例外的截止 UTC，由核心的截止时间调度器管理，重启后检查是否到期（01 第 6.1 节）。
+`settings.metadata_version` 在应用显示名、浏览器 profile 标签、分类名称、颜色、倾向或层级变化时，在同一事务加一。日缓存、托盘摘要和 `day` 订阅同时失效。限时策略的 UTC 截止时间由核心的截止时间调度器管理，重启后检查是否到期（01 第 6.1 节）。
 
 首版不建立持久的派生表，派生结果放在内存缓存里（见第 5 节）。
 
 ### 2.8 删除屏障与采集缺口
+
+限时策略状态保存在 `timed_policies`，授权、到期或取消与采集边界在同一事务写入或删除。
 
 ```sql
 CREATE TABLE deletion_barriers (

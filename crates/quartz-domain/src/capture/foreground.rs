@@ -203,6 +203,12 @@ impl ForegroundTracker {
             }),
         }
     }
+    pub(super) fn app(&self) -> Option<&super::AppIdentity> {
+        match &self.last {
+            LastForeground::Window(row) => Some(&row.facts.app),
+            _ => None,
+        }
+    }
     pub(super) fn instance(&self) -> Option<WindowId> {
         match &self.last {
             LastForeground::Window(row) => Some(row.instance),

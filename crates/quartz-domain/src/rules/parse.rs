@@ -1,4 +1,11 @@
-use super::{diagnostic::*, model::*};
+use super::{
+    diagnostic::{Diagnostic, DiagnosticCode, SourceLocation},
+    model::{
+        Action, BuiltinMetadata, CaseSensitivity, CategoryReference, Condition, Content, Disable,
+        EntryPosition, Field, MAX_TEXT_UTF16, MatchMode, Operator, Override, PrivacyAction,
+        REGEX_SIZE_LIMIT, Rule, RuleBody, RuleKind, RuleOrigin, RuleSet, SetHeader, WebAction,
+    },
+};
 use crate::domain_name::DomainName;
 use regex::RegexBuilder;
 use serde::{

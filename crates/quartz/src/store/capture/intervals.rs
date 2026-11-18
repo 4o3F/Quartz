@@ -6,7 +6,8 @@ use crate::store::{
     rows::IntervalsRow,
     schema::{intervals, titles, window_instances},
 };
-use diesel::prelude::*;
+use diesel::NullableExpressionMethods;
+use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
 use quartz_domain::capture::{
     CapturedFields, IntervalEndReason, IntervalFact, OpenInterval, PrivacyExplanation,
     PrivacyLabel, RowId, RunId, TimeRange, Timestamp, WindowId,

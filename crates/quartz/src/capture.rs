@@ -1,15 +1,24 @@
 //! Database-thread persistence shell; all core feedback is returned as values.
 
+mod queue;
+use queue::TransactionPlan;
+pub(crate) use queue::WriteQueue;
+
 use crate::store::{
     Store,
     capture::{
         CaptureKeys, CaptureStartup, ExecuteCaptureBatchError, RecoverCaptureError, RunMetadata,
     },
 };
-use quartz_domain::capture::{
-    BacklogFailure, BacklogOutcome, CaptureEffect, CaptureEvent, CaptureParts, CaptureWrite,
-    MonoInstant, Timestamp, WriteBacklog, limits,
-};
+#[cfg(test)]
+use quartz_domain::capture::CaptureParts;
+use quartz_domain::capture::{BacklogOutcome, CaptureEffect, CaptureEvent, MonoInstant, Timestamp};
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QueueShutdown {
+    pub at: Timestamp,
+    pub deadline: std::time::Instant,
+}
 
 /// Maximum commands per transaction, data model 03 §4.2; a single core batch is indivisible.
 const TRANSACTION_COMMANDS: usize = 64;
@@ -35,11 +44,22 @@ pub(crate) enum PersistenceOutcome {
         commands: usize,
     },
 }
+/// Progress made by one bounded database transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlushProgress {
+    None,
+    Committed { commands: usize },
+}
+#[derive(Debug, snafu::Snafu)]
+#[snafu(display("capture flush retained buffered commands without making progress"))]
+pub(crate) struct FlushStalledError;
+
 #[derive(Debug)]
 pub(crate) struct PersistenceResult {
     pub feedback: Vec<CaptureEvent>,
     pub effects: Vec<CaptureEffect>,
     pub outcome: PersistenceOutcome,
+    pub progress: FlushProgress,
 }
 impl PersistenceResult {
     pub(crate) fn state(&self) -> PersistenceState {
@@ -67,7 +87,12 @@ impl PersistenceResult {
                 .chain(outcome.discarded)
                 .map(CaptureEvent::BatchDiscarded),
         );
-        for gap in outcome.gaps {
+        // Storage retains every segment's loss; the core only needs its latest untrusted frontier.
+        if let Some(gap) = outcome
+            .gaps
+            .into_iter()
+            .max_by_key(|gap| gap.range.end.mono)
+        {
             self.feedback.push(CaptureEvent::PersistenceGap {
                 reason: gap.reason,
                 lost_through: gap.range.end,
@@ -85,13 +110,17 @@ pub(crate) struct OpenedPersistence {
 /// Owns retained writes and transaction-local key mappings, without calling the core.
 #[derive(Debug)]
 pub(crate) struct Persistence {
-    backlog: WriteBacklog,
+    queue: WriteQueue,
     keys: CaptureKeys,
     metadata: RunMetadata,
-    state: PersistenceState,
 }
 impl Persistence {
-    /// Settle previous runs atomically before returning a writer for the new run.
+    pub(crate) fn state(&self) -> PersistenceState {
+        self.queue.state()
+    }
+    pub(crate) fn writer(&self) -> WriteQueue {
+        self.queue.clone()
+    }
     pub(crate) fn open(
         store: &mut Store,
         metadata: RunMetadata,
@@ -100,165 +129,70 @@ impl Persistence {
         let startup = store.recover_capture(&mut keys, &metadata)?;
         Ok(OpenedPersistence {
             persistence: Self {
-                backlog: WriteBacklog::new(),
+                queue: WriteQueue::new(),
                 keys,
                 metadata,
-                state: PersistenceState::Ready,
             },
             startup,
         })
     }
+    #[cfg(test)]
     pub(crate) fn accept(&mut self, parts: CaptureParts, now: Timestamp) -> PersistenceResult {
-        let mut result = self.result();
-        result.effects = parts.effects;
-        if let Some(batch) = parts.batch {
-            result.append_outcome(self.backlog.push(batch, now));
-        }
-        self.update_state();
-        result.outcome = self.outcome();
-        result
+        self.queue.accept(parts, now)
     }
-    /// Caller arms one timer at this deadline; there is no clock polling inside the shell.
     pub(crate) fn next_deadline(&self) -> Option<MonoInstant> {
-        let batching = self.backlog.oldest_queued_at().map(|at| {
-            at.mono
-                .checked_add(limits::BATCH_WAIT)
-                .expect("validated capture clock has room for batching")
-        });
-        let confirmation = self
-            .backlog
-            .batches()
-            .flat_map(|batch| &batch.writes)
-            .filter_map(|write| match write {
-                CaptureWrite::Checkpoint(point) => Some(point.commit_by_mono),
-                _ => None,
-            })
-            .min();
-        batching
-            .into_iter()
-            .chain(confirmation)
-            .chain(self.backlog.next_deadline())
-            .min()
+        self.queue.next_deadline()
+    }
+    pub(crate) fn is_due(&self, now: Timestamp) -> bool {
+        self.queue.due(now)
     }
     pub(crate) fn flush_due(&mut self, store: &mut Store, now: Timestamp) -> PersistenceResult {
-        if self.backlog.first_gap().is_some()
-            || self.backlog.command_count() >= TRANSACTION_COMMANDS
-            || self
-                .next_deadline()
-                .is_some_and(|deadline| deadline <= now.mono)
-        {
+        if self.queue.due(now) {
             self.flush(store, now)
         } else {
-            self.result()
+            self.queue.result()
         }
     }
-    /// Flushes a command group now, including on shutdown; loss repair always precedes retained batches.
+    /// Pins a bounded prefix under the queue lock, then executes SQLite with that lock released.
     pub(crate) fn flush(&mut self, store: &mut Store, now: Timestamp) -> PersistenceResult {
-        let mut result = self.result();
-        result.append_outcome(self.backlog.advance(now));
-        let committed = match self
-            .flush_gaps(store)
-            .and_then(|()| self.flush_batches(store))
-        {
-            Ok(committed) => committed,
-            Err(error) => return self.failed(result, error),
-        };
-        result
-            .feedback
-            .extend(committed.into_iter().map(CaptureEvent::Committed));
-        self.backlog.failed(BacklogFailure::QueueFull);
-        self.state = PersistenceState::Ready;
-        self.update_state();
-        result.outcome = self.outcome();
-        result
-    }
-    fn flush_gaps(&mut self, store: &mut Store) -> Result<(), ExecuteCaptureBatchError> {
-        while let Some(stored) = self.backlog.first_gap() {
-            let writes = self.backlog.recovery_writes();
-            store.capture_transaction(&mut self.keys, &self.metadata, |capture| {
-                capture.execute_writes(stored.run, &writes)
-            })?;
-            assert!(
-                self.backlog.committed_gap(stored.run, stored.gap),
-                "only the persisted front gap is acknowledged"
-            );
+        let prepared = self.queue.prepare(now);
+        let mut result = prepared.result;
+        if let Err(error) = self.execute_plan(store, &prepared.plan) {
+            result.outcome = self.queue.failed(error);
+            return result;
         }
-        Ok(())
+        self.queue.committed(&prepared.plan);
+        result.feedback.extend(
+            prepared
+                .plan
+                .committed_batches()
+                .into_iter()
+                .map(CaptureEvent::Committed),
+        );
+        result.progress = prepared.plan.progress();
+        result.outcome = self.queue.result().outcome;
+        result
     }
-    fn flush_batches(
+    fn execute_plan(
         &mut self,
         store: &mut Store,
-    ) -> Result<Vec<quartz_domain::capture::BatchId>, ExecuteCaptureBatchError> {
-        let mut commands = 0;
-        let batches: Vec<_> = self
-            .backlog
-            .batches()
-            .take_while(|batch| {
-                if commands > 0 && commands + batch.writes.len() > TRANSACTION_COMMANDS {
-                    return false;
-                }
-                commands += batch.writes.len();
-                true
-            })
-            .collect();
-        let committed: Vec<_> = batches.iter().map(|batch| batch.id).collect();
-        if !batches.is_empty() {
-            let transaction =
+        plan: &TransactionPlan,
+    ) -> Result<(), ExecuteCaptureBatchError> {
+        match plan {
+            TransactionPlan::Empty => Ok(()),
+            TransactionPlan::Batches(batches) => {
                 store.capture_transaction(&mut self.keys, &self.metadata, |capture| {
-                    for batch in &batches {
+                    for batch in batches {
                         capture.execute(batch)?;
                     }
                     Ok(())
-                });
-            transaction?;
-        }
-        for batch in &committed {
-            assert!(
-                self.backlog.committed(*batch),
-                "only committed prefix batches are removed"
-            );
-        }
-        Ok(committed)
-    }
-    fn failed(
-        &mut self,
-        mut result: PersistenceResult,
-        error: ExecuteCaptureBatchError,
-    ) -> PersistenceResult {
-        self.backlog.failed(BacklogFailure::Database);
-        self.state = PersistenceState::Failed {
-            commands: self.backlog.command_count(),
-        };
-        result.outcome = PersistenceOutcome::Failed {
-            commands: self.backlog.command_count(),
-            error,
-        };
-        result
-    }
-    fn update_state(&mut self) {
-        let commands = self.backlog.command_count();
-        self.state = match self.state {
-            PersistenceState::Failed { .. } => PersistenceState::Failed { commands },
-            _ if commands > 0 || self.backlog.first_gap().is_some() => {
-                PersistenceState::Buffered { commands }
+                })
             }
-            _ => PersistenceState::Ready,
-        };
-    }
-    fn outcome(&self) -> PersistenceOutcome {
-        match self.state {
-            PersistenceState::Ready => PersistenceOutcome::Ready,
-            PersistenceState::Buffered { commands } => PersistenceOutcome::Buffered { commands },
-            PersistenceState::Failed { commands } => {
-                PersistenceOutcome::RetainedFailure { commands }
+            TransactionPlan::Repair { stored, writes } => {
+                store.capture_transaction(&mut self.keys, &self.metadata, |capture| {
+                    capture.execute_writes(stored.run, writes)
+                })
             }
-        }
-    }
-    fn result(&self) -> PersistenceResult {
-        PersistenceResult {
-            feedback: Vec::new(),
-            effects: Vec::new(),
-            outcome: self.outcome(),
         }
     }
 }

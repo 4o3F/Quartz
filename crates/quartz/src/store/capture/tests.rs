@@ -131,12 +131,16 @@ fn real_core_script_round_trips_and_conserves_persisted_duration() {
     fixture.persist(at(200), CaptureEvent::Destroy(WindowId::from_persisted(1)));
     fixture.persist(
         at(300),
-        CaptureEvent::RegisterDeadline {
-            owner: DeadlineKind::Pause,
-            deadline: Deadline::Utc(at(10_000).utc),
-        },
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::Pause,
+            started: at(300).utc,
+            until: at(10_000).utc,
+        }),
     );
-    fixture.persist(at(400), CaptureEvent::CancelDeadline(DeadlineKind::Pause));
+    fixture.persist(
+        at(400),
+        CaptureEvent::CancelTimedPolicy(TimedPolicyKind::Pause),
+    );
     fixture.persist(
         at(500),
         CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
@@ -487,7 +491,7 @@ fn deadlines_round_trip_and_invalid_time_rolls_back() {
     fixture.persist(
         at(1),
         CaptureEvent::RegisterDeadline {
-            owner: DeadlineKind::Privacy,
+            owner: SchedulerKind::Midnight,
             deadline: Deadline::Utc(at(5000).utc),
         },
     );
@@ -499,7 +503,7 @@ fn deadlines_round_trip_and_invalid_time_rolls_back() {
         .load_startup()
         .expect("startup");
     assert_eq!(startup.deadlines.len(), 1);
-    assert_eq!(startup.deadlines[0].owner, DeadlineKind::Privacy);
+    assert_eq!(startup.deadlines[0].owner, SchedulerKind::Midnight);
     assert_eq!(startup.deadlines[0].at, at(5000).utc);
     assert!(startup.last_segment.is_some());
     let invalid = Timestamp {
@@ -564,6 +568,26 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
         .expect("writable");
     let recovered = fixture.shell.flush(&mut fixture.store, overdue);
     assert!(recovered.failure().is_none(), "{:?}", recovered.failure());
+    assert!(
+        matches!(recovered.progress, crate::capture::FlushProgress::Committed { commands } if commands > 0)
+    );
+    assert!(matches!(
+        recovered.state(),
+        PersistenceState::Buffered { .. }
+    ));
+    assert_eq!(
+        capture_gaps::table
+            .count()
+            .get_result::<i64>(&mut fixture.store._writer)
+            .expect("repair precedes fresh facts"),
+        1
+    );
+    let facts = fixture.shell.flush(&mut fixture.store, overdue);
+    assert!(facts.failure().is_none(), "{:?}", facts.failure());
+    assert!(
+        matches!(facts.progress, crate::capture::FlushProgress::Committed { commands } if commands > 0)
+    );
+    assert_eq!(facts.state(), PersistenceState::Ready);
     let gaps = capture_gaps::table
         .select(CaptureGapsRow::as_select())
         .load::<CaptureGapsRow>(&mut fixture.store._writer)
@@ -671,7 +695,7 @@ fn queue_capacity_discards_whole_batch_and_persists_identity_free_gap() {
     let batch = parts.batch.as_mut().expect("batch");
     batch.writes = vec![
         CaptureWrite::ClearDeadline {
-            owner: DeadlineKind::Pause
+            owner: SchedulerKind::Midnight
         };
         limits::WRITE_QUEUE_CAPACITY + 1
     ];
@@ -724,7 +748,7 @@ fn flush_waits_one_second_and_keeps_command_groups_bounded() {
     let parts = fixture.step(
         at(1),
         CaptureEvent::RegisterDeadline {
-            owner: DeadlineKind::Pause,
+            owner: SchedulerKind::Midnight,
             deadline: Deadline::Utc(at(5000).utc),
         },
     );
@@ -748,7 +772,7 @@ fn flush_waits_one_second_and_keeps_command_groups_bounded() {
         let parts = fixture.step(
             at(1002),
             CaptureEvent::RegisterDeadline {
-                owner: DeadlineKind::Pause,
+                owner: SchedulerKind::Midnight,
                 deadline: Deadline::Utc(at(5000).utc),
             },
         );
@@ -912,7 +936,7 @@ fn recovery_decode_error_identifies_the_table_column_row_and_value() {
 fn startup_decode_failure_is_classified_as_startup_and_rolls_back_recovery() {
     let mut fixture = Fixture::new(at(0));
     fixture.ready(at(0));
-    let key = Capture::deadline_key(DeadlineKind::Privacy);
+    let key = Capture::deadline_key(SchedulerKind::Midnight);
     diesel::insert_into(crate::store::schema::settings::table)
         .values((
             crate::store::schema::settings::key.eq(key),
@@ -1012,4 +1036,721 @@ fn windows_session_identifier_preserves_the_entire_u32_range() {
         .first::<i64>(&mut fixture.store._writer)
         .expect("session column");
     assert_eq!(stored, i64::from(u32::MAX));
+}
+
+/// Real worker threads use this clock while scripted sources advance capture time.
+struct RuntimeClock {
+    origin: std::time::Instant,
+    offset: std::sync::atomic::AtomicU64,
+}
+impl RuntimeClock {
+    fn new() -> Self {
+        Self {
+            origin: std::time::Instant::now(),
+            offset: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    fn advance(&self, millis: u64) {
+        self.offset
+            .fetch_add(millis, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl crate::core::sources::ClockReader for RuntimeClock {
+    fn read(&self) -> Result<Timestamp, crate::core::sources::ReadClockError> {
+        let elapsed = u64::try_from(self.origin.elapsed().as_millis()).expect("test duration");
+        Ok(at(
+            elapsed + self.offset.load(std::sync::atomic::Ordering::SeqCst)
+        ))
+    }
+}
+struct RuntimeFixture {
+    directory: tempfile::TempDir,
+    workers: crate::core::app::Workers,
+    clock: Arc<RuntimeClock>,
+}
+impl RuntimeFixture {
+    fn recovered() -> Self {
+        // Leave a real open run behind, as a process crash would.
+        let old = Fixture::new(at(0));
+        let Fixture {
+            _directory: directory,
+            store,
+            ..
+        } = old;
+        drop(store);
+        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("reopen");
+        assert_eq!(
+            store.installation_id("runtime-device").expect("device ID"),
+            "runtime-device"
+        );
+        assert_eq!(
+            store
+                .installation_id("ignored-proposal")
+                .expect("stable ID"),
+            "runtime-device"
+        );
+        let clock = Arc::new(RuntimeClock::new());
+        let workers =
+            crate::core::app::Workers::start(store, metadata(), clock.clone(), Arc::new(|| {}))
+                .expect("workers");
+        Self {
+            directory,
+            workers,
+            clock,
+        }
+    }
+    fn observe(&self, event: CaptureEvent) {
+        use crate::core::sources::ClockReader;
+        self.workers
+            .sender
+            .observe(crate::core::app::ObservedEvent {
+                at: self.clock.read().expect("clock"),
+                event,
+            })
+            .expect("observation");
+    }
+    fn wait(&self, predicate: impl Fn(&crate::core::app::MainCommand) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let command = self
+                .workers
+                .commands
+                .recv_deadline(deadline)
+                .expect("worker response before deadline");
+            if let crate::core::app::MainCommand::Fatal(worker) = command {
+                panic!("{worker} worker failed");
+            }
+            if predicate(&command) {
+                return;
+            }
+        }
+    }
+    fn reader(&self) -> SqliteConnection {
+        SqliteConnection::establish(
+            self.directory
+                .path()
+                .join("quartz.db")
+                .to_str()
+                .expect("path"),
+        )
+        .expect("inspection connection")
+    }
+    fn shutdown(self) -> tempfile::TempDir {
+        use crate::core::sources::ClockReader;
+        self.workers
+            .request_shutdown(self.clock.read().expect("clock"), RunEndReason::UserExit)
+            .expect("shutdown");
+        self.workers.join().expect("joined and flushed");
+        self.directory
+    }
+}
+
+#[test]
+fn real_threads_recover_gate_checkpoint_report_failure_and_flush_shutdown() {
+    use crate::core::app::MainCommand;
+    use diesel::connection::SimpleConnection;
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let mut reader = runtime.reader();
+    let recovered = capture_runs::table
+        .filter(capture_runs::id.eq(1))
+        .select(CaptureRunsRow::as_select())
+        .first::<CaptureRunsRow>(&mut reader)
+        .expect("recovered run");
+    assert_eq!(
+        recovered.end_reason,
+        Some(enums::RunEndReason::CrashRecovered)
+    );
+    runtime.observe(CaptureEvent::Session(SessionStatus::Unavailable));
+    runtime.wait(|command| matches!(command, MainCommand::Effect(CaptureEffect::QuerySession)));
+    runtime.observe(CaptureEvent::Foreground {
+        generation: ForegroundGeneration::new(1),
+        source: ObservationSource::Review,
+        foreground: Foreground::None(NoForegroundReason::Empty),
+    });
+    runtime.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
+    runtime.wait(|command| {
+        matches!(
+            command,
+            MainCommand::Effect(CaptureEffect::ReviewForeground)
+        )
+    });
+    let before = intervals::table
+        .count()
+        .get_result::<i64>(&mut reader)
+        .expect("gating query");
+    assert_eq!(before, 0, "session readiness gates foreground rows");
+    runtime.wait(|command| matches!(command, MainCommand::Effect(CaptureEffect::CheckIdle)));
+    runtime.observe(CaptureEvent::Foreground {
+        generation: ForegroundGeneration::new(2),
+        source: ObservationSource::Review,
+        foreground: Foreground::None(NoForegroundReason::Empty),
+    });
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let confirmed_before = capture_runs::table
+        .filter(capture_runs::id.eq(2))
+        .select(capture_runs::confirmed_utc_ms)
+        .first::<Option<i64>>(&mut reader)
+        .expect("initial confirmation")
+        .expect("open run");
+    runtime.clock.advance(59_000);
+    runtime.observe(CaptureEvent::Wake);
+    runtime.wait(|command| {
+        matches!(
+            command,
+            MainCommand::Persistence(PersistenceState::Buffered { .. })
+        )
+    });
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let confirmed_after = capture_runs::table
+        .filter(capture_runs::id.eq(2))
+        .select(capture_runs::confirmed_utc_ms)
+        .first::<Option<i64>>(&mut reader)
+        .expect("deadline confirmation")
+        .expect("open run");
+    assert!(
+        confirmed_after >= confirmed_before + 59_000,
+        "DB timeout flushes the checkpoint"
+    );
+    reader.batch_execute("CREATE TRIGGER fail_runtime_write BEFORE UPDATE ON capture_runs BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;").expect("inject failure");
+    runtime.observe(CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)));
+    runtime.wait(|command| {
+        matches!(
+            command,
+            MainCommand::Persistence(PersistenceState::Failed { .. })
+        )
+    });
+    reader
+        .batch_execute("DROP TRIGGER fail_runtime_write;")
+        .expect("restore database");
+    runtime.observe(CaptureEvent::Stop(StopChange::End(StopReason::Locked)));
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let directory = runtime.shutdown();
+    let mut reader =
+        SqliteConnection::establish(directory.path().join("quartz.db").to_str().expect("path"))
+            .expect("final reader");
+    let run = capture_runs::table
+        .filter(capture_runs::id.eq(2))
+        .select(CaptureRunsRow::as_select())
+        .first::<CaptureRunsRow>(&mut reader)
+        .expect("closed run");
+    assert_eq!(run.end_reason, Some(enums::RunEndReason::UserExit));
+    assert!(run.ended_utc_ms.is_some());
+    assert_eq!(run.confirmed_utc_ms, None);
+    assert_eq!(
+        clock_segments::table
+            .filter(clock_segments::end_utc_ms.is_null())
+            .count()
+            .get_result::<i64>(&mut reader)
+            .expect("closed clocks"),
+        0
+    );
+}
+
+#[test]
+fn real_threads_translate_channel_overload_into_a_durable_gap() {
+    use crate::core::app::MainCommand;
+    let runtime = RuntimeFixture::recovered();
+    runtime.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
+    runtime.wait(|command| {
+        matches!(
+            command,
+            MainCommand::Effect(CaptureEffect::ReviewForeground)
+        )
+    });
+    runtime.observe(CaptureEvent::Foreground {
+        generation: ForegroundGeneration::new(1),
+        source: ObservationSource::Review,
+        foreground: Foreground::None(NoForegroundReason::Empty),
+    });
+    // Main output is deliberately left undrained, bounding capture progress before flooding input.
+    for _ in 0..10_000 {
+        runtime.observe(CaptureEvent::Wake);
+    }
+    runtime.wait(|command| {
+        matches!(
+            command,
+            MainCommand::Effect(CaptureEffect::StateChanged(CaptureState::Gap(
+                GapReason::EventOverload
+            )))
+        )
+    });
+    runtime.observe(CaptureEvent::Foreground {
+        generation: ForegroundGeneration::new(2),
+        source: ObservationSource::Review,
+        foreground: Foreground::None(NoForegroundReason::Empty),
+    });
+    use crate::core::sources::ClockReader;
+    runtime
+        .workers
+        .shutdown_port()
+        .close(runtime.clock.read().expect("clock"))
+        .expect("synchronous session settlement");
+    runtime.workers.join().expect("join settled workers");
+    let directory = runtime.directory;
+    let mut reader =
+        SqliteConnection::establish(directory.path().join("quartz.db").to_str().expect("path"))
+            .expect("gap reader");
+    assert!(
+        capture_gaps::table
+            .filter(capture_gaps::reason.eq(enums::GapReason::EventOverload))
+            .count()
+            .get_result::<i64>(&mut reader)
+            .expect("overload gaps")
+            > 0
+    );
+}
+
+impl RuntimeFixture {
+    fn restart_keep_timing(until: u64) -> Self {
+        let mut old = Fixture::new(at(0));
+        old.persist(
+            at(0),
+            CaptureEvent::SetTimedState(TimedState {
+                policy: TimedPolicy::KeepTiming,
+                started: at(0).utc,
+                until: at(until).utc,
+            }),
+        );
+        let Fixture {
+            _directory: directory,
+            store,
+            ..
+        } = old;
+        drop(store);
+        let store =
+            Store::open(&DataDirectory::new(directory.path())).expect("reopen timed settings");
+        let clock = Arc::new(RuntimeClock::new());
+        clock.advance(200_000);
+        let workers =
+            crate::core::app::Workers::start(store, metadata(), clock.clone(), Arc::new(|| {}))
+                .expect("restart workers");
+        Self {
+            directory,
+            workers,
+            clock,
+        }
+    }
+    fn sample_idle_then_lock(&self) {
+        use crate::core::app::MainCommand;
+        self.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
+        self.observe(CaptureEvent::Idle(idle_sample(200_000)));
+        self.observe(CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)));
+        self.wait(|command| matches!(command, MainCommand::Effect(CaptureEffect::StateChanged(CaptureState::Stopped { reasons, .. })) if reasons.contains(&StopReason::Locked)));
+        self.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    }
+}
+fn idle_sample(tick_ms: u64) -> IdleSample {
+    IdleSample {
+        tick: std::time::Duration::from_millis(tick_ms),
+        last_input: LastInput::Tick(0),
+        policy: IdlePolicy::default(),
+        exceptions: Vec::new(),
+    }
+}
+
+#[test]
+fn restart_with_unexpired_keep_timing_suppresses_idle_and_keeps_original_grant() {
+    use crate::core::app::MainCommand;
+    let runtime = RuntimeFixture::restart_keep_timing(260_000);
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    runtime.sample_idle_then_lock();
+    let mut reader = runtime.reader();
+    assert_eq!(
+        availability_intervals::table
+            .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
+            .count()
+            .get_result::<i64>(&mut reader)
+            .expect("idle rows"),
+        0
+    );
+    let state = crate::store::schema::timed_policies::table
+        .find(enums::TimedPolicyKind::KeepTiming)
+        .select(crate::store::rows::TimedPoliciesRow::as_select())
+        .first::<crate::store::rows::TimedPoliciesRow>(&mut reader)
+        .expect("persisted grant");
+    assert_eq!(state.started_utc_ms, 0);
+    assert_eq!(state.until_utc_ms, 260_000);
+    runtime.shutdown();
+}
+
+#[test]
+fn restart_clears_keep_timing_that_expired_while_core_was_down() {
+    use crate::core::app::MainCommand;
+    use crate::store::schema::timed_policies;
+    let runtime = RuntimeFixture::restart_keep_timing(100_000);
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let mut reader = runtime.reader();
+    assert_eq!(
+        timed_policies::table
+            .filter(timed_policies::kind.eq(enums::TimedPolicyKind::KeepTiming))
+            .count()
+            .get_result::<i64>(&mut reader)
+            .expect("expired policy removed"),
+        0
+    );
+    runtime.sample_idle_then_lock();
+    assert_eq!(
+        availability_intervals::table
+            .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
+            .count()
+            .get_result::<i64>(&mut reader)
+            .expect("idle mask resumes"),
+        1
+    );
+    runtime.shutdown();
+}
+
+#[test]
+fn timed_application_and_audible_grants_follow_foreground_scope_and_two_hour_cap() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    let app = AppIdentity::Exe("c:\\app.exe".into());
+    for policy in [
+        TimedPolicy::AppExemption(app.clone()),
+        TimedPolicy::Audible(app.clone()),
+    ] {
+        fixture.persist(
+            at(0),
+            CaptureEvent::SetTimedState(TimedState {
+                policy,
+                started: at(0).utc,
+                until: at(10_000_000).utc,
+            }),
+        );
+    }
+    fixture.persist(at(200_000), CaptureEvent::Idle(idle_sample(200_000)));
+    assert_eq!(
+        availability_intervals::table
+            .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
+            .count()
+            .get_result::<i64>(&mut fixture.store._writer)
+            .expect("foreground exemptions"),
+        0
+    );
+    let mut other = foreground(2, "other");
+    if let CaptureEvent::Foreground {
+        foreground: Foreground::Window { facts, .. },
+        ..
+    } = &mut other
+    {
+        facts.app = AppIdentity::Exe("c:\\other.exe".into());
+    }
+    fixture.persist(at(200_001), other);
+    fixture.persist(at(200_002), CaptureEvent::Idle(idle_sample(200_002)));
+    assert_eq!(
+        availability_intervals::table
+            .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
+            .count()
+            .get_result::<i64>(&mut fixture.store._writer)
+            .expect("other application becomes idle"),
+        1
+    );
+    let opened =
+        Persistence::open(&mut fixture.store, metadata()).expect("restore scoped settings");
+    assert_eq!(opened.startup.policies.len(), 2);
+    for state in opened.startup.policies {
+        assert_eq!(state.until, at(7_200_000).utc);
+        assert_eq!(state.started, at(0).utc);
+    }
+}
+
+#[test]
+fn policy_clear_and_capture_boundary_rollback_in_one_transaction() {
+    use crate::store::schema::timed_policies;
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    fixture.persist(
+        at(1),
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::KeepTiming,
+            started: at(1).utc,
+            until: at(60_000).utc,
+        }),
+    );
+    let mut parts = fixture.step(
+        at(2),
+        CaptureEvent::CancelTimedPolicy(TimedPolicyKind::KeepTiming),
+    );
+    let batch = parts.batch.as_mut().expect("policy boundary batch");
+    assert!(batch.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::CloseInterval {
+            reason: IntervalEndReason::PolicyChanged,
+            ..
+        }
+    )));
+    batch.writes.push(CaptureWrite::OpenRun {
+        run: RunId::new(1),
+        at: at(2),
+    });
+    let _ = fixture.shell.accept(parts, at(2));
+    let failed = fixture.shell.flush(&mut fixture.store, at(2));
+    assert!(failed.failure().is_some());
+    assert_eq!(
+        timed_policies::table
+            .filter(timed_policies::kind.eq(enums::TimedPolicyKind::KeepTiming))
+            .count()
+            .get_result::<i64>(&mut fixture.store._writer)
+            .expect("policy row rolled back"),
+        1
+    );
+    assert!(
+        fixture
+            .intervals()
+            .last()
+            .expect("current interval")
+            .end_utc_ms
+            .is_none()
+    );
+}
+
+#[test]
+fn running_keep_timing_expiration_clears_policy_with_capture_boundary() {
+    use crate::store::schema::timed_policies;
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    fixture.persist(
+        at(1),
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::KeepTiming,
+            started: at(1).utc,
+            until: at(100).utc,
+        }),
+    );
+    let parts = fixture.step(at(100), CaptureEvent::Wake);
+    let writes = &parts.batch.as_ref().expect("expiration transaction").writes;
+    assert!(writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::ClearTimedPolicy(TimedPolicyKind::KeepTiming)
+    )));
+    assert!(writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::CloseInterval {
+            reason: IntervalEndReason::PolicyChanged,
+            ..
+        }
+    )));
+    let _ = fixture.shell.accept(parts, at(100));
+    assert!(
+        fixture
+            .shell
+            .flush(&mut fixture.store, at(100))
+            .failure()
+            .is_none()
+    );
+    assert_eq!(
+        timed_policies::table
+            .filter(timed_policies::kind.eq(enums::TimedPolicyKind::KeepTiming))
+            .count()
+            .get_result::<i64>(&mut fixture.store._writer)
+            .expect("cleared policy"),
+        0
+    );
+}
+
+#[test]
+fn restored_audible_deadline_waits_for_fresh_foreground_evidence() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    let state = TimedState {
+        policy: TimedPolicy::Audible(AppIdentity::Exe("c:\\app.exe".into())),
+        started: at(0).utc,
+        until: at(600_000).utc,
+    };
+    fixture.persist(at(0), CaptureEvent::RestoreTimedState(state.clone()));
+    fixture.persist(at(200_000), CaptureEvent::Idle(idle_sample(200_000)));
+    let idle = availability_intervals::table
+        .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
+        .select(AvailabilityIntervalsRow::as_select())
+        .first::<AvailabilityIntervalsRow>(&mut fixture.store._writer)
+        .expect("old browser evidence is not reused");
+    assert!(idle.end_utc_ms.is_none());
+    fixture.persist(
+        at(200_001),
+        CaptureEvent::RestoreTimedState(TimedState {
+            until: at(600_001).utc,
+            ..state.clone()
+        }),
+    );
+    fixture.persist(at(200_002), foreground(2, "reviewed browser"));
+    fixture.persist(at(200_003), CaptureEvent::Idle(idle_sample(200_003)));
+    let retained = availability_intervals::table
+        .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
+        .select(AvailabilityIntervalsRow::as_select())
+        .first::<AvailabilityIntervalsRow>(&mut fixture.store._writer)
+        .expect("changing the deadline does not refresh browser evidence");
+    assert!(retained.end_utc_ms.is_none());
+    fixture.persist(at(200_004), CaptureEvent::SetTimedState(state));
+    fixture.persist(at(200_005), foreground(3, "fresh browser"));
+    fixture.persist(at(200_006), CaptureEvent::Idle(idle_sample(200_006)));
+    let idle = availability_intervals::table
+        .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
+        .select(AvailabilityIntervalsRow::as_select())
+        .first::<AvailabilityIntervalsRow>(&mut fixture.store._writer)
+        .expect("fresh audible evidence");
+    assert_eq!(idle.end_reason, Some(enums::AvailabilityEndReason::Resumed));
+    assert_eq!(idle.exception, Some(enums::IdleException::Audible));
+}
+
+#[test]
+fn repeated_write_loss_while_stopped_does_not_emit_recursive_recovery_batches() {
+    let rules = RuleRegistry::from_state(RegistryState::default())
+        .expect("rules")
+        .snapshots();
+    let started = CaptureCore::start(RunId::new(1), at(0)).expect("core");
+    let startup_batch = started.step.batch.expect("startup batch");
+    let mut core = started.core;
+    let _ = core
+        .step(CaptureInput {
+            at: at(0),
+            rules: rules.load(),
+            event: CaptureEvent::Session(SessionStatus::Ready(BTreeSet::from([
+                StopReason::Locked,
+            ]))),
+        })
+        .expect("locked session");
+    for _ in 0..2 {
+        let loss = core
+            .step(CaptureInput {
+                at: at(1),
+                rules: rules.load(),
+                event: CaptureEvent::PersistenceGap {
+                    reason: GapReason::WriteQueueOverload,
+                    lost_through: at(1),
+                },
+            })
+            .expect("bounded loss feedback");
+        assert!(
+            loss.writes.is_empty(),
+            "loss feedback cannot depend on free queue capacity"
+        );
+    }
+    let progress = core
+        .step(CaptureInput {
+            at: at(1),
+            rules: rules.load(),
+            event: CaptureEvent::Committed(startup_batch),
+        })
+        .expect("durable prefix releases capacity");
+    assert!(progress.writes.iter().any(|write| matches!(write, CaptureWrite::OpenAvailability(row) if row.reason == AvailabilityReason::Stopped(StopReason::Locked))));
+}
+
+#[test]
+fn restored_privacy_value_applies_until_expiration_and_clears_atomically() {
+    use crate::store::schema::timed_policies;
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    fixture.persist(
+        at(0),
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::Privacy(PrivacyMode::NoTitles),
+            started: at(0).utc,
+            until: at(100).utc,
+        }),
+    );
+    let mut keys = CaptureKeys::default();
+    let metadata = metadata();
+    let startup = fixture
+        .store
+        .capture(&mut keys, &metadata)
+        .load_startup()
+        .expect("load complete policy value");
+    let state = startup
+        .policies
+        .into_iter()
+        .find(|state| state.owner() == TimedPolicyKind::Privacy)
+        .expect("persisted privacy mode");
+    assert_eq!(state.policy, TimedPolicy::Privacy(PrivacyMode::NoTitles));
+    fixture.persist(at(0), CaptureEvent::RestoreTimedState(state));
+    fixture.persist(at(1), foreground(2, "withheld"));
+    assert_eq!(
+        fixture
+            .intervals()
+            .last()
+            .expect("private foreground")
+            .capture_level,
+        enums::CaptureLevel::TitleHidden
+    );
+    fixture.persist(at(100), CaptureEvent::Wake);
+    fixture.persist(at(101), foreground(3, "allowed"));
+    assert_eq!(
+        fixture
+            .intervals()
+            .last()
+            .expect("fresh foreground")
+            .capture_level,
+        enums::CaptureLevel::Full
+    );
+    assert_eq!(
+        timed_policies::table
+            .filter(timed_policies::kind.eq(enums::TimedPolicyKind::Privacy))
+            .count()
+            .get_result::<i64>(&mut fixture.store._writer)
+            .expect("expired privacy settings"),
+        0
+    );
+}
+
+#[test]
+fn restored_pause_remains_stopped_until_its_policy_deadline() {
+    use crate::store::schema::timed_policies;
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    fixture.persist(
+        at(0),
+        CaptureEvent::RestoreTimedState(TimedState {
+            policy: TimedPolicy::Pause,
+            started: at(0).utc,
+            until: at(100).utc,
+        }),
+    );
+    assert!(
+        matches!(fixture.core.state(), CaptureState::Stopped { reasons, .. } if reasons.contains(&StopReason::Paused))
+    );
+    fixture.persist(at(100), CaptureEvent::Wake);
+    fixture.persist(at(101), foreground(2, "resumed"));
+    assert!(matches!(fixture.core.state(), CaptureState::Tracking(_)));
+    assert_eq!(
+        timed_policies::table
+            .filter(timed_policies::kind.eq(enums::TimedPolicyKind::Pause))
+            .count()
+            .get_result::<i64>(&mut fixture.store._writer)
+            .expect("expired pause settings"),
+        0
+    );
+}
+
+#[test]
+fn policy_scope_upserts_applications_and_restores_identity_after_display_rename() {
+    use crate::store::schema::timed_policies;
+    let mut fixture = Fixture::new(at(0));
+    let app = AppIdentity::Unresolved("TestClass".into());
+    let state = TimedState {
+        policy: TimedPolicy::AppExemption(app.clone()),
+        started: at(0).utc,
+        until: at(100).utc,
+    };
+    fixture.persist(at(0), CaptureEvent::SetTimedState(state.clone()));
+    fixture.persist(at(1), CaptureEvent::SetTimedState(state.clone()));
+    assert_eq!(
+        applications::table
+            .filter(applications::identity_key.eq(app.key()))
+            .count()
+            .get_result::<i64>(&mut fixture.store._writer)
+            .expect("one application"),
+        1
+    );
+    let scope = timed_policies::table
+        .find(enums::TimedPolicyKind::AppExemption)
+        .select(timed_policies::application_id)
+        .first::<Option<i64>>(&mut fixture.store._writer)
+        .expect("application scope")
+        .expect("scoped policy");
+    diesel::update(applications::table.filter(applications::id.eq(scope)))
+        .set(applications::display_name.eq("Friendly name"))
+        .execute(&mut fixture.store._writer)
+        .expect("rename display metadata");
+    let opened = Persistence::open(&mut fixture.store, metadata()).expect("restore scoped policy");
+    assert_eq!(opened.startup.policies, vec![state]);
 }

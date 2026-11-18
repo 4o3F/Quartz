@@ -495,8 +495,91 @@ impl EnumColumn for GapReason {
     const COLUMN: &'static str = "capture_gaps.reason";
 }
 
+/// Persisted policy identities; scheduler-only slots have no database code.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    AsExpression,
+    FromSqlRow,
+    IntoPrimitive,
+    TryFromPrimitive,
+    VariantArray,
+    IntoStaticStr,
+)]
+#[diesel(sql_type = Integer)]
+#[strum(serialize_all = "snake_case")]
+#[repr(i32)]
+pub(super) enum TimedPolicyKind {
+    Pause = 1,
+    Privacy = 2,
+    KeepTiming = 3,
+    AppExemption = 4,
+    Audible = 5,
+}
+impl EnumColumn for TimedPolicyKind {
+    const COLUMN: &'static str = "timed_policies.kind";
+}
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    AsExpression,
+    FromSqlRow,
+    IntoPrimitive,
+    TryFromPrimitive,
+    VariantArray,
+    IntoStaticStr,
+)]
+#[diesel(sql_type = Integer)]
+#[strum(serialize_all = "snake_case")]
+#[repr(i32)]
+pub(super) enum PrivacyMode {
+    Normal = 1,
+    Private = 2,
+    NoTitles = 3,
+}
+impl EnumColumn for PrivacyMode {
+    const COLUMN: &'static str = "timed_policies.privacy_mode";
+}
+impl From<quartz_domain::capture::TimedPolicyKind> for TimedPolicyKind {
+    fn from(kind: quartz_domain::capture::TimedPolicyKind) -> Self {
+        use quartz_domain::capture::TimedPolicyKind as Kind;
+        match kind {
+            Kind::Pause => Self::Pause,
+            Kind::Privacy => Self::Privacy,
+            Kind::KeepTiming => Self::KeepTiming,
+            Kind::AppExemption => Self::AppExemption,
+            Kind::Audible => Self::Audible,
+        }
+    }
+}
+impl From<PrivacyMode> for quartz_domain::capture::PrivacyMode {
+    fn from(mode: PrivacyMode) -> Self {
+        match mode {
+            PrivacyMode::Normal => Self::Normal,
+            PrivacyMode::Private => Self::Private,
+            PrivacyMode::NoTitles => Self::NoTitles,
+        }
+    }
+}
+impl From<quartz_domain::capture::PrivacyMode> for PrivacyMode {
+    fn from(mode: quartz_domain::capture::PrivacyMode) -> Self {
+        use quartz_domain::capture::PrivacyMode as Mode;
+        match mode {
+            Mode::Normal => Self::Normal,
+            Mode::Private => Self::Private,
+            Mode::NoTitles => Self::NoTitles,
+        }
+    }
+}
+
 #[rustfmt::skip]
-impl_integer_sql!(RunEndReason, ClockEndReason, ApplicationKind, IntervalKind, NoForegroundReason, TitleStatus, CaptureLevel, IntervalEndReason, AvailabilityReason, AvailabilityEndReason, IdleException, WebEndReason, LinkStatus, WebLevel, IngestOutcome, CategoryTendency, RuleSetKind, RuleSetSource, AnnotationKind, DataSource, GapReason);
+impl_integer_sql!(TimedPolicyKind, PrivacyMode, RunEndReason, ClockEndReason, ApplicationKind, IntervalKind, NoForegroundReason, TitleStatus, CaptureLevel, IntervalEndReason, AvailabilityReason, AvailabilityEndReason, IdleException, WebEndReason, LinkStatus, WebLevel, IngestOutcome, CategoryTendency, RuleSetKind, RuleSetSource, AnnotationKind, DataSource, GapReason);
 
 impl From<quartz_domain::capture::RunEndReason> for RunEndReason {
     fn from(value: quartz_domain::capture::RunEndReason) -> Self {

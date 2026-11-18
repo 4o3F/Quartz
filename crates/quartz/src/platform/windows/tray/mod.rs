@@ -1,7 +1,7 @@
 //! Shell tray state, native callbacks and semantic commands.
 
 mod icon;
-mod window;
+pub(super) mod window;
 
 use icon::{AddTrayIconError, TrayIcon, TrayMenuItem, UpdateTrayTooltipError};
 use snafu::{ResultExt, Snafu};
@@ -10,27 +10,9 @@ use window::{CoreEvent, CreateCoreWindowError, Window};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TrayIconState {
     Normal,
-    #[expect(
-        dead_code,
-        reason = "TODO(M2): runtime failures select the warning icon"
-    )]
     Warning,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TrayTooltip {
-    Ready,
-    Opening,
-    Upgrading,
-}
-impl TrayTooltip {
-    fn key(self) -> &'static str {
-        match self {
-            Self::Ready => "app.name",
-            Self::Opening => "tray.opening",
-            Self::Upgrading => "tray.upgrading",
-        }
-    }
-}
+pub(super) use crate::tray_tooltip::TrayTooltip;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TrayState {
     pub icon: TrayIconState,
@@ -48,6 +30,8 @@ impl Default for TrayState {
 pub(super) enum TrayCommand {
     OpenUi,
     Exit,
+    EndSession,
+    Deadline(quartz_domain::capture::Timestamp),
 }
 
 #[derive(Debug, Snafu)]
@@ -66,7 +50,6 @@ pub(super) struct UpdateTrayStateError {
     source: UpdateTrayTooltipError,
 }
 
-#[derive(Debug)]
 pub(super) struct Tray {
     // Fields drop in declaration order, removing the icon before its callback window.
     icon: TrayIcon,
@@ -80,6 +63,12 @@ impl Tray {
         icon.update(state).context(StateSnafu)?;
         Ok(Self { icon, window })
     }
+    pub(super) fn raw_window(&self) -> windows::Win32::Foundation::HWND {
+        self.window.raw()
+    }
+    pub(super) fn attach_capture(&self, ingress: super::sources::SystemIngress) {
+        self.window.attach_capture(ingress);
+    }
     pub(super) fn update(&mut self, state: TrayState) -> Result<(), UpdateTrayStateError> {
         self.icon.update(state).context(UpdateTrayStateSnafu)
     }
@@ -87,6 +76,8 @@ impl Tray {
         let mut commands = Vec::new();
         for event in self.window.drain_events() {
             match event {
+                CoreEvent::EndSession => commands.push(TrayCommand::EndSession),
+                CoreEvent::Deadline(at) => commands.push(TrayCommand::Deadline(at)),
                 CoreEvent::Quit => commands.push(TrayCommand::Exit),
                 CoreEvent::OpenUi => commands.push(TrayCommand::OpenUi),
                 CoreEvent::RestoreTray => {

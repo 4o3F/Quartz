@@ -6,7 +6,8 @@ use crate::store::{
     rows::{AvailabilityIntervalsRow, IntervalsRow},
     schema::{availability_intervals, capture_runs, clock_segments, intervals},
 };
-use diesel::prelude::*;
+use diesel::NullableExpressionMethods;
+use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
 use quartz_domain::capture::{
     AvailabilityEndReason, Checkpoint, IntervalEndReason, RunId, SegmentId, TimeRange, Timestamp,
 };

@@ -6,8 +6,8 @@ use crate::store::{
     rows::CaptureGapsRow,
     schema::{capture_gaps, data_day_versions, settings},
 };
-use diesel::prelude::*;
-use quartz_domain::capture::{CaptureGap, DeadlineKind, RunId, TimeRange, UtcInstant, limits};
+use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl};
+use quartz_domain::capture::{CaptureGap, RunId, SchedulerKind, TimeRange, UtcInstant, limits};
 
 impl Capture<'_> {
     pub(super) fn record_gap(
@@ -63,7 +63,7 @@ impl Capture<'_> {
     }
     pub(super) fn set_deadline(
         &mut self,
-        owner: DeadlineKind,
+        owner: SchedulerKind,
         at: UtcInstant,
     ) -> Result<(), ExecuteCaptureBatchError> {
         let value = CaptureColumn::new("settings", Self::deadline_key(owner))
@@ -82,23 +82,18 @@ impl Capture<'_> {
     }
     pub(super) fn clear_deadline(
         &mut self,
-        owner: DeadlineKind,
+        owner: SchedulerKind,
     ) -> Result<(), ExecuteCaptureBatchError> {
         diesel::delete(settings::table.filter(settings::key.eq(Self::deadline_key(owner))))
             .execute(self.connection)?;
         Ok(())
     }
-    pub(super) fn deadline_key(owner: DeadlineKind) -> &'static str {
+    pub(super) fn deadline_key(owner: SchedulerKind) -> &'static str {
         match owner {
-            DeadlineKind::Maintenance => "capture.deadline.maintenance",
-            DeadlineKind::Idle => "capture.deadline.idle",
-            DeadlineKind::Pause => "capture.deadline.pause",
-            DeadlineKind::Privacy => "capture.deadline.privacy",
-            DeadlineKind::KeepTiming => "capture.deadline.keep_timing",
-            DeadlineKind::AppExemption => "capture.deadline.app_exemption",
-            DeadlineKind::Audible => "capture.deadline.audible",
-            DeadlineKind::PrivacyContext => "capture.deadline.privacy_context",
-            DeadlineKind::Midnight => "capture.deadline.midnight",
+            SchedulerKind::Maintenance => "capture.deadline.maintenance",
+            SchedulerKind::Idle => "capture.deadline.idle",
+            SchedulerKind::PrivacyContext => "capture.deadline.privacy_context",
+            SchedulerKind::Midnight => "capture.deadline.midnight",
         }
     }
 }

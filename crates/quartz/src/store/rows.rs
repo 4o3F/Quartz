@@ -14,7 +14,10 @@ use super::{
         web_intervals, window_instances,
     },
 };
-use diesel::{prelude::*, sqlite::Sqlite};
+use diesel::{
+    prelude::{AsChangeset, Insertable, Queryable, Selectable},
+    sqlite::Sqlite,
+};
 
 #[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
 #[diesel(table_name = annotations)]
@@ -311,4 +314,16 @@ pub(super) struct WindowInstancesRow {
     pub window_class: Option<String>,
     pub first_seen_utc_ms: i64,
     pub last_seen_utc_ms: i64,
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
+#[diesel(table_name = super::schema::timed_policies)]
+#[diesel(primary_key(kind))]
+#[diesel(check_for_backend(Sqlite))]
+pub(super) struct TimedPoliciesRow {
+    pub kind: super::enums::TimedPolicyKind,
+    pub privacy_mode: Option<super::enums::PrivacyMode>,
+    pub application_id: Option<i64>,
+    pub started_utc_ms: i64,
+    pub until_utc_ms: i64,
 }

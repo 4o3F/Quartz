@@ -5,7 +5,12 @@ use super::{
     rows::{RuleSetVersionsRow, RuleSetsRow},
     schema::{categories, rule_set_versions, rule_sets},
 };
-use diesel::{SqliteConnection, prelude::*};
+use diesel::{
+    SqliteConnection,
+    prelude::{
+        Connection, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper,
+    },
+};
 use quartz_domain::rules::registry::{
     ExpectedRuleVersion, RegistryState, RuleSetDeletion, RuleSetState, RuleSetVersion, RuleSetWrite,
 };

@@ -2,6 +2,38 @@
 
 use snafu::Snafu;
 
+/// All shell tooltip templates, shared with catalog verification on Linux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrayTooltip {
+    Ready,
+    Opening,
+    Upgrading,
+    PersistenceFailed,
+    SessionUnavailable,
+    CaptureGap,
+}
+impl TrayTooltip {
+    #[cfg(test)]
+    pub(crate) const ALL: &[Self] = &[
+        Self::Ready,
+        Self::Opening,
+        Self::Upgrading,
+        Self::PersistenceFailed,
+        Self::SessionUnavailable,
+        Self::CaptureGap,
+    ];
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Ready => "app.name",
+            Self::Opening => "tray.opening",
+            Self::Upgrading => "tray.upgrading",
+            Self::PersistenceFailed => "tray.persistence_failed",
+            Self::SessionUnavailable => "tray.session_unavailable",
+            Self::CaptureGap => "tray.capture_gap",
+        }
+    }
+}
+
 /// A tooltip that cannot fit together with its terminating NUL.
 #[derive(Debug, Snafu)]
 #[snafu(display("tray tooltip needs {units} UTF-16 units; at most 127 are available"))]
@@ -43,6 +75,23 @@ impl TryFrom<&str> for TrayTooltipText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_tray_text_key_resolves_in_both_catalogs() {
+        for locale in [
+            quartz_i18n::Language::English,
+            quartz_i18n::Language::SimplifiedChinese,
+        ] {
+            for key in TrayTooltip::ALL
+                .iter()
+                .map(|tooltip| tooltip.key())
+                .chain(["tray.open", "tray.exit"])
+            {
+                assert!(locale.has_message(key), "{locale}: {key}");
+                assert_ne!(locale.translate(key), key);
+            }
+        }
+    }
 
     #[test]
     fn tooltip_counts_utf16_units_and_reserves_a_terminator() {

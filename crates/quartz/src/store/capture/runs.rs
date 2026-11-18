@@ -6,7 +6,8 @@ use crate::store::{
     rows::{CaptureRunsRow, ClockSegmentsRow},
     schema::{capture_runs, clock_segments},
 };
-use diesel::prelude::*;
+use diesel::NullableExpressionMethods;
+use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl};
 use quartz_domain::capture::{ClockEndReason, RunEndReason, RunId, SegmentId, Timestamp};
 
 impl Capture<'_> {

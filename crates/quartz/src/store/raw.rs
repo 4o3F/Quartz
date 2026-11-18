@@ -1,8 +1,8 @@
 //! SQL that cannot be expressed through Diesel's typed query builder.
 
 use diesel::{
+    QueryResult, QueryableByName, RunQueryDsl, SqliteConnection,
     connection::SimpleConnection,
-    prelude::*,
     sql_types::{BigInt, Text},
 };
 
@@ -110,6 +110,7 @@ impl<'connection> ConnectionSql<'connection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diesel::Connection;
     #[test]
     fn every_statement_prepares_on_migrated_database() {
         let mut conn = SqliteConnection::establish(":memory:").expect("open empty database");

@@ -2,7 +2,8 @@
 
 use super::{Capture, CaptureColumn, DbRowId, ExecuteCaptureBatchError, LogicalKey, TimeColumns};
 use crate::store::{enums, rows::AvailabilityIntervalsRow, schema::availability_intervals};
-use diesel::prelude::*;
+use diesel::NullableExpressionMethods;
+use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
 use quartz_domain::capture::{
     AvailabilityEndReason, IdleRecord, OpenAvailability, RowId, RunId, TimeRange, Timestamp,
 };

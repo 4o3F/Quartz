@@ -76,6 +76,9 @@ impl RegistryShell {
     pub(crate) fn snapshots(&self) -> SnapshotCell {
         self.registry.snapshots()
     }
+    pub(crate) fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
     pub(crate) fn core(&self) -> &RuleRegistry {
         &self.registry
     }

@@ -1,30 +1,23 @@
 //! SQLite connections, schema migrations, and offline backup recovery.
 
-#[cfg_attr(
-    all(windows, not(test)),
-    expect(
-        dead_code,
-        reason = "used only by the capture persistence shell, which is wired into the database thread in D2"
-    )
-)]
 pub(crate) mod capture;
 #[expect(
     dead_code,
-    reason = "schema v1 row models are consumed by later capture steps"
+    reason = "schema v1 also includes browser and annotation models for later milestones"
 )]
 mod enums;
 mod migrations;
 mod raw;
 #[expect(
     dead_code,
-    reason = "schema v1 row models are consumed by later capture steps"
+    reason = "schema v1 also includes browser and annotation models for later milestones"
 )]
 mod rows;
 pub(crate) mod rules;
 mod schema;
 
 use crate::data_directory::DataDirectory;
-use diesel::{migration::MigrationSource, prelude::*};
+use diesel::{Connection, SqliteConnection, migration::MigrationSource};
 use diesel_migrations::MigrationHarness;
 use migrations::{Migrations, typed};
 use raw::ConnectionSql;
@@ -66,7 +59,7 @@ pub(crate) enum OpenStoreError {
     },
 }
 
-/// Owns both connections on the calling thread until the database thread is introduced.
+/// Owns both connections on the database thread.
 pub(crate) struct Store {
     _writer: SqliteConnection,
     _reader: ReadOnlyStore,
@@ -78,13 +71,7 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
-    #[cfg_attr(
-        all(windows, not(test)),
-        expect(
-            dead_code,
-            reason = "used only by the capture persistence shell, which is wired into the database thread in D2"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) fn capture<'connection>(
         &'connection mut self,
         keys: &'connection mut capture::CaptureKeys,
@@ -393,5 +380,52 @@ impl From<diesel::result::Error> for ReadRulesError {
 impl From<rules::LoadRulesError> for ReadRulesError {
     fn from(source: rules::LoadRulesError) -> Self {
         Self::Load { source }
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Snafu)]
+pub(crate) enum LoadDeviceIdError {
+    #[snafu(display("could not persist installation identity"))]
+    Database { source: diesel::result::Error },
+    #[snafu(display("could not decode installation identity"))]
+    Decode { source: serde_json::Error },
+}
+#[cfg(any(windows, test))]
+impl From<diesel::result::Error> for LoadDeviceIdError {
+    fn from(source: diesel::result::Error) -> Self {
+        Self::Database { source }
+    }
+}
+#[cfg(any(windows, test))]
+impl Store {
+    /// Bound SQLite lock waits by the remaining worker shutdown budget.
+    pub(crate) fn limit_write_wait(&mut self, remaining: std::time::Duration) {
+        const NORMAL_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+        self._writer
+            .set_busy_timeout(remaining.min(NORMAL_LOCK_WAIT));
+    }
+    pub(crate) fn installation_id(&mut self, proposed: &str) -> Result<String, LoadDeviceIdError> {
+        use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl};
+        use schema::settings;
+        self._writer.immediate_transaction(|connection| {
+            if let Some(value) = settings::table
+                .filter(settings::key.eq("device_id"))
+                .select(settings::value)
+                .first::<String>(connection)
+                .optional()
+                .map_err(|source| LoadDeviceIdError::Database { source })?
+            {
+                return serde_json::from_str(&value)
+                    .map_err(|source| LoadDeviceIdError::Decode { source });
+            }
+            let value = serde_json::to_string(proposed)
+                .map_err(|source| LoadDeviceIdError::Decode { source })?;
+            diesel::insert_into(settings::table)
+                .values((settings::key.eq("device_id"), settings::value.eq(value)))
+                .execute(connection)
+                .map_err(|source| LoadDeviceIdError::Database { source })?;
+            Ok(proposed.to_owned())
+        })
     }
 }
