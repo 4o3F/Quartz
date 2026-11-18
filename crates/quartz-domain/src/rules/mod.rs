@@ -12,8 +12,9 @@ mod resolve;
 pub use content_hash::{ContentHash, ParseContentHashError};
 pub use diagnostic::{Diagnostic, DiagnosticCode, SourceLocation};
 pub use evaluate::{
-    CompileRulesError, CompiledRules, ConditionOutcome, Evaluation, Extraction, ExtractionStatus,
-    FieldSnapshot, PrivacySources, RuleOutcome, RuleStatus, ShadowReason,
+    CompileRulesError, CompiledRules, ConditionOutcome, Evaluation, ExplanationId, Extraction,
+    ExtractionStatus, FieldSnapshot, ParseExplanationIdError, PrivacyLabelSnapshot, PrivacySources,
+    RuleOutcome, RuleStatus, ShadowReason,
 };
 pub use identity::{
     ParseRuleIdError, ParseRuleSetKeyError, ParseRuleTargetError, RuleId, RuleSetKey, RuleTarget,

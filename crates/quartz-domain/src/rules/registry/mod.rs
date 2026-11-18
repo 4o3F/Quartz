@@ -1,8 +1,10 @@
 //! Rule decisions and RCU publication without database, clock, channel, or thread access.
 
+mod epoch;
 mod snapshot;
 mod state;
 
+pub use epoch::SnapshotEpoch;
 pub use snapshot::{
     BuildRuleSnapshotError, RuleSnapshot, RuleWarning, RulesChanged, SiblingRevision, SnapshotCell,
     SnapshotHashes,
@@ -93,7 +95,7 @@ pub enum RegistryCommand {
 #[derive(Debug)]
 pub struct RegistrySuccess {
     /// Process-local snapshot publication sequence.
-    pub epoch: u64,
+    pub epoch: SnapshotEpoch,
     /// New current revisions by key; deleted keys are omitted.
     pub versions: BTreeMap<RuleSetKey, u32>,
     /// Computed alerts comparing saved parent revisions with current ancestors.
@@ -271,7 +273,7 @@ impl Decision {
 #[must_use]
 pub struct CommitOutcome {
     state: RegistryState,
-    base_epoch: u64,
+    base_epoch: SnapshotEpoch,
 }
 
 /// A commit acknowledgement was stale or its snapshot could not be rebuilt.
@@ -284,9 +286,9 @@ pub enum CommitRuleDecisionError {
     ))]
     StaleEpoch {
         /// Publication epoch on which the acknowledgement was based.
-        expected: u64,
+        expected: SnapshotEpoch,
         /// Current publication epoch that rejects the delayed acknowledgement.
-        current: u64,
+        current: SnapshotEpoch,
     },
     /// Could not rebuild committed rule snapshot.
     #[snafu(display("could not rebuild committed rule snapshot"))]
@@ -328,8 +330,9 @@ impl RuleRegistry {
                 return Err(CreateRuleRegistryError::InvalidOrigin { key: key.clone() });
             }
         }
-        let snapshot = RuleSnapshot::build(&state, 0, BuildPolicy::Startup, None)
-            .context(create_error::SnapshotSnafu)?;
+        let snapshot =
+            RuleSnapshot::build(&state, SnapshotEpoch::initial(), BuildPolicy::Startup, None)
+                .context(create_error::SnapshotSnafu)?;
         Ok(Self {
             state,
             snapshots: SnapshotCell::new(snapshot),
@@ -370,7 +373,10 @@ impl RuleRegistry {
             });
         }
         // decide checked the epoch increment and compiled this exact candidate before persistence.
-        let epoch = outcome.base_epoch + 1;
+        let epoch = outcome
+            .base_epoch
+            .next()
+            .expect("decide checked the snapshot epoch increment");
         let snapshot =
             RuleSnapshot::build(&outcome.state, epoch, BuildPolicy::Startup, Some(&current))
                 .context(commit_error::SnapshotSnafu)?;
@@ -382,7 +388,7 @@ impl RuleRegistry {
         let current = self.snapshots.load();
         let epoch = current
             .epoch()
-            .checked_add(1)
+            .next()
             .ok_or(DecideRegistryCommandError::EpochOverflow)?;
         let mut state = self.state.clone();
         let mut writes = Vec::new();

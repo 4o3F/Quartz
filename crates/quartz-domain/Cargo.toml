@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+jiff.workspace = true
 arc-swap.workspace = true
 icu_casemap.workspace = true
 icu_normalizer.workspace = true

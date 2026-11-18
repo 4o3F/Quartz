@@ -105,25 +105,25 @@ fn batch_failure_rolls_back_all_writes_and_never_acknowledges_the_core() {
             .all(|entry| entry.current.version == 1)
     );
     assert!(Arc::ptr_eq(&before, &fixture.shell.snapshots().load()));
-    assert_eq!(fixture.shell.snapshots().load().epoch(), 2);
+    assert_eq!(fixture.shell.snapshots().load().epoch().get(), 2);
 }
 
 #[test]
 fn successful_transaction_publishes_once_and_startup_rebuild_matches() {
     let mut fixture = Fixture::new();
-    assert_eq!(fixture.shell.snapshots().load().epoch(), 0);
+    assert_eq!(fixture.shell.snapshots().load().epoch().get(), 0);
     let old = fixture.shell.snapshots().load();
     let first = fixture
         .apply("user.test", "First", 0)
         .expect("first command");
-    assert_eq!(first.event.expect("publication").epoch, 1);
+    assert_eq!(first.event.expect("publication").epoch.get(), 1);
     let second = fixture
         .apply("user.test", "Second", 1)
         .expect("second command");
-    assert_eq!(second.event.expect("one publication").epoch, 2);
+    assert_eq!(second.event.expect("one publication").epoch.get(), 2);
     let published = fixture.shell.snapshots().load();
     assert_ne!(old.hashes(), published.hashes());
-    assert_eq!(old.epoch(), 0);
+    assert_eq!(old.epoch().get(), 0);
     let state = fixture.persisted();
     assert_eq!(
         state.sets[&"user.test".parse().expect("key")]
@@ -145,7 +145,7 @@ fn successful_transaction_publishes_once_and_startup_rebuild_matches() {
     )
     .expect("restart");
     assert_eq!(reopened.snapshots().load().hashes(), published.hashes());
-    assert_eq!(reopened.snapshots().load().epoch(), 0);
+    assert_eq!(reopened.snapshots().load().epoch().get(), 0);
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn deletion_retains_relational_history_and_restoring_clears_the_null_marker() {
             base_version: 1,
         })
         .expect("delete");
-    assert_eq!(reply.event.expect("publication").epoch, 2);
+    assert_eq!(reply.event.expect("publication").epoch.get(), 2);
     let state = fixture.persisted();
     assert!(
         !state
@@ -450,6 +450,6 @@ fn startup_rebuild_degrades_uncompilable_user_or_builtin_sets_without_sql_decisi
                 base_version: 1,
             })
             .expect("healthy edits remain possible");
-        assert_eq!(shell.snapshots().load().epoch(), 1);
+        assert_eq!(shell.snapshots().load().epoch().get(), 1);
     }
 }

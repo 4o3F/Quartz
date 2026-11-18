@@ -286,6 +286,43 @@ impl EffectiveRules {
     }
 }
 impl CompiledRules {
+    /// Returns the label snapshot for a revision-qualified privacy explanation.
+    pub fn privacy_label(&self, explanation_id: &ExplanationId) -> Option<PrivacyLabelSnapshot> {
+        self.effective
+            .rules
+            .iter()
+            .find(|entry| entry.explanation_id() == explanation_id.as_str())
+            .map(|entry| PrivacyLabelSnapshot {
+                key: entry
+                    .rule
+                    .builtin
+                    .as_ref()
+                    .and_then(|metadata| metadata.label_key.clone()),
+                text: entry.rule.label.clone(),
+            })
+    }
+
+    /// Reports whether missing browser context requires withholding foreground titles.
+    pub fn requires_web_privacy(&self) -> bool {
+        self.effective
+            .rules
+            .iter()
+            .any(|entry| match &entry.rule.body {
+                RuleBody::Privacy { action, when, .. } => {
+                    (action.app == super::Action::Drop
+                        || action.window_title == super::Action::Drop
+                        || action.web != super::WebAction::Full)
+                        && when.iter().any(|condition| {
+                            matches!(
+                                condition.field,
+                                Field::Domain | Field::TabTitle | Field::BrowserProfile
+                            )
+                        })
+                }
+                _ => false,
+            })
+    }
+
     /// Evaluates every rule for explanation, choosing the first classification or extraction match.
     pub fn evaluate(&self, snapshot: &FieldSnapshot) -> Evaluation {
         let mut result = Evaluation {
@@ -468,3 +505,58 @@ const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<CompiledRules>();
 };
+
+/// Revision-qualified explanation identity used by privacy metadata lookups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplanationId(String);
+impl ExplanationId {
+    /// Borrows its revision-qualified representation.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+/// Label metadata retained from the exact effective rule revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivacyLabelSnapshot {
+    /// Builtin translation key.
+    pub key: Option<String>,
+    /// Historical user label.
+    pub text: Option<String>,
+}
+
+/// A revision-qualified explanation has an invalid target or revision.
+#[derive(Debug, Snafu)]
+#[snafu(module(explanation_id_error))]
+pub enum ParseExplanationIdError {
+    /// A revision separator is required after the qualified rule target.
+    #[snafu(display("rule explanation is missing its revision"))]
+    MissingRevision,
+    /// The set key or local rule identifier is invalid.
+    #[snafu(display("rule explanation has an invalid target"))]
+    Target {
+        /// Original target validation error.
+        source: crate::rules::ParseRuleTargetError,
+    },
+    /// The revision must be a positive 32-bit integer.
+    #[snafu(display("rule explanation has an invalid revision"))]
+    Revision {
+        /// Original integer validation error.
+        source: std::num::ParseIntError,
+    },
+}
+impl std::str::FromStr for ExplanationId {
+    type Err = ParseExplanationIdError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (target, revision) = value
+            .rsplit_once('@')
+            .ok_or(ParseExplanationIdError::MissingRevision)?;
+        target
+            .parse::<super::RuleTarget>()
+            .map_err(|source| ParseExplanationIdError::Target { source })?;
+        revision
+            .parse::<std::num::NonZeroU32>()
+            .map_err(|source| ParseExplanationIdError::Revision { source })?;
+        Ok(Self(value.to_owned()))
+    }
+}

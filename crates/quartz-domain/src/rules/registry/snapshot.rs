@@ -1,4 +1,4 @@
-use super::{ComputeUpstreamChangesError, RegistryState, UpstreamChange};
+use super::{ComputeUpstreamChangesError, RegistryState, SnapshotEpoch, UpstreamChange};
 use crate::rules::{
     self, CompileRulesError, CompiledRules, ContentHash, Diagnostic, DiagnosticCode, Enablement,
     Resolution, RuleKind, RuleSetKey,
@@ -37,7 +37,7 @@ pub enum RuleWarning {
 /// Immutable compiled inputs; a work unit retains one Arc for its entire evaluation.
 #[derive(Debug)]
 pub struct RuleSnapshot {
-    epoch: u64,
+    epoch: SnapshotEpoch,
     privacy: CompiledRules,
     classification: CompiledRules,
     extraction: CompiledRules,
@@ -47,7 +47,7 @@ pub struct RuleSnapshot {
 }
 impl RuleSnapshot {
     /// Returns the publication sequence within this registry process.
-    pub fn epoch(&self) -> u64 {
+    pub fn epoch(&self) -> SnapshotEpoch {
         self.epoch
     }
     /// Borrows compiled privacy rules for this snapshot.
@@ -78,7 +78,7 @@ impl RuleSnapshot {
 
     pub(super) fn build(
         installed: &RegistryState,
-        epoch: u64,
+        epoch: SnapshotEpoch,
         policy: BuildPolicy,
         baseline: Option<&RuleSnapshot>,
     ) -> Result<Self, BuildRuleSnapshotError> {
@@ -225,7 +225,7 @@ impl SnapshotCell {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RulesChanged {
     /// Process-local snapshot publication sequence.
-    pub epoch: u64,
+    pub epoch: SnapshotEpoch,
 }
 
 /// A checked sibling revision participating in a complete sibling ordering.

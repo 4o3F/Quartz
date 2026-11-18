@@ -1,0 +1,304 @@
+//! Run-local window identity and bounded title observations.
+
+use super::{Timestamp, UtcInstant, WindowId, ids::IdAllocator, limits};
+use std::collections::BTreeMap;
+
+/// Opaque native window value; no platform handle type crosses the domain boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WindowHandle(u64);
+impl WindowHandle {
+    /// Constructs an opaque platform value supplied by the shell.
+    #[must_use]
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+    /// Returns the value for the platform or persistence adapter.
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+/// Platform process identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProcessId(u32);
+impl ProcessId {
+    /// Constructs an opaque platform value supplied by the shell.
+    #[must_use]
+    pub fn new(value: u32) -> Self {
+        Self(value)
+    }
+    /// Returns the value for the platform or persistence adapter.
+    #[must_use]
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+/// Foreground hook generation, independently of window-instance reuse generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ForegroundGeneration(u64);
+impl ForegroundGeneration {
+    /// Constructs an opaque platform value supplied by the shell.
+    #[must_use]
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+    /// Returns the value for the platform or persistence adapter.
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// HWND reuse sequence within one capture run, independent of foreground hook generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InstanceGeneration(u64);
+
+impl InstanceGeneration {
+    /// Starts the first lifetime observed for a window handle.
+    #[must_use]
+    pub fn initial() -> Self {
+        Self(0)
+    }
+
+    /// Returns the reuse sequence for persistence adapters.
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns the next lifetime sequence, or `None` when the counter is exhausted.
+    #[must_use]
+    pub fn next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+}
+
+/// Application identity already resolved and normalized by the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppIdentity {
+    /// Normalized lowercase absolute executable path.
+    Exe(String),
+    /// Application user model identifier, preferred for packaged applications.
+    Aumid(String),
+    /// Window class used when process identity cannot be resolved.
+    Unresolved(String),
+}
+impl AppIdentity {
+    /// Produces the stable application dictionary key.
+    pub fn key(&self) -> String {
+        match self {
+            Self::Exe(value) => format!("exe:{value}"),
+            Self::Aumid(value) => format!("aumid:{value}"),
+            Self::Unresolved(value) => format!("unresolved:{value}"),
+        }
+    }
+}
+
+/// Title status codes match the existing store ontology; conversion stays in the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleStatus {
+    /// The capped title was read successfully.
+    Ok,
+    /// The shell successfully read an empty title.
+    Empty,
+    /// The shell could not read a title snapshot.
+    Unreadable,
+    /// The title exceeded the configured UTF-16 unit cap.
+    Truncated,
+    /// Privacy policy discarded the captured title.
+    Redacted,
+}
+
+/// A bounded title input. Debug formatting deliberately excludes its text.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Title {
+    text: Option<String>,
+    status: TitleStatus,
+}
+impl std::fmt::Debug for Title {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Title")
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+impl Title {
+    /// Caps text before privacy evaluation, without cutting a UTF-16 surrogate pair.
+    pub fn readable(text: &str) -> Self {
+        let mut units = 0;
+        let bounded: String = text
+            .chars()
+            .take_while(|ch| {
+                units += ch.len_utf16();
+                units <= limits::TITLE_UTF16_UNITS
+            })
+            .collect();
+        let status = if bounded.len() < text.len() {
+            TitleStatus::Truncated
+        } else if bounded.is_empty() {
+            TitleStatus::Empty
+        } else {
+            TitleStatus::Ok
+        };
+        Self {
+            text: Some(bounded),
+            status,
+        }
+    }
+    /// Represents a failed title read without substituting a later title.
+    pub fn unreadable() -> Self {
+        Self {
+            text: None,
+            status: TitleStatus::Unreadable,
+        }
+    }
+    /// Borrows the capped text used for privacy matching.
+    pub fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+    /// Returns how the shell's read was represented.
+    pub fn status(&self) -> TitleStatus {
+        self.status
+    }
+    pub(super) fn fingerprint(&self) -> [u8; 32] {
+        use sha2::Digest;
+        let mut digest = sha2::Sha256::new();
+        digest.update([match self.status {
+            TitleStatus::Ok => 0,
+            TitleStatus::Empty => 1,
+            TitleStatus::Unreadable => 2,
+            TitleStatus::Truncated => 3,
+            TitleStatus::Redacted => 4,
+        }]);
+        if let Some(text) = &self.text {
+            digest.update(text.as_bytes());
+        }
+        digest.finalize().into()
+    }
+    pub(super) fn redact(&mut self) {
+        self.text = None;
+        self.status = TitleStatus::Redacted;
+    }
+}
+
+/// Identity facts that the shell revalidated after resolving process metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowFacts {
+    /// Run-local native window value.
+    pub handle: WindowHandle,
+    /// Revalidated owning process.
+    pub process: ProcessId,
+    /// Process creation UTC, absent on query failure.
+    pub process_created_utc: Option<UtcInstant>,
+    /// Exact class name; changes retire the old instance.
+    pub class: String,
+    /// Resolved application identity.
+    pub app: AppIdentity,
+    /// Lowercase executable filename used by rules.
+    pub exe_name: Option<String>,
+    /// Resolved application display name.
+    pub display_name: String,
+    /// Immediate, capped title snapshot.
+    pub title: Title,
+}
+
+/// Persistable instance identity, emitted only after application privacy permits it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowInstance {
+    /// Core-assigned logical key, scoped by run.
+    pub id: WindowId,
+    /// Revalidated window identity and application metadata; title is excluded.
+    pub handle: WindowHandle,
+    /// Owning process.
+    pub process: ProcessId,
+    /// Optional process creation time.
+    pub process_created_utc: Option<UtcInstant>,
+    /// HWND reuse generation within this run.
+    pub generation: InstanceGeneration,
+    /// Exact observed class.
+    pub class: String,
+    /// Application dictionary identity.
+    pub app: AppIdentity,
+    /// Executable filename.
+    pub exe_name: Option<String>,
+    /// Application display name.
+    pub display_name: String,
+    /// First observation of this instance.
+    pub first_seen: Timestamp,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstanceLifecycle {
+    Live,
+    Retired,
+}
+#[derive(Debug, Clone)]
+struct Entry {
+    instance: WindowInstance,
+    lifecycle: InstanceLifecycle,
+}
+/// Window identities retained for one run, including retirement history per HWND.
+#[derive(Debug, Clone, Default)]
+pub struct WindowInstances {
+    entries: BTreeMap<WindowHandle, Entry>,
+    ids: IdAllocator,
+}
+impl WindowInstances {
+    /// Resolves a current instance, incrementing generation after retirement or identity change.
+    #[must_use]
+    pub fn observe(&mut self, facts: &WindowFacts, at: Timestamp) -> WindowInstance {
+        let old = self.entries.get(&facts.handle);
+        let same = old.is_some_and(|old| {
+            old.lifecycle == InstanceLifecycle::Live
+                && old.instance.process == facts.process
+                && old.instance.process_created_utc == facts.process_created_utc
+                && old.instance.class == facts.class
+        });
+        if same {
+            let entry = self
+                .entries
+                .get_mut(&facts.handle)
+                .expect("matching entry exists");
+            entry.instance.app = facts.app.clone();
+            entry.instance.exe_name = facts.exe_name.clone();
+            entry.instance.display_name = facts.display_name.clone();
+            return entry.instance.clone();
+        }
+        let generation = match old {
+            Some(old) => old
+                .instance
+                .generation
+                .next()
+                .expect("window instance generation exhausted"),
+            None => InstanceGeneration::initial(),
+        };
+        let instance = WindowInstance {
+            id: self.ids.window(),
+            handle: facts.handle,
+            process: facts.process,
+            process_created_utc: facts.process_created_utc,
+            generation,
+            class: facts.class.clone(),
+            app: facts.app.clone(),
+            exe_name: facts.exe_name.clone(),
+            display_name: facts.display_name.clone(),
+            first_seen: at,
+        };
+        self.entries.insert(
+            facts.handle,
+            Entry {
+                instance: instance.clone(),
+                lifecycle: InstanceLifecycle::Live,
+            },
+        );
+        instance
+    }
+    /// Retires only the matching instance, so a delayed destroy cannot retire a reused HWND.
+    pub fn retire(&mut self, id: WindowId) {
+        for entry in self.entries.values_mut() {
+            if entry.instance.id == id {
+                entry.lifecycle = InstanceLifecycle::Retired;
+                break;
+            }
+        }
+    }
+}

@@ -122,7 +122,7 @@ fn compilation_failure_is_a_pure_rejection_with_no_writes_or_epoch_change() {
             source: BuildRuleSnapshotError::Compile { .. }
         })
     ));
-    assert_eq!(fixture.core.snapshots().load().epoch(), 0);
+    assert_eq!(fixture.core.snapshots().load().epoch().get(), 0);
     assert!(fixture.core.state().sets.is_empty());
 }
 
@@ -148,14 +148,14 @@ fn valid_decision_describes_writes_and_publication_waits_for_commit() {
         .core
         .committed(outcome.expect("pending candidate"))
         .expect("commit");
-    assert_eq!(event, RulesChanged { epoch: 1 });
+    assert_eq!(event.epoch.get(), 1);
     assert_eq!(reply.expect("success").epoch, event.epoch);
     let current = fixture.core.snapshots().load();
     let facts = FieldSnapshot {
         text: BTreeMap::from([(Field::ExeName, NfcText::new("quartz-test.exe"))]),
         domain: None,
     };
-    assert_eq!(old.epoch(), 0);
+    assert_eq!(old.epoch().get(), 0);
     assert_eq!(
         old.privacy().evaluate(&facts).privacy.window_title,
         Action::Keep
@@ -168,7 +168,7 @@ fn valid_decision_describes_writes_and_publication_waits_for_commit() {
     let rebuilt =
         RuleRegistry::from_state(fixture.core.state().clone()).expect("restart from values");
     assert_eq!(rebuilt.snapshots().load().hashes(), current.hashes());
-    assert_eq!(rebuilt.snapshots().load().epoch(), 0);
+    assert_eq!(rebuilt.snapshots().load().epoch().get(), 0);
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn toggle_reorder_revert_and_delete_have_explicit_atomic_write_descriptions() {
             ..
         })
     ));
-    assert_eq!(fixture.core.snapshots().load().epoch(), 8);
+    assert_eq!(fixture.core.snapshots().load().epoch().get(), 8);
 }
 
 #[test]
@@ -510,9 +510,9 @@ fn delayed_commit_acknowledgements_cannot_replace_a_newer_snapshot() {
     assert!(matches!(
         fixture.core.committed(second.expect("second candidate")),
         Err(CommitRuleDecisionError::StaleEpoch {
-            expected: 0,
-            current: 1
-        })
+            expected,
+            current,
+        }) if expected.get() == 0 && current.get() == 1
     ));
     assert!(Arc::ptr_eq(&before, &fixture.core.snapshots().load()));
 }
