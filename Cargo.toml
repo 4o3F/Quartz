@@ -48,7 +48,7 @@ rust-i18n = { version = "4.2.4", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
 snafu = { version = "0.9.2", default-features = false, features = ["std", "rust_1_81"] }
-tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter"] }
 windows = { version = "0.62.2", default-features = false, features = ["Win32_System_Console"] }
 
