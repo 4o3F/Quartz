@@ -22,7 +22,7 @@ num_enum = "0.7.6"
 strum = { version = "0.28.0", features = ["derive"] }
 arc-swap = "1.9.5"
 crossbeam-channel = "0.5.17"
-anyhow = "1"
+anyhow = "1.0.104"
 diesel = { version = "2.4.0", default-features = false, features = ["std", "sqlite", "returning_clauses_for_sqlite_3_35", "32-column-tables"] }
 diesel_migrations = { version = "2.4.0", default-features = false, features = ["sqlite"] }
 # Declared only to enable bundled SQLite; keep this version within Diesel's allowed
