@@ -1,8 +1,6 @@
 # UI framework resident-memory spike (2026-11-15)
 
-Each spike: tray icon + on-demand 720x480 window with a 5-bar usage chart.
-Measured by `measure.ps1` (30 s settle + 30 s idle). "closed" = after 10 open/close
-cycles. Private WS = Task Manager "Memory" column; Private Bytes = committed memory.
+Each spike: tray icon + on-demand 720x480 window with a 5-bar usage chart. Measured with the former `measure.ps1` (30 s settle + 30 s idle); the current Quartz entry point is `deno task measure`. "closed" = after 10 open/close cycles. Private WS = Task Manager "Memory" column; Private Bytes = committed memory.
 
 | Build | State | Private WS | Private Bytes | Threads | Idle CPU / 30 s |
 |---|---|---|---|---|---|

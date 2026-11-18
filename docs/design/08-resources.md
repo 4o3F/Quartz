@@ -55,10 +55,10 @@
 
 ### 2.1 工具
 
-- `scripts/measure.ps1`：基于 ui-spike 的同名脚本，分别测量 `quartz.exe` 的核心、界面进程及独立的 `quartz-host.exe`。先稳定一段时间再采样，输出 Private Bytes、Private WS、线程数、句柄数、CPU 时间。
-- 只用 `Get-Process` 和 `GetProcessMemoryInfo` 采样。WMI 性能计数器每次查询大约要 1 秒，会干扰测量（spike 里踩过的坑）。
+- `deno task measure --Exe ./target/release/quartz.exe --SettleSeconds 30 --IdleSeconds 600`：要求 Deno 2.9.8 与 Windows 桌面会话，先稳定再采样核心及界面进程，输出 Private Bytes、Private WS、线程数、句柄数、CPU 时间，并报告两个可执行文件的体积。`--ScreenshotPath <文件.png>` 可保存界面截图；稳定与空闲秒数均允许 1–3600。任务显式授予 FFI、进程启动和文件读写权限。
+- 通过 Deno FFI 调用 `GetProcessMemoryInfo`、`GetProcessTimes`、`GetProcessHandleCount` 与进程快照接口采样。WMI 只在采样前读取机器信息。
 - `EmptyWorkingSet` 不作为优化手段，也不在验收时调用。
-- 模块检查：用 `Get-Process -Module` 列出核心和 host 加载的模块，断言没有 `nv*.dll`。
+- 模块检查：测量任务通过 `EnumProcessModulesEx` 列出核心与界面加载的模块，检查核心没有 `nv*.dll`。
 - 唤醒和线程活动：用 WPR 的 CPU 和 Generic Events profile 录制 10 分钟空闲，在 WPA 里看各线程的唤醒次数和原因。
 - 查询性能：M1 提供 `quartz gen-data` 生成一年模拟数据及 `bench-query` 雏形；M2 接入最小查询管线，M4 验收完整管线。日、周、年查询各跑 100 次，输出 P50 和 P95。
 

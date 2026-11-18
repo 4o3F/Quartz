@@ -1,0 +1,26 @@
+{
+  "lock": true,
+  "compilerOptions": {
+    "strict": true
+  },
+  "fmt": {
+    "include": ["scripts/"],
+    "proseWrap": "never"
+  },
+  "lint": {
+    "include": ["scripts/"]
+  },
+  "imports": {
+    "@std/cli/parse-args": "jsr:@std/cli@1.0.32/parse-args",
+    "@std/path": "jsr:@std/path@1.1.6",
+    "@std/toml": "jsr:@std/toml@1.0.11",
+    "fflate": "npm:fflate@0.8.3/browser"
+  },
+  "tasks": {
+    "check": "deno fmt --check && deno lint && deno check --frozen scripts/*.ts",
+    "check-schema": "deno run --frozen --allow-read --allow-write --allow-run scripts/check-schema.ts",
+    "verify-version": "deno run --frozen --allow-read --allow-write --allow-env=GITHUB_REF_NAME,GITHUB_OUTPUT scripts/verify-version.ts",
+    "package": "deno run --frozen --allow-read --allow-write --allow-env=GITHUB_OUTPUT scripts/package.ts",
+    "measure": "deno run --frozen --allow-ffi --allow-run --allow-read --allow-write scripts/measure.ts"
+  }
+}

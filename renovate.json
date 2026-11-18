@@ -1,0 +1,147 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "default:prHourlyLimitNone",
+    "default:rebaseStalePrs",
+    "group:monorepos"
+  ],
+  "platformAutomerge": false,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Diesel CLI version used for the schema drift check",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/ci\\.yml$/"
+      ],
+      "matchStrings": [
+        "DIESEL_CLI_VERSION: (?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "diesel_cli",
+      "datasourceTemplate": "crate"
+    },
+    {
+      "customType": "regex",
+      "description": "Diesel CLI version in the schema check hints",
+      "managerFilePatterns": [
+        "/^scripts/check-schema\\.ts$/"
+      ],
+      "matchStrings": [
+        "diesel_cli --version (?<currentValue>\\d+\\.\\d+\\.\\d+)",
+        "Diesel CLI (?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "diesel_cli",
+      "datasourceTemplate": "crate"
+    },
+    {
+      "customType": "regex",
+      "description": "Deno runtime used by setup-deno",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "deno-version: v(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "denoland/deno",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Pinned Rust toolchain",
+      "managerFilePatterns": [
+        "/^rust-toolchain\\.toml$/"
+      ],
+      "matchStrings": [
+        "channel = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "depNameTemplate": "rust",
+      "packageNameTemplate": "rust-lang/rust",
+      "datasourceTemplate": "github-releases"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "rangeStrategy": "bump"
+    },
+    {
+      "description": "Merge non-major updates automatically once CI passes",
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "automerge": true
+    },
+    {
+      "groupName": "Diesel",
+      "matchPackageNames": [
+        "diesel",
+        "diesel_migrations",
+        "diesel_cli",
+        "libsqlite3-sys"
+      ]
+    },
+    {
+      "groupName": "ICU4X and IDNA",
+      "matchPackageNames": [
+        "/^icu_/",
+        "idna"
+      ]
+    },
+    {
+      "groupName": "windows-rs",
+      "matchPackageNames": [
+        "windows",
+        "/^windows-/"
+      ]
+    },
+    {
+      "groupName": "tracing",
+      "matchPackageNames": [
+        "tracing",
+        "tracing-subscriber"
+      ]
+    },
+    {
+      "groupName": "serde",
+      "matchPackageNames": [
+        "serde",
+        "serde_json"
+      ]
+    },
+    {
+      "groupName": "Deno",
+      "matchManagers": [
+        "deno"
+      ]
+    },
+    {
+      "groupName": "Deno",
+      "matchPackageNames": [
+        "denoland/deno"
+      ]
+    },
+    {
+      "groupName": "GitHub Actions",
+      "matchManagers": [
+        "github-actions"
+      ]
+    },
+    {
+      "description": "UI framework updates need screenshot review before merging",
+      "matchPackageNames": [
+        "gpui-kit"
+      ],
+      "automerge": false
+    }
+  ]
+}

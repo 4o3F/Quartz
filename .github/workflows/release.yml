@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Windows draft release
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Deno
+        uses: denoland/setup-deno@v2.0.5
+        with:
+          deno-version: v2.9.8
+          cache: true
+
+      - name: Check scripts
+        run: deno task check
+
+      - name: Verify tag matches workspace version
+        id: version
+        run: deno task verify-version
+
+      - name: Install pinned Rust toolchain
+        # rustup >= 1.28 installs the toolchain, components and targets listed in
+        # rust-toolchain.toml only on an explicit install.
+        run: rustup toolchain install
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          key: release
+          cache-bin: false
+
+      - name: Build release binaries
+        run: cargo build --release --locked -p quartz -p quartz-host
+
+      - name: Package binaries and checksums
+        id: package
+        run: deno task package release --version "${{ steps.version.outputs.version }}" --output "${{ runner.temp }}/quartz-release-assets"
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: quartz-${{ steps.version.outputs.version }}-x86_64-pc-windows-msvc
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Create draft GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ARCHIVE: ${{ steps.package.outputs.archive }}
+          RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: gh release create "$env:GITHUB_REF_NAME" "$env:RELEASE_ARCHIVE" "$env:RELEASE_CHECKSUM" --draft --verify-tag --title "Quartz $env:GITHUB_REF_NAME" --generate-notes

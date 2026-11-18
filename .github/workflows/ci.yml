@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in step with the diesel crate (Renovate group "Diesel").
+  DIESEL_CLI_VERSION: 2.4.0
+
+jobs:
+  check:
+    name: Windows checks
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Deno
+        uses: denoland/setup-deno@v2.0.5
+        with:
+          deno-version: v2.9.8
+          cache: true
+
+      - name: Check scripts
+        run: deno task check
+
+      - name: Install pinned Rust toolchain
+        # rustup >= 1.28 installs the toolchain, components and targets listed in
+        # rust-toolchain.toml only on an explicit install.
+        run: rustup toolchain install
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          key: ci
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2.90.5
+        with:
+          tool: cargo-deny
+
+      - name: Check dependency policy
+        run: cargo deny check
+
+      - name: Cache Diesel CLI
+        id: diesel-cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.temp }}/diesel-cli
+          key: ${{ runner.os }}-${{ runner.arch }}-diesel-cli-${{ env.DIESEL_CLI_VERSION }}-sqlite-bundled-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml') }}
+
+      - name: Install Diesel CLI with bundled SQLite
+        if: steps.diesel-cache.outputs.cache-hit != 'true'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/diesel-cli-target
+        run: cargo install diesel_cli --version "${{ env.DIESEL_CLI_VERSION }}" --no-default-features --features sqlite-bundled --locked --root "${{ runner.temp }}/diesel-cli"
+
+      - name: Check schema drift
+        run: deno task check-schema --diesel "${{ runner.temp }}/diesel-cli/bin/diesel.exe"
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Tests do not open windows. GUI preview is never run in CI.
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+      - name: Build release binaries
+        run: cargo build --release --locked -p quartz -p quartz-host
+
+      - name: Collect release binaries and checksums
+        run: deno task package collect --output "${{ runner.temp }}/quartz-artifact"
+
+      - name: Upload release binaries
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: quartz-${{ github.sha }}-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/quartz-artifact/
+          if-no-files-found: error
+          retention-days: 14

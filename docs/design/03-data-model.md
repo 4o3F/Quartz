@@ -629,7 +629,7 @@ struct DerivedSegment {
 
 - 迁移放在 `crates/quartz/migrations/<时间戳>_<名称>/up.sql`，用 `embed_migrations!` 编进 exe。不提供 `down.sql`：Quartz 不支持把数据库降级到旧 schema。
 - 已发布的迁移不可修改。仓库里的 `migrations.lock` 记录每个已发布迁移的 SHA-256，CI 校验文件未变。diesel 自身不校验迁移内容，这一检查由我们补上。
-- `store/schema.rs` 必须与迁移一致。CI 在空库上执行全部迁移，再运行 `diesel print-schema`，与提交的文件比较。CHECK 约束和部分索引不出现在 schema.rs 中，由迁移测试覆盖。本地执行 `scripts/check-schema.sh` 完成空库迁移与生成结果比较，需要 Diesel CLI 2.4.0（`sqlite-bundled`）；脚本使用仓库中的 `diesel.toml` 与 `crates/quartz/schema.patch`。
+- `store/schema.rs` 必须与迁移一致。CI 在空库上执行全部迁移，再运行 `diesel print-schema`，与提交的文件逐字节比较。CHECK 约束和部分索引不出现在 schema.rs 中，由迁移测试覆盖。本地执行 `deno task check-schema` 完成空库迁移与生成结果比较，需要 Deno 2.9.8 与 Diesel CLI 2.4.0（`sqlite-bundled`）；脚本使用仓库中的 `diesel.toml` 与 `crates/quartz/schema.patch`，在 Windows 和 Linux 上均可运行。
 
 ### 8.2 启动流程
 

@@ -10,8 +10,10 @@ UI 使用 gpui-component `TitleBar` 与 `TitleBar::window_options()`，通过 `a
 
 在 Windows 桌面会话中执行以下命令。核心稳定 30 秒后记录 CPU 起点，空闲 600 秒后采样；UI 稳定 30 秒后采集 30 秒空闲 CPU。随后通过向 `Quartz.Core` 隐藏窗口投递 `AppMessage::TrayCallback`（`WM_APP + 1`），在 `lParam` 低 16 位传入 `NIN_SELECT`，打开并用 `WM_CLOSE` 关闭 UI 共 20 次。每次等待 UI 退出并确认没有剩余 UI 子进程，最后再稳定 30 秒并测量 30 秒核心空闲 CPU。表格同时记录初始空闲、首次 UI 关闭后及每 5 次循环的核心指标；20 次循环的增量以首次 UI 关闭后为起点，首次 UI 带来的增量单独列出。
 
+本节结果由当时的 `measure.ps1` 测得。当前使用 Deno 2.9.8，按相同参数执行：
+
 ```powershell
-./scripts/measure.ps1 -Exe ./target/release/quartz.exe -SettleSeconds 30 -IdleSeconds 600
+deno task measure --Exe ./target/release/quartz.exe --SettleSeconds 30 --IdleSeconds 600
 ```
 
 Private Bytes 与 Private Working Set 使用 `GetProcessMemoryInfo` 的 `PROCESS_MEMORY_COUNTERS_EX2`；线程、句柄和 CPU 使用 `Get-Process`。机器信息使用 WMI，在资源采样前读取。脚本不调用 WMI 性能计数器或 `EmptyWorkingSet`。`PROCESS_MEMORY_COUNTERS_EX2` 要求 Windows 10/11 安装 2023 年 9 月或之后的相应累积更新，参见 [Microsoft 文档](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters_ex2)。
@@ -80,7 +82,7 @@ GPUI 的最大化按钮返回 Windows 11 Snap 布局所需的 `HTMAXBUTTON`（9�
 | Windows `cargo.exe clippy --workspace --all-targets -- -D warnings` | 通过 |
 | Windows `cargo.exe test --workspace` | 31 项通过 |
 | Windows `cargo.exe build --release --workspace` | 通过 |
-| Windows `scripts/measure.ps1 -Exe ./target/release/quartz.exe -SettleSeconds 30 -IdleSeconds 600` | 运行完成，退出码 0；预算偏差见测量结果 |
+| Windows 旧版 `measure.ps1`，稳定 30 秒、空闲 600 秒（当前入口为 `deno task measure`） | 运行完成，退出码 0；预算偏差见测量结果 |
 | 核心与 UI 冒烟检查 | 核心存活；第二次启动退出码 0；直接 `quartz.exe ui` 打开 Quartz 窗口，WM_CLOSE 后 34.323 ms 退出且退出码为 0；`ui --prewarm` 不开窗，退出码 0 |
 | `cargo deny check` | advisories、bans、licenses、sources 全部通过；重复版本仅有警告 |
 
@@ -211,7 +213,7 @@ Q1 已按用户决策选定 jiff，查询到的最新发布版为 1.0.0。已核
 - 第 8.2 节的版本兼容性按已应用迁移的集合判断。任何程序不认识的迁移均拒绝启动，包括版本号更小但未知的迁移。
 - 初次创建的空库也先备份，旧版本标为 `0`。备份名使用 jiff 的 UTC 毫秒时间戳，成功迁移后仅清理程序生成的旧迁移备份，保留最近两份。
 - Diesel 的迁移接口使用擦除错误类型，且 SQL 迁移的具体运行错误未公开。自定义 SQL 迁移适配器保留内嵌迁移的名称与事务元数据，在 `store::raw` 执行 SQL，立即把接口返回的错误转换回具体类型；自有错误类型不保存 `Box<dyn Error>`。Rust 迁移与 SQL 迁移共用自定义来源和版本序列。
-- `store/schema.rs` 由 Diesel CLI 2.4.0 生成。`diesel.toml` 和 `crates/quartz/schema.patch` 将 SQLite `INTEGER` 的时间、时长、标识等字段映射为 `BigInt`，枚举与布尔标志保留整数类型。执行 `scripts/check-schema.sh` 会迁移临时空库、重新生成 schema 并比较；安装命令为 `cargo install diesel_cli --version 2.4.0 --no-default-features --features sqlite-bundled --locked`。
+- `store/schema.rs` 由 Diesel CLI 2.4.0 生成。`diesel.toml` 和 `crates/quartz/schema.patch` 将 SQLite `INTEGER` 的时间、时长、标识等字段映射为 `BigInt`，枚举与布尔标志保留整数类型。执行 `deno task check-schema` 会迁移临时空库、重新生成 schema 并比较，需要 Deno 2.9.8；Diesel CLI 安装命令为 `cargo install diesel_cli --version 2.4.0 --no-default-features --features sqlite-bundled --locked`。
 - `crates/quartz/migrations.lock` 校验迁移目录中每个文件的 SHA-256 和完整文件清单，增删或修改文件都会导致测试失败。`tests/fixtures/db/v1.db` 保存全部表的测试数据，覆盖开放记录、零时长、Unicode、隐藏标题和未知 JSON 字段。
 
 ### 依赖版本与许可
@@ -266,7 +268,7 @@ Private Bytes 在启动完成后约 3 秒读取 `Process.PrivateMemorySize64`，
 | Windows `cargo.exe clippy --workspace --all-targets -- -D warnings` | 通过 |
 | Windows `cargo.exe test --workspace` | 56 项通过 |
 | Windows `cargo.exe build --release --workspace` | 通过；本轮构建 quartz.exe 为 14,997,504 字节 |
-| `scripts/check-schema.sh`（Diesel CLI 2.4.0） | 空库迁移与 schema.rs 比较通过 |
+| 原 schema 检查脚本（Diesel CLI 2.4.0；当前入口为 `deno task check-schema`） | 空库迁移与 schema.rs 比较通过 |
 | Windows 核心与恢复命令冒烟检查 | 核心存活并创建 quartz.db；迁移记录为 `20261116000000`，20 张业务表、5 个视图，完整性检查为 ok；第二次启动返回 0；通过 taskkill 停止核心 |
 | Core/UI 文件日志 | 核心与 `ui --prewarm` 均启动成功，core.log 与 ui.log 正常写入，UI 预热占位进程返回 0 |
 | 不提供 `--yes` 的恢复命令 | 返回 1，列出源备份、目标数据库及数据丢失提示；不存在的数据目录保持不存在，已有目录的全部文件清单及 SHA-256 保持不变；标准输入保持打开仍立即退出 |
@@ -303,7 +305,7 @@ workspace 的窗口、托盘、进程、语言、领域转换、迁移、连接�
 | Windows `cargo.exe clippy --workspace --all-targets -- -D warnings` | 通过 |
 | Windows `cargo.exe test --workspace` | 61 项通过 |
 | `cargo deny check` | advisories、bans、licenses、sources 通过；没有放宽规则 |
-| `scripts/check-schema.sh` | 通过，迁移与 schema 未改变 |
+| 原 schema 检查脚本（当前入口为 `deno task check-schema`） | 通过，迁移与 schema 未改变 |
 | Windows `cargo.exe build --release --workspace` | 通过，quartz.exe 为 15,016,960 字节 |
 | 核心正常启动、第二次启动、taskkill | 核心创建数据库并运行；第二次启动返回 0；按 PID 停止核心 |
 | 托盘打开 UI | 向托盘隐藏窗口发送选择事件，实际启动普通 UI 子进程；关闭 UI 返回 0，核心继续运行 |
