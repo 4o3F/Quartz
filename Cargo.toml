@@ -67,6 +67,12 @@ undocumented_unsafe_blocks = "deny"
 [profile.dev]
 debug = "line-tables-only"
 
+# Dependencies (gpui's tree in particular) carry no debug info in dev and test builds:
+# this keeps target/ and Windows PDBs small. Workspace crates keep line tables for
+# panic locations and backtraces.
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
