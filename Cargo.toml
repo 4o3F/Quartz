@@ -46,7 +46,7 @@ quartz-ui = { path = "crates/quartz-ui" }
 raw-window-handle = { version = "0.6.2", default-features = false, features = ["std"] }
 rust-i18n = { version = "4.2.4", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1"
+serde_json = "1.0.154"
 snafu = { version = "0.9.2", default-features = false, features = ["std", "rust_1_81"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter"] }
