@@ -53,6 +53,10 @@ impl<'connection> ConnectionSql<'connection> {
     pub(super) fn configure_reader(&mut self) -> QueryResult<()> {
         self.connection.batch_execute(READ_SETTINGS)
     }
+    #[cfg(test)]
+    pub(super) fn resume_writes(&mut self) -> QueryResult<()> {
+        self.connection.batch_execute(ALLOW_BACKUP)
+    }
     pub(super) fn sqlite_version(&mut self) -> QueryResult<String> {
         diesel::sql_query(SQLITE_VERSION)
             .get_result::<TextValue>(self.connection)

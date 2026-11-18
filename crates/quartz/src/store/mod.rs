@@ -1,5 +1,13 @@
 //! SQLite connections, schema migrations, and offline backup recovery.
 
+#[cfg_attr(
+    all(windows, not(test)),
+    expect(
+        dead_code,
+        reason = "used only by the capture persistence shell, which is wired into the database thread in D2"
+    )
+)]
+pub(crate) mod capture;
 #[expect(
     dead_code,
     reason = "schema v1 row models are consumed by later capture steps"
@@ -70,6 +78,39 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
+    #[cfg_attr(
+        all(windows, not(test)),
+        expect(
+            dead_code,
+            reason = "used only by the capture persistence shell, which is wired into the database thread in D2"
+        )
+    )]
+    pub(crate) fn capture<'connection>(
+        &'connection mut self,
+        keys: &'connection mut capture::CaptureKeys,
+        metadata: &'connection capture::RunMetadata,
+    ) -> capture::Capture<'connection> {
+        capture::Capture::new(&mut self._writer, keys, metadata)
+    }
+
+    pub(crate) fn capture_transaction<T>(
+        &mut self,
+        keys: &mut capture::CaptureKeys,
+        metadata: &capture::RunMetadata,
+        execute: impl FnOnce(&mut capture::Capture<'_>) -> Result<T, capture::ExecuteCaptureBatchError>,
+    ) -> Result<T, capture::ExecuteCaptureBatchError> {
+        let mut staged = keys.clone();
+        let result = self._writer.immediate_transaction(|connection| {
+            execute(&mut capture::Capture::new(
+                connection,
+                &mut staged,
+                metadata,
+            ))
+        })?;
+        *keys = staged;
+        Ok(result)
+    }
+
     pub(crate) fn rule_sets(&mut self) -> rules::RuleSets<'_> {
         rules::RuleSets::new(&mut self._writer)
     }

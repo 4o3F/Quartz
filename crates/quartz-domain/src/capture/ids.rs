@@ -19,6 +19,11 @@ impl RunId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SegmentId(u64);
 impl SegmentId {
+    /// Reconstructs a logical key while loading persisted capture rows.
+    #[must_use]
+    pub fn from_persisted(value: u64) -> Self {
+        Self(value)
+    }
     /// Returns the logical value for the persistence adapter.
     #[must_use]
     pub fn get(self) -> u64 {
@@ -29,6 +34,11 @@ impl SegmentId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WindowId(u64);
 impl WindowId {
+    /// Reconstructs a logical key while loading persisted capture rows.
+    #[must_use]
+    pub fn from_persisted(value: u64) -> Self {
+        Self(value)
+    }
     /// Returns the logical value for the persistence adapter.
     #[must_use]
     pub fn get(self) -> u64 {
@@ -39,6 +49,11 @@ impl WindowId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RowId(u64);
 impl RowId {
+    /// Reconstructs a logical key while loading persisted capture rows.
+    #[must_use]
+    pub fn from_persisted(value: u64) -> Self {
+        Self(value)
+    }
     /// Returns the logical value for the persistence adapter.
     #[must_use]
     pub fn get(self) -> u64 {
@@ -49,6 +64,11 @@ impl RowId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionKey(u64);
 impl SessionKey {
+    /// Reconstructs a logical key while loading persisted capture rows.
+    #[must_use]
+    pub fn from_persisted(value: u64) -> Self {
+        Self(value)
+    }
     /// Returns the logical value for the persistence adapter.
     #[must_use]
     pub fn get(self) -> u64 {

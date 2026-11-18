@@ -2,6 +2,14 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "capture persistence is wired into the database thread in D2"
+    )
+)]
+mod capture;
 #[cfg(windows)]
 mod commands;
 mod data_directory;

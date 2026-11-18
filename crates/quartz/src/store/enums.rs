@@ -9,6 +9,9 @@ use diesel::{
     sqlite::{Sqlite, SqliteValue},
 };
 
+use num_enum::{IntoPrimitive, TryFromPrimitive};
+use strum::{IntoStaticStr, VariantArray};
+
 #[derive(Debug, snafu::Snafu)]
 #[snafu(display("unknown {enum_name} code {code}"))]
 pub(super) struct DecodeEnumError {
@@ -16,25 +19,28 @@ pub(super) struct DecodeEnumError {
     pub(super) code: i32,
 }
 
-/// Stable codes and diagnostic labels for one database enum column.
-pub(super) trait IntegerCode: Copy + 'static {
+/// Column context attached to unknown integer codes.
+pub(super) trait EnumColumn {
     const COLUMN: &'static str;
-    const ALL: &'static [Self];
+}
 
-    fn code(self) -> i32;
-
-    fn from_code(code: i32) -> Option<Self> {
-        Self::ALL.iter().copied().find(|value| value.code() == code)
+/// Stable encodings and labels derived from each enum's explicit variants.
+pub(super) trait IntegerCode:
+    EnumColumn + Copy + Into<i32> + TryFrom<i32> + VariantArray + Into<&'static str> + 'static
+{
+    fn code(self) -> i32 {
+        self.into()
     }
-
-    fn label(self) -> &'static str;
+    fn label(self) -> &'static str {
+        self.into()
+    }
     fn write_sql(self, out: &mut Output<'_, '_, Sqlite>) -> serialize::Result {
         out.set_value(self.code());
         Ok(IsNull::No)
     }
     fn read_sql(value: SqliteValue<'_, '_, '_>) -> deserialize::Result<Self> {
         let code = <i32 as FromSql<Integer, Sqlite>>::from_sql(value)?;
-        Self::from_code(code).ok_or_else(|| {
+        Self::try_from(code).map_err(|_| {
             DecodeEnumError {
                 enum_name: Self::COLUMN,
                 code,
@@ -42,6 +48,10 @@ pub(super) trait IntegerCode: Copy + 'static {
             .into()
         })
     }
+}
+impl<T> IntegerCode for T where
+    T: EnumColumn + Copy + Into<i32> + TryFrom<i32> + VariantArray + Into<&'static str> + 'static
+{
 }
 
 // Diesel's foreign traits require an implementation for each concrete enum type.
@@ -65,6 +75,8 @@ macro_rules! impl_integer_sql {
 /// Why a capture run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum RunEndReason {
     Shutdown = 1,
@@ -74,32 +86,15 @@ pub(super) enum RunEndReason {
     Update = 4,
 }
 
-impl IntegerCode for RunEndReason {
+impl EnumColumn for RunEndReason {
     const COLUMN: &'static str = "capture_runs.end_reason";
-    const ALL: &'static [Self] = &[
-        Self::Shutdown,
-        Self::UserExit,
-        Self::CrashRecovered,
-        Self::Update,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Shutdown => "shutdown",
-            Self::UserExit => "user_exit",
-            Self::CrashRecovered => "crash_recovered",
-            Self::Update => "update",
-        }
-    }
 }
 
 /// Why a UTC-to-monotonic clock segment ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum ClockEndReason {
     TimeChange = 1,
@@ -112,34 +107,15 @@ pub(super) enum ClockEndReason {
     CrashRecovered = 5,
 }
 
-impl IntegerCode for ClockEndReason {
+impl EnumColumn for ClockEndReason {
     const COLUMN: &'static str = "clock_segments.end_reason";
-    const ALL: &'static [Self] = &[
-        Self::TimeChange,
-        Self::Resume,
-        Self::Drift,
-        Self::RunEnd,
-        Self::CrashRecovered,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::TimeChange => "time_change",
-            Self::Resume => "resume",
-            Self::Drift => "drift",
-            Self::RunEnd => "run_end",
-            Self::CrashRecovered => "crash_recovered",
-        }
-    }
 }
 
 /// Identity used to distinguish an application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum ApplicationKind {
     /// Identified by its executable path.
@@ -150,51 +126,30 @@ pub(super) enum ApplicationKind {
     Unresolved = 3,
 }
 
-impl IntegerCode for ApplicationKind {
+impl EnumColumn for ApplicationKind {
     const COLUMN: &'static str = "applications.kind";
-    const ALL: &'static [Self] = &[Self::Exe, Self::Aumid, Self::Unresolved];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Exe => "exe",
-            Self::Aumid => "aumid",
-            Self::Unresolved => "unresolved",
-        }
-    }
 }
 
 /// Whether a foreground interval represents a window or no foreground.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum IntervalKind {
     Window = 1,
     NoForeground = 2,
 }
 
-impl IntegerCode for IntervalKind {
+impl EnumColumn for IntervalKind {
     const COLUMN: &'static str = "intervals.kind";
-    const ALL: &'static [Self] = &[Self::Window, Self::NoForeground];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Window => "window",
-            Self::NoForeground => "no_foreground",
-        }
-    }
 }
 
 /// Why an interval has no foreground window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum NoForegroundReason {
     /// There is no foreground window.
@@ -203,25 +158,15 @@ pub(super) enum NoForegroundReason {
     UnknownDesktop = 2,
 }
 
-impl IntegerCode for NoForegroundReason {
+impl EnumColumn for NoForegroundReason {
     const COLUMN: &'static str = "intervals.no_foreground_reason";
-    const ALL: &'static [Self] = &[Self::Empty, Self::UnknownDesktop];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Empty => "empty",
-            Self::UnknownDesktop => "unknown_desktop",
-        }
-    }
 }
 
 /// Title availability shared by foreground and browser records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum TitleStatus {
     /// Title text was read successfully.
@@ -238,36 +183,15 @@ pub(super) enum TitleStatus {
     Purged = 6,
 }
 
-impl IntegerCode for TitleStatus {
+impl EnumColumn for TitleStatus {
     const COLUMN: &'static str = "title_status";
-    const ALL: &'static [Self] = &[
-        Self::Ok,
-        Self::Empty,
-        Self::Unreadable,
-        Self::Truncated,
-        Self::Redacted,
-        Self::Purged,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::Empty => "empty",
-            Self::Unreadable => "unreadable",
-            Self::Truncated => "truncated",
-            Self::Redacted => "redacted",
-            Self::Purged => "purged",
-        }
-    }
 }
 
 /// Privacy level retained for a foreground interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum CaptureLevel {
     /// Retain application identity and title.
@@ -278,26 +202,15 @@ pub(super) enum CaptureLevel {
     Excluded = 3,
 }
 
-impl IntegerCode for CaptureLevel {
+impl EnumColumn for CaptureLevel {
     const COLUMN: &'static str = "intervals.capture_level";
-    const ALL: &'static [Self] = &[Self::Full, Self::TitleHidden, Self::Excluded];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::TitleHidden => "title_hidden",
-            Self::Excluded => "excluded",
-        }
-    }
 }
 
 /// Boundary that closed a foreground interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum IntervalEndReason {
     /// The foreground window changed.
@@ -322,50 +235,15 @@ pub(super) enum IntervalEndReason {
     CaptureGap = 13,
 }
 
-impl IntegerCode for IntervalEndReason {
+impl EnumColumn for IntervalEndReason {
     const COLUMN: &'static str = "intervals.end_reason";
-    const ALL: &'static [Self] = &[
-        Self::Switch,
-        Self::Title,
-        Self::NoForeground,
-        Self::Locked,
-        Self::Suspended,
-        Self::Paused,
-        Self::Disconnected,
-        Self::Shutdown,
-        Self::CrashRecovered,
-        Self::ClockJump,
-        Self::MidnightSplit,
-        Self::PolicyChanged,
-        Self::CaptureGap,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Switch => "switch",
-            Self::Title => "title",
-            Self::NoForeground => "no_foreground",
-            Self::Locked => "locked",
-            Self::Suspended => "suspended",
-            Self::Paused => "paused",
-            Self::Disconnected => "disconnected",
-            Self::Shutdown => "shutdown",
-            Self::CrashRecovered => "crash_recovered",
-            Self::ClockJump => "clock_jump",
-            Self::MidnightSplit => "midnight_split",
-            Self::PolicyChanged => "policy_changed",
-            Self::CaptureGap => "capture_gap",
-        }
-    }
 }
 
 /// State recorded as an availability interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum AvailabilityReason {
     Idle = 1,
@@ -375,34 +253,15 @@ pub(super) enum AvailabilityReason {
     Paused = 5,
 }
 
-impl IntegerCode for AvailabilityReason {
+impl EnumColumn for AvailabilityReason {
     const COLUMN: &'static str = "availability_intervals.reason";
-    const ALL: &'static [Self] = &[
-        Self::Idle,
-        Self::Locked,
-        Self::Disconnected,
-        Self::Suspended,
-        Self::Paused,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Locked => "locked",
-            Self::Disconnected => "disconnected",
-            Self::Suspended => "suspended",
-            Self::Paused => "paused",
-        }
-    }
 }
 
 /// Boundary that closed an availability interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum AvailabilityEndReason {
     /// The recorded availability state ended.
@@ -418,36 +277,15 @@ pub(super) enum AvailabilityEndReason {
     PolicyChanged = 6,
 }
 
-impl IntegerCode for AvailabilityEndReason {
+impl EnumColumn for AvailabilityEndReason {
     const COLUMN: &'static str = "availability_intervals.end_reason";
-    const ALL: &'static [Self] = &[
-        Self::Resumed,
-        Self::Shutdown,
-        Self::CrashRecovered,
-        Self::ClockJump,
-        Self::MidnightSplit,
-        Self::PolicyChanged,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Resumed => "resumed",
-            Self::Shutdown => "shutdown",
-            Self::CrashRecovered => "crash_recovered",
-            Self::ClockJump => "clock_jump",
-            Self::MidnightSplit => "midnight_split",
-            Self::PolicyChanged => "policy_changed",
-        }
-    }
 }
 
 /// Exception that ended an idle interval early.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum IdleException {
     /// The user enabled keep-alive timing.
@@ -458,26 +296,15 @@ pub(super) enum IdleException {
     Audible = 3,
 }
 
-impl IntegerCode for IdleException {
+impl EnumColumn for IdleException {
     const COLUMN: &'static str = "availability_intervals.exception";
-    const ALL: &'static [Self] = &[Self::KeepAlive, Self::AppExempt, Self::Audible];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::KeepAlive => "keep_alive",
-            Self::AppExempt => "app_exempt",
-            Self::Audible => "audible",
-        }
-    }
 }
 
 /// Boundary that closed a browser interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum WebEndReason {
     /// The browser reported a new state.
@@ -495,38 +322,15 @@ pub(super) enum WebEndReason {
     Shutdown = 7,
 }
 
-impl IntegerCode for WebEndReason {
+impl EnumColumn for WebEndReason {
     const COLUMN: &'static str = "web_intervals.end_reason";
-    const ALL: &'static [Self] = &[
-        Self::BrowserState,
-        Self::ForegroundEnd,
-        Self::Disconnected,
-        Self::Gap,
-        Self::PolicyChanged,
-        Self::CrashRecovered,
-        Self::Shutdown,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::BrowserState => "browser_state",
-            Self::ForegroundEnd => "foreground_end",
-            Self::Disconnected => "disconnected",
-            Self::Gap => "gap",
-            Self::PolicyChanged => "policy_changed",
-            Self::CrashRecovered => "crash_recovered",
-            Self::Shutdown => "shutdown",
-        }
-    }
 }
 
 /// Confidence of a browser interval's foreground association.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum LinkStatus {
     /// The browser interval has an unambiguous foreground association.
@@ -535,25 +339,15 @@ pub(super) enum LinkStatus {
     Ambiguous = 2,
 }
 
-impl IntegerCode for LinkStatus {
+impl EnumColumn for LinkStatus {
     const COLUMN: &'static str = "web_intervals.link_status";
-    const ALL: &'static [Self] = &[Self::Linked, Self::Ambiguous];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Linked => "linked",
-            Self::Ambiguous => "ambiguous",
-        }
-    }
 }
 
 /// Privacy level retained for a stored browser interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum WebLevel {
     /// Retain domain and tab title.
@@ -562,25 +356,15 @@ pub(super) enum WebLevel {
     DomainOnly = 2,
 }
 
-impl IntegerCode for WebLevel {
+impl EnumColumn for WebLevel {
     const COLUMN: &'static str = "web_intervals.web_level";
-    const ALL: &'static [Self] = &[Self::Full, Self::DomainOnly];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::DomainOnly => "domain_only",
-        }
-    }
 }
 
 /// Durable result used to acknowledge a browser message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum IngestOutcome {
     /// The message produced stored browser intervals.
@@ -595,34 +379,15 @@ pub(super) enum IngestOutcome {
     DiscardedBarrier = 5,
 }
 
-impl IntegerCode for IngestOutcome {
+impl EnumColumn for IngestOutcome {
     const COLUMN: &'static str = "ingest_receipts.outcome";
-    const ALL: &'static [Self] = &[
-        Self::Stored,
-        Self::DiscardedNoOverlap,
-        Self::DiscardedPrivacy,
-        Self::DiscardedGap,
-        Self::DiscardedBarrier,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Stored => "stored",
-            Self::DiscardedNoOverlap => "discarded_no_overlap",
-            Self::DiscardedPrivacy => "discarded_privacy",
-            Self::DiscardedGap => "discarded_gap",
-            Self::DiscardedBarrier => "discarded_barrier",
-        }
-    }
 }
 
 /// Contribution of a category to focus and distraction totals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum CategoryTendency {
     Focus = 1,
@@ -630,26 +395,15 @@ pub(super) enum CategoryTendency {
     Distraction = 3,
 }
 
-impl IntegerCode for CategoryTendency {
+impl EnumColumn for CategoryTendency {
     const COLUMN: &'static str = "categories.tendency";
-    const ALL: &'static [Self] = &[Self::Focus, Self::Neutral, Self::Distraction];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Focus => "focus",
-            Self::Neutral => "neutral",
-            Self::Distraction => "distraction",
-        }
-    }
 }
 
 /// Rule family evaluated by a rule-set tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum RuleSetKind {
     Classification = 1,
@@ -661,59 +415,30 @@ pub(super) enum RuleSetKind {
     PolicyCheck = 5,
 }
 
-impl IntegerCode for RuleSetKind {
+impl EnumColumn for RuleSetKind {
     const COLUMN: &'static str = "rule_sets.kind";
-    const ALL: &'static [Self] = &[
-        Self::Classification,
-        Self::Extraction,
-        Self::Privacy,
-        Self::Precedent,
-        Self::PolicyCheck,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Classification => "classification",
-            Self::Extraction => "extraction",
-            Self::Privacy => "privacy",
-            Self::Precedent => "precedent",
-            Self::PolicyCheck => "policy_check",
-        }
-    }
 }
 
 /// Whether a rule set is built in or supplied by the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum RuleSetSource {
     Builtin = 1,
     User = 2,
 }
 
-impl IntegerCode for RuleSetSource {
+impl EnumColumn for RuleSetSource {
     const COLUMN: &'static str = "rule_sets.source";
-    const ALL: &'static [Self] = &[Self::Builtin, Self::User];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Builtin => "builtin",
-            Self::User => "user",
-        }
-    }
 }
 
 /// User annotation applied over a time range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum AnnotationKind {
     /// Override the computed category.
@@ -727,34 +452,15 @@ pub(super) enum AnnotationKind {
     Note = 5,
 }
 
-impl IntegerCode for AnnotationKind {
+impl EnumColumn for AnnotationKind {
     const COLUMN: &'static str = "annotations.kind";
-    const ALL: &'static [Self] = &[
-        Self::CategoryOverride,
-        Self::OfflineActivity,
-        Self::ActiveOverride,
-        Self::DismissedAway,
-        Self::Note,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::CategoryOverride => "category_override",
-            Self::OfflineActivity => "offline_activity",
-            Self::ActiveOverride => "active_override",
-            Self::DismissedAway => "dismissed_away",
-            Self::Note => "note",
-        }
-    }
 }
 
 /// Fact source whose per-day version invalidates cached results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum DataSource {
     Intervals = 1,
@@ -767,34 +473,15 @@ pub(super) enum DataSource {
     Gaps = 5,
 }
 
-impl IntegerCode for DataSource {
+impl EnumColumn for DataSource {
     const COLUMN: &'static str = "data_day_versions.source";
-    const ALL: &'static [Self] = &[
-        Self::Intervals,
-        Self::Availability,
-        Self::Web,
-        Self::Annotations,
-        Self::Gaps,
-    ];
-
-    fn code(self) -> i32 {
-        self as i32
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Intervals => "intervals",
-            Self::Availability => "availability",
-            Self::Web => "web",
-            Self::Annotations => "annotations",
-            Self::Gaps => "gaps",
-        }
-    }
 }
 
 /// Failure that left a capture interval without trustworthy facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub(super) enum GapReason {
     /// The event input exceeded its capacity.
@@ -804,47 +491,195 @@ pub(super) enum GapReason {
     DatabaseError = 3,
 }
 
-impl IntegerCode for GapReason {
+impl EnumColumn for GapReason {
     const COLUMN: &'static str = "capture_gaps.reason";
-    const ALL: &'static [Self] = &[
-        Self::EventOverload,
-        Self::WriteQueueOverload,
-        Self::DatabaseError,
-    ];
+}
 
-    fn code(self) -> i32 {
-        self as i32
-    }
+#[rustfmt::skip]
+impl_integer_sql!(RunEndReason, ClockEndReason, ApplicationKind, IntervalKind, NoForegroundReason, TitleStatus, CaptureLevel, IntervalEndReason, AvailabilityReason, AvailabilityEndReason, IdleException, WebEndReason, LinkStatus, WebLevel, IngestOutcome, CategoryTendency, RuleSetKind, RuleSetSource, AnnotationKind, DataSource, GapReason);
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::EventOverload => "event_overload",
-            Self::WriteQueueOverload => "write_queue_overload",
-            Self::DatabaseError => "database_error",
+impl From<quartz_domain::capture::RunEndReason> for RunEndReason {
+    fn from(value: quartz_domain::capture::RunEndReason) -> Self {
+        match value {
+            quartz_domain::capture::RunEndReason::Shutdown => Self::Shutdown,
+            quartz_domain::capture::RunEndReason::UserExit => Self::UserExit,
+            quartz_domain::capture::RunEndReason::CrashRecovered => Self::CrashRecovered,
+            quartz_domain::capture::RunEndReason::Update => Self::Update,
         }
     }
 }
 
-impl_integer_sql!(
-    RunEndReason,
-    ClockEndReason,
-    ApplicationKind,
-    IntervalKind,
-    NoForegroundReason,
-    TitleStatus,
-    CaptureLevel,
-    IntervalEndReason,
-    AvailabilityReason,
-    AvailabilityEndReason,
-    IdleException,
-    WebEndReason,
-    LinkStatus,
-    WebLevel,
-    IngestOutcome,
-    CategoryTendency,
-    RuleSetKind,
-    RuleSetSource,
-    AnnotationKind,
-    DataSource,
-    GapReason,
-);
+impl From<quartz_domain::capture::ClockEndReason> for ClockEndReason {
+    fn from(value: quartz_domain::capture::ClockEndReason) -> Self {
+        match value {
+            quartz_domain::capture::ClockEndReason::TimeChange => Self::TimeChange,
+            quartz_domain::capture::ClockEndReason::Resume => Self::Resume,
+            quartz_domain::capture::ClockEndReason::Drift => Self::Drift,
+            quartz_domain::capture::ClockEndReason::RunEnd => Self::RunEnd,
+            quartz_domain::capture::ClockEndReason::CrashRecovered => Self::CrashRecovered,
+        }
+    }
+}
+
+impl From<quartz_domain::capture::IntervalEndReason> for IntervalEndReason {
+    fn from(value: quartz_domain::capture::IntervalEndReason) -> Self {
+        match value {
+            quartz_domain::capture::IntervalEndReason::Switch => Self::Switch,
+            quartz_domain::capture::IntervalEndReason::Title => Self::Title,
+            quartz_domain::capture::IntervalEndReason::NoForeground => Self::NoForeground,
+            quartz_domain::capture::IntervalEndReason::Locked => Self::Locked,
+            quartz_domain::capture::IntervalEndReason::Suspended => Self::Suspended,
+            quartz_domain::capture::IntervalEndReason::Paused => Self::Paused,
+            quartz_domain::capture::IntervalEndReason::Disconnected => Self::Disconnected,
+            quartz_domain::capture::IntervalEndReason::Shutdown => Self::Shutdown,
+            quartz_domain::capture::IntervalEndReason::CrashRecovered => Self::CrashRecovered,
+            quartz_domain::capture::IntervalEndReason::ClockJump => Self::ClockJump,
+            quartz_domain::capture::IntervalEndReason::MidnightSplit => Self::MidnightSplit,
+            quartz_domain::capture::IntervalEndReason::PolicyChanged => Self::PolicyChanged,
+            quartz_domain::capture::IntervalEndReason::CaptureGap => Self::CaptureGap,
+        }
+    }
+}
+
+impl From<quartz_domain::capture::GapReason> for GapReason {
+    fn from(value: quartz_domain::capture::GapReason) -> Self {
+        match value {
+            quartz_domain::capture::GapReason::EventOverload => Self::EventOverload,
+            quartz_domain::capture::GapReason::WriteQueueOverload => Self::WriteQueueOverload,
+            quartz_domain::capture::GapReason::DatabaseError => Self::DatabaseError,
+        }
+    }
+}
+
+impl From<quartz_domain::capture::TitleStatus> for TitleStatus {
+    fn from(value: quartz_domain::capture::TitleStatus) -> Self {
+        match value {
+            quartz_domain::capture::TitleStatus::Ok => Self::Ok,
+            quartz_domain::capture::TitleStatus::Empty => Self::Empty,
+            quartz_domain::capture::TitleStatus::Unreadable => Self::Unreadable,
+            quartz_domain::capture::TitleStatus::Truncated => Self::Truncated,
+            quartz_domain::capture::TitleStatus::Redacted => Self::Redacted,
+        }
+    }
+}
+
+impl From<quartz_domain::capture::CaptureLevel> for CaptureLevel {
+    fn from(value: quartz_domain::capture::CaptureLevel) -> Self {
+        match value {
+            quartz_domain::capture::CaptureLevel::Full => Self::Full,
+            quartz_domain::capture::CaptureLevel::TitleHidden => Self::TitleHidden,
+            quartz_domain::capture::CaptureLevel::Excluded => Self::Excluded,
+        }
+    }
+}
+
+impl From<quartz_domain::capture::NoForegroundReason> for NoForegroundReason {
+    fn from(value: quartz_domain::capture::NoForegroundReason) -> Self {
+        match value {
+            quartz_domain::capture::NoForegroundReason::Empty => Self::Empty,
+            quartz_domain::capture::NoForegroundReason::UnknownDesktop => Self::UnknownDesktop,
+        }
+    }
+}
+
+impl From<quartz_domain::capture::IdleException> for IdleException {
+    fn from(value: quartz_domain::capture::IdleException) -> Self {
+        match value {
+            quartz_domain::capture::IdleException::KeepTiming => Self::KeepAlive,
+            quartz_domain::capture::IdleException::AppExempt => Self::AppExempt,
+            quartz_domain::capture::IdleException::Audible => Self::Audible,
+        }
+    }
+}
+
+impl From<quartz_domain::capture::AvailabilityReason> for AvailabilityReason {
+    fn from(value: quartz_domain::capture::AvailabilityReason) -> Self {
+        use quartz_domain::capture::{AvailabilityReason as Reason, StopReason};
+        match value {
+            Reason::Idle => Self::Idle,
+            Reason::Stopped(reason) => match reason {
+                StopReason::Locked => Self::Locked,
+                StopReason::Disconnected => Self::Disconnected,
+                StopReason::Suspended => Self::Suspended,
+                StopReason::Paused => Self::Paused,
+            },
+        }
+    }
+}
+impl From<quartz_domain::capture::AvailabilityEndReason> for AvailabilityEndReason {
+    fn from(value: quartz_domain::capture::AvailabilityEndReason) -> Self {
+        use quartz_domain::capture::AvailabilityEndReason as Reason;
+        match value {
+            Reason::Resumed | Reason::Exception(_) => Self::Resumed,
+            Reason::Shutdown => Self::Shutdown,
+            Reason::CrashRecovered => Self::CrashRecovered,
+            Reason::ClockJump => Self::ClockJump,
+            Reason::MidnightSplit => Self::MidnightSplit,
+            Reason::PolicyChanged => Self::PolicyChanged,
+        }
+    }
+}
+
+impl From<NoForegroundReason> for quartz_domain::capture::NoForegroundReason {
+    fn from(value: NoForegroundReason) -> Self {
+        match value {
+            NoForegroundReason::Empty => Self::Empty,
+            NoForegroundReason::UnknownDesktop => Self::UnknownDesktop,
+        }
+    }
+}
+impl From<CaptureLevel> for quartz_domain::capture::CaptureLevel {
+    fn from(value: CaptureLevel) -> Self {
+        match value {
+            CaptureLevel::Full => Self::Full,
+            CaptureLevel::TitleHidden => Self::TitleHidden,
+            CaptureLevel::Excluded => Self::Excluded,
+        }
+    }
+}
+impl From<AvailabilityReason> for quartz_domain::capture::AvailabilityReason {
+    fn from(value: AvailabilityReason) -> Self {
+        use quartz_domain::capture::StopReason;
+        match value {
+            AvailabilityReason::Idle => Self::Idle,
+            AvailabilityReason::Locked => Self::Stopped(StopReason::Locked),
+            AvailabilityReason::Disconnected => Self::Stopped(StopReason::Disconnected),
+            AvailabilityReason::Suspended => Self::Stopped(StopReason::Suspended),
+            AvailabilityReason::Paused => Self::Stopped(StopReason::Paused),
+        }
+    }
+}
+#[derive(Debug, snafu::Snafu)]
+#[snafu(display("title status {code} has no capture representation"))]
+pub(crate) struct ConvertTitleStatusError {
+    pub(super) code: i32,
+}
+impl TryFrom<TitleStatus> for quartz_domain::capture::TitleStatus {
+    type Error = ConvertTitleStatusError;
+    fn try_from(value: TitleStatus) -> Result<Self, Self::Error> {
+        match value {
+            TitleStatus::Ok => Ok(Self::Ok),
+            TitleStatus::Empty => Ok(Self::Empty),
+            TitleStatus::Unreadable => Ok(Self::Unreadable),
+            TitleStatus::Truncated => Ok(Self::Truncated),
+            TitleStatus::Redacted => Ok(Self::Redacted),
+            TitleStatus::Purged => Err(ConvertTitleStatusError { code: value.code() }),
+        }
+    }
+}
+impl IdleException {
+    pub(super) fn from_ending(
+        reason: quartz_domain::capture::AvailabilityEndReason,
+    ) -> Option<Self> {
+        use quartz_domain::capture::AvailabilityEndReason as Reason;
+        match reason {
+            Reason::Exception(exception) => Some(exception.into()),
+            Reason::Resumed
+            | Reason::Shutdown
+            | Reason::CrashRecovered
+            | Reason::ClockJump
+            | Reason::MidnightSplit
+            | Reason::PolicyChanged => None,
+        }
+    }
+}

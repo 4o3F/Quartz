@@ -31,7 +31,7 @@ fn migrate_empty_and_reopen_without_another_backup() {
 #[test]
 fn enum_labels_match_every_rust_enum_exactly() {
     fn labels<T: enums::IntegerCode>() -> Vec<(String, i32, String)> {
-        T::ALL
+        T::VARIANTS
             .iter()
             .map(|value| (T::COLUMN.to_owned(), value.code(), value.label().to_owned()))
             .collect()
@@ -78,9 +78,9 @@ fn enum_labels_match_every_rust_enum_exactly() {
 #[test]
 fn every_enum_code_round_trips() {
     fn check<T: enums::IntegerCode + std::fmt::Debug + PartialEq>() {
-        for &value in T::ALL {
+        for &value in T::VARIANTS {
             assert_eq!(
-                T::from_code(value.code()),
+                T::try_from(value.code()).ok(),
                 Some(value),
                 "{} code {} must round-trip",
                 T::COLUMN,

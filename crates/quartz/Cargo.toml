@@ -12,6 +12,8 @@ name = "quartz"
 path = "src/main.rs"
 
 [dependencies]
+num_enum.workspace = true
+strum.workspace = true
 diesel.workspace = true
 diesel_migrations.workspace = true
 libsqlite3-sys.workspace = true
@@ -43,6 +45,7 @@ windows = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+quartz-domain = { workspace = true, features = ["test-support"] }
 sha2.workspace = true
 tempfile.workspace = true
 

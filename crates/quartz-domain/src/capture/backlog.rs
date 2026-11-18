@@ -115,6 +115,21 @@ impl WriteBacklog {
             .min();
         retention.into_iter().chain(confirmation).min()
     }
+    /// Borrows retained batches in order, after all pending gaps have been persisted.
+    pub fn batches(&self) -> impl Iterator<Item = &WriteBatch> {
+        self.queue
+            .iter()
+            .take(if self.gaps.is_empty() {
+                self.queue.len()
+            } else {
+                0
+            })
+            .map(|queued| &queued.batch)
+    }
+    /// Returns the enqueue clock of the oldest retained batch for the batching deadline.
+    pub fn oldest_queued_at(&self) -> Option<Timestamp> {
+        self.queue.front().map(|queued| queued.queued_at)
+    }
     /// Returns the oldest whole transaction; remove it only after successful commit.
     pub fn front(&self) -> Option<&WriteBatch> {
         if self.gaps.is_empty() {
