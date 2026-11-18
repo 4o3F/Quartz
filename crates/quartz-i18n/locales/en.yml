@@ -221,3 +221,13 @@ category.builtin.system:
   en: "System & tools"
 category.builtin.uncategorized:
   en: "Unclassified"
+privacy.label.private_window:
+  en: "Private window"
+privacy.label.title_hidden:
+  en: "Title hidden"
+privacy.label.capture_excluded:
+  en: "Capture excluded"
+privacy.label.credential_ui:
+  en: "Credentials"
+privacy.label.password_manager:
+  en: "Password manager"

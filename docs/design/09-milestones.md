@@ -29,9 +29,9 @@
 - 前台和标题 hook、窗口与应用身份解析、空闲检测、会话和电源通知、时钟段（02）。
 - schema v1（diesel 迁移）、`store` 访问层、批量写入、确认点、崩溃恢复（03 第 2–4 节）；迁移启动流程、`VACUUM INTO` 备份、`restore-backup` 命令，以及 schema.rs 漂移检查与 `migrations.lock` 校验（03 第 8 节）。
 - 隐私策略框架、字段动作、`builtin.browser_private`、`builtin.credential_ui`、`builtin.password_manager` 与用户规则求值（06）。M1 验证用户在用的 Edge、Chrome、Firefox 无痕模式与语言样本；无法可靠识别时启用 06 第 3.4 节的保守规则。规则集基础设施在 M1 完成：`quartz-rules/1` 解析与校验、规则集树解析（rule / override / disable、冲突检测）、版本存储、生效规则哈希、内置规则集 `builtin.privacy` 及其升级流程（03 第 8.5 节）。用户隐私规则先通过规则文件编辑，`quartz rules check` 在 M1 提供；界面在 M4 提供。
-- `quartz dump --date <日期>`：直接打印某天的区间，用于验收。
+- `quartz dump --date <YYYY-MM-DD> [--format text|json]`：M1 经数据目录直接只读打开生产数据库，不取得核心实例锁，在一个 WAL 快照中读取本地日历日相交的运行、时钟段、前台与无前台事实、可用状态、采集缺口及限时策略。默认文本每行一条，按开始 UTC 毫秒、类型和主键排序，包含本地起止时间、UTC 毫秒、时长、结束原因及已存储字段；开放行显示 `open (confirmed …)`。字符串使用 JSON 转义；`--format json` 每行一个对象，字段包含 `kind`、`id`、`start_utc_ms`、`end_utc_ms`、`confirmed_utc_ms`、`duration_ms`、`end_reason` 和相应事实字段，以及 `start_local`、`end_local`、`confirmed_local`。端点保留完整存储范围，标题仅在数据库有对应文本时出现。
 - 规则匹配的文本比较（NFC、NFKC 与大小写折叠、IDN 转换）及多语言测试用例（10 第 4.1、7 节）；内置识别规则按语言列出变体，验证 zh-CN 与 en 浏览器样本（10 第 4.2 节）。
-- `quartz gen-data`：一年模拟数据，含高频标题、长标题、多网页切片；`quartz bench-query` 雏形，先跑事实范围读取。
+- `quartz gen-data --db <新文件> [--profile light|typical|heavy] [--seed N] [--days N]`：默认一年，复现 03 第 4.6 节的三档前台与标题参数，包含高频标题和长标题。网页行待采集写入器支持后生成，当前输出跳过说明及目标切片数。`quartz bench-query --db <模拟库> [--runs N]`：默认每种范围 100 次，M1 先跑前台、可用状态和缺口的事实范围读取。
 - capture_gaps、deletion_barriers、统一确认点与数据库写入故障处理。
 
 **验收**

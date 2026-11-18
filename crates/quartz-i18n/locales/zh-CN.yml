@@ -221,3 +221,13 @@ category.builtin.system:
   zh-CN: "系统与工具"
 category.builtin.uncategorized:
   zh-CN: "未分类"
+privacy.label.private_window:
+  zh-CN: "无痕窗口"
+privacy.label.title_hidden:
+  zh-CN: "已隐藏标题"
+privacy.label.capture_excluded:
+  zh-CN: "已排除截屏"
+privacy.label.credential_ui:
+  zh-CN: "凭据界面"
+privacy.label.password_manager:
+  zh-CN: "密码管理器"

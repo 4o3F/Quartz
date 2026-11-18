@@ -173,6 +173,34 @@ mod tests {
     }
 
     #[test]
+    fn capture_and_builtin_privacy_labels_resolve_in_both_catalogs() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
+        let sources = [
+            include_str!("../../quartz-domain/src/capture/privacy.rs"),
+            include_str!("../../quartz-domain/src/rules/builtin-privacy.toml"),
+        ];
+        let backend = _rust_i18n_backend();
+        for source in sources {
+            for suffix in source.split("privacy.label.").skip(1) {
+                let name: String = suffix
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                    .collect();
+                let key = format!("privacy.label.{name}");
+                for locale in ["en", "zh-CN"] {
+                    let catalog = backend.messages_for_locale(locale).expect("locale catalog");
+                    assert!(
+                        catalog
+                            .iter()
+                            .any(|(candidate, value)| candidate == &key && !value.is_empty()),
+                        "{locale}: {key}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn every_locale_has_every_key_and_matching_placeholders() {
         let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
         // Read the backend directly so fallback cannot hide missing keys.

@@ -18,7 +18,7 @@ strum.workspace = true
 diesel.workspace = true
 diesel_migrations.workspace = true
 libsqlite3-sys.workspace = true
-jiff.workspace = true
+jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo"] }
 clap.workspace = true
 quartz-protocol.workspace = true
 quartz-domain.workspace = true

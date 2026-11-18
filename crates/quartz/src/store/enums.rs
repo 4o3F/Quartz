@@ -58,6 +58,11 @@ impl<T> IntegerCode for T where
 macro_rules! impl_integer_sql {
     ($($name:ty),+ $(,)?) => {
         $(
+            impl serde::Serialize for $name {
+                fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                    serializer.serialize_str(self.label())
+                }
+            }
             impl ToSql<Integer, Sqlite> for $name {
                 fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Sqlite>) -> serialize::Result {
                     self.write_sql(out)
@@ -78,7 +83,7 @@ macro_rules! impl_integer_sql {
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum RunEndReason {
+pub(crate) enum RunEndReason {
     Shutdown = 1,
     UserExit = 2,
     /// The next startup closed the run at its last confirmed point.
@@ -96,7 +101,7 @@ impl EnumColumn for RunEndReason {
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum ClockEndReason {
+pub(crate) enum ClockEndReason {
     TimeChange = 1,
     Resume = 2,
     /// The UTC-to-monotonic mapping drifted.
@@ -151,7 +156,7 @@ impl EnumColumn for IntervalKind {
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum NoForegroundReason {
+pub(crate) enum NoForegroundReason {
     /// There is no foreground window.
     Empty = 1,
     /// The foreground desktop cannot be identified.
@@ -168,7 +173,7 @@ impl EnumColumn for NoForegroundReason {
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum TitleStatus {
+pub(crate) enum TitleStatus {
     /// Title text was read successfully.
     Ok = 1,
     /// The title is empty.
@@ -193,7 +198,7 @@ impl EnumColumn for TitleStatus {
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum CaptureLevel {
+pub(crate) enum CaptureLevel {
     /// Retain application identity and title.
     Full = 1,
     /// Retain application identity without the title.
@@ -212,7 +217,7 @@ impl EnumColumn for CaptureLevel {
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum IntervalEndReason {
+pub(crate) enum IntervalEndReason {
     /// The foreground window changed.
     Switch = 1,
     /// The foreground title changed.
@@ -245,7 +250,7 @@ impl EnumColumn for IntervalEndReason {
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum AvailabilityReason {
+pub(crate) enum AvailabilityReason {
     Idle = 1,
     Locked = 2,
     Disconnected = 3,
@@ -263,7 +268,7 @@ impl EnumColumn for AvailabilityReason {
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum AvailabilityEndReason {
+pub(crate) enum AvailabilityEndReason {
     /// The recorded availability state ended.
     Resumed = 1,
     Shutdown = 2,
@@ -287,7 +292,7 @@ impl EnumColumn for AvailabilityEndReason {
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum IdleException {
+pub(crate) enum IdleException {
     /// The user enabled keep-alive timing.
     KeepAlive = 1,
     /// The foreground application is exempt from idle detection.
@@ -483,7 +488,7 @@ impl EnumColumn for DataSource {
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum GapReason {
+pub(crate) enum GapReason {
     /// The event input exceeded its capacity.
     EventOverload = 1,
     /// The database write queue exceeded its capacity.
@@ -512,7 +517,7 @@ impl EnumColumn for GapReason {
 #[diesel(sql_type = Integer)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum TimedPolicyKind {
+pub(crate) enum TimedPolicyKind {
     Pause = 1,
     Privacy = 2,
     KeepTiming = 3,
@@ -538,7 +543,7 @@ impl EnumColumn for TimedPolicyKind {
 #[diesel(sql_type = Integer)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
-pub(super) enum PrivacyMode {
+pub(crate) enum PrivacyMode {
     Normal = 1,
     Private = 2,
     NoTitles = 3,

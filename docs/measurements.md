@@ -317,3 +317,73 @@ workspace 的窗口、托盘、进程、语言、领域转换、迁移、连接�
 | 恢复命令回归 | 没有 --yes 时返回 1，目录与文件 SHA-256 不变；核心运行中带 --yes 拒绝恢复，核心停止后返回 0 并恢复样本数据 |
 
 全部外部直接依赖再次逐项运行 `cargo info --registry crates-io <crate>`，最新发布版本与上一节依赖表一致；没有增加外部 crate，仅调整本地 crate 依赖及现有 serde、snafu 的使用位置。`quartz` 的 quartz-i18n 依赖限定 Windows，文字查找仅用于托盘；语言协商不生成错误文字。
+
+## 2026-11-18 M1-E1：验收工具与事实范围查询
+
+本次在 Windows x86_64、Intel Core i7-14700HX（28 个逻辑处理器）、Rust 1.100.0 上测量，源代码为 `e3cb5e5` 上的本次工作区修改。构建采用仓库 release 配置：`opt-level = 3`、`lto = "fat"`、`codegen-units = 1`、`panic = "abort"`、`strip = true`，静态链接 C 运行库。编译结束后再运行测量命令。
+
+在仓库根目录执行以下 Windows 命令，模拟目录提前创建，数据库为新文件：
+
+```powershell
+cargo.exe build --release -p quartz --target-dir target/windows
+New-Item -ItemType Directory -Force target/windows/sim
+.\target\windows\release\quartz.exe gen-data --db target/windows/sim/typical-30d.db --profile typical --days 30 --seed 1
+.\target\windows\release\quartz.exe bench-query --db target/windows/sim/typical-30d.db --runs 100
+```
+
+### 生成速度与数据库体积
+
+生成器通过采集存储视图按天提交 `CaptureWrite`。typical 档工作日生成 2,000 个逻辑切片、550 个新标题，周末减半；含每秒标题变化、4,096 UTF-16 单元长标题、空闲、锁屏、睡眠、午夜拆分和采集缺口。网页行等待采集写入器支持，当前输出 900 个网页切片/工作日的目标数量并跳过写入。首日、中间日、末日的存储层时长守恒检查全部通过。
+
+总耗时采用 `gen-data` 输出的内部计时，包含迁移、逐日事务、写连接关闭时的 WAL 写回、三日守恒检查和行数读取。`writes` 为 `CaptureWrite` 条数，事实行数为 `intervals`、`availability_intervals`、`capture_gaps` 的行数之和。
+
+| 指标 | 实测 |
+|---|---:|
+| 模拟日数 | 30 |
+| 总耗时（秒） | 6.678 |
+| `CaptureWrite` 条数 | 104,469 |
+| `CaptureWrite` 条数/秒 | 15,643 |
+| 事实行数 | 52,120 |
+| 事实行数/秒 | 7,805 |
+| 数据库主文件（字节） | 7,966,720 |
+| 数据库主文件（MiB） | 7.598 |
+
+测量结束时，WAL 文件为 0 字节，共享内存文件为 32,768 字节。各表行数如下：
+
+| 表 | 行数 |
+|---|---:|
+| `applications` | 4 |
+| `availability_intervals` | 98 |
+| `capture_gaps` | 5 |
+| `capture_runs` | 30 |
+| `clock_segments` | 35 |
+| `intervals` | 52,017 |
+| `timed_policies` | 0 |
+| `titles` | 14,300 |
+| `web_intervals` | 0 |
+| `window_instances` | 120 |
+
+### 事实范围读取
+
+数据库包含从 2025-01-01 开始的 30 个模拟日。day、week、year 查询从最早运行的 UTC 开始时间起，分别读取 1、7、365 个 24 小时区间；year 范围读取库内已有的全部 30 日事实。每个范围在同一进程内连续执行 100 次，沿用进程与操作系统缓存，包含首次事实读取，使用 nearest-rank（排序后第 `ceil(次数 × 百分位)` 个样本）计算 P50 和 P95。计时包含 SQLite 读取和存储结果构造，返回结果的释放在计时之外。读取对象为前台与无前台事实、可用状态及缺口；已结束的前台和可用状态使用 `start_utc_ms >= from - 86_400_000` 条件，开放行和缺口使用完整相交条件，每次读取在一个只读快照事务内完成。
+
+| 范围 | 前台与无前台 | 可用状态 | 缺口 | 总行数 | P50（ms） | P95（ms） | 最大值（ms） |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| day | 2,000 | 3 | 1 | 2,004 | 2.662 | 2.884 | 3.755 |
+| week | 12,004 | 23 | 1 | 12,028 | 20.065 | 21.331 | 21.939 |
+| year | 52,017 | 98 | 5 | 52,120 | 229.515 | 260.142 | 269.688 |
+
+### Release 文件与时区功能
+
+本次新构建的 `quartz.exe` 为 17,567,232 字节（16.753 MiB）。体积对照基准为 `fe09a54` 的 CI 制品。该制品中的 `quartz.exe` 为 16,948,736 字节、`quartz-host.exe` 为 203,776 字节；本次增加 618,496 字节（+604 KiB），包含 jiff 内置时区数据与 `dump`、`gen-data`、`bench-query` 三个命令。`quartz` 的 jiff 依赖在 `std` 上启用 `tz-system`、`tzdb-bundle-platform`、`tzdb-zoneinfo`；Windows 构建由 `tzdb-bundle-platform` 带入 `jiff-tzdb` 的 IANA 时区数据，用于系统时区识别、本地日历日与 UTC 范围转换及夏令时计算。
+
+### 验证
+
+| 命令 | 结果 |
+|---|---|
+| `cargo fmt --all --check`（WSL，仅格式检查） | 通过 |
+| Windows `cargo.exe clippy -p quartz -p quartz-domain -p quartz-i18n --all-targets --target-dir target/windows -- -D warnings` | 通过 |
+| Windows `cargo.exe test -p quartz -p quartz-domain -p quartz-i18n --target-dir target/windows` | 211 项通过：quartz 122、quartz-domain 81、quartz-i18n 8 |
+| Windows `cargo.exe build --release -p quartz --target-dir target/windows` | 通过 |
+
+回归覆盖缺失主键与无效端点的类型化解码错误、开放确认点、存储枚举标签序列化、停止状态并集与空闲掩码、固定种子的行数与事实哈希、三档标题参数、生产路径与已有文件拒绝写入，以及小型模拟库的基准读取。

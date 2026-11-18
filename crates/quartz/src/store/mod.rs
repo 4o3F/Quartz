@@ -6,6 +6,7 @@ pub(crate) mod capture;
     reason = "schema v1 also includes browser and annotation models for later milestones"
 )]
 mod enums;
+pub(crate) mod facts;
 mod migrations;
 mod raw;
 #[expect(
@@ -43,7 +44,7 @@ pub(crate) enum OpenStoreError {
     LoadMigrations {
         source: migrations::ApplyMigrationError,
     },
-    #[snafu(display("could not configure database connection"))]
+    #[snafu(display("could not configure database connection: {source}"))]
     Configure { source: diesel::result::Error },
     #[snafu(display("could not create backup directory"))]
     CreateBackupDirectory { source: std::io::Error },
@@ -212,13 +213,13 @@ impl std::fmt::Debug for ReadOnlyStore {
 }
 impl ReadOnlyStore {
     pub(crate) fn open(path: &Path) -> Result<Self, ReadRulesError> {
-        let mut store = Self::connect(path).context(read_rules_error::OpenSnafu)?;
-        let source = typed(Migrations.migrations())
-            .context(LoadMigrationsSnafu)
-            .context(read_rules_error::OpenSnafu)?;
-        ConnectionSql::new(&mut store.connection)
-            .inspect(&source)
-            .context(read_rules_error::OpenSnafu)?;
+        Self::open_facts(path).context(read_rules_error::OpenSnafu)
+    }
+    /// Opens capture facts without migrations or an instance lock.
+    pub(crate) fn open_facts(path: &Path) -> Result<Self, OpenStoreError> {
+        let mut store = Self::connect(path)?;
+        let source = typed(Migrations.migrations()).context(LoadMigrationsSnafu)?;
+        ConnectionSql::new(&mut store.connection).inspect(&source)?;
         Ok(store)
     }
     pub(crate) fn rule_sets(&mut self) -> rules::RuleSets<'_> {
@@ -231,6 +232,12 @@ impl ReadOnlyStore {
             .replace('%', "%25")
             .replace('?', "%3F")
             .replace('#', "%23");
+        // An empty URI authority preserves Windows UNC paths without treating the server as an authority.
+        let path = if path.starts_with("//") {
+            format!("//{path}")
+        } else {
+            path
+        };
         let mut conn =
             SqliteConnection::establish(&format!("file:{path}?mode=ro")).context(ConnectSnafu)?;
         ConnectionSql::new(&mut conn)

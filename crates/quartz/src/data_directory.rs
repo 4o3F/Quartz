@@ -1,9 +1,9 @@
 //! Resolves the per-user data directory and names its persistent resources.
 
+use snafu::OptionExt;
+#[cfg(any(windows, test))]
+use snafu::ResultExt;
 use snafu::Snafu;
-#[cfg(any(windows, test))]
-use snafu::{OptionExt, ResultExt};
-#[cfg(any(windows, test))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -28,12 +28,10 @@ impl DataDirectory {
         Self(path.into())
     }
 
-    #[cfg(windows)]
     pub(crate) fn resolve() -> Result<Self, ResolveDataDirectoryError> {
         Self::from_local_app_data(std::env::var_os("LOCALAPPDATA"))
     }
 
-    #[cfg(any(windows, test))]
     fn from_local_app_data(local: Option<OsString>) -> Result<Self, ResolveDataDirectoryError> {
         local
             .map(PathBuf::from)

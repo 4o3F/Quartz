@@ -2,6 +2,7 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod bench_query;
 #[cfg(any(windows, test))]
 mod capture;
 #[cfg(windows)]
@@ -9,10 +10,13 @@ mod commands;
 #[cfg(any(windows, test))]
 mod core;
 mod data_directory;
+mod dump;
+mod generate_data;
 mod logging;
 mod platform;
 mod rules;
 mod rules_check;
+mod simulation;
 #[cfg_attr(
     not(windows),
     expect(
@@ -71,6 +75,8 @@ enum CliCommand {
     Dump {
         #[arg(long)]
         date: String,
+        #[arg(long, value_enum, default_value_t = dump::DumpFormat::Text)]
+        format: dump::DumpFormat,
     },
     /// Show core status.
     Status,
@@ -78,11 +84,19 @@ enum CliCommand {
     GenData {
         #[arg(long)]
         db: PathBuf,
+        #[arg(long, value_enum, default_value_t = generate_data::Profile::Typical)]
+        profile: generate_data::Profile,
+        #[arg(long, default_value_t = generate_data::DEFAULT_SEED)]
+        seed: u64,
+        #[arg(long, default_value_t = generate_data::DEFAULT_DAYS, value_parser = clap::value_parser!(u32).range(1..))]
+        days: u32,
     },
     /// Benchmark queries against a simulation database.
     BenchQuery {
         #[arg(long)]
         db: PathBuf,
+        #[arg(long, default_value_t = bench_query::DEFAULT_RUNS, value_parser = clap::value_parser!(u32).range(1..))]
+        runs: u32,
     },
     /// Restore a database backup while the core is stopped.
     RestoreBackup {
@@ -149,6 +163,16 @@ impl CliCommand {
 #[derive(Debug, Snafu)]
 enum DispatchCommandError {
     #[snafu(display("{source}"))]
+    Dump { source: dump::DumpDayError },
+    #[snafu(display("{source}"))]
+    Generate {
+        source: generate_data::GenerateDataError,
+    },
+    #[snafu(display("{source}"))]
+    Bench {
+        source: bench_query::BenchQueryError,
+    },
+    #[snafu(display("{source}"))]
     CheckRules {
         source: rules_check::CheckRulesError,
     },
@@ -163,7 +187,28 @@ enum DispatchCommandError {
 
 impl CliCommand {
     fn dispatch(self) -> Result<(), DispatchCommandError> {
-        let command = self;
+        use snafu::ResultExt as _;
+        let command = match self {
+            Self::Dump { date, format } => {
+                return dump::DumpDay::new(&date, format).run().context(DumpSnafu);
+            }
+            Self::GenData {
+                db,
+                profile,
+                seed,
+                days,
+            } => {
+                return generate_data::GenerateData::new(&db, profile, seed, days)
+                    .run()
+                    .context(GenerateSnafu);
+            }
+            Self::BenchQuery { db, runs } => {
+                return bench_query::BenchQuery::new(&db, runs)
+                    .run()
+                    .context(BenchSnafu);
+            }
+            command => command,
+        };
         if let CliCommand::Rules(RulesCommand::Check { files }) = &command {
             use snafu::ResultExt as _;
             return rules_check::CheckRulesCommand::new(files)
@@ -400,6 +445,7 @@ mod tests {
                 vec!["dump", "--date", "2026-11-16"],
                 CliCommand::Dump {
                     date: "2026-11-16".into(),
+                    format: dump::DumpFormat::Text,
                 },
             ),
             (vec!["status"], CliCommand::Status),
@@ -407,12 +453,16 @@ mod tests {
                 vec!["gen-data", "--db", "simulation.db"],
                 CliCommand::GenData {
                     db: "simulation.db".into(),
+                    profile: generate_data::Profile::Typical,
+                    seed: generate_data::DEFAULT_SEED,
+                    days: generate_data::DEFAULT_DAYS,
                 },
             ),
             (
                 vec!["bench-query", "--db", "simulation.db"],
                 CliCommand::BenchQuery {
                     db: "simulation.db".into(),
+                    runs: bench_query::DEFAULT_RUNS,
                 },
             ),
             (
@@ -430,7 +480,13 @@ mod tests {
             let Some(Command::Cli(command)) = parsed.command else {
                 panic!("expected CLI command for {args:?}");
             };
-            if matches!(command, CliCommand::RestoreBackup { .. }) {
+            if matches!(
+                command,
+                CliCommand::RestoreBackup { .. }
+                    | CliCommand::Dump { .. }
+                    | CliCommand::GenData { .. }
+                    | CliCommand::BenchQuery { .. }
+            ) {
                 continue;
             }
             if matches!(command, CliCommand::Rules(RulesCommand::Check { .. })) {
@@ -591,6 +647,55 @@ mod tests {
                     .command,
                 Some(Command::Cli(CliCommand::Rules(expected))),
                 "rules arguments: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn acceptance_commands_parse_typed_options_and_reject_invalid_values() {
+        let parsed = Args::try_parse_from([
+            "quartz",
+            "gen-data",
+            "--db",
+            "simulation.db",
+            "--profile",
+            "heavy",
+            "--seed",
+            "0",
+            "--days",
+            "3",
+        ])
+        .expect("typed generator options");
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Cli(CliCommand::GenData {
+                profile: generate_data::Profile::Heavy,
+                seed: 0,
+                days: 3,
+                ..
+            }))
+        ));
+        let parsed =
+            Args::try_parse_from(["quartz", "dump", "--date", "2025-01-02", "--format", "json"])
+                .expect("JSON dump option");
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Cli(CliCommand::Dump {
+                format: dump::DumpFormat::Json,
+                ..
+            }))
+        ));
+        for args in [
+            vec!["gen-data", "--db", "simulation.db", "--profile", "invalid"],
+            vec!["gen-data", "--db", "simulation.db", "--days", "0"],
+            vec!["bench-query", "--db", "simulation.db", "--runs", "0"],
+            vec!["dump", "--date", "2025-01-02", "--format", "yaml"],
+        ] {
+            assert_eq!(
+                Args::try_parse_from(std::iter::once("quartz").chain(args))
+                    .expect_err("invalid acceptance options")
+                    .exit_code(),
+                2
             );
         }
     }
