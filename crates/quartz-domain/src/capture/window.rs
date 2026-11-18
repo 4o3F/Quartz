@@ -145,6 +145,13 @@ impl Title {
             status,
         }
     }
+    /// Marks a snapshot whose native buffer was filled to the title cap.
+    #[must_use]
+    pub fn truncated(text: &str) -> Self {
+        let mut title = Self::readable(text);
+        title.status = TitleStatus::Truncated;
+        title
+    }
     /// Represents a failed title read without substituting a later title.
     pub fn unreadable() -> Self {
         Self {
@@ -291,6 +298,13 @@ impl WindowInstances {
             },
         );
         instance
+    }
+    /// Finds the live instance associated with a native destroy notification.
+    pub(super) fn live_id(&self, handle: WindowHandle) -> Option<WindowId> {
+        self.entries
+            .get(&handle)
+            .filter(|entry| entry.lifecycle == InstanceLifecycle::Live)
+            .map(|entry| entry.instance.id)
     }
     /// Retires only the matching instance, so a delayed destroy cannot retire a reused HWND.
     pub fn retire(&mut self, id: WindowId) {

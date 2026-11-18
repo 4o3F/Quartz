@@ -1,9 +1,8 @@
 //! Startup ownership transfer and bounded worker completion.
 
 use super::{
-    CONTROL_CAPACITY, CaptureSender, DatabaseCommand, Feedback, MainCommand, MainPort,
-    ObservedEvent, SHUTDOWN_TIMEOUT, Shutdown, ShutdownPort, WORKER_COUNT, Worker, WorkerFailure,
-    WorkerGuard,
+    CONTROL_CAPACITY, CaptureSender, DatabaseCommand, Feedback, MainCommand, MainPort, Observation,
+    SHUTDOWN_TIMEOUT, Shutdown, ShutdownPort, WORKER_COUNT, Worker, WorkerFailure, WorkerGuard,
 };
 use super::{capture_loop::CaptureLoop, database_loop::DatabaseLoop};
 use crate::{capture::OpenedPersistence, store::capture::CaptureStartup};
@@ -83,7 +82,7 @@ impl<T> Channel<T> {
     }
 }
 struct WorkerChannels {
-    observations: Channel<ObservedEvent>,
+    observations: Channel<Observation>,
     database: Channel<DatabaseCommand>,
     feedback: Channel<Feedback>,
     main: Channel<MainCommand>,
@@ -255,6 +254,8 @@ impl Workers {
         at: Timestamp,
     ) -> CaptureLoop {
         CaptureLoop {
+            #[cfg(windows)]
+            foreground: crate::platform::ForegroundResolver::new(),
             core,
             run,
             at,

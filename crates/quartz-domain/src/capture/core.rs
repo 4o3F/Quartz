@@ -140,9 +140,14 @@ impl CaptureCore {
             return Ok(step);
         }
         let CaptureInput { at, rules, event } = input;
-        if let CaptureEvent::Foreground { generation, .. } = &event
-            && *generation < self.tracker.generation()
-        {
+        let stale = match &event {
+            CaptureEvent::Foreground { generation, .. } => *generation < self.tracker.generation(),
+            CaptureEvent::DestroyWindow { generation, .. } => {
+                *generation != self.tracker.generation()
+            }
+            _ => false,
+        };
+        if stale {
             return Ok(step);
         }
         self.validate_input(at, &event)?;
@@ -248,6 +253,11 @@ impl CaptureCore {
                 browser,
             } => self.on_privacy_context(observation, browser, step),
             CaptureEvent::Destroy(id) => self.destroy(id, at, step),
+            CaptureEvent::DestroyWindow { handle, .. } => {
+                if let Some(id) = self.windows.live_id(handle) {
+                    self.destroy(id, at, step);
+                }
+            }
             CaptureEvent::Stop(change) => self.stop(change, at, step),
             CaptureEvent::ClockChanged(change) => self.clock_boundary(
                 at,

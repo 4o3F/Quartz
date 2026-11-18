@@ -23,16 +23,16 @@
 
 跨进程 `GetWindowTextW` 读取系统缓存的窗口标题，不向目标发送 `WM_GETTEXT`，挂起的目标不会阻塞此读取（[Microsoft 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowtextw)）。M1 验证挂起目标与 Quartz 自身窗口的回调耗时。读不到的中间标题标为 `unreadable`，不使用后续标题追溯填充。
 
-Windows 和扩展的标题上限统一为 4,096 个 UTF-16 单元；Windows 含结尾空字符的缓冲为 4,097。超过上限时保留截断部分，`title_status = truncated`。隐私求值和正则输入均使用截断后的文本；截断点之后的隐私关键词无法匹配，这是已知限制。
+Windows 和扩展的标题上限统一为 4,096 个 UTF-16 单元；Windows 含结尾空字符的缓冲为 4,097。超过上限时保留截断部分，`title_status = truncated`。Windows 快照恰好填满 4,096 单元时，`GetWindowTextW` 无法区分标题正好达到上限与更长的标题；此时保守标为 `truncated`，若最后一个单元是未配对的高代理项则去掉该单元。回调不追加长度查询。隐私求值和正则输入均使用截断后的文本；截断点之后的隐私关键词无法匹配，这是已知限制。
 
 ### 1.2 前台切换的处理
 
 1. 主线程在前台变化时递增前台代次，立即取得标题快照。采集线程处理该快照，读取 `GetWindowThreadProcessId` 和窗口类名。
-2. 解析应用身份（见第 2 节）。解析结束后再次确认这个 HWND 仍属于同一个 PID，防止窗口句柄被回收。
+2. 读取窗口类名并解析应用身份（见第 2 节）。类名读取失败时记录错误种类、清除该 PID 的缓存并请求重新复核，不生成空类名的观测；内容子窗口的类名读取失败也按此处理。解析结束后再次确认这个 HWND 仍属于同一个 PID，防止窗口句柄被回收。
 3. 采集线程发送带前台代次的重绑命令。主线程检查代次后解绑旧 hook、为新前台进程安装标题和销毁 hook，再补读一次标题。旧代次通知和命令丢弃。
 4. 生成观测，交给隐私策略和状态机。启用依赖网页字段的规则时，浏览器标题须经 06 第 5 节的延迟机制后才能输出。
 
-前台窗口为空时，生成"无前台"观测并结束当前区间。收到桌面切换事件后，若已离开可观察桌面，记录 `kind = no_foreground`、`no_foreground_reason = unknown_desktop`；返回后复核并恢复。UAC、Ctrl+Alt+Del 与 Windows 虚拟桌面的通知覆盖分别在 M1 实测。
+前台窗口为空时，生成"无前台"观测并结束当前区间。收到桌面切换事件后，若已离开可观察桌面，记录 `kind = no_foreground`、`no_foreground_reason = unknown_desktop`；返回后复核并恢复。桌面复核在主线程用 `OpenInputDesktop(DESKTOP_READOBJECTS)` 打开输入桌面，并用 `GetUserObjectInformationW(UOI_NAME)` 比较它与 `GetThreadDesktop` 返回的主线程桌面名称；名称不同或任一查询失败都记为 `unknown_desktop`。输入桌面句柄用 RAII 关闭，主线程的借用桌面句柄不关闭。桌面切换通知先使旧代次失效，再请求复核。UAC、Ctrl+Alt+Del 与 Windows 虚拟桌面的通知覆盖分别在 M1 实测。
 
 ### 1.3 标题变化的处理
 
@@ -53,7 +53,11 @@ Windows 和扩展的标题上限统一为 4,096 个 UTF-16 单元；Windows 含�
 | 提权或受保护进程 | 有限查询权限通常足够；失败时记录 `unresolved`，保留窗口类名和 PID | `unresolved:<类名>` |
 
 - 显示名优先取 exe 版本信息里的 `FileDescription`，没有时用文件名。显示名在首次发现应用时读取一次，存到 `applications` 表。多语言版本信息的选择与 Windows 显示语言变化后的重新解析见 10 第 5 节。
-- 进程元数据按 `(PID, 进程创建时间)` 缓存，进程退出后清除。有了创建时间，PID 被复用也不会混淆。
+- 进程元数据按 `(PID, 进程创建时间)` 缓存，键保留 `GetProcessTimes` 的完整 FILETIME 精度，窗口事实中的创建 UTC 使用毫秒。缓存最多 128 项，按最近使用顺序淘汰；每次查询检查该 PID 的创建时间，移除旧的 PID 生命周期，复核时用缓存的有限查询句柄和 `GetExitCodeProcess` 清理已退出或查询失败的进程，命中项也检查退出状态。清理由观测与已有复核驱动，不增加轮询。HWND 的 PID 复核不一致时清除该 PID 的缓存并重新复核前台。
+- 应用显示名按身份键缓存，最多 256 项，按最近使用顺序淘汰；保留期间只读取一次版本信息，淘汰后再次遇到才重新读取。版本资源单次分配上限为 1 MiB。打包应用也读取内容进程 exe 的 `FileDescription`，语言依次选 Windows 首选显示语言、`en-US`、资源中的第一个翻译，缺失时使用文件名。
+- `ApplicationFrameHost.exe` 的窗口实例保留宿主 HWND、PID 和创建时间，应用身份与显示名来自可见内容子窗口的进程；宿主与内容窗口都在解析后复核 PID。找不到有效内容进程时使用宿主窗口类名构成 `unresolved`。
+- `GetWindowDisplayAffinity` 在采集线程查询：`WDA_EXCLUDEFROMCAPTURE` 和 `WDA_MONITOR` 映射为 `capture_excluded = Present`，`WDA_NONE` 为 `Absent`，失败或未知值为 `Unknown`。Windows 没有本实现可用的通用浏览器无痕系统信号，因此 `private_window` 始终为 `Unknown`；浏览器类名与标题模式仅由 `builtin.privacy` 规则求值。浏览器扩展尚未接入时提供 `BrowserContext::Offline`，涉及缺失网页字段的规则由核心立即按隐私策略降级。
+- `MissedEvent` 在主线程累计为 `missed_events` 诊断计数，仅输出计数，不输出窗口标题或应用名。
 - 图标不在采集路径里提取。界面请求某个应用的图标时，核心才提取，并缓存到 `icons\<app_id>.png`。
 
 ### 2.2 窗口实例

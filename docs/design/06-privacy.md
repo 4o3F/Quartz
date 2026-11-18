@@ -77,7 +77,7 @@ trait Detector {
 | `builtin.password_manager` | KeePass、KeePassXC、1Password、Bitwarden 等 exe 名 | title_hidden | 名单使用规则数据 |
 | `builtin.capture_excluded` | `WDA_EXCLUDEFROMCAPTURE` 或 `WDA_MONITOR` | title_hidden | 查询失败记 unknown，由其他规则继续求值 |
 | `rules` | `kind = privacy` 的规则集树（含 `builtin.privacy` 与用户规则集） | 按规则字段动作 | 见第 3.3、4 节 |
-| `session.privacy_mode` | 限时隐私模式 | private_window | 截止 UTC 存 settings，到期触发 policy_changed |
+| `session.privacy_mode` | 限时隐私模式 | private_window | 状态与截止 UTC 存 `timed_policies`，到期触发 policy_changed |
 
 `GetWindowDisplayAffinity` 支持跨进程查询；窗口条件、DWM 状态会影响成功率。M1 验证常见应用窗口的查询覆盖、错误码与成本（[Microsoft 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowdisplayaffinity)）。
 

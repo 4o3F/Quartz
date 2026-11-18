@@ -38,6 +38,18 @@ pub(crate) struct ObservedEvent {
     pub event: CaptureEvent,
 }
 
+#[derive(Debug)]
+pub(crate) enum Observation {
+    Event(ObservedEvent),
+    #[cfg(windows)]
+    Foreground(crate::core::foreground::Snapshot),
+}
+impl From<ObservedEvent> for Observation {
+    fn from(event: ObservedEvent) -> Self {
+        Self::Event(event)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CaptureIndicator {
     Normal,
@@ -201,11 +213,25 @@ impl MainPort {
 
 #[derive(Clone)]
 pub(crate) struct CaptureSender {
-    sender: Sender<ObservedEvent>,
+    sender: Sender<Observation>,
     overloaded: Arc<AtomicBool>,
 }
 impl CaptureSender {
     pub(crate) fn observe(&self, observation: ObservedEvent) -> Result<(), ObserveCaptureError> {
+        self.send(Observation::Event(observation))
+    }
+    #[cfg(windows)]
+    pub(crate) fn mark_overloaded(&self) {
+        self.overloaded.store(true, Ordering::Release);
+    }
+    #[cfg(windows)]
+    pub(crate) fn foreground(
+        &self,
+        snapshot: crate::core::foreground::Snapshot,
+    ) -> Result<(), ObserveCaptureError> {
+        self.send(Observation::Foreground(snapshot))
+    }
+    fn send(&self, observation: Observation) -> Result<(), ObserveCaptureError> {
         match self.sender.try_send(observation) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
@@ -364,6 +390,8 @@ mod tests {
             .expect("rules")
             .snapshots();
         let mut capture = CaptureLoop {
+            #[cfg(windows)]
+            foreground: crate::platform::ForegroundResolver::new(),
             core: started.core,
             run: RunId::new(1),
             at,

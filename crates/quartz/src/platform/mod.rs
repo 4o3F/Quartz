@@ -11,3 +11,8 @@ pub(super) fn attach_parent_console() {
     #[cfg(windows)]
     windows::attach_parent_console();
 }
+
+#[cfg(windows)]
+pub(crate) use windows::foreground::{
+    Resolution as ForegroundResolution, Resolver as ForegroundResolver,
+};

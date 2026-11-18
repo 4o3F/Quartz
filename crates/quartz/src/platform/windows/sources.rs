@@ -5,8 +5,8 @@ use crate::core::{
     sources::{ClockReader, ClockSample, InputSample, PowerNotice, ReadClockError, SessionNotice},
 };
 use quartz_domain::capture::{
-    AdvanceTimeError, CaptureEffect, CaptureEvent, ClockChange, LastInput, MonoInstant,
-    SessionStatus, StopReason, Timer, Timestamp,
+    AdvanceTimeError, CaptureEvent, ClockChange, LastInput, MonoInstant, SessionStatus, StopReason,
+    Timer, Timestamp,
 };
 use snafu::Snafu;
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
@@ -76,6 +76,10 @@ pub(super) enum QuerySessionError {
 }
 #[derive(Debug, Snafu)]
 pub(super) enum ObserveSystemError {
+    #[snafu(display("could not observe foreground"))]
+    Foreground {
+        source: super::foreground::ObserveForegroundError,
+    },
     #[snafu(display("could not create system message-only window"))]
     Window {
         source: super::tray::window::CreateCoreWindowError,
@@ -190,6 +194,7 @@ impl Drop for SessionBuffer {
 }
 
 pub(super) struct Sources {
+    foreground: super::foreground::ForegroundPort,
     window: HWND,
     session_window: super::tray::window::Window,
     ingress: SystemIngress,
@@ -208,6 +213,8 @@ impl Sources {
         let session_window = super::tray::window::Window::create_system()
             .map_err(|source| ObserveSystemError::Window { source })?;
         session_window.attach_capture(ingress.clone());
+        let foreground = super::foreground::ForegroundPort::start(ingress.sender.clone())
+            .map_err(|source| ObserveSystemError::Foreground { source })?;
         // SAFETY: The message-only window is owned by Sources until registration is removed.
         let power = unsafe {
             Power::RegisterSuspendResumeNotification(
@@ -217,6 +224,7 @@ impl Sources {
         }
         .map_err(|source| ObserveSystemError::Power { source })?;
         Ok(Self {
+            foreground,
             window,
             session_window,
             ingress,
@@ -225,6 +233,14 @@ impl Sources {
             core_deadline: None,
             retry: None,
         })
+    }
+    pub(super) fn foreground(
+        &mut self,
+        command: super::foreground::ForegroundCommand,
+    ) -> Result<(), ObserveSystemError> {
+        self.foreground
+            .dispatch(command)
+            .map_err(|source| ObserveSystemError::Foreground { source })
     }
     fn query(&mut self) -> Result<SessionStatus, QuerySessionError> {
         if let SessionRegistration::Pending = self.registration {
@@ -384,19 +400,6 @@ impl SystemMessage {
             ProcessIdToSessionId(GetCurrentProcessId(), &mut id)?;
         }
         Ok(id)
-    }
-}
-
-/// D2b implements foreground review and generation-checked hook rebinding on the main thread.
-pub(super) struct UnsupportedForegroundPort;
-impl UnsupportedForegroundPort {
-    pub(super) fn dispatch(&self, effect: &CaptureEffect) {
-        match effect {
-            CaptureEffect::RebindHooks { .. } | CaptureEffect::ReviewForeground => {
-                tracing::trace!("foreground observation port is unsupported in D2a")
-            }
-            _ => {}
-        }
     }
 }
 

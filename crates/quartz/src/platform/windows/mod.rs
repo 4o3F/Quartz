@@ -1,5 +1,6 @@
 //! Windows core lifecycle and main-thread platform integration.
 
+pub(crate) mod foreground;
 mod handle;
 mod instance;
 mod language;
@@ -19,7 +20,7 @@ use crate::{
 };
 use quartz_domain::capture::{CaptureEffect, CaptureState, RunEndReason};
 use quartz_protocol::{CoreError, CoreErrorCode};
-use sources::{Sources, SystemClock, SystemIngress, UnsupportedForegroundPort};
+use sources::{Sources, SystemClock, SystemIngress};
 use std::sync::Arc;
 use std::{fs, path::PathBuf, process::ExitCode};
 
@@ -158,6 +159,7 @@ pub(crate) struct CoreProcess {
     ui: UiState<process::UiProcess>,
     capture: Option<CaptureState>,
     persistence: PersistenceState,
+    missed_events: u64,
 }
 impl CoreProcess {
     pub(crate) fn new() -> Self {
@@ -165,6 +167,7 @@ impl CoreProcess {
             ui: UiState::None,
             capture: None,
             persistence: PersistenceState::Ready,
+            missed_events: 0,
         }
     }
     /// Runs the Windows core on the calling main thread and reports startup failures.
@@ -307,13 +310,37 @@ impl CoreProcess {
                         CaptureEffect::CheckIdle => {
                             sources.check_idle().context(wait_error::ObserveSnafu)?
                         }
+                        CaptureEffect::MissedEvent => {
+                            self.missed_events = self.missed_events.saturating_add(1);
+                            tracing::info!(
+                                missed_events = self.missed_events,
+                                "foreground review detected a missed event"
+                            );
+                        }
                         CaptureEffect::IdleSampleFailed(error) => {
                             tracing::warn!(%error, "idle sample was rejected")
                         }
-                        CaptureEffect::RebindHooks { .. } | CaptureEffect::ReviewForeground => {
-                            UnsupportedForegroundPort.dispatch(&effect)
+                        CaptureEffect::RebindHooks { generation, target } => sources
+                            .foreground(foreground::ForegroundCommand::Rebind {
+                                generation,
+                                target,
+                            })
+                            .context(wait_error::ObserveSnafu)?,
+                        CaptureEffect::ReviewForeground => sources
+                            .foreground(foreground::ForegroundCommand::Review)
+                            .context(wait_error::ObserveSnafu)?,
+                        CaptureEffect::DiscardQueuedObservations => {
+                            // The capture worker has already discarded the queue before publishing this effect.
+                            tracing::trace!("capture worker discarded queued observations");
                         }
-                        _ => {}
+                        CaptureEffect::AwaitBrowserContext { .. } => {
+                            // M5 supplies the browser port; CaptureCore owns the existing timeout.
+                            tracing::trace!("browser context request awaits browser integration");
+                        }
+                        CaptureEffect::PolicyExpired(kind) => {
+                            // CaptureCore has applied expiration and requested the necessary fresh observations.
+                            tracing::trace!(?kind, "capture policy expired");
+                        }
                     },
                 }
                 if let Err(error) = tray.update(self.tray_state(TrayTooltip::Ready)) {

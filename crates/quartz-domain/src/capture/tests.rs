@@ -263,6 +263,44 @@ fn startup_waits_for_session_query_and_registration_retry() {
 }
 
 #[test]
+fn native_destroy_retires_the_live_instance_and_rejects_old_hook_generations() {
+    let mut fixture = Fixture::active();
+    let stale = fixture.send(
+        at(10),
+        CaptureEvent::DestroyWindow {
+            generation: ForegroundGeneration::new(0),
+            handle: WindowHandle::new(1),
+        },
+    );
+    assert!(stale.writes.is_empty());
+    assert!(stale.effects.is_empty());
+    let unrelated = fixture.send(
+        at(20),
+        CaptureEvent::DestroyWindow {
+            generation: ForegroundGeneration::new(1),
+            handle: WindowHandle::new(99),
+        },
+    );
+    assert!(!unrelated.effects.contains(&CaptureEffect::ReviewForeground));
+    let destroyed = fixture.send(
+        at(30),
+        CaptureEvent::DestroyWindow {
+            generation: ForegroundGeneration::new(1),
+            handle: WindowHandle::new(1),
+        },
+    );
+    assert!(destroyed.effects.contains(&CaptureEffect::ReviewForeground));
+    assert!(
+        destroyed
+            .writes
+            .iter()
+            .any(|write| matches!(write, CaptureWrite::RetireWindow { .. }))
+    );
+    let reviewed = fixture.review(at(40), 2, window(1, "reused"));
+    assert!(reviewed.writes.iter().any(|write| matches!(write, CaptureWrite::ObserveWindow { instance, .. } if instance.generation.get() == 1)));
+}
+
+#[test]
 fn window_retirement_class_change_and_process_reuse_allocate_new_generations() {
     let mut instances = WindowInstances::default();
     let Foreground::Window { mut facts, .. } = window(1, "same") else {

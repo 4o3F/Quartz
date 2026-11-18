@@ -445,6 +445,13 @@ pub enum CaptureEvent {
     },
     /// Matching logical window was destroyed.
     Destroy(WindowId),
+    /// Native destroy notification from the currently bound process hook.
+    DestroyWindow {
+        /// Generation checked before retiring the native handle.
+        generation: ForegroundGeneration,
+        /// Native handle whose live instance should be retired.
+        handle: super::WindowHandle,
+    },
     /// One stop reason began or ended.
     Stop(StopChange),
     /// An explicit clock boundary, including resume.

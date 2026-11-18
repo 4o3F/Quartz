@@ -1,7 +1,8 @@
 //! Capture work units and nonblocking submission to the shared command budget.
 
 use super::{
-    DatabaseCommand, Feedback, MainCommand, MainPort, ObservedEvent, SendMainCommandError, Shutdown,
+    DatabaseCommand, Feedback, MainCommand, MainPort, Observation, ObservedEvent,
+    SendMainCommandError, Shutdown,
 };
 use crate::capture::WriteQueue;
 use crate::store::capture::CaptureStartup;
@@ -60,15 +61,17 @@ pub(super) enum Settlement {
 }
 enum CaptureWork {
     Shutdown(Shutdown),
-    Observation(ObservedEvent),
+    Observation(Observation),
     Feedback(Feedback),
 }
 pub(super) struct CaptureLoop {
+    #[cfg(windows)]
+    pub foreground: crate::platform::ForegroundResolver,
     pub core: CaptureCore,
     pub run: RunId,
     pub at: Timestamp,
     pub snapshots: SnapshotCell,
-    pub observed: Receiver<ObservedEvent>,
+    pub observed: Receiver<Observation>,
     pub replies: Receiver<Feedback>,
     pub stop: Receiver<Shutdown>,
     pub database: Sender<DatabaseCommand>,
@@ -153,18 +156,35 @@ impl CaptureLoop {
             }
         }
     }
-    fn observe(&mut self, observation: ObservedEvent) -> Result<(), RunCaptureLoopError> {
+    fn observe(&mut self, observation: Observation) -> Result<(), RunCaptureLoopError> {
         if self.overloaded.swap(false, Ordering::AcqRel) {
             self.discard_observations();
             self.step(
                 ObservedEvent {
-                    at: observation.at,
+                    at: match &observation {
+                        Observation::Event(event) => event.at,
+                        #[cfg(windows)]
+                        Observation::Foreground(snapshot) => snapshot.at,
+                    },
                     event: CaptureEvent::EventOverload,
                 },
                 Settlement::Deferred,
             )
         } else {
-            self.step(observation, Settlement::Deferred)
+            match observation {
+                Observation::Event(event) => self.step(event, Settlement::Deferred),
+                #[cfg(windows)]
+                Observation::Foreground(snapshot) => match self.foreground.resolve(snapshot) {
+                    crate::platform::ForegroundResolution::Event(event) => {
+                        self.step(event, Settlement::Deferred)
+                    }
+                    crate::platform::ForegroundResolution::Review => {
+                        self.main
+                            .send(MainCommand::Effect(CaptureEffect::ReviewForeground))?;
+                        Ok(())
+                    }
+                },
+            }
         }
     }
     fn discard_observations(&self) {
@@ -323,6 +343,8 @@ mod tests {
             .expect("rules")
             .snapshots();
         let mut capture = CaptureLoop {
+            #[cfg(windows)]
+            foreground: crate::platform::ForegroundResolver::new(),
             core: started.core,
             run,
             at: at(0),
@@ -354,20 +376,20 @@ mod tests {
             finished.send(result).expect("capture result");
         });
         sender
-            .send(ObservedEvent {
+            .send(Observation::Event(ObservedEvent {
                 at: at(0),
                 event: CaptureEvent::Session(SessionStatus::Ready(Default::default())),
-            })
+            }))
             .expect("session");
         sender
-            .send(ObservedEvent {
+            .send(Observation::Event(ObservedEvent {
                 at: at(1),
                 event: CaptureEvent::Foreground {
                     generation: ForegroundGeneration::new(1),
                     source: ObservationSource::Review,
                     foreground: Foreground::None(NoForegroundReason::Empty),
                 },
-            })
+            }))
             .expect("overflow boundary");
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -381,13 +403,13 @@ mod tests {
             }
         }
         sender
-            .send(ObservedEvent {
+            .send(Observation::Event(ObservedEvent {
                 at: at(2),
                 event: CaptureEvent::RegisterDeadline {
                     owner: SchedulerKind::Midnight,
                     deadline: Deadline::Utc(at(86_400_000).utc),
                 },
-            })
+            }))
             .expect("fresh work after discarded observations");
         loop {
             if let MainCommand::Persistence(PersistenceState::Buffered { commands: 1 }) = commands
