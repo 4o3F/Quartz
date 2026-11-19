@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::identifiers::{ColumnName, TableName};
 use crate::store::{
     enums,
     rows::{
@@ -10,7 +11,7 @@ use crate::store::{
     },
 };
 use crate::{
-    capture::{Persistence, PersistenceState},
+    capture::{CheckpointCollection, Persistence, PersistenceState},
     data_directory::DataDirectory,
     store::Store,
 };
@@ -19,6 +20,37 @@ use domain::*;
 use quartz_domain::capture as domain;
 use quartz_domain::rules::registry::{RegistryState, RuleRegistry};
 use std::{collections::BTreeSet, sync::Arc};
+
+#[test]
+fn integer_decode_errors_keep_typed_width_schema_context_and_display() {
+    let context = RowContext::new(Some(7));
+    let unsigned = context
+        .unsigned(-1, intervals::sequence)
+        .expect_err("negative unsigned ID");
+    assert!(matches!(unsigned, DecodeCaptureRowError::Integer {
+        target: errors::IntegerTarget::U64, field, value: -1, ..
+    } if field.table == TableName::of(intervals::table)
+        && field.column == ColumnName::of(intervals::sequence) && field.row_id == Some(7)));
+    assert_eq!(
+        unsigned.to_string(),
+        "invalid integer -1 at intervals.sequence (row 7); expected u64"
+    );
+    let invalid_version = i64::from(u32::MAX) + 1;
+    let version = context
+        .policy_version(invalid_version, availability_intervals::policy_version)
+        .expect_err("policy version exceeds u32");
+    assert!(matches!(version, DecodeCaptureRowError::Integer {
+        target: errors::IntegerTarget::U32, field, value, ..
+    } if value == invalid_version
+        && field.table == TableName::of(availability_intervals::table)
+        && field.column == ColumnName::of(availability_intervals::policy_version)));
+    assert_eq!(
+        version.to_string(),
+        format!(
+            "invalid integer {invalid_version} at availability_intervals.policy_version (row 7); expected u32"
+        )
+    );
+}
 
 fn at(ms: u64) -> Timestamp {
     Timestamp {
@@ -50,7 +82,7 @@ impl Fixture {
         let StartedCapture { core, step } = CaptureCore::start(RunId::new(1), start).expect("core");
         let result = shell.accept(step.into_parts(RunId::new(1)), start);
         assert!(result.feedback.is_empty());
-        let initial = shell.flush(&mut store, start);
+        let initial = shell.flush(&mut store, start, CheckpointCollection::Skip);
         assert!(initial.failure().is_none());
         let rules = RuleRegistry::from_state(RegistryState::default())
             .expect("rules")
@@ -82,7 +114,9 @@ impl Fixture {
         let parts = self.step(now, event);
         let accepted = self.shell.accept(parts, now);
         assert!(accepted.feedback.is_empty());
-        let result = self.shell.flush(&mut self.store, now);
+        let result = self
+            .shell
+            .flush(&mut self.store, now, CheckpointCollection::Skip);
         assert!(result.failure().is_none(), "{:?}", result.failure());
         for feedback in result.feedback {
             let _ = self.step(now, feedback);
@@ -302,7 +336,9 @@ fn failed_switch_rolls_back_close_open_dictionaries_and_key_mapping() {
             at: at(100),
         });
     let _ = fixture.shell.accept(parts, at(100));
-    let failed = fixture.shell.flush(&mut fixture.store, at(100));
+    let failed = fixture
+        .shell
+        .flush(&mut fixture.store, at(100), CheckpointCollection::Skip);
     assert!(matches!(
         failed.failure(),
         Some(ExecuteCaptureBatchError::Database { .. })
@@ -533,7 +569,9 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
     crate::store::raw::ConnectionSql::new(&mut fixture.store._writer)
         .configure_reader()
         .expect("read only");
-    let failed = fixture.shell.flush(&mut fixture.store, at(100));
+    let failed = fixture
+        .shell
+        .flush(&mut fixture.store, at(100), CheckpointCollection::Skip);
     assert!(matches!(
         failed.failure(),
         Some(ExecuteCaptureBatchError::Database { .. })
@@ -543,7 +581,9 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
     let overdue = at(100)
         .checked_advance(limits::BACKLOG_RETENTION)
         .expect("retention");
-    let expired = fixture.shell.flush(&mut fixture.store, overdue);
+    let expired = fixture
+        .shell
+        .flush(&mut fixture.store, overdue, CheckpointCollection::Skip);
     assert!(
         expired
             .feedback
@@ -566,7 +606,9 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
     crate::store::raw::ConnectionSql::new(&mut fixture.store._writer)
         .resume_writes()
         .expect("writable");
-    let recovered = fixture.shell.flush(&mut fixture.store, overdue);
+    let recovered = fixture
+        .shell
+        .flush(&mut fixture.store, overdue, CheckpointCollection::Skip);
     assert!(recovered.failure().is_none(), "{:?}", recovered.failure());
     assert!(
         matches!(recovered.progress, crate::capture::FlushProgress::Committed { commands } if commands > 0)
@@ -582,18 +624,52 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
             .expect("repair precedes fresh facts"),
         1
     );
-    let facts = fixture.shell.flush(&mut fixture.store, overdue);
+    let repaired = fixture.intervals();
+    assert_eq!(
+        repaired.len(),
+        1,
+        "fresh facts wait for the loss transaction"
+    );
+    assert_eq!(repaired[0].end_mono_ms, Some(0));
+    assert_eq!(
+        titles::table
+            .filter(titles::text.eq("recovered title"))
+            .count()
+            .get_result::<i64>(&mut fixture.store._writer)
+            .expect("recovery title is still pending"),
+        0
+    );
+    let facts = fixture
+        .shell
+        .flush(&mut fixture.store, overdue, CheckpointCollection::Skip);
     assert!(facts.failure().is_none(), "{:?}", facts.failure());
     assert!(
         matches!(facts.progress, crate::capture::FlushProgress::Committed { commands } if commands > 0)
     );
     assert_eq!(facts.state(), PersistenceState::Ready);
     let gaps = capture_gaps::table
+        .order(capture_gaps::id)
         .select(CaptureGapsRow::as_select())
         .load::<CaptureGapsRow>(&mut fixture.store._writer)
         .expect("loss rows");
     assert_eq!(gaps.len(), 2);
     assert_eq!(gaps[0].reason, enums::GapReason::DatabaseError);
+    assert_eq!(gaps[0].start_mono_ms, 0);
+    assert_eq!(gaps[0].end_mono_ms, 100);
+    assert_eq!(gaps[1].reason, enums::GapReason::DatabaseError);
+    assert_eq!(gaps[1].start_mono_ms, gaps[0].end_mono_ms);
+    assert_eq!(
+        gaps[1].end_mono_ms,
+        i64::try_from(overdue.mono).expect("time")
+    );
+    assert_eq!(
+        fixture
+            .intervals()
+            .last()
+            .expect("fresh fact")
+            .start_mono_ms,
+        gaps[1].end_mono_ms
+    );
     assert_eq!(
         fixture.intervals()[0].end_reason,
         Some(enums::IntervalEndReason::CaptureGap)
@@ -713,7 +789,9 @@ fn queue_capacity_discards_whole_batch_and_persists_identity_free_gap() {
             ..
         }
     )));
-    let result = fixture.shell.flush(&mut fixture.store, at(100));
+    let result = fixture
+        .shell
+        .flush(&mut fixture.store, at(100), CheckpointCollection::Skip);
     assert!(result.failure().is_none(), "{:?}", result.failure());
     let gaps = capture_gaps::table
         .select(CaptureGapsRow::as_select())
@@ -721,6 +799,9 @@ fn queue_capacity_discards_whole_batch_and_persists_identity_free_gap() {
         .expect("gaps");
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].reason, enums::GapReason::WriteQueueOverload);
+    assert_eq!(gaps[0].start_mono_ms, 0);
+    assert_eq!(gaps[0].end_mono_ms, 100);
+    assert_eq!(fixture.intervals()[0].end_mono_ms, Some(0));
     assert_eq!(
         data_day_versions::table
             .filter(data_day_versions::source.eq(enums::DataSource::Gaps))
@@ -756,14 +837,14 @@ fn flush_waits_one_second_and_keeps_command_groups_bounded() {
     assert!(
         fixture
             .shell
-            .flush_due(&mut fixture.store, at(1000))
+            .flush_due(&mut fixture.store, at(1000), CheckpointCollection::Skip)
             .feedback
             .is_empty()
     );
     assert!(
         fixture
             .shell
-            .flush_due(&mut fixture.store, at(1001))
+            .flush_due(&mut fixture.store, at(1001), CheckpointCollection::Skip)
             .feedback
             .iter()
             .any(|event| matches!(event, CaptureEvent::Committed(_)))
@@ -778,7 +859,9 @@ fn flush_waits_one_second_and_keeps_command_groups_bounded() {
         );
         let _ = fixture.shell.accept(parts, at(1002));
     }
-    let result = fixture.shell.flush_due(&mut fixture.store, at(1002));
+    let result = fixture
+        .shell
+        .flush_due(&mut fixture.store, at(1002), CheckpointCollection::Skip);
     assert!(result.failure().is_none());
     assert_eq!(
         result
@@ -850,7 +933,7 @@ fn crash_recovery_preserves_open_foreground_and_idle_confirmations() {
     let _ = restarted.accept(step.into_parts(startup.next_run), at(210_000));
     assert!(
         restarted
-            .flush(&mut fixture.store, at(210_000))
+            .flush(&mut fixture.store, at(210_000), CheckpointCollection::Skip)
             .failure()
             .is_none()
     );
@@ -869,7 +952,7 @@ fn crash_recovery_preserves_open_foreground_and_idle_confirmations() {
         let _ = restarted.accept(parts, at(210_000));
         assert!(
             restarted
-                .flush(&mut fixture.store, at(210_000))
+                .flush(&mut fixture.store, at(210_000), CheckpointCollection::Skip)
                 .failure()
                 .is_none()
         );
@@ -891,11 +974,14 @@ fn checkpoint_commit_deadline_preempts_the_batch_wait() {
     assert!(
         fixture
             .shell
-            .flush_due(&mut fixture.store, at(59_999))
+            .flush_due(&mut fixture.store, at(59_999), CheckpointCollection::Skip)
             .feedback
             .is_empty()
     );
-    let result = fixture.shell.flush_due(&mut fixture.store, at(60_000));
+    let result =
+        fixture
+            .shell
+            .flush_due(&mut fixture.store, at(60_000), CheckpointCollection::Skip);
     assert!(result.failure().is_none());
     assert!(
         result
@@ -904,6 +990,43 @@ fn checkpoint_commit_deadline_preempts_the_batch_wait() {
             .any(|event| matches!(event, CaptureEvent::Committed(_)))
     );
     assert_eq!(fixture.intervals()[0].confirmed_mono_ms, Some(59_000));
+}
+
+#[test]
+fn closed_fact_commits_within_batch_deadline_and_advances_open_confirmation() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    let closed = at(100);
+    let deadline = closed
+        .checked_advance(limits::BATCH_WAIT)
+        .expect("commit deadline");
+    let parts = fixture.step(closed, foreground(2, "after close"));
+    let _ = fixture.shell.accept(parts, closed);
+    assert_eq!(fixture.shell.next_deadline(), Some(deadline.mono));
+    let early = closed
+        .checked_advance(limits::BATCH_WAIT - std::time::Duration::from_millis(1))
+        .expect("before deadline");
+    assert!(
+        fixture
+            .shell
+            .flush_due(&mut fixture.store, early, CheckpointCollection::Skip)
+            .feedback
+            .is_empty()
+    );
+    assert!(fixture.intervals()[0].end_mono_ms.is_none());
+    let committed =
+        fixture
+            .shell
+            .flush_due(&mut fixture.store, deadline, CheckpointCollection::Skip);
+    assert!(committed.failure().is_none(), "{:?}", committed.failure());
+    assert_eq!(committed.state(), PersistenceState::Ready);
+    let rows = fixture.intervals();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].end_mono_ms, Some(100));
+    assert_eq!(rows[0].end_reason, Some(enums::IntervalEndReason::Switch));
+    assert_eq!(rows[0].confirmed_mono_ms, None);
+    assert_eq!(rows[1].start_mono_ms, 100);
+    assert_eq!(rows[1].confirmed_mono_ms, Some(100));
 }
 
 #[test]
@@ -926,8 +1049,8 @@ fn recovery_decode_error_identifies_the_table_column_row_and_value() {
     else {
         panic!("expected load decode error: {error:?}");
     };
-    assert_eq!(field.table, "intervals");
-    assert_eq!(field.column, "start_mono_ms");
+    assert_eq!(field.table, TableName::of(intervals::table));
+    assert_eq!(field.column, ColumnName::of(intervals::start_mono_ms));
     assert_eq!(field.row_id, Some(row_id));
     assert_eq!(value, -7);
 }
@@ -951,7 +1074,7 @@ fn startup_decode_failure_is_classified_as_startup_and_rolls_back_recovery() {
             recovery::LoadCaptureStartupError::Decode {
                 source:
                     DecodeCaptureRowError::Deadline {
-                        key: actual_key,
+                        owner: actual_owner,
                         value,
                         ..
                     },
@@ -960,7 +1083,7 @@ fn startup_decode_failure_is_classified_as_startup_and_rolls_back_recovery() {
     else {
         panic!("expected startup decode error: {error:?}");
     };
-    assert_eq!(actual_key, key);
+    assert_eq!(actual_owner, SchedulerKind::Midnight);
     assert_eq!(value, "invalid");
     assert!(
         fixture.intervals()[0].end_utc_ms.is_none(),
@@ -1005,8 +1128,8 @@ fn execute_errors_identify_unknown_keys_and_integer_values() {
     let ExecuteCaptureBatchError::Integer { field, value, .. } = error else {
         panic!("expected integer error: {error:?}");
     };
-    assert_eq!(field.table, "capture_runs");
-    assert_eq!(field.column, "id");
+    assert_eq!(field.table, TableName::of(capture_runs::table));
+    assert_eq!(field.column, ColumnName::of(capture_runs::id));
     assert_eq!(value, u128::from(u64::MAX));
 }
 
@@ -1485,7 +1608,9 @@ fn policy_clear_and_capture_boundary_rollback_in_one_transaction() {
         at: at(2),
     });
     let _ = fixture.shell.accept(parts, at(2));
-    let failed = fixture.shell.flush(&mut fixture.store, at(2));
+    let failed = fixture
+        .shell
+        .flush(&mut fixture.store, at(2), CheckpointCollection::Skip);
     assert!(failed.failure().is_some());
     assert_eq!(
         timed_policies::table
@@ -1535,7 +1660,7 @@ fn running_keep_timing_expiration_clears_policy_with_capture_boundary() {
     assert!(
         fixture
             .shell
-            .flush(&mut fixture.store, at(100))
+            .flush(&mut fixture.store, at(100), CheckpointCollection::Skip)
             .failure()
             .is_none()
     );

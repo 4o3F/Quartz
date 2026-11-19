@@ -22,15 +22,15 @@ impl TrayTooltip {
         Self::SessionUnavailable,
         Self::CaptureGap,
     ];
-    pub(crate) fn key(self) -> &'static str {
-        match self {
+    pub(crate) fn key(self) -> quartz_i18n::MessageKey<'static> {
+        quartz_i18n::MessageKey::new(match self {
             Self::Ready => "app.name",
             Self::Opening => "tray.opening",
             Self::Upgrading => "tray.upgrading",
             Self::PersistenceFailed => "tray.persistence_failed",
             Self::SessionUnavailable => "tray.session_unavailable",
             Self::CaptureGap => "tray.capture_gap",
-        }
+        })
     }
 }
 
@@ -82,13 +82,12 @@ mod tests {
             quartz_i18n::Language::English,
             quartz_i18n::Language::SimplifiedChinese,
         ] {
-            for key in TrayTooltip::ALL
-                .iter()
-                .map(|tooltip| tooltip.key())
-                .chain(["tray.open", "tray.exit"])
-            {
-                assert!(locale.has_message(key), "{locale}: {key}");
-                assert_ne!(locale.translate(key), key);
+            for key in TrayTooltip::ALL.iter().map(|tooltip| tooltip.key()).chain([
+                quartz_i18n::MessageKey::new("tray.open"),
+                quartz_i18n::MessageKey::new("tray.exit"),
+            ]) {
+                assert!(key.is_in_catalog(locale), "{locale}: {key}");
+                assert_ne!(key.in_language(locale), key.as_str());
             }
         }
     }

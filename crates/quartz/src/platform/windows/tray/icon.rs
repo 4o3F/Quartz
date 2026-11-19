@@ -20,7 +20,7 @@ use windows::{
     core::PCWSTR,
 };
 
-use super::super::wide;
+use super::super::WideString;
 use super::window::{AppMessage, Window};
 use crate::tray_tooltip::{FormatTrayTooltipError, TrayTooltipText};
 
@@ -59,9 +59,11 @@ pub(in crate::platform::windows) enum ShowTrayMenuError {
     CreatePopupMenu { source: windows::core::Error },
     #[snafu(display("could not append tray menu item {key} (AppendMenuW)"))]
     AppendMenu {
-        key: &'static str,
+        key: quartz_i18n::MessageKey<'static>,
         source: windows::core::Error,
     },
+    #[snafu(display("tray menu command exceeds the supported range"))]
+    MenuCommand { source: std::num::TryFromIntError },
     #[snafu(display("could not locate tray menu cursor (GetCursorPos)"))]
     GetCursorPosition { source: windows::core::Error },
 }
@@ -69,6 +71,7 @@ pub(in crate::platform::windows) enum ShowTrayMenuError {
 /// Tray commands with their Windows menu IDs and translation keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
+#[derive(num_enum::IntoPrimitive)]
 pub(super) enum TrayMenuItem {
     Open = 1,
     Exit = 2,
@@ -77,15 +80,15 @@ pub(super) enum TrayMenuItem {
 impl TrayMenuItem {
     const ALL: [Self; 2] = [Self::Open, Self::Exit];
 
-    fn label_key(self) -> &'static str {
-        match self {
+    fn label_key(self) -> quartz_i18n::MessageKey<'static> {
+        quartz_i18n::MessageKey::new(match self {
             Self::Open => "tray.open",
             Self::Exit => "tray.exit",
-        }
+        })
     }
 
     fn from_command(id: usize) -> Option<Self> {
-        Self::ALL.into_iter().find(|item| *item as usize == id)
+        Self::ALL.into_iter().find(|item| usize::from(*item) == id)
     }
 }
 
@@ -115,15 +118,19 @@ impl TrayIcon {
             .context(LoadIconSnafu)?;
         let tray = Self {
             data: NOTIFYICONDATAW {
-                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                cbSize: const { super::super::structure_size::<NOTIFYICONDATAW>() },
                 hWnd: window.raw(),
                 uID: ICON_ID,
                 uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP,
-                uCallbackMessage: AppMessage::TrayCallback as u32,
+                uCallbackMessage: u32::from(AppMessage::TrayCallback),
                 hIcon: icon,
-                szTip: TrayTooltipText::try_from(quartz_i18n::translate("app.name").as_ref())
-                    .context(FormatInitialTooltipSnafu)?
-                    .into_buffer(),
+                szTip: TrayTooltipText::try_from(
+                    quartz_i18n::MessageKey::new("app.name")
+                        .translate()
+                        .as_ref(),
+                )
+                .context(FormatInitialTooltipSnafu)?
+                .into_buffer(),
                 Anonymous: NOTIFYICONDATAW_0 {
                     uVersion: NOTIFYICON_VERSION_4,
                 },
@@ -156,10 +163,9 @@ impl TrayIcon {
     /// # Errors
     /// Returns tooltip encoding or Shell update failures.
     pub(super) fn update(&mut self, state: super::TrayState) -> Result<(), UpdateTrayTooltipError> {
-        self.data.szTip =
-            TrayTooltipText::try_from(quartz_i18n::translate(state.tooltip.key()).as_ref())
-                .context(FormatTooltipSnafu)?
-                .into_buffer();
+        self.data.szTip = TrayTooltipText::try_from(state.tooltip.key().translate().as_ref())
+            .context(FormatTooltipSnafu)?
+            .into_buffer();
         // SAFETY: Both icon identifiers name shared system resources.
         self.data.hIcon = unsafe {
             WindowsAndMessaging::LoadIconW(
@@ -192,13 +198,13 @@ impl TrayIcon {
             Menu(unsafe { WindowsAndMessaging::CreatePopupMenu() }.context(CreatePopupMenuSnafu)?);
         for item in TrayMenuItem::ALL {
             let key = item.label_key();
-            let label = wide(&quartz_i18n::translate(key));
+            let label = WideString::new(&key.translate());
             // SAFETY: Menu is live; each label is terminated and copied synchronously by AppendMenuW.
             unsafe {
                 WindowsAndMessaging::AppendMenuW(
                     menu.0,
                     MF_STRING,
-                    item as usize,
+                    usize::from(item),
                     PCWSTR(label.as_ptr()),
                 )
             }
@@ -210,6 +216,7 @@ impl TrayIcon {
         // SAFETY: Our window is live on this thread. Foreground ownership lets clicking elsewhere
         // dismiss the menu; TPM_RETURNCMD returns the selection without borrowing callback state.
         let command = unsafe {
+            // Focus restrictions may reject this advisory request; the menu can still be shown.
             let _ = WindowsAndMessaging::SetForegroundWindow(self.window);
             let command = WindowsAndMessaging::TrackPopupMenu(
                 menu.0,
@@ -220,9 +227,12 @@ impl TrayIcon {
                 self.window,
                 None,
             );
-            let _ =
-                WindowsAndMessaging::PostMessageW(Some(self.window), WM_NULL, WPARAM(0), LPARAM(0));
-            command.0 as usize
+            if let Err(error) =
+                WindowsAndMessaging::PostMessageW(Some(self.window), WM_NULL, WPARAM(0), LPARAM(0))
+            {
+                tracing::warn!(%error, "could not post tray menu dismissal message");
+            }
+            usize::try_from(command.0).context(MenuCommandSnafu)?
         };
         Ok(TrayMenuItem::from_command(command))
     }
@@ -231,6 +241,7 @@ impl TrayIcon {
 impl Drop for TrayIcon {
     fn drop(&mut self) {
         // SAFETY: The window outlives the icon; deleting a missing icon is harmless after Explorer exits.
+        // Best-effort teardown: Explorer may already have removed this icon.
         let _ = unsafe { Shell::Shell_NotifyIconW(NIM_DELETE, &self.data) };
     }
 }
@@ -240,6 +251,7 @@ struct Menu(HMENU);
 impl Drop for Menu {
     fn drop(&mut self) {
         // SAFETY: The popup menu is uniquely owned and TrackPopupMenu has returned.
+        // Best-effort teardown: Drop cannot report menu destruction failures.
         let _ = unsafe { WindowsAndMessaging::DestroyMenu(self.0) };
     }
 }
@@ -256,7 +268,7 @@ mod tests {
         for id in [0, 3, usize::MAX] {
             assert_eq!(TrayMenuItem::from_command(id), None, "unknown command {id}");
         }
-        assert_eq!(TrayMenuItem::Open.label_key(), "tray.open");
-        assert_eq!(TrayMenuItem::Exit.label_key(), "tray.exit");
+        assert_eq!(TrayMenuItem::Open.label_key().as_str(), "tray.open");
+        assert_eq!(TrayMenuItem::Exit.label_key().as_str(), "tray.exit");
     }
 }

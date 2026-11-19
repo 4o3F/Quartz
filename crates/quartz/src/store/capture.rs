@@ -15,6 +15,10 @@ pub(crate) use recovery::{CaptureStartup, RecoverCaptureError};
 #[cfg(test)]
 mod tests;
 
+use super::{
+    identifiers::{NamedTable, TableName},
+    schema::capture_runs,
+};
 use diesel::SqliteConnection;
 use errors::{RowContext, TimeColumns};
 use quartz_domain::capture::{CaptureWrite, RowId, RunId, SegmentId, WindowId, WriteBatch};
@@ -38,19 +42,19 @@ impl DbRowId {
     fn get(self) -> i64 {
         self.0
     }
-    fn context(self, table: &'static str) -> RowContext {
-        RowContext::new(table, Some(self.0))
+    fn context(self) -> RowContext {
+        RowContext::new(Some(self.0))
     }
     fn require_open(
         self,
-        table: &'static str,
+        table: impl NamedTable,
         affected_rows: usize,
     ) -> Result<(), ExecuteCaptureBatchError> {
         if affected_rows == 1 {
             Ok(())
         } else {
             Err(ExecuteCaptureBatchError::MissingOpenRow {
-                table,
+                table: TableName::of(table),
                 row_id: self.get(),
                 affected_rows,
             })
@@ -211,7 +215,7 @@ impl<'connection> Capture<'connection> {
         )
     }
     fn run_id(run: RunId) -> Result<DbRowId, ExecuteCaptureBatchError> {
-        CaptureColumn::new("capture_runs", "id")
+        CaptureColumn::new(capture_runs::id)
             .integer(run.get())
             .map(DbRowId::new)
     }
@@ -220,6 +224,13 @@ impl<'connection> Capture<'connection> {
         utc: i64,
         mono: i64,
     ) -> Result<quartz_domain::capture::Timestamp, DecodeCaptureRowError> {
-        RowContext::new("test capture row", None).point(utc, mono, TimeColumns::Start)
+        RowContext::new(None).point(
+            utc,
+            mono,
+            TimeColumns::new(
+                super::schema::intervals::start_utc_ms,
+                super::schema::intervals::start_mono_ms,
+            ),
+        )
     }
 }

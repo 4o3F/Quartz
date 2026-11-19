@@ -17,8 +17,7 @@ use crate::{
 };
 use crossbeam_channel::{Receiver, Sender, bounded, select_biased};
 use quartz_domain::capture::{
-    CaptureCore, CaptureStep, RunEndReason, RunId, StartCaptureError, StartedCapture, Timestamp,
-    limits,
+    CaptureCore, CaptureStep, RunEndReason, StartCaptureError, StartedCapture, Timestamp, limits,
 };
 use std::{
     sync::{Arc, atomic::AtomicBool},
@@ -213,15 +212,22 @@ impl Workers {
             at,
             clock,
         } = startup;
-        let capture = Self::capture_loop(
-            &channels,
-            &registry,
-            &persistence,
-            main.clone(),
-            started.core,
-            startup.next_run,
+        let capture = CaptureLoop {
+            #[cfg(windows)]
+            foreground: crate::platform::ForegroundResolver::new(),
+            core: started.core,
+            run: startup.next_run,
             at,
-        );
+            snapshots: registry.snapshots(),
+            observed: channels.observations.receiver.clone(),
+            replies: channels.feedback.receiver.clone(),
+            stop: channels.shutdown.receiver.clone(),
+            database: channels.database.sender.clone(),
+            writer: persistence.writer(),
+            main: main.clone(),
+            overloaded: Arc::clone(&channels.overloaded),
+            clock: Arc::clone(&clock),
+        };
         let database = DatabaseLoop {
             persistence,
             registry,
@@ -243,31 +249,6 @@ impl Workers {
             completed: channels.completed.receiver,
             handles: vec![capture, db],
         })
-    }
-    fn capture_loop(
-        channels: &WorkerChannels,
-        registry: &RegistryShell,
-        persistence: &Persistence,
-        main: MainPort,
-        core: CaptureCore,
-        run: RunId,
-        at: Timestamp,
-    ) -> CaptureLoop {
-        CaptureLoop {
-            #[cfg(windows)]
-            foreground: crate::platform::ForegroundResolver::new(),
-            core,
-            run,
-            at,
-            snapshots: registry.snapshots(),
-            observed: channels.observations.receiver.clone(),
-            replies: channels.feedback.receiver.clone(),
-            stop: channels.shutdown.receiver.clone(),
-            database: channels.database.sender.clone(),
-            writer: persistence.writer(),
-            main,
-            overloaded: Arc::clone(&channels.overloaded),
-        }
     }
     pub(crate) fn shutdown_port(&self) -> ShutdownPort {
         ShutdownPort {

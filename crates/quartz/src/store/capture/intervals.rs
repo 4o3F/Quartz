@@ -101,14 +101,19 @@ impl Capture<'_> {
             .filter(intervals::end_utc_ms.is_null())
             .select(IntervalsRow::as_select())
             .first(self.connection)?;
-        let context = id.context("intervals");
-        let start = context.point(row.start_utc_ms, row.start_mono_ms, TimeColumns::Start)?;
-        let duration = context.field("duration_ms").range(start, at)?;
+        let context = id.context();
+        let start = context.point(
+            row.start_utc_ms,
+            row.start_mono_ms,
+            TimeColumns::new(intervals::start_utc_ms, intervals::start_mono_ms),
+        )?;
+        let duration = context.field(intervals::duration_ms).range(start, at)?;
         diesel::update(intervals::table.filter(intervals::id.eq(id.get())))
             .set((
-                intervals::end_utc_ms.eq(context.field("end_utc_ms").utc(at.utc)?),
-                intervals::end_mono_ms.eq(context.field("end_mono_ms").mono(at.mono)?),
-                intervals::duration_ms.eq(context.field("duration_ms").duration(duration)?),
+                intervals::end_utc_ms.eq(context.field(intervals::end_utc_ms).utc(at.utc)?),
+                intervals::end_mono_ms.eq(context.field(intervals::end_mono_ms).mono(at.mono)?),
+                intervals::duration_ms
+                    .eq(context.field(intervals::duration_ms).duration(duration)?),
                 intervals::end_reason.eq(enums::IntervalEndReason::from(reason)),
                 intervals::confirmed_utc_ms.eq(None::<i64>),
                 intervals::confirmed_mono_ms.eq(None::<i64>),
@@ -124,12 +129,12 @@ impl IntervalsRow {
         segment: DbRowId,
         open: &OpenInterval,
     ) -> Result<Self, ExecuteCaptureBatchError> {
-        let utc = CaptureColumn::new("intervals", "start_utc_ms").utc(open.start.utc)?;
-        let mono = CaptureColumn::new("intervals", "start_mono_ms").mono(open.start.mono)?;
+        let utc = CaptureColumn::new(intervals::start_utc_ms).utc(open.start.utc)?;
+        let mono = CaptureColumn::new(intervals::start_mono_ms).mono(open.start.mono)?;
         Ok(Self {
             id: None,
             run_id: run.get(),
-            sequence: CaptureColumn::new("intervals", "sequence").integer(open.id.get())?,
+            sequence: CaptureColumn::new(intervals::sequence).integer(open.id.get())?,
             clock_segment_id: segment.get(),
             kind: enums::IntervalKind::NoForeground,
             no_foreground_reason: None,
@@ -141,8 +146,7 @@ impl IntervalsRow {
             privacy_rule_id: None,
             privacy_label_key: None,
             privacy_label: None,
-            session_key: CaptureColumn::new("intervals", "session_key")
-                .integer(open.session.get())?,
+            session_key: CaptureColumn::new(intervals::session_key).integer(open.session.get())?,
             start_utc_ms: utc,
             start_mono_ms: mono,
             end_utc_ms: None,

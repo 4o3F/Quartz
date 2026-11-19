@@ -55,7 +55,7 @@ impl Fixture {
     }
     fn commit(&mut self, command: RegistryCommand) -> RegistryReply {
         let decision = self.core.decide(command);
-        let (_, reply, outcome) = decision.into_parts();
+        let DecisionParts { reply, outcome, .. } = decision.into_parts();
         if let Some(outcome) = outcome {
             self.core
                 .committed(outcome)
@@ -143,7 +143,7 @@ fn valid_decision_describes_writes_and_publication_waits_for_commit() {
     );
     assert!(fixture.core.state().sets.is_empty());
     assert!(Arc::ptr_eq(&old, &fixture.core.snapshots().load()));
-    let (_, reply, outcome) = decision.into_parts();
+    let DecisionParts { reply, outcome, .. } = decision.into_parts();
     let event = fixture
         .core
         .committed(outcome.expect("pending candidate"))
@@ -494,11 +494,13 @@ fn startup_degrades_only_bad_sets_and_allows_healthy_commands() {
 #[test]
 fn delayed_commit_acknowledgements_cannot_replace_a_newer_snapshot() {
     let mut fixture = Fixture::new();
-    let (_, _, first) = fixture
+    let DecisionParts { outcome: first, .. } = fixture
         .core
         .decide(apply("user.first", "First", 0))
         .into_parts();
-    let (_, _, second) = fixture
+    let DecisionParts {
+        outcome: second, ..
+    } = fixture
         .core
         .decide(apply("user.second", "Second", 0))
         .into_parts();

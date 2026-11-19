@@ -1,7 +1,7 @@
 //! Platform-independent foreground filtering and metadata selection.
 
 use quartz_domain::capture::{
-    AppIdentity, ForegroundGeneration, ProcessId, SystemSignal, Title, WindowHandle, limits,
+    ForegroundGeneration, ProcessId, SystemSignal, Title, WindowHandle, limits,
 };
 use std::collections::VecDeque;
 
@@ -16,6 +16,8 @@ pub(crate) const WINDOW_OBJECT: i32 = 0;
 pub(crate) const SELF_CHILD: i32 = 0;
 /// en-US language identifier, i18n 10 §5.
 const ENGLISH_US: u16 = 0x0409;
+/// UTF-16 leading-surrogate range; a trailing unit may lie beyond the title cap.
+const LEADING_SURROGATES: std::ops::RangeInclusive<u16> = 0xD800..=0xDBFF;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EventKind {
@@ -98,38 +100,33 @@ pub(crate) enum TitleRead {
     Copied(usize),
     Failed,
 }
-pub(crate) fn title_snapshot(buffer: &[u16], read: TitleRead) -> Title {
-    let TitleRead::Copied(count) = read else {
-        return Title::unreadable();
-    };
-    let Some(units) = buffer.get(..count) else {
-        return Title::unreadable();
-    };
-    // A saturated GetWindowTextW result cannot distinguish exact-cap text from longer text.
-    // Do not turn a split surrogate at the cap into a replacement character.
-    let units = if count == limits::TITLE_UTF16_UNITS
-        && units
-            .last()
-            .is_some_and(|unit| (0xD800..=0xDBFF).contains(unit))
-    {
-        &units[..count - 1]
-    } else {
-        units
-    };
-    let Ok(text) = String::from_utf16(units) else {
-        return Title::unreadable();
-    };
-    if count >= limits::TITLE_UTF16_UNITS {
-        Title::truncated(&text)
-    } else {
-        Title::readable(&text)
-    }
-}
-
-pub(crate) fn application_identity(executable: &str, aumid: Option<&str>) -> AppIdentity {
-    match aumid {
-        Some(value) => AppIdentity::Aumid(value.to_owned()),
-        None => AppIdentity::Exe(executable.replace('/', "\\").to_lowercase()),
+impl TitleRead {
+    pub(crate) fn snapshot(self, buffer: &[u16]) -> Title {
+        let Self::Copied(count) = self else {
+            return Title::unreadable();
+        };
+        let Some(units) = buffer.get(..count) else {
+            return Title::unreadable();
+        };
+        // A saturated GetWindowTextW result cannot distinguish exact-cap text from longer text.
+        // Do not turn a split surrogate at the cap into a replacement character.
+        let units = if count == limits::TITLE_UTF16_UNITS
+            && units
+                .last()
+                .is_some_and(|unit| LEADING_SURROGATES.contains(unit))
+        {
+            &units[..count - 1]
+        } else {
+            units
+        };
+        let Ok(text) = String::from_utf16(units) else {
+            return Title::unreadable();
+        };
+        if count >= limits::TITLE_UTF16_UNITS {
+            Title::truncated(&text)
+        } else {
+            Title::readable(&text)
+        }
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,12 +141,14 @@ pub(crate) struct ChildWindow {
     pub class: String,
     pub visibility: Visibility,
 }
-pub(crate) fn content_window(children: &[ChildWindow], host: ProcessId) -> Option<&ChildWindow> {
-    children.iter().find(|child| {
-        child.process != host
-            && child.visibility == Visibility::Visible
-            && child.class == "Windows.UI.Core.CoreWindow"
-    })
+impl ChildWindow {
+    pub(crate) fn content(children: &[Self], host: ProcessId) -> Option<&Self> {
+        children.iter().find(|child| {
+            child.process != host
+                && child.visibility == Visibility::Visible
+                && child.class == "Windows.UI.Core.CoreWindow"
+        })
+    }
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DisplayAffinity {
@@ -185,16 +184,15 @@ pub(crate) struct Translation {
     pub language: u16,
     pub codepage: u16,
 }
-pub(crate) fn version_translation(
-    available: &[Translation],
-    preferred: &[u16],
-) -> Option<Translation> {
-    preferred
-        .iter()
-        .chain(std::iter::once(&ENGLISH_US))
-        .find_map(|language| available.iter().find(|entry| entry.language == *language))
-        .or_else(|| available.first())
-        .copied()
+impl Translation {
+    pub(crate) fn select(available: &[Translation], preferred: &[u16]) -> Option<Translation> {
+        preferred
+            .iter()
+            .chain(std::iter::once(&ENGLISH_US))
+            .find_map(|language| available.iter().find(|entry| entry.language == *language))
+            .or_else(|| available.first())
+            .copied()
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProcessKey {
@@ -307,7 +305,7 @@ impl Desktop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quartz_domain::capture::TitleStatus;
+    use quartz_domain::capture::{AppIdentity, TitleStatus};
     #[test]
     fn filters_only_foreground_window_title_and_window_destroys() {
         let foreground = WindowHandle::new(1);
@@ -375,32 +373,29 @@ mod tests {
     #[test]
     fn titles_preserve_failure_empty_and_surrogate_boundaries() {
         assert_eq!(
-            title_snapshot(&[], TitleRead::Failed).status(),
+            TitleRead::Failed.snapshot(&[]).status(),
             TitleStatus::Unreadable
         );
         assert_eq!(
-            title_snapshot(&[], TitleRead::Copied(0)).status(),
+            TitleRead::Copied(0).snapshot(&[]).status(),
             TitleStatus::Empty
         );
         assert_eq!(
-            title_snapshot(&[65], TitleRead::Copied(2)).status(),
+            TitleRead::Copied(2).snapshot(&[65]).status(),
+            TitleStatus::Unreadable
+        );
+        assert_eq!(TitleRead::Copied(1).snapshot(&[65]).text(), Some("A"));
+        assert_eq!(
+            TitleRead::Copied(1).snapshot(&[0xD800]).status(),
             TitleStatus::Unreadable
         );
         assert_eq!(
-            title_snapshot(&[65], TitleRead::Copied(1)).text(),
-            Some("A")
-        );
-        assert_eq!(
-            title_snapshot(&[0xD800], TitleRead::Copied(1)).status(),
-            TitleStatus::Unreadable
-        );
-        assert_eq!(
-            title_snapshot(&[0xD83D, 0xDE00], TitleRead::Copied(2)).text(),
+            TitleRead::Copied(2).snapshot(&[0xD83D, 0xDE00]).text(),
             Some("😀")
         );
         let mut buffer = vec![65; TITLE_BUFFER_UNITS];
         buffer[limits::TITLE_UTF16_UNITS - 1] = 0xD800;
-        let title = title_snapshot(&buffer, TitleRead::Copied(limits::TITLE_UTF16_UNITS));
+        let title = TitleRead::Copied(limits::TITLE_UTF16_UNITS).snapshot(&buffer);
         assert_eq!(title.status(), TitleStatus::Truncated);
         assert_eq!(
             title.text().expect("text").len(),
@@ -410,11 +405,11 @@ mod tests {
     #[test]
     fn prefers_aumid_and_normalizes_executable_identity() {
         assert_eq!(
-            application_identity("C:/Apps/TEST.EXE", None),
+            AppIdentity::from_process("C:/Apps/TEST.EXE", None),
             AppIdentity::Exe("c:\\apps\\test.exe".into())
         );
         assert_eq!(
-            application_identity("C:/Apps/TEST.EXE", Some("Package!App")),
+            AppIdentity::from_process("C:/Apps/TEST.EXE", Some("Package!App")),
             AppIdentity::Aumid("Package!App".into())
         );
     }
@@ -427,17 +422,19 @@ mod tests {
             class: "Windows.UI.Core.CoreWindow".into(),
             visibility: Visibility::Visible,
         }];
-        assert!(content_window(&children, host).is_none());
+        assert!(ChildWindow::content(&children, host).is_none());
         children.push(ChildWindow {
             window: WindowHandle::new(3),
             process: ProcessId::new(2),
             class: "Windows.UI.Core.CoreWindow".into(),
             visibility: Visibility::Hidden,
         });
-        assert!(content_window(&children, host).is_none());
+        assert!(ChildWindow::content(&children, host).is_none());
         children[1].visibility = Visibility::Visible;
         assert_eq!(
-            content_window(&children, host).expect("content").window,
+            ChildWindow::content(&children, host)
+                .expect("content")
+                .window,
             WindowHandle::new(3)
         );
     }
@@ -491,15 +488,15 @@ mod tests {
             codepage: 1200,
         };
         assert_eq!(
-            version_translation(&[english, chinese], &[chinese.language]),
+            Translation::select(&[english, chinese], &[chinese.language]),
             Some(chinese)
         );
         assert_eq!(
-            version_translation(&[chinese, english], &[0x0411]),
+            Translation::select(&[chinese, english], &[0x0411]),
             Some(english)
         );
-        assert_eq!(version_translation(&[chinese], &[]), Some(chinese));
-        assert_eq!(version_translation(&[], &[]), None);
+        assert_eq!(Translation::select(&[chinese], &[]), Some(chinese));
+        assert_eq!(Translation::select(&[], &[]), None);
     }
     #[test]
     fn cache_is_bounded_lru_and_retires_exited_or_reused_processes() {

@@ -12,7 +12,11 @@ use crate::store::{
 };
 #[cfg(test)]
 use quartz_domain::capture::CaptureParts;
-use quartz_domain::capture::{BacklogOutcome, CaptureEffect, CaptureEvent, MonoInstant, Timestamp};
+use quartz_domain::capture::{
+    AdvanceTimeError, BacklogOutcome, BatchId, CaptureEffect, CaptureEvent, MonoInstant, RunId,
+    Timestamp,
+};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct QueueShutdown {
@@ -22,6 +26,12 @@ pub(crate) struct QueueShutdown {
 
 /// Maximum commands per transaction, data model 03 §4.2; a single core batch is indivisible.
 const TRANSACTION_COMMANDS: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckpointCollection {
+    Skip,
+    Collect,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PersistenceState {
@@ -54,12 +64,26 @@ pub(crate) enum FlushProgress {
 #[snafu(display("capture flush retained buffered commands without making progress"))]
 pub(crate) struct FlushStalledError;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CommittedCheckpoint {
+    pub run: RunId,
+    pub batch: BatchId,
+    pub at: Timestamp,
+    pub commit_by_mono: MonoInstant,
+}
+impl CommittedCheckpoint {
+    pub(crate) fn latency_at(&self, committed: MonoInstant) -> Result<Duration, AdvanceTimeError> {
+        committed.duration_since(self.at.mono)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PersistenceResult {
     pub feedback: Vec<CaptureEvent>,
     pub effects: Vec<CaptureEffect>,
     pub outcome: PersistenceOutcome,
     pub progress: FlushProgress,
+    pub checkpoints: Vec<CommittedCheckpoint>,
 }
 impl PersistenceResult {
     pub(crate) fn state(&self) -> PersistenceState {
@@ -146,15 +170,25 @@ impl Persistence {
     pub(crate) fn is_due(&self, now: Timestamp) -> bool {
         self.queue.due(now)
     }
-    pub(crate) fn flush_due(&mut self, store: &mut Store, now: Timestamp) -> PersistenceResult {
+    pub(crate) fn flush_due(
+        &mut self,
+        store: &mut Store,
+        now: Timestamp,
+        checkpoints: CheckpointCollection,
+    ) -> PersistenceResult {
         if self.queue.due(now) {
-            self.flush(store, now)
+            self.flush(store, now, checkpoints)
         } else {
             self.queue.result()
         }
     }
     /// Pins a bounded prefix under the queue lock, then executes SQLite with that lock released.
-    pub(crate) fn flush(&mut self, store: &mut Store, now: Timestamp) -> PersistenceResult {
+    pub(crate) fn flush(
+        &mut self,
+        store: &mut Store,
+        now: Timestamp,
+        checkpoints: CheckpointCollection,
+    ) -> PersistenceResult {
         let prepared = self.queue.prepare(now);
         let mut result = prepared.result;
         if let Err(error) = self.execute_plan(store, &prepared.plan) {
@@ -162,6 +196,9 @@ impl Persistence {
             return result;
         }
         self.queue.committed(&prepared.plan);
+        if checkpoints == CheckpointCollection::Collect {
+            result.checkpoints = prepared.plan.checkpoints().collect();
+        }
         result.feedback.extend(
             prepared
                 .plan

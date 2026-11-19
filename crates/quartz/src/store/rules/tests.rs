@@ -327,12 +327,18 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
             .parent_version,
         Some(1)
     );
-    let stored: (i64, Option<i64>) = rule_sets::table
+    #[derive(Debug, diesel::Queryable)]
+    struct RuleRevisions {
+        current: i64,
+        builtin: Option<i64>,
+    }
+    let stored: RuleRevisions = rule_sets::table
         .filter(rule_sets::key.eq("builtin.test"))
         .select((rule_sets::current_version, rule_sets::builtin_revision))
         .first(&mut fixture.connection())
         .expect("separate local and upstream revisions");
-    assert_eq!(stored, (3, Some(2)));
+    assert_eq!(stored.current, 3);
+    assert_eq!(stored.builtin, Some(2));
     let same = fixture
         .shell
         .run(RegistryCommand::InstallBuiltin { set, revision: 2 })
@@ -452,4 +458,28 @@ fn startup_rebuild_degrades_uncompilable_user_or_builtin_sets_without_sql_decisi
             .expect("healthy edits remain possible");
         assert_eq!(shell.snapshots().load().epoch().get(), 1);
     }
+}
+
+#[test]
+fn loading_rules_rejects_missing_version_history_with_the_set_key() {
+    let mut fixture = Fixture::new();
+    fixture
+        .apply("user.missing_history", "History", 0)
+        .expect("persist rule set");
+    let mut connection = fixture.connection();
+    let id = rule_sets::table
+        .filter(rule_sets::key.eq("user.missing_history"))
+        .select(rule_sets::id)
+        .first::<Option<i64>>(&mut connection)
+        .expect("stored set")
+        .expect("persisted set has a primary key");
+    diesel::delete(rule_set_versions::table.filter(rule_set_versions::set_id.eq(id)))
+        .execute(&mut connection)
+        .expect("remove history to simulate corruption");
+    let error = RuleSets::new(&mut connection)
+        .load()
+        .expect_err("missing version history is corrupt");
+    assert!(
+        matches!(error, LoadRulesError::MissingVersionHistory { set } if set.as_str() == "user.missing_history")
+    );
 }

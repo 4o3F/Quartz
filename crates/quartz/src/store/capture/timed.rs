@@ -31,9 +31,9 @@ impl Capture<'_> {
             kind: state.owner().into(),
             privacy_mode,
             application_id,
-            started_utc_ms: CaptureColumn::new("timed_policies", "started_utc_ms")
+            started_utc_ms: CaptureColumn::new(timed_policies::started_utc_ms)
                 .utc(state.started)?,
-            until_utc_ms: CaptureColumn::new("timed_policies", "until_utc_ms").utc(state.until)?,
+            until_utc_ms: CaptureColumn::new(timed_policies::until_utc_ms).utc(state.until)?,
         };
         diesel::insert_into(timed_policies::table)
             .values(&row)
@@ -81,33 +81,35 @@ impl Capture<'_> {
         &mut self,
         row: TimedPoliciesRow,
     ) -> Result<TimedState, LoadCaptureStartupError> {
-        let context = super::RowContext::new("timed_policies", None);
+        let context = super::RowContext::new(None);
         let policy = match row.kind {
             enums::TimedPolicyKind::Pause => TimedPolicy::Pause,
-            enums::TimedPolicyKind::Privacy => {
-                TimedPolicy::Privacy(context.required(row.privacy_mode, "privacy_mode")?.into())
-            }
+            enums::TimedPolicyKind::Privacy => TimedPolicy::Privacy(
+                context
+                    .required(row.privacy_mode, timed_policies::privacy_mode)?
+                    .into(),
+            ),
             enums::TimedPolicyKind::KeepTiming => TimedPolicy::KeepTiming,
             enums::TimedPolicyKind::AppExemption => {
                 TimedPolicy::AppExemption(self.load_policy_application(
-                    context.required(row.application_id, "application_id")?,
+                    context.required(row.application_id, timed_policies::application_id)?,
                 )?)
             }
             enums::TimedPolicyKind::Audible => TimedPolicy::Audible(self.load_policy_application(
-                context.required(row.application_id, "application_id")?,
+                context.required(row.application_id, timed_policies::application_id)?,
             )?),
         };
         let state = TimedState {
             policy,
-            started: context.utc(row.started_utc_ms, "started_utc_ms")?,
-            until: context.utc(row.until_utc_ms, "until_utc_ms")?,
+            started: context.utc(row.started_utc_ms, timed_policies::started_utc_ms)?,
+            until: context.utc(row.until_utc_ms, timed_policies::until_utc_ms)?,
         };
         let normalized =
             state
                 .clone()
                 .normalized()
                 .map_err(|source| DecodeCaptureRowError::Time {
-                    field: context.field("until_utc_ms"),
+                    field: context.field(timed_policies::until_utc_ms),
                     value: row.until_utc_ms,
                     source,
                 })?;
@@ -121,19 +123,19 @@ impl Capture<'_> {
             .filter(applications::id.eq(id))
             .select(ApplicationsRow::as_select())
             .first::<ApplicationsRow>(self.connection)?;
-        let context = super::RowContext::new("applications", Some(id));
+        let context = super::RowContext::new(Some(id));
         Ok(match row.kind {
             enums::ApplicationKind::Exe => {
-                AppIdentity::Exe(context.required(row.exe_path, "exe_path")?)
+                AppIdentity::Exe(context.required(row.exe_path, applications::exe_path)?)
             }
             enums::ApplicationKind::Aumid => {
-                AppIdentity::Aumid(context.required(row.aumid, "aumid")?)
+                AppIdentity::Aumid(context.required(row.aumid, applications::aumid)?)
             }
             enums::ApplicationKind::Unresolved => AppIdentity::Unresolved(
                 row.identity_key
                     .strip_prefix("unresolved:")
                     .ok_or(DecodeCaptureRowError::ApplicationIdentity {
-                        field: context.field("identity_key"),
+                        field: context.field(applications::identity_key),
                     })?
                     .to_owned(),
             ),
@@ -173,8 +175,7 @@ impl ApplicationsRow {
             aumid,
             exe_name: None,
             display_name,
-            first_seen_utc_ms: CaptureColumn::new("applications", "first_seen_utc_ms")
-                .utc(started)?,
+            first_seen_utc_ms: CaptureColumn::new(applications::first_seen_utc_ms).utc(started)?,
         })
     }
 }

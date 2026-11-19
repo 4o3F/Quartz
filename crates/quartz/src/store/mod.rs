@@ -7,6 +7,7 @@ pub(crate) mod capture;
 )]
 mod enums;
 pub(crate) mod facts;
+mod identifiers;
 mod migrations;
 mod raw;
 #[expect(
@@ -20,12 +21,13 @@ mod schema;
 use crate::data_directory::DataDirectory;
 use diesel::{Connection, SqliteConnection, migration::MigrationSource};
 use diesel_migrations::MigrationHarness;
-use migrations::{Migrations, typed};
+use migrations::{ApplyMigrationError, Migrations};
 use raw::ConnectionSql;
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::{
     fs,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 #[derive(Debug, Snafu)]
@@ -36,6 +38,11 @@ pub(crate) enum OpenStoreError {
     Connect { source: diesel::ConnectionError },
     #[snafu(display("could not inspect SQLite database"))]
     Inspect { source: diesel::result::Error },
+    #[snafu(display("could not parse SQLite version {version}"))]
+    SqliteVersion {
+        version: String,
+        source: ParseSqliteVersionError,
+    },
     #[snafu(display("SQLite {version} is older than required 3.51.3"))]
     OldSqlite { version: String },
     #[snafu(display("database contains unknown migration {version}"))]
@@ -124,7 +131,8 @@ impl Store {
         migrations: impl MigrationSource<diesel::sqlite::Sqlite>,
     ) -> Result<Self, OpenStoreError> {
         let path = directory.database();
-        let mut source = typed(migrations.migrations()).context(LoadMigrationsSnafu)?;
+        let mut source = ApplyMigrationError::from_result(migrations.migrations())
+            .context(LoadMigrationsSnafu)?;
         source.sort_by(|a, b| a.name().version().cmp(&b.name().version()));
         let applied = if path.exists() {
             // Inspect through mode=ro before any persistent PRAGMA or migration-table creation.
@@ -146,17 +154,25 @@ impl Store {
         if !pending.is_empty() {
             let backup_directory = directory.backups();
             fs::create_dir_all(&backup_directory).context(CreateBackupDirectorySnafu)?;
-            let old = applied.last().map(String::as_str).unwrap_or("0");
-            let timestamp = jiff::Timestamp::now().as_millisecond();
-            let backup = backup_directory.join(format!("pre-migrate-{old}-{timestamp}.db"));
+            // An empty migration history uses the initial version marker in its backup name.
+            let old = applied
+                .last()
+                .map(String::as_str)
+                .unwrap_or(INITIAL_DATABASE_VERSION);
+            let name = BackupName {
+                version: old.to_owned(),
+                timestamp: jiff::Timestamp::now().as_millisecond(),
+            };
+            let backup = backup_directory.join(name.to_string());
             ConnectionSql::new(&mut writer)
                 .backup(backup.to_str().context(InvalidPathSnafu)?)
                 .context(BackupSnafu { path: &backup })?;
             tracing::info!(backup = %backup.display(), "upgrading database");
             // Initialize Diesel's tracking table only after version checks and a usable backup.
-            typed(writer.applied_migrations()).context(MigrateSnafu { backup: &backup })?;
+            ApplyMigrationError::from_result(writer.applied_migrations())
+                .context(MigrateSnafu { backup: &backup })?;
             for migration in pending {
-                typed(writer.run_migration(migration.as_ref()))
+                ApplyMigrationError::from_result(writer.run_migration(migration.as_ref()))
                     .context(MigrateSnafu { backup: &backup })?;
             }
             directory.prune_backups();
@@ -172,13 +188,10 @@ impl Store {
 impl ConnectionSql<'_> {
     fn check_sqlite(&mut self) -> Result<(), OpenStoreError> {
         let version = self.sqlite_version().context(InspectSnafu)?;
-        let parts: Option<Vec<u32>> = version.split('.').map(|part| part.parse().ok()).collect();
-        snafu::ensure!(
-            parts
-                .as_deref()
-                .is_some_and(|p| p.len() == 3 && p >= [3, 51, 3].as_slice()),
-            OldSqliteSnafu { version }
-        );
+        let parsed = version
+            .parse::<SqliteVersion>()
+            .context(SqliteVersionSnafu { version: &version })?;
+        snafu::ensure!(parsed >= SqliteVersion::MINIMUM, OldSqliteSnafu { version });
         Ok(())
     }
 }
@@ -218,7 +231,8 @@ impl ReadOnlyStore {
     /// Opens capture facts without migrations or an instance lock.
     pub(crate) fn open_facts(path: &Path) -> Result<Self, OpenStoreError> {
         let mut store = Self::connect(path)?;
-        let source = typed(Migrations.migrations()).context(LoadMigrationsSnafu)?;
+        let source = ApplyMigrationError::from_result(Migrations.migrations())
+            .context(LoadMigrationsSnafu)?;
         ConnectionSql::new(&mut store.connection).inspect(&source)?;
         Ok(store)
     }
@@ -247,46 +261,153 @@ impl ReadOnlyStore {
     }
 }
 
+/// Version marker for a database before its first migration.
+const INITIAL_DATABASE_VERSION: &str = "0";
+/// Keep the two newest automatic snapshots for migration recovery.
+const RETAINED_MIGRATION_BACKUPS: usize = 2;
+
+#[derive(Debug, PartialEq, Eq)]
+struct BackupName {
+    version: String,
+    timestamp: i64,
+}
+impl BackupName {
+    /// Recognizes automatic backup names; unrelated files remain untouched.
+    fn parse(name: &str) -> Option<Self> {
+        let body = name.strip_prefix("pre-migrate-")?.strip_suffix(".db")?;
+        let (version, timestamp) = body.split_once('-')?;
+        if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let Ok(timestamp) = timestamp.parse() else {
+            return None;
+        };
+        Some(Self {
+            version: version.to_owned(),
+            timestamp,
+        })
+    }
+}
+impl std::fmt::Display for BackupName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "pre-migrate-{}-{}.db",
+            self.version, self.timestamp
+        )
+    }
+}
+#[derive(Debug, Snafu)]
+#[snafu(module(prune_backups_error))]
+enum PruneMigrationBackupsError {
+    #[snafu(display("could not list migration backups: {source}"))]
+    ReadDirectory { source: std::io::Error },
+    #[snafu(display("could not read migration backup entry: {source}"))]
+    ReadEntry { source: std::io::Error },
+    #[snafu(display("could not inspect migration backup {}: {source}", path.display()))]
+    InspectEntry {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[snafu(display("could not remove migration backup {}: {source}", path.display()))]
+    RemoveFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+struct MigrationBackup {
+    path: PathBuf,
+    name: BackupName,
+}
 impl DataDirectory {
     fn prune_backups(&self) {
-        let result = (|| -> std::io::Result<()> {
-            let mut files = fs::read_dir(self.backups())?
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(is_migration_backup)
-                })
-                .collect::<Vec<_>>();
-            files.sort_by_key(|path| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| s.rsplit('-').next())
-                    .and_then(|s| s.parse::<i64>().ok())
-            });
-            let remove_count = files.len().saturating_sub(2);
-            for path in files.into_iter().take(remove_count) {
-                fs::remove_file(path)?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
+        if let Err(error) = self.try_prune_backups() {
             tracing::warn!(%error, "could not prune migration backups");
         }
     }
+    fn try_prune_backups(&self) -> Result<(), PruneMigrationBackupsError> {
+        let mut files = Vec::new();
+        for entry in
+            fs::read_dir(self.backups()).context(prune_backups_error::ReadDirectorySnafu)?
+        {
+            let entry = entry.context(prune_backups_error::ReadEntrySnafu)?;
+            let path = entry.path();
+            if !entry
+                .file_type()
+                .context(prune_backups_error::InspectEntrySnafu { path: &path })?
+                .is_file()
+            {
+                continue;
+            }
+            if let Some(name) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(BackupName::parse)
+            {
+                files.push(MigrationBackup { path, name });
+            }
+        }
+        files.sort_by_key(|backup| backup.name.timestamp);
+        let remove_count = files.len().saturating_sub(RETAINED_MIGRATION_BACKUPS);
+        for backup in files.into_iter().take(remove_count) {
+            fs::remove_file(&backup.path)
+                .context(prune_backups_error::RemoveFileSnafu { path: &backup.path })?;
+        }
+        Ok(())
+    }
 }
 
-fn is_migration_backup(name: &str) -> bool {
-    name.strip_prefix("pre-migrate-")
-        .and_then(|s| s.strip_suffix(".db"))
-        .and_then(|s| s.split_once('-'))
-        .is_some_and(|(version, time)| {
-            !version.is_empty()
-                && version.bytes().all(|b| b.is_ascii_digit())
-                && time.parse::<i64>().is_ok()
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SqliteVersion {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+impl SqliteVersion {
+    const MINIMUM: Self = Self {
+        major: 3,
+        minor: 51,
+        patch: 3,
+    };
+}
+#[derive(Debug, Snafu)]
+#[snafu(module(sqlite_version_error))]
+pub(crate) enum ParseSqliteVersionError {
+    #[snafu(display("SQLite version must have major, minor, and patch components"))]
+    Components,
+    #[snafu(display("SQLite version component is not an unsigned integer"))]
+    Integer { source: std::num::ParseIntError },
+}
+impl FromStr for SqliteVersion {
+    type Err = ParseSqliteVersionError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let mut parts = value.split('.');
+        let major = parts
+            .next()
+            .context(sqlite_version_error::ComponentsSnafu)?
+            .parse()
+            .context(sqlite_version_error::IntegerSnafu)?;
+        let minor = parts
+            .next()
+            .context(sqlite_version_error::ComponentsSnafu)?
+            .parse()
+            .context(sqlite_version_error::IntegerSnafu)?;
+        let patch = parts
+            .next()
+            .context(sqlite_version_error::ComponentsSnafu)?
+            .parse()
+            .context(sqlite_version_error::IntegerSnafu)?;
+        snafu::ensure!(
+            parts.next().is_none(),
+            sqlite_version_error::ComponentsSnafu
+        );
+        Ok(Self {
+            major,
+            minor,
+            patch,
         })
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -307,7 +428,7 @@ impl DataDirectory {
     /// Restores a consistent staged copy; the caller holds the data-directory lock.
     pub(crate) fn restore_backup(&self, file: &Path) -> Result<(), RestoreBackupError> {
         let mut backup = ReadOnlyStore::connect(file).context(OpenSnafu)?;
-        let source = typed(Migrations.migrations())
+        let source = ApplyMigrationError::from_result(Migrations.migrations())
             .context(LoadMigrationsSnafu)
             .context(OpenSnafu)?;
         ConnectionSql::new(&mut backup.connection)

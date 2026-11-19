@@ -24,7 +24,22 @@ impl rust_i18n::Backend for Backend {
             .map(|text| Cow::Owned(expand(&text)))
     }
 
+    // rust-i18n requires key/value tuples at its backend boundary.
     fn messages_for_locale(&self, locale: &str) -> Option<Vec<(Cow<'_, str>, Cow<'_, str>)>> {
+        self.messages(locale).map(|messages| {
+            messages
+                .into_iter()
+                .map(|message| (message.key, message.text))
+                .collect()
+        })
+    }
+}
+struct CatalogMessage<'message> {
+    key: Cow<'message, str>,
+    text: Cow<'message, str>,
+}
+impl Backend {
+    fn messages(&self, locale: &str) -> Option<Vec<CatalogMessage<'_>>> {
         if locale != "en-XA" {
             return None;
         }
@@ -33,7 +48,10 @@ impl rust_i18n::Backend for Backend {
             .map(|messages| {
                 messages
                     .into_iter()
-                    .map(|(key, text)| (key, Cow::Owned(expand(&text))))
+                    .map(|(key, text)| CatalogMessage {
+                        key,
+                        text: Cow::Owned(expand(&text)),
+                    })
                     .collect()
             })
     }

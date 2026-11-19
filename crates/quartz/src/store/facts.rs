@@ -3,6 +3,7 @@
 use super::{
     ReadOnlyStore, Store,
     enums::{self, IntegerCode},
+    identifiers::{ColumnName, TableName},
     rows::{
         AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow, ClockSegmentsRow, IntervalsRow,
         TimedPoliciesRow,
@@ -50,7 +51,7 @@ pub(crate) enum ReadFactsError {
     MissingColumn {
         kind: FactKind,
         id: i64,
-        column: &'static str,
+        column: ColumnName,
     },
     #[snafu(display("invalid monotonic endpoint state in {kind} {id}"))]
     InvalidMonotonicEnd { kind: FactKind, id: i64 },
@@ -127,6 +128,15 @@ pub(crate) enum FactKind {
     TimedPolicy,
 }
 impl FactKind {
+    fn start_mono_column(self) -> Result<ColumnName, ReadFactsError> {
+        match self {
+            Self::ClockSegment => Ok(ColumnName::of(clock_segments::start_mono_ms)),
+            Self::Foreground | Self::NoForeground => Ok(ColumnName::of(intervals::start_mono_ms)),
+            Self::Availability => Ok(ColumnName::of(availability_intervals::start_mono_ms)),
+            Self::CaptureGap => Ok(ColumnName::of(capture_gaps::start_mono_ms)),
+            Self::Run | Self::TimedPolicy => Err(ReadFactsError::InvalidCoverage { kind: self }),
+        }
+    }
     pub(crate) fn label(self) -> &'static str {
         self.into()
     }
@@ -298,7 +308,7 @@ impl Fact {
         let start = self.start_mono_ms.ok_or(ReadFactsError::MissingColumn {
             kind: self.kind,
             id: self.id,
-            column: "start_mono_ms",
+            column: self.kind.start_mono_column()?,
         })?;
         let end = match (self.end, self.end_mono_ms, self.confirmed_mono_ms) {
             (FactEnd::Closed(_), Some(end), None) => end,
@@ -343,7 +353,7 @@ impl RangeRowCounts {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TableCount {
-    pub name: &'static str,
+    pub name: TableName,
     pub rows: i64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,43 +376,43 @@ impl RowCounts {
     pub(crate) fn tables(self) -> [TableCount; GENERATED_TABLE_COUNT] {
         [
             TableCount {
-                name: "applications",
+                name: TableName::of(applications::table),
                 rows: self.applications,
             },
             TableCount {
-                name: "availability_intervals",
+                name: TableName::of(availability_intervals::table),
                 rows: self.availability_intervals,
             },
             TableCount {
-                name: "capture_gaps",
+                name: TableName::of(capture_gaps::table),
                 rows: self.capture_gaps,
             },
             TableCount {
-                name: "capture_runs",
+                name: TableName::of(capture_runs::table),
                 rows: self.capture_runs,
             },
             TableCount {
-                name: "clock_segments",
+                name: TableName::of(clock_segments::table),
                 rows: self.clock_segments,
             },
             TableCount {
-                name: "intervals",
+                name: TableName::of(intervals::table),
                 rows: self.intervals,
             },
             TableCount {
-                name: "timed_policies",
+                name: TableName::of(timed_policies::table),
                 rows: self.timed_policies,
             },
             TableCount {
-                name: "titles",
+                name: TableName::of(titles::table),
                 rows: self.titles,
             },
             TableCount {
-                name: "web_intervals",
+                name: TableName::of(web_intervals::table),
                 rows: self.web_intervals,
             },
             TableCount {
-                name: "window_instances",
+                name: TableName::of(window_instances::table),
                 rows: self.window_instances,
             },
         ]
@@ -796,7 +806,7 @@ impl IntervalsRow {
             FactEnd::Closed(_) => self.duration_ms.ok_or(ReadFactsError::MissingColumn {
                 kind,
                 id: fact.id,
-                column: "duration_ms",
+                column: ColumnName::of(intervals::duration_ms),
             })?,
             FactEnd::Open { .. } => fact.monotonic_duration()?,
         });
@@ -881,8 +891,10 @@ impl Store {
         super::raw::ConnectionSql::new(&mut writer)
             .configure_writer()
             .context(super::ConfigureSnafu)?;
-        super::migrations::typed(writer.run_pending_migrations(super::migrations::Migrations))
-            .context(super::LoadMigrationsSnafu)?;
+        super::migrations::ApplyMigrationError::from_result(
+            writer.run_pending_migrations(super::migrations::Migrations),
+        )
+        .context(super::LoadMigrationsSnafu)?;
         Ok(Self {
             _writer: writer,
             _reader: ReadOnlyStore::connect(path)?,

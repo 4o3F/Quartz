@@ -31,6 +31,8 @@ pub(crate) enum LoadRulesError {
     MissingId,
     #[snafu(display("stored rule set refers to a missing parent row"))]
     MissingParent,
+    #[snafu(display("stored rule set {set} is missing its version history"))]
+    MissingVersionHistory { set: RuleSetKey },
     #[snafu(display("stored current revision is missing"))]
     MissingRevision,
     #[snafu(display("stored rule revision exceeds the supported range"))]
@@ -147,7 +149,9 @@ impl<'connection> RuleSets<'connection> {
                 })
                 .transpose()?;
             let version = u32::try_from(row.current_version).context(InvalidVersionSnafu)?;
-            let history = versions.remove(&id).unwrap_or_default();
+            let history = versions
+                .remove(&id)
+                .ok_or_else(|| LoadRulesError::MissingVersionHistory { set: key.clone() })?;
             let content = history
                 .get(&version)
                 .ok_or(LoadRulesError::MissingRevision)?

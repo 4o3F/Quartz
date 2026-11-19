@@ -35,9 +35,17 @@ impl Capture<'_> {
             .select(IntervalsRow::as_select())
             .load(self.connection)?;
         for row in rows {
-            let context = super::RowContext::new("intervals", row.id);
-            let start = context.point(row.start_utc_ms, row.start_mono_ms, TimeColumns::Start)?;
-            context.confirmation(start, at)?;
+            let context = super::RowContext::new(row.id);
+            let start = context.point(
+                row.start_utc_ms,
+                row.start_mono_ms,
+                TimeColumns::new(intervals::start_utc_ms, intervals::start_mono_ms),
+            )?;
+            context.confirmation(
+                start,
+                at,
+                TimeColumns::new(intervals::confirmed_utc_ms, intervals::confirmed_mono_ms),
+            )?;
             self.bump_days(enums::DataSource::Intervals, TimeRange { start, end: at })?;
         }
         diesel::update(
@@ -47,9 +55,9 @@ impl Capture<'_> {
         )
         .set((
             intervals::confirmed_utc_ms
-                .eq(CaptureColumn::new("intervals", "confirmed_utc_ms").utc(at.utc)?),
+                .eq(CaptureColumn::new(intervals::confirmed_utc_ms).utc(at.utc)?),
             intervals::confirmed_mono_ms
-                .eq(CaptureColumn::new("intervals", "confirmed_mono_ms").mono(at.mono)?),
+                .eq(CaptureColumn::new(intervals::confirmed_mono_ms).mono(at.mono)?),
         ))
         .execute(self.connection)?;
         Ok(())
@@ -65,9 +73,23 @@ impl Capture<'_> {
             .select(AvailabilityIntervalsRow::as_select())
             .load(self.connection)?;
         for row in rows {
-            let context = super::RowContext::new("availability_intervals", row.id);
-            let start = context.point(row.start_utc_ms, row.start_mono_ms, TimeColumns::Start)?;
-            context.confirmation(start, at)?;
+            let context = super::RowContext::new(row.id);
+            let start = context.point(
+                row.start_utc_ms,
+                row.start_mono_ms,
+                TimeColumns::new(
+                    availability_intervals::start_utc_ms,
+                    availability_intervals::start_mono_ms,
+                ),
+            )?;
+            context.confirmation(
+                start,
+                at,
+                TimeColumns::new(
+                    availability_intervals::confirmed_utc_ms,
+                    availability_intervals::confirmed_mono_ms,
+                ),
+            )?;
             self.bump_days(
                 enums::DataSource::Availability,
                 TimeRange { start, end: at },
@@ -79,16 +101,10 @@ impl Capture<'_> {
                 .filter(availability_intervals::end_utc_ms.is_null()),
         )
         .set((
-            availability_intervals::confirmed_utc_ms.eq(CaptureColumn::new(
-                "availability_intervals",
-                "confirmed_utc_ms",
-            )
-            .utc(at.utc)?),
-            availability_intervals::confirmed_mono_ms.eq(CaptureColumn::new(
-                "availability_intervals",
-                "confirmed_mono_ms",
-            )
-            .mono(at.mono)?),
+            availability_intervals::confirmed_utc_ms
+                .eq(CaptureColumn::new(availability_intervals::confirmed_utc_ms).utc(at.utc)?),
+            availability_intervals::confirmed_mono_ms
+                .eq(CaptureColumn::new(availability_intervals::confirmed_mono_ms).mono(at.mono)?),
         ))
         .execute(self.connection)?;
         Ok(())
@@ -101,31 +117,34 @@ impl Capture<'_> {
         )
         .set(
             capture_runs::confirmed_utc_ms.eq(id
-                .context("capture_runs")
-                .field("confirmed_utc_ms")
+                .context()
+                .field(capture_runs::confirmed_utc_ms)
                 .utc(at.utc)?),
         )
         .execute(self.connection)?;
-        id.require_open("capture_runs", count)
+        id.require_open(capture_runs::table, count)
     }
     fn confirm_segment(
         &mut self,
         id: DbRowId,
         at: Timestamp,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        let context = id.context("clock_segments");
+        let context = id.context();
         let count = diesel::update(
             clock_segments::table
                 .filter(clock_segments::id.eq(id.get()))
                 .filter(clock_segments::end_utc_ms.is_null()),
         )
         .set((
-            clock_segments::confirmed_utc_ms.eq(context.field("confirmed_utc_ms").utc(at.utc)?),
-            clock_segments::confirmed_mono_ms
-                .eq(context.field("confirmed_mono_ms").mono(at.mono)?),
+            clock_segments::confirmed_utc_ms.eq(context
+                .field(clock_segments::confirmed_utc_ms)
+                .utc(at.utc)?),
+            clock_segments::confirmed_mono_ms.eq(context
+                .field(clock_segments::confirmed_mono_ms)
+                .mono(at.mono)?),
         ))
         .execute(self.connection)?;
-        id.require_open("clock_segments", count)
+        id.require_open(clock_segments::table, count)
     }
     pub(super) fn settle_persisted(
         &mut self,
@@ -158,7 +177,7 @@ impl Capture<'_> {
                 .map(|(key, _)| *key)
                 .ok_or(ExecuteCaptureBatchError::MissingMapping {
                     run,
-                    table: "intervals",
+                    table: crate::store::identifiers::TableName::of(intervals::table),
                     row_id: row_id.get(),
                 })?;
             self.close_interval(run, key, at, IntervalEndReason::CaptureGap)?;
@@ -186,7 +205,7 @@ impl Capture<'_> {
                 .map(|(key, _)| *key)
                 .ok_or(ExecuteCaptureBatchError::MissingMapping {
                     run,
-                    table: "availability_intervals",
+                    table: crate::store::identifiers::TableName::of(availability_intervals::table),
                     row_id: row_id.get(),
                 })?;
             self.close_availability(run, key, at, AvailabilityEndReason::PolicyChanged)?;

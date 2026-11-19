@@ -27,7 +27,9 @@ impl MigrationSource<Sqlite> for Migrations {
                     }
                     _ => return Err(ApplyMigrationError::UnregisteredSql.into()),
                 };
-                Ok(Box::new(SqlMigration { inner, script }) as Box<dyn Migration<Sqlite>>)
+                let migration: Box<dyn Migration<Sqlite>> =
+                    Box::new(SqlMigration { inner, script });
+                Ok(migration)
             })
             .collect()
         // Append Rust Migration implementations to this same ordered source when needed.
@@ -49,27 +51,31 @@ pub(crate) enum ApplyMigrationError {
 }
 
 // Diesel's trait boundary erases errors. Recover concrete causes immediately.
-pub(super) fn typed<T>(result: diesel::migration::Result<T>) -> Result<T, ApplyMigrationError> {
-    result.map_err(|source| {
-        let source = match source.downcast::<ApplyMigrationError>() {
-            Ok(source) => return *source,
-            Err(source) => source,
-        };
-        let source = match source.downcast::<diesel::result::Error>() {
-            Ok(source) => return ApplyMigrationError::Database { source: *source },
-            Err(source) => source,
-        };
-        match source.downcast::<diesel_migrations::MigrationError>() {
-            Ok(source) => ApplyMigrationError::Load { source: *source },
-            Err(_) => ApplyMigrationError::UnexpectedCause,
-        }
-    })
+impl ApplyMigrationError {
+    pub(super) fn from_result<T>(
+        result: diesel::migration::Result<T>,
+    ) -> Result<T, ApplyMigrationError> {
+        result.map_err(|source| {
+            let source = match source.downcast::<ApplyMigrationError>() {
+                Ok(source) => return *source,
+                Err(source) => source,
+            };
+            let source = match source.downcast::<diesel::result::Error>() {
+                Ok(source) => return ApplyMigrationError::Database { source: *source },
+                Err(source) => source,
+            };
+            match source.downcast::<diesel_migrations::MigrationError>() {
+                Ok(source) => ApplyMigrationError::Load { source: *source },
+                Err(_) => ApplyMigrationError::UnexpectedCause,
+            }
+        })
+    }
 }
 
 #[cfg(test)]
 impl Migrations {
     pub(super) fn apply_all(&self, conn: &mut SqliteConnection) -> Result<(), ApplyMigrationError> {
-        typed(conn.run_pending_migrations(*self)).map(|_| ())
+        ApplyMigrationError::from_result(conn.run_pending_migrations(*self)).map(|_| ())
     }
 }
 

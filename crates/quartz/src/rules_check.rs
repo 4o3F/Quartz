@@ -19,6 +19,8 @@ pub(crate) enum CheckRulesError {
     InspectDatabase { source: std::io::Error },
     #[snafu(display("rule validation failed with {count} error(s)"))]
     Invalid { count: usize },
+    #[snafu(display("rule sibling order exceeds the supported range"))]
+    SiblingOrderOverflow { source: std::num::TryFromIntError },
     #[cfg(windows)]
     #[snafu(display("could not resolve rule database directory"))]
     Directory {
@@ -95,9 +97,11 @@ impl<'files> CheckRulesCommand<'files> {
                         enabled: existing
                             .as_ref()
                             .map_or(Enablement::Enabled, |old| old.enabled),
-                        sibling_order: existing
-                            .as_ref()
-                            .map_or(input_sets.len() as i64, |old| old.sibling_order),
+                        sibling_order: match &existing {
+                            Some(old) => old.sibling_order,
+                            None => i64::try_from(input_sets.len())
+                                .context(SiblingOrderOverflowSnafu)?,
+                        },
                     });
                 }
                 Err(error) => diagnostics.extend(error.into_diagnostics()),

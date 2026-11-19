@@ -70,7 +70,13 @@ impl SourceLocation {
         Self {
             file: file.into(),
             line: prefix.bytes().filter(|b| *b == b'\n').count() + 1,
-            column: prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1,
+            column: prefix
+                .rsplit('\n')
+                .next()
+                .expect("splitting a string always yields at least one segment")
+                .chars()
+                .count()
+                + 1,
             bytes,
         }
     }

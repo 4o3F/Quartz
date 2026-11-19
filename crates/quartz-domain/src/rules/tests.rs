@@ -956,3 +956,112 @@ fn parse_errors_preserve_nonempty_diagnostics_and_implement_standard_error() {
         assert_eq!(error.into_diagnostics(), expected);
     }
 }
+
+#[test]
+fn extraction_without_named_spans_preserves_only_the_available_title() {
+    let source = "format='quartz-rules/1'\n[set]\nkey='user.extract'\nkind='extraction'\nname='Extract'\n[[rule]]\nid='title'\nlabel='Title'\napp=[{field='app.exe_name',op='equals',value='code.exe'}]\npattern='^(?P<dirty>● )?Report$'\n";
+    let compiled = Resolution::resolve(&[installed(user(source))], RuleKind::Extraction)
+        .effective
+        .compile()
+        .expect("compile extractor");
+    let mut snapshot = FieldSnapshot {
+        text: BTreeMap::from([
+            (Field::ExeName, NfcText::new("code.exe")),
+            (Field::RawTitle, NfcText::new("● Report")),
+        ]),
+        domain: None,
+    };
+    let extracted = compiled
+        .evaluate(&snapshot)
+        .extraction
+        .expect("matched title");
+    assert_eq!(extracted.normalized_title.as_deref(), Some("● Report"));
+    assert!(extracted.dirty);
+    assert_eq!(extracted.document, None);
+    snapshot.text.remove(&Field::RawTitle);
+    let hidden = compiled
+        .evaluate(&snapshot)
+        .extraction
+        .expect("unknown title");
+    assert_eq!(hidden.normalized_title, None);
+    assert_eq!(hidden.status, ExtractionStatus::Unknown);
+}
+
+#[test]
+fn override_references_keep_array_wire_format_and_validate_set_keys() {
+    let reference = OverrideRef {
+        set: "user.overlay".parse().expect("rule-set key"),
+        version: RuleVersion::new(3),
+    };
+    let serialized = serde_json::to_string(&reference).expect("serialize override reference");
+    assert_eq!(serialized, r#"["user.overlay",3]"#);
+    assert_eq!(
+        serde_json::from_str::<OverrideRef>(&serialized).expect("decode reference"),
+        reference
+    );
+    assert_eq!(reference.version.get(), 3);
+    for invalid in [
+        r#"["INVALID",3]"#,
+        r#"["user.overlay"]"#,
+        r#"["user.overlay",3,4]"#,
+    ] {
+        assert!(
+            serde_json::from_str::<OverrideRef>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn required_field_diagnostics_preserve_messages_order_and_locations() {
+    let mut sources = vec![
+        "format='quartz-rules/1'".to_owned(),
+        "format='quartz-rules/1'\n[set]".to_owned(),
+        "format='quartz-rules/1'\n[set]\nkey=3\nkind=false\nname=[]".to_owned(),
+        "format='quartz-rules/1'\n[set]\nkey=''\nkind=''\nname=''".to_owned(),
+    ];
+    for kind in [
+        "classification",
+        "extraction",
+        "privacy",
+        "precedent",
+        "unknown",
+    ] {
+        let header = format!(
+            "format='quartz-rules/1'\n[set]\nkey='user.invalid'\nkind='{kind}'\nname='Invalid'\n"
+        );
+        for entries in [
+            "[[rule]]\nlabel='Missing fields'\n",
+            "[[rule]]\nid=3\ncategory=false\npattern=3\npriority=70000\n",
+            "[[rule]]\nid=''\ncategory=''\npattern='['\npriority=-1\n",
+            "[[rule]]\nlabel='First'\n[[rule]]\nlabel='Second'\n[[rule]]\nid=''\nlabel='Empty'\n",
+            "[[override]]\nlabel='Missing target'\n",
+            "[[override]]\ntarget='invalid'\nlabel='Malformed target'\n",
+            "[[disable]]\nreason=3\n[[disable]]\ntarget=3\nreason=3\n",
+        ] {
+            sources.push(format!("{header}{entries}"));
+        }
+    }
+    let references = catalog();
+    let diagnostics: Vec<_> = sources
+        .iter()
+        .map(|source| {
+            RuleSet::parse(
+                "required-fields.toml",
+                source,
+                ParseContext {
+                    origin: RuleOrigin::User,
+                    references: &references,
+                },
+            )
+            .expect_err("incomplete source")
+            .into_diagnostics()
+        })
+        .collect();
+    let serialized = serde_json::to_string(&diagnostics).expect("diagnostic serialization");
+    assert_eq!(
+        ContentHash::of(&serialized).as_str(),
+        "df2dc9ff90d1c59ec39ca9a005fa48817197f443433ba935166a9b6e81f4c23f",
+        "required-field diagnostic messages, order, and source locations changed: {diagnostics:#?}"
+    );
+}

@@ -16,6 +16,44 @@ mod translations {
 
 use translations::{_rust_i18n_t, _rust_i18n_try_translate};
 
+/// A catalog message identifier, borrowed without allocating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MessageKey<'key>(&'key str);
+impl<'key> MessageKey<'key> {
+    /// Borrows the identifier used by the embedded catalog and rust-i18n macros.
+    #[must_use]
+    pub const fn new(key: &'key str) -> Self {
+        Self(key)
+    }
+    /// Returns the identifier at a translation backend boundary.
+    #[must_use]
+    pub const fn as_str(self) -> &'key str {
+        self.0
+    }
+    /// Looks up this message using the global language.
+    #[must_use]
+    pub fn translate(self) -> Cow<'key, str> {
+        rust_i18n::t!(self.0)
+    }
+    /// Looks up this message in a language without changing the global language.
+    #[must_use]
+    pub fn in_language(self, language: Language) -> Cow<'key, str> {
+        rust_i18n::t!(self.0, locale = language.code())
+    }
+    /// Checks the language's own catalog without English fallback.
+    #[must_use]
+    pub fn is_in_catalog(self, language: Language) -> bool {
+        translations::_rust_i18n_backend()
+            .translate(language.code(), self.0)
+            .is_some()
+    }
+}
+impl std::fmt::Display for MessageKey<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
 /// An interface language with a translation catalog (10 section 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum Language {
@@ -78,15 +116,24 @@ impl Language {
     /// fills in missing translations, and an unknown key comes back unchanged.
     #[must_use]
     pub fn translate(self, key: &str) -> Cow<'_, str> {
-        rust_i18n::t!(key, locale = self.code())
+        MessageKey::new(key).in_language(self)
     }
 
     /// Whether this language's own catalog has `key`, without falling back to English.
     #[must_use]
     pub fn has_message(self, key: &str) -> bool {
-        translations::_rust_i18n_backend()
-            .translate(self.code(), key)
-            .is_some()
+        MessageKey::new(key).is_in_catalog(self)
+    }
+
+    /// Formats an unfinished-command diagnostic in this language.
+    #[must_use]
+    pub fn not_implemented(self, operation: &str) -> String {
+        rust_i18n::t!(
+            "error.not_implemented",
+            locale = self.code(),
+            operation = operation
+        )
+        .into_owned()
     }
 
     /// Makes this the global language shared with rust-i18n consumers such as gpui-component.
@@ -114,37 +161,6 @@ impl std::str::FromStr for Language {
     }
 }
 
-/// Selects the first supported preferred language, falling back to English.
-///
-/// Returns the locale code for callers that still pass languages as text; new code uses
-/// [`Language::negotiate`].
-#[must_use]
-pub fn negotiate_language(preferred: &[&str]) -> &'static str {
-    Language::negotiate(preferred).code()
-}
-
-/// Changes the global translation locale shared with rust-i18n consumers.
-pub fn set_locale(locale: &str) {
-    rust_i18n::set_locale(locale);
-}
-
-/// Looks up a translation template in the current locale.
-#[must_use]
-pub fn translate(key: &str) -> Cow<'_, str> {
-    rust_i18n::t!(key)
-}
-
-/// Formats the English diagnostic used by unfinished commands.
-#[must_use]
-pub fn not_implemented(operation: &str) -> String {
-    rust_i18n::t!(
-        "error.not_implemented",
-        locale = "en",
-        operation = operation
-    )
-    .into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -164,7 +180,7 @@ mod tests {
         while let Some((_, after)) = rest.split_once("%{") {
             let (name, remaining) = after
                 .split_once('}')
-                .unwrap_or_else(|| panic!("unclosed placeholder in {text}"));
+                .expect("catalog placeholders have closing braces");
             assert!(!name.is_empty(), "empty placeholder in {text}");
             names.insert(name);
             rest = remaining;
@@ -211,7 +227,7 @@ mod tests {
             .map(|locale| {
                 let messages = backend
                     .messages_for_locale(&locale)
-                    .unwrap_or_else(|| panic!("missing translation catalog for {locale}"))
+                    .expect("each advertised locale has an embedded catalog")
                     .into_iter()
                     .collect();
                 (locale, messages)
@@ -252,7 +268,7 @@ mod tests {
         for locale in backend.available_locales() {
             for (key, text) in backend
                 .messages_for_locale(&locale)
-                .unwrap_or_else(|| panic!("missing translation catalog for {locale}"))
+                .expect("each advertised locale has an embedded catalog")
             {
                 if key.starts_with("tray.") || key == "app.name" {
                     // M0 tray keys have no placeholders; add maximum substitutions with new keys.
@@ -294,7 +310,7 @@ mod tests {
             "Chinese operation substitution"
         );
         assert_eq!(
-            not_implemented("rules check"),
+            Language::English.not_implemented("rules check"),
             "not implemented yet: rules check",
             "English command diagnostic"
         );
@@ -303,23 +319,31 @@ mod tests {
     #[test]
     fn global_locale_changes_translation_but_cli_errors_remain_english() {
         let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
-        set_locale("zh-CN");
-        assert_eq!(translate("tray.open"), "打开", "global Chinese locale");
+        Language::SimplifiedChinese.set_global();
         assert_eq!(
-            not_implemented("status"),
+            MessageKey::new("tray.open").translate(),
+            "打开",
+            "global Chinese locale"
+        );
+        assert_eq!(
+            Language::English.not_implemented("status"),
             "not implemented yet: status",
             "CLI diagnostic with Chinese global locale"
         );
         #[cfg(debug_assertions)]
         {
-            set_locale("en-XA");
+            Language::PseudoEnglish.set_global();
             assert!(
-                translate("tray.open").starts_with('['),
+                MessageKey::new("tray.open").translate().starts_with('['),
                 "pseudo-locale translation must have a start marker"
             );
         }
-        set_locale("en");
-        assert_eq!(translate("tray.open"), "Open", "global English locale");
+        Language::English.set_global();
+        assert_eq!(
+            MessageKey::new("tray.open").translate(),
+            "Open",
+            "global English locale"
+        );
     }
 
     #[test]
@@ -330,7 +354,10 @@ mod tests {
         }
         assert!("zh".parse::<Language>().is_err());
         assert!("fr".parse::<Language>().is_err());
-        assert_eq!(Language::SimplifiedChinese.translate("tray.open"), "打开");
+        assert_eq!(
+            MessageKey::new("tray.open").in_language(Language::SimplifiedChinese),
+            "打开"
+        );
         assert!(Language::SimplifiedChinese.has_message("tray.open"));
         assert!(!Language::SimplifiedChinese.has_message("no.such.key"));
         assert_eq!(
@@ -349,7 +376,11 @@ mod tests {
             (vec!["en-US", "zh-CN"], "en"),
             (vec!["ZH-cn"], "zh-CN"),
         ] {
-            assert_eq!(negotiate_language(&preferred), expected, "{preferred:?}");
+            assert_eq!(
+                Language::negotiate(&preferred).code(),
+                expected,
+                "{preferred:?}"
+            );
         }
     }
 
@@ -361,7 +392,7 @@ mod tests {
         for (key, english) in backend.messages_for_locale("en").expect("English catalog") {
             let pseudo = backend
                 .translate("en-XA", &key)
-                .unwrap_or_else(|| panic!("missing pseudo translation for {key}"));
+                .expect("each English message has a generated pseudo translation");
             assert!(pseudo.starts_with('[') && pseudo.ends_with(']'), "{key}");
             assert!(
                 pseudo.chars().count() >= english.chars().count() * 14 / 10,
@@ -380,7 +411,7 @@ mod tests {
             "unresolved placeholder in {message}"
         );
         assert_eq!(
-            negotiate_language(&["en-XA"]),
+            Language::negotiate(&["en-XA"]).code(),
             "en-XA",
             "explicit pseudo-locale selection"
         );

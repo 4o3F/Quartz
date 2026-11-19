@@ -43,6 +43,15 @@ pub enum CompileRulesError {
         source: NormalizeDomainError,
     },
 }
+struct CompiledExpressions {
+    conditions: Vec<CompiledCondition>,
+    pattern: Option<Regex>,
+}
+struct PrivacyMatch {
+    index: usize,
+    action: PrivacyAction,
+}
+
 #[derive(Debug, Clone)]
 struct CompiledCondition {
     condition: Condition,
@@ -211,6 +220,7 @@ impl Extraction {
             let suffix = snapshot
                 .value(Field::DisplayName)
                 .map(|name| format!(" - {name}"));
+            // Titles without the application's suffix remain unchanged.
             suffix
                 .as_deref()
                 .and_then(|suffix| title.strip_suffix(suffix))
@@ -274,9 +284,9 @@ impl EffectiveRules {
         let mut conditions = Vec::new();
         let mut patterns = Vec::new();
         for entry in &self.rules {
-            let (compiled, pattern) = entry.rule.compile_expressions()?;
-            conditions.push(compiled);
-            patterns.push(pattern);
+            let compiled = entry.rule.compile_expressions()?;
+            conditions.push(compiled.conditions);
+            patterns.push(compiled.pattern);
         }
         Ok(CompiledRules {
             effective: self.clone(),
@@ -361,23 +371,30 @@ impl CompiledRules {
                                 .into_iter()
                                 .filter_map(|name| captures.name(name))
                                 .collect();
-                            let start = spans
-                                .iter()
-                                .map(|capture| capture.start())
-                                .min()
-                                .unwrap_or(0);
-                            let end = spans
-                                .iter()
-                                .map(|capture| capture.end())
-                                .max()
-                                .unwrap_or(title.as_str().len());
-                            Some(title.as_str()[start..end].to_owned())
+                            // Only fields allowed by privacy policy reach extraction (06 §6).
+                            // A match without named captures retains that allowed title in full.
+                            if spans.is_empty() {
+                                Some(title.as_str().to_owned())
+                            } else {
+                                let start = spans
+                                    .iter()
+                                    .map(|capture| capture.start())
+                                    .min()
+                                    .expect("capture spans are nonempty");
+                                let end = spans
+                                    .iter()
+                                    .map(|capture| capture.end())
+                                    .max()
+                                    .expect("capture spans are nonempty");
+                                Some(title.as_str()[start..end].to_owned())
+                            }
                         },
                         status: ExtractionStatus::Extracted,
                     })
                 })
             });
             let pattern_matched = self.patterns[index].as_ref().map(|_| captures.is_some());
+            // Rules without an extraction pattern are decided by their conditions alone.
             let matched = matches && pattern_matched.unwrap_or(true);
             let status = if !matched {
                 RuleStatus::DidNotMatch
@@ -395,7 +412,7 @@ impl CompiledRules {
                     action.web = action.web.max(super::WebAction::DomainOnly);
                 }
                 action = PrivacyAction::default().merge(action);
-                privacy_matches.push((index, action));
+                privacy_matches.push(PrivacyMatch { index, action });
                 result.privacy = result.privacy.merge(action);
                 RuleStatus::Merged
             } else if let Some(winner) = winner {
@@ -447,40 +464,43 @@ impl CompiledRules {
     }
     fn privacy_source<T: Ord + Copy>(
         &self,
-        matches: &[(usize, PrivacyAction)],
+        matches: &[PrivacyMatch],
         field: impl Fn(PrivacyAction) -> T,
         baseline: T,
     ) -> Option<String> {
         matches
             .iter()
-            .filter(|(_, action)| field(*action) > baseline)
-            .max_by_key(|(index, action)| {
-                let rule = &self.effective.rules[*index];
+            .filter(|matched| field(matched.action) > baseline)
+            .max_by_key(|matched| {
+                let rule = &self.effective.rules[matched.index];
                 (
-                    field(*action),
+                    field(matched.action),
                     rule.rule.builtin.is_none(),
                     std::cmp::Reverse(rule.preorder),
                     std::cmp::Reverse(rule.file_order),
                 )
             })
-            .map(|(index, _)| self.effective.rules[*index].explanation_id())
+            .map(|matched| self.effective.rules[matched.index].explanation_id())
     }
 }
 
 impl super::Rule {
-    fn compile_expressions(
-        &self,
-    ) -> Result<(Vec<CompiledCondition>, Option<Regex>), CompileRulesError> {
-        let (when, pattern) = match &self.body {
-            RuleBody::Classification { when, .. } | RuleBody::Privacy { when, .. } => (when, None),
-            RuleBody::Extraction { app, pattern } => (app, Some(compile_regex(pattern)?)),
+    fn compile_expressions(&self) -> Result<CompiledExpressions, CompileRulesError> {
+        let when = match &self.body {
+            RuleBody::Classification { when, .. } | RuleBody::Privacy { when, .. } => when,
+            RuleBody::Extraction { app, .. } => app,
         };
-        Ok((
-            when.iter()
+        let pattern = match &self.body {
+            RuleBody::Extraction { pattern, .. } => Some(compile_regex(pattern)?),
+            RuleBody::Classification { .. } | RuleBody::Privacy { .. } => None,
+        };
+        Ok(CompiledExpressions {
+            conditions: when
+                .iter()
                 .map(CompiledCondition::compile)
                 .collect::<Result<_, _>>()?,
             pattern,
-        ))
+        })
     }
 }
 impl super::RuleSet {

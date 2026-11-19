@@ -18,7 +18,7 @@ pub use evaluate::{
 };
 pub use identity::{
     ParseRuleIdError, ParseRuleSetKeyError, ParseRuleTargetError, RuleId, RuleSetKey, RuleTarget,
-    RuleWriteCode,
+    RuleVersion, RuleWriteCode,
 };
 pub use model::{
     Action, BuiltinMetadata, CaseSensitivity, CategoryReference, Condition, Content, Disable,
@@ -27,8 +27,8 @@ pub use model::{
 };
 pub use parse::{ParseContext, ParseRuleSetError, ReferenceCatalog};
 pub use resolve::{
-    EffectiveRule, EffectiveRules, Enablement, InstalledSet, Resolution, RuleProvenance,
-    SuppressedRule, SuppressionReason,
+    EffectiveRule, EffectiveRules, Enablement, InstalledSet, OverrideRef, Resolution,
+    RuleProvenance, SuppressedRule, SuppressionReason,
 };
 
 /// Embedded privacy rules; all language variants are evaluated together.

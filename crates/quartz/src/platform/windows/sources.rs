@@ -2,14 +2,17 @@
 
 use crate::core::{
     app::{CaptureSender, CloseCaptureError, ObserveCaptureError, ObservedEvent, ShutdownPort},
-    sources::{ClockReader, ClockSample, InputSample, PowerNotice, ReadClockError, SessionNotice},
+    sources::{
+        ClockReader, ClockSample, InputSample, PowerNotice, ReadClockError, SessionAttempt,
+        SessionInitialization, SessionNotice, SessionRegistration,
+    },
 };
 use quartz_domain::capture::{
     AdvanceTimeError, CaptureEvent, ClockChange, LastInput, MonoInstant, SessionStatus, StopReason,
     Timer, Timestamp,
 };
 use snafu::Snafu;
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc};
 use windows::{
     Win32::{
         Foundation::{HANDLE, HWND, WPARAM},
@@ -38,8 +41,6 @@ use windows::{
     core::PWSTR,
 };
 
-/// Session registration failures stay stopped and retry at most once per five seconds (02 §3).
-const SESSION_RETRY_DELAY: Duration = Duration::from_secs(5);
 const TIMER_ID: usize = 1;
 const WTS_INFO_LEVEL: u32 = 1;
 
@@ -57,7 +58,7 @@ impl ClockReader for SystemClock {
             });
         }
         ClockSample {
-            filetime_ticks: (u64::from(filetime.dwHighDateTime) << 32)
+            filetime_ticks: (u64::from(filetime.dwHighDateTime) << u32::BITS)
                 | u64::from(filetime.dwLowDateTime),
             interrupt_ticks,
         }
@@ -71,6 +72,8 @@ pub(super) enum QuerySessionError {
     Register { source: windows::core::Error },
     #[snafu(display("could not query WTSInfoEx"))]
     Query { source: windows::core::Error },
+    #[snafu(display("WTSInfoEx buffer exceeds addressable memory"))]
+    BufferSize { source: std::num::TryFromIntError },
     #[snafu(display("WTSInfoEx returned an unsupported layout or session state"))]
     InvalidState,
 }
@@ -155,11 +158,9 @@ impl SessionBuffer {
         }
         .map_err(|source| QuerySessionError::Query { source })?;
         let buffer = Self(pointer);
-        if usize::try_from(bytes)
-            .ok()
-            .is_none_or(|bytes| bytes < size_of::<WTSINFOEXW>())
-            || buffer.0.is_null()
-        {
+        let bytes =
+            usize::try_from(bytes).map_err(|source| QuerySessionError::BufferSize { source })?;
+        if bytes < size_of::<WTSINFOEXW>() || buffer.0.is_null() {
             return Err(QuerySessionError::InvalidState);
         }
         Ok(buffer)
@@ -199,14 +200,8 @@ pub(super) struct Sources {
     session_window: super::tray::window::Window,
     ingress: SystemIngress,
     power: HPOWERNOTIFY,
-    registration: SessionRegistration,
+    session: SessionInitialization,
     core_deadline: Option<MonoInstant>,
-    retry: Option<MonoInstant>,
-}
-#[derive(Debug, Clone, Copy)]
-enum SessionRegistration {
-    Pending,
-    Registered,
 }
 impl Sources {
     pub(super) fn start(window: HWND, ingress: SystemIngress) -> Result<Self, ObserveSystemError> {
@@ -229,9 +224,8 @@ impl Sources {
             session_window,
             ingress,
             power,
-            registration: SessionRegistration::Pending,
+            session: SessionInitialization::new(),
             core_deadline: None,
-            retry: None,
         })
     }
     pub(super) fn foreground(
@@ -242,37 +236,28 @@ impl Sources {
             .dispatch(command)
             .map_err(|source| ObserveSystemError::Foreground { source })
     }
-    fn query(&mut self) -> Result<SessionStatus, QuerySessionError> {
-        if let SessionRegistration::Pending = self.registration {
-            // SAFETY: Notifications are delivered only to the live window on this thread.
-            unsafe {
-                WTSRegisterSessionNotification(self.session_window.raw(), NOTIFY_FOR_THIS_SESSION)
-            }
-            .map_err(|source| QuerySessionError::Register { source })?;
-            self.registration = SessionRegistration::Registered;
-        }
-        SessionBuffer::query()?.status()
-    }
-
     pub(super) fn query_session(&mut self) -> Result<(), ObserveSystemError> {
         let now = SystemClock
             .read()
             .map_err(|source| ObserveSystemError::Clock { source })?;
-        if self.retry.is_some_and(|retry| now.mono < retry) {
-            return self.arm(now);
-        }
-        let status = match self.query() {
-            Ok(status) => {
-                self.retry = None;
-                status
-            }
-            Err(error) => {
+        let window = self.session_window.raw();
+        let attempt = self
+            .session
+            .attempt(
+                now.mono,
+                || {
+                    // SAFETY: Notifications are delivered only to the live window on this thread.
+                    unsafe { WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION) }
+                        .map_err(|source| QuerySessionError::Register { source })
+                },
+                || SessionBuffer::query()?.status(),
+            )
+            .map_err(|source| ObserveSystemError::Deadline { source })?;
+        let status = match attempt {
+            SessionAttempt::Deferred => return self.arm(now),
+            SessionAttempt::Ready(status) => status,
+            SessionAttempt::Failed(error) => {
                 tracing::error!(%error, "session initialization failed");
-                self.retry = Some(
-                    now.mono
-                        .checked_add(SESSION_RETRY_DELAY)
-                        .map_err(|source| ObserveSystemError::Deadline { source })?,
-                );
                 SessionStatus::Unavailable
             }
         };
@@ -293,13 +278,20 @@ impl Sources {
     fn arm(&self, now: Timestamp) -> Result<(), ObserveSystemError> {
         // SAFETY: This is the sole timer ID on this live main-thread window.
         unsafe {
+            // Cancellation is best-effort because no timer may currently be armed.
             let _ = KillTimer(Some(self.window), TIMER_ID);
         }
-        if let Some(deadline) = self.core_deadline.into_iter().chain(self.retry).min() {
+        if let Some(deadline) = self
+            .core_deadline
+            .into_iter()
+            .chain(self.session.retry())
+            .min()
+        {
             let delay = deadline
                 .get()
                 .saturating_sub(now.mono.get())
                 .max(u64::from(USER_TIMER_MINIMUM));
+            // Longer deadlines are clamped to Win32's maximum timer interval.
             let delay = u32::try_from(delay)
                 .unwrap_or(USER_TIMER_MAXIMUM)
                 .min(USER_TIMER_MAXIMUM);
@@ -315,6 +307,7 @@ impl Sources {
     pub(super) fn fired(&mut self, at: Timestamp) -> Result<(), ObserveSystemError> {
         // SAFETY: Kill before processing makes SetTimer one-shot, including reentrant dispatch.
         unsafe {
+            // Cancellation is best-effort because no timer may currently be armed.
             let _ = KillTimer(Some(self.window), TIMER_ID);
         }
         if self
@@ -323,7 +316,7 @@ impl Sources {
         {
             self.core_deadline = None;
         }
-        if self.retry.is_some_and(|retry| retry <= at.mono) {
+        if self.session.retry().is_some_and(|retry| retry <= at.mono) {
             self.query_session()?;
         }
         self.arm(at)
@@ -356,8 +349,10 @@ impl Drop for Sources {
     fn drop(&mut self) {
         // SAFETY: Registrations and timer belong to this live main-thread window.
         unsafe {
+            // Best-effort teardown: the timer may already be cancelled.
             let _ = KillTimer(Some(self.window), TIMER_ID);
-            if let SessionRegistration::Registered = self.registration {
+            if let SessionRegistration::Registered = self.session.registration() {
+                // Best-effort teardown: Drop cannot report session unregistration failures.
                 let _ = WTSUnRegisterSessionNotification(self.session_window.raw());
             }
             if let Err(error) = Power::UnregisterSuspendResumeNotification(self.power) {

@@ -40,6 +40,35 @@ use clap::{Parser, Subcommand};
 use snafu::ResultExt;
 use snafu::Snafu;
 
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+enum Autostart {
+    Enabled,
+    Disabled,
+}
+#[cfg(windows)]
+impl From<bool> for Autostart {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+enum UiLaunch {
+    Open,
+    Prewarm,
+}
+#[cfg(windows)]
+impl From<bool> for UiLaunch {
+    fn from(prewarm: bool) -> Self {
+        if prewarm { Self::Prewarm } else { Self::Open }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Parser)]
 #[command(name = "quartz", bin_name = "quartz", version)]
 struct Args {
@@ -69,7 +98,8 @@ enum Command {
     Cli(CliCommand),
 }
 
-#[derive(Debug, PartialEq, Eq, Subcommand)]
+#[derive(Debug, PartialEq, Eq, Subcommand, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 enum CliCommand {
     /// Print intervals for a date.
     Dump {
@@ -110,7 +140,8 @@ enum CliCommand {
     Rules(RulesCommand),
 }
 
-#[derive(Debug, PartialEq, Eq, Subcommand)]
+#[derive(Debug, PartialEq, Eq, Subcommand, strum::IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 enum RulesCommand {
     /// Check rule files and the installed rule tree offline.
     Check {
@@ -141,22 +172,15 @@ enum RulesCommand {
     },
 }
 
-impl CliCommand {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Dump { .. } => "dump",
-            Self::Status => "status",
-            Self::GenData { .. } => "gen-data",
-            Self::BenchQuery { .. } => "bench-query",
-            Self::RestoreBackup { .. } => "restore-backup",
-            Self::Rules(rules) => match rules {
-                RulesCommand::Check { .. } => "rules check",
-                RulesCommand::Preview { .. } => "rules preview",
-                RulesCommand::Diff { .. } => "rules diff",
-                RulesCommand::Explain { .. } => "rules explain",
-                RulesCommand::Tree { .. } => "rules tree",
-            },
+impl std::fmt::Display for CliCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name: &'static str = self.into();
+        formatter.write_str(name)?;
+        if let Self::Rules(rules) = self {
+            let name: &'static str = rules.into();
+            write!(formatter, " {name}")?;
         }
+        Ok(())
     }
 }
 
@@ -177,7 +201,7 @@ enum DispatchCommandError {
         source: rules_check::CheckRulesError,
     },
     #[snafu(display("not implemented yet: {operation}"))]
-    NotImplemented { operation: &'static str },
+    NotImplemented { operation: CliCommand },
     #[cfg(windows)]
     #[snafu(display("could not restore database backup: {source}"))]
     Restore {
@@ -218,19 +242,12 @@ impl CliCommand {
         #[cfg(windows)]
         if let CliCommand::RestoreBackup { file, yes } = &command {
             use snafu::ResultExt as _;
-            let confirmation = if *yes {
-                commands::RestoreConfirmation::Confirmed
-            } else {
-                commands::RestoreConfirmation::Required
-            };
+            let confirmation = commands::RestoreConfirmation::from(*yes);
             return commands::RestoreBackupCommand::new(file, confirmation)
                 .run()
                 .context(RestoreSnafu);
         }
-        NotImplementedSnafu {
-            operation: command.name(),
-        }
-        .fail()
+        NotImplementedSnafu { operation: command }.fail()
     }
 }
 
@@ -244,7 +261,7 @@ fn main() -> ExitCode {
     };
     match args.command {
         #[cfg(windows)]
-        None => platform::CoreProcess::new().run(),
+        None => platform::CoreProcess::new().run(Autostart::from(args.autostart)),
         #[cfg(not(windows))]
         None => ExitCode::FAILURE,
         #[cfg(windows)]
@@ -265,11 +282,12 @@ fn main() -> ExitCode {
                     language: platform::UiLanguage::detect().as_str(),
                     error: quartz_protocol::CoreError::new(code, backup_path),
                 }
-            } else if prewarm {
-                quartz_ui::RunOptions::Prewarm
             } else {
-                quartz_ui::RunOptions::Open {
-                    language: platform::UiLanguage::detect().as_str(),
+                match UiLaunch::from(prewarm) {
+                    UiLaunch::Prewarm => quartz_ui::RunOptions::Prewarm,
+                    UiLaunch::Open => quartz_ui::RunOptions::Open {
+                        language: platform::UiLanguage::detect().as_str(),
+                    },
                 }
             };
             UiCommand::new(options).run()
@@ -285,7 +303,7 @@ fn main() -> ExitCode {
             match command.dispatch() {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
-                    tracing::debug!(target: "quartz::entry", error = %error, "command failed");
+                    tracing::debug!(error = %error, "command failed");
                     eprintln!("{error}");
                     ExitCode::FAILURE
                 }
@@ -343,6 +361,27 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::*;
+
+    #[test]
+    fn unsupported_command_error_keeps_the_subcommand_and_display_name() {
+        let error = CliCommand::Rules(RulesCommand::Preview {
+            file: "private-rules.toml".into(),
+            days: 14,
+        })
+        .dispatch()
+        .expect_err("preview remains unimplemented");
+        assert_eq!(error.to_string(), "not implemented yet: rules preview");
+        let DispatchCommandError::NotImplemented { operation } = error else {
+            panic!("expected unsupported command error");
+        };
+        assert_eq!(
+            operation,
+            CliCommand::Rules(RulesCommand::Preview {
+                file: "private-rules.toml".into(),
+                days: 14,
+            })
+        );
+    }
 
     #[test]
     fn unknown_arguments_do_not_start_core() {
@@ -493,7 +532,7 @@ mod tests {
                 continue;
             }
             assert!(
-                matches!(command.dispatch(), Err(DispatchCommandError::NotImplemented { operation }) if operation == args[0]),
+                matches!(command.dispatch(), Err(DispatchCommandError::NotImplemented { operation }) if operation.to_string() == args[0]),
                 "dispatch operation for {args:?}"
             );
         }
@@ -610,7 +649,7 @@ mod tests {
                 continue;
             }
             assert!(
-                matches!(command.dispatch(), Err(DispatchCommandError::NotImplemented { operation }) if operation == name),
+                matches!(command.dispatch(), Err(DispatchCommandError::NotImplemented { operation }) if operation.to_string() == name),
                 "dispatch operation for {args:?}"
             );
         }
@@ -772,26 +811,70 @@ mod tests {
 
     #[test]
     fn ui_help_and_invalid_flags_produce_clap_diagnostics() {
-        let suffixes: &[(&[&str], Option<ErrorKind>)] = &[
-            (&[], None),
-            (&["--"], None),
-            (&["--prewarm"], None),
-            (&["--prewarm", "--"], None),
-            (&["--help"], Some(ErrorKind::DisplayHelp)),
-            (&["-h"], Some(ErrorKind::DisplayHelp)),
-            (&["--version"], Some(ErrorKind::UnknownArgument)),
-            (&["--unknown"], Some(ErrorKind::UnknownArgument)),
-            (&["--autostart"], Some(ErrorKind::UnknownArgument)),
-            (
-                &["--prewarm", "--prewarm"],
-                Some(ErrorKind::ArgumentConflict),
-            ),
-            (&["--prewarm", "--help"], Some(ErrorKind::DisplayHelp)),
-            (&["--", "--help"], Some(ErrorKind::UnknownArgument)),
-            (&["--prewarm=true"], Some(ErrorKind::TooManyValues)),
+        struct UiFlagCase<'arguments> {
+            arguments: &'arguments [&'arguments str],
+            expected: Option<ErrorKind>,
+        }
+        let suffixes = [
+            UiFlagCase {
+                arguments: &[],
+                expected: None,
+            },
+            UiFlagCase {
+                arguments: &["--"],
+                expected: None,
+            },
+            UiFlagCase {
+                arguments: &["--prewarm"],
+                expected: None,
+            },
+            UiFlagCase {
+                arguments: &["--prewarm", "--"],
+                expected: None,
+            },
+            UiFlagCase {
+                arguments: &["--help"],
+                expected: Some(ErrorKind::DisplayHelp),
+            },
+            UiFlagCase {
+                arguments: &["-h"],
+                expected: Some(ErrorKind::DisplayHelp),
+            },
+            UiFlagCase {
+                arguments: &["--version"],
+                expected: Some(ErrorKind::UnknownArgument),
+            },
+            UiFlagCase {
+                arguments: &["--unknown"],
+                expected: Some(ErrorKind::UnknownArgument),
+            },
+            UiFlagCase {
+                arguments: &["--autostart"],
+                expected: Some(ErrorKind::UnknownArgument),
+            },
+            UiFlagCase {
+                arguments: &["--prewarm", "--prewarm"],
+                expected: Some(ErrorKind::ArgumentConflict),
+            },
+            UiFlagCase {
+                arguments: &["--prewarm", "--help"],
+                expected: Some(ErrorKind::DisplayHelp),
+            },
+            UiFlagCase {
+                arguments: &["--", "--help"],
+                expected: Some(ErrorKind::UnknownArgument),
+            },
+            UiFlagCase {
+                arguments: &["--prewarm=true"],
+                expected: Some(ErrorKind::TooManyValues),
+            },
         ];
         for autostart_count in 0..=2 {
-            for (suffix, expected) in suffixes {
+            for UiFlagCase {
+                arguments: suffix,
+                expected,
+            } in &suffixes
+            {
                 let args: Vec<_> = std::iter::repeat_n("--autostart", autostart_count)
                     .chain(Some("ui"))
                     .chain(suffix.iter().copied())

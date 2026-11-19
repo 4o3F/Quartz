@@ -23,6 +23,7 @@ impl OwnedHandle {
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         // SAFETY: Construction transfers unique ownership of a valid kernel handle.
+        // Best-effort teardown: Drop cannot report handle closure failures.
         let _ = unsafe { Foundation::CloseHandle(self.0) };
     }
 }

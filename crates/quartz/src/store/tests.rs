@@ -31,45 +31,59 @@ fn migrate_empty_and_reopen_without_another_backup() {
 
 #[test]
 fn enum_labels_match_every_rust_enum_exactly() {
-    fn labels<T: enums::IntegerCode>() -> Vec<(String, i32, String)> {
-        T::VARIANTS
-            .iter()
-            .map(|value| (T::COLUMN.to_owned(), value.code(), value.label().to_owned()))
-            .collect()
+    #[derive(Debug, Queryable, PartialEq, Eq, PartialOrd, Ord)]
+    struct EnumLabel {
+        enum_name: String,
+        code: i32,
+        label: String,
+    }
+    impl EnumLabel {
+        fn all<T: enums::IntegerCode>() -> Vec<Self> {
+            T::VARIANTS
+                .iter()
+                .map(|value| Self {
+                    enum_name: T::COLUMN.to_string(),
+                    code: value.code(),
+                    label: value.label().to_owned(),
+                })
+                .collect()
+        }
     }
 
     use schema::enum_labels::dsl::{code, enum_labels, enum_name, label};
     let mut conn = empty();
     let mut actual = enum_labels
         .select((enum_name, code, label))
-        .load::<(String, i32, String)>(&mut conn)
+        .load::<EnumLabel>(&mut conn)
         .expect("read enum labels");
     let mut expected = [
-        labels::<enums::RunEndReason>(),
-        labels::<enums::ClockEndReason>(),
-        labels::<enums::ApplicationKind>(),
-        labels::<enums::IntervalKind>(),
-        labels::<enums::NoForegroundReason>(),
-        labels::<enums::TitleStatus>(),
-        labels::<enums::CaptureLevel>(),
-        labels::<enums::IntervalEndReason>(),
-        labels::<enums::AvailabilityReason>(),
-        labels::<enums::AvailabilityEndReason>(),
-        labels::<enums::IdleException>(),
-        labels::<enums::WebEndReason>(),
-        labels::<enums::LinkStatus>(),
-        labels::<enums::WebLevel>(),
-        labels::<enums::IngestOutcome>(),
-        labels::<enums::CategoryTendency>(),
-        labels::<enums::RuleSetKind>(),
-        labels::<enums::RuleSetSource>(),
-        labels::<enums::AnnotationKind>(),
-        labels::<enums::DataSource>(),
-        labels::<enums::GapReason>(),
-        labels::<enums::TimedPolicyKind>(),
-        labels::<enums::PrivacyMode>(),
+        EnumLabel::all::<enums::RunEndReason>(),
+        EnumLabel::all::<enums::ClockEndReason>(),
+        EnumLabel::all::<enums::ApplicationKind>(),
+        EnumLabel::all::<enums::IntervalKind>(),
+        EnumLabel::all::<enums::NoForegroundReason>(),
+        EnumLabel::all::<enums::TitleStatus>(),
+        EnumLabel::all::<enums::CaptureLevel>(),
+        EnumLabel::all::<enums::IntervalEndReason>(),
+        EnumLabel::all::<enums::AvailabilityReason>(),
+        EnumLabel::all::<enums::AvailabilityEndReason>(),
+        EnumLabel::all::<enums::IdleException>(),
+        EnumLabel::all::<enums::WebEndReason>(),
+        EnumLabel::all::<enums::LinkStatus>(),
+        EnumLabel::all::<enums::WebLevel>(),
+        EnumLabel::all::<enums::IngestOutcome>(),
+        EnumLabel::all::<enums::CategoryTendency>(),
+        EnumLabel::all::<enums::RuleSetKind>(),
+        EnumLabel::all::<enums::RuleSetSource>(),
+        EnumLabel::all::<enums::AnnotationKind>(),
+        EnumLabel::all::<enums::DataSource>(),
+        EnumLabel::all::<enums::GapReason>(),
+        EnumLabel::all::<enums::TimedPolicyKind>(),
+        EnumLabel::all::<enums::PrivacyMode>(),
     ]
-    .concat();
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     actual.sort();
     expected.sort();
     assert_eq!(
@@ -136,7 +150,14 @@ fn unknown_sql_code_returns_decode_enum_error() {
         let cause = source
             .downcast_ref::<enums::DecodeEnumError>()
             .expect("SQL decoding must preserve DecodeEnumError");
-        assert_eq!(cause.enum_name, "title_status");
+        assert_eq!(
+            cause.enum_name,
+            <enums::TitleStatus as enums::EnumColumn>::COLUMN
+        );
+        assert_eq!(
+            cause.to_string(),
+            format!("unknown title_status code {code}")
+        );
         assert_eq!(cause.code, code);
     }
 }
@@ -377,6 +398,7 @@ fn prune_only_generated_backups_and_keep_two_newest() {
     let root = DataDirectory::new(directory.path());
     fs::create_dir_all(root.backups()).expect("backups directory");
     for name in [
+        "pre-migrate-0--42.db",
         "pre-migrate-0-1.db",
         "pre-migrate-20261116000000-2.db",
         "pre-migrate-0-3.db",
@@ -386,7 +408,14 @@ fn prune_only_generated_backups_and_keep_two_newest() {
         fs::write(root.backups().join(name), []).expect("backup file");
     }
     root.prune_backups();
+    assert!(!root.backups().join("pre-migrate-0--42.db").exists());
     assert!(!root.backups().join("pre-migrate-0-1.db").exists());
+    assert!(
+        root.backups()
+            .join("pre-migrate-20261116000000-2.db")
+            .exists()
+    );
+    assert!(root.backups().join("pre-migrate-0-3.db").exists());
     assert_eq!(fs::read_dir(root.backups()).expect("backups").count(), 4);
 }
 
@@ -475,4 +504,64 @@ fn timed_policy_constraints_enforce_scope_mode_order_and_foreign_keys() {
         error,
         Error::DatabaseError(DatabaseErrorKind::ForeignKeyViolation, _)
     ));
+}
+
+#[test]
+fn backup_names_round_trip_and_preserve_negative_timestamps() {
+    let parsed = BackupName::parse("pre-migrate-20261116000000--42.db").expect("generated backup");
+    assert_eq!(parsed.version, "20261116000000");
+    assert_eq!(parsed.timestamp, -42);
+    assert_eq!(parsed.to_string(), "pre-migrate-20261116000000--42.db");
+    for name in [
+        "manual.db",
+        "pre-migrate--1.db",
+        "pre-migrate-v1-1.db",
+        "pre-migrate-0-overflow.db",
+        "pre-migrate-0-9223372036854775808.db",
+    ] {
+        assert!(
+            BackupName::parse(name).is_none(),
+            "unrecognized backup {name}"
+        );
+    }
+}
+
+#[test]
+fn sqlite_versions_compare_numerically_and_reject_malformed_components() {
+    assert!("3.9.0".parse::<SqliteVersion>().expect("valid version") < SqliteVersion::MINIMUM);
+    assert!("3.100.0".parse::<SqliteVersion>().expect("valid version") > SqliteVersion::MINIMUM);
+    assert_eq!(
+        "3.51.3".parse::<SqliteVersion>().expect("minimum version"),
+        SqliteVersion::MINIMUM
+    );
+    for version in ["3.51", "3.51.3.1"] {
+        assert!(
+            matches!(
+                version.parse::<SqliteVersion>(),
+                Err(ParseSqliteVersionError::Components)
+            ),
+            "{version}"
+        );
+    }
+    for version in ["3.no.3", "3.51.-1", "3.51.4294967296"] {
+        assert!(
+            matches!(
+                version.parse::<SqliteVersion>(),
+                Err(ParseSqliteVersionError::Integer { .. })
+            ),
+            "{version}"
+        );
+    }
+}
+
+#[test]
+fn prune_backups_propagates_directory_read_failure() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let directory = DataDirectory::new(temporary.path());
+    let error = directory
+        .try_prune_backups()
+        .expect_err("missing backup directory");
+    assert!(
+        matches!(error, PruneMigrationBackupsError::ReadDirectory { source } if source.kind() == std::io::ErrorKind::NotFound)
+    );
 }

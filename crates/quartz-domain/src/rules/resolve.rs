@@ -1,4 +1,7 @@
-use super::{ContentHash, Diagnostic, DiagnosticCode, EntryPosition, Rule, RuleKind, RuleSet};
+use super::{
+    ContentHash, Diagnostic, DiagnosticCode, EntryPosition, Rule, RuleKind, RuleSet, RuleSetKey,
+    RuleVersion,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,6 +25,76 @@ pub struct InstalledSet {
     /// User-defined sibling position, with smaller values traversed first.
     pub sibling_order: i64,
 }
+/// The rule-set revision supplying an ancestor replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverrideRef {
+    /// Validated key of the replacing rule set.
+    pub set: RuleSetKey,
+    /// Revision of the replacing rule set.
+    pub version: RuleVersion,
+}
+impl OverrideRef {
+    const FIELD_COUNT: usize = 2;
+    fn from_installed(installed: &InstalledSet) -> Self {
+        Self {
+            set: installed
+                .set
+                .header
+                .key
+                .parse()
+                .expect("parsed rule sets have validated keys"),
+            version: RuleVersion::new(installed.version),
+        }
+    }
+}
+// Preserve the existing two-element revision array on the serialized boundary.
+impl Serialize for OverrideRef {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeTuple;
+        let mut fields = serializer.serialize_tuple(Self::FIELD_COUNT)?;
+        fields.serialize_element(&self.set)?;
+        fields.serialize_element(&self.version)?;
+        fields.end()
+    }
+}
+impl<'de> Deserialize<'de> for OverrideRef {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_tuple(Self::FIELD_COUNT, OverrideRefVisitor)
+    }
+}
+struct OverrideRefVisitor;
+impl<'de> serde::de::Visitor<'de> for OverrideRefVisitor {
+    type Value = OverrideRef;
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a rule-set key followed by its revision")
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut sequence: A,
+    ) -> Result<Self::Value, A::Error> {
+        use serde::de::Error;
+        let set = sequence
+            .next_element()?
+            .ok_or_else(|| A::Error::invalid_length(0, &self))?;
+        let version = sequence
+            .next_element()?
+            .ok_or_else(|| A::Error::invalid_length(1, &self))?;
+        if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+            return Err(A::Error::invalid_length(
+                OverrideRef::FIELD_COUNT + 1,
+                &self,
+            ));
+        }
+        Ok(OverrideRef { set, version })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Modification {
+    set_index: usize,
+    path: String,
+}
+
 /// Original definition and every replacement, in ancestor-to-descendant order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleProvenance {
@@ -30,7 +103,7 @@ pub struct RuleProvenance {
     /// Revision of the original definition.
     pub defining_version: u32,
     /// Replacing set keys and revisions, ordered from the first ancestor replacement to the latest.
-    pub overrides: Vec<(String, u32)>,
+    pub overrides: Vec<OverrideRef>,
 }
 /// A rule after ancestor overlays have been applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,16 +124,16 @@ pub struct EffectiveRule {
 impl EffectiveRule {
     /// Returns the explanation ID for the revision supplying the current contents.
     pub fn explanation_id(&self) -> String {
-        let (set, version) = self
-            .provenance
-            .overrides
-            .last()
-            .map(|(set, version)| (set.as_str(), *version))
-            .unwrap_or((
-                &self.provenance.defining_set,
-                self.provenance.defining_version,
-            ));
-        format!("{set}/{}@{version}", self.rule.id)
+        match self.provenance.overrides.last() {
+            Some(replacement) => format!(
+                "{}/{}@{}",
+                replacement.set, self.rule.id, replacement.version
+            ),
+            None => format!(
+                "{}/{}@{}",
+                self.provenance.defining_set, self.rule.id, self.provenance.defining_version
+            ),
+        }
     }
 }
 /// Why a formerly effective rule no longer participates.
@@ -160,7 +233,7 @@ impl Resolution {
                 cursor = parent_index;
             }
         }
-        let mut modifications: BTreeMap<&str, Vec<(usize, String)>> = BTreeMap::new();
+        let mut modifications: BTreeMap<&str, Vec<Modification>> = BTreeMap::new();
         let mut bad_targets = BTreeSet::new();
         for (index, installed) in sets.iter().enumerate() {
             let targets = installed
@@ -197,21 +270,37 @@ impl Resolution {
                         &path,
                         "target does not name a rule in an ancestor set",
                     ));
-                    bad_targets.insert((index, path.clone()));
+                    bad_targets.insert(Modification {
+                        set_index: index,
+                        path: path.clone(),
+                    });
                 }
                 let previous = modifications.entry(target).or_default();
-                for (other, other_path) in previous.iter() {
+                for Modification {
+                    set_index: other,
+                    path: other_path,
+                } in previous.iter()
+                {
                     if !ancestors[index].contains(other) && !ancestors[*other].contains(&index) {
                         diagnostics.push(installed.set.diagnostic(
                             DiagnosticCode::Conflict,
                             &path,
                             "target is also modified outside this ancestor chain",
                         ));
-                        bad_targets.insert((index, path.clone()));
-                        bad_targets.insert((*other, other_path.clone()));
+                        bad_targets.insert(Modification {
+                            set_index: index,
+                            path: path.clone(),
+                        });
+                        bad_targets.insert(Modification {
+                            set_index: *other,
+                            path: other_path.clone(),
+                        });
                     }
                 }
-                previous.push((index, path));
+                previous.push(Modification {
+                    set_index: index,
+                    path,
+                });
             }
         }
         let mut traversal: Vec<_> = (0..sets.len())
@@ -266,11 +355,14 @@ impl Resolution {
                         .order
                         .iter()
                         .position(|p| *p == EntryPosition::Rule(file_order))
-                        .unwrap_or(file_order),
+                        .expect("canonical content order includes every rule"),
                 });
             }
             for (i, entry) in set.content.r#override.iter().enumerate() {
-                if bad_targets.contains(&(index, format!("override[{i}].target"))) {
+                if bad_targets.contains(&Modification {
+                    set_index: index,
+                    path: format!("override[{i}].target"),
+                }) {
                     continue;
                 }
                 if let Some(position) = rules.iter().position(|rule| rule.full_id == entry.target) {
@@ -279,7 +371,7 @@ impl Resolution {
                     replacement
                         .provenance
                         .overrides
-                        .push((set.header.key.clone(), installed.version));
+                        .push(OverrideRef::from_installed(installed));
                     replacement.depth = ancestors[index].len();
                     replacement.preorder = preorder;
                     replacement.file_order = set
@@ -287,7 +379,7 @@ impl Resolution {
                         .order
                         .iter()
                         .position(|p| *p == EntryPosition::Override(i))
-                        .unwrap_or(i);
+                        .expect("canonical content order includes every override");
                     let old = std::mem::replace(&mut rules[position], replacement);
                     suppressed.push(SuppressedRule {
                         rule: old,
@@ -307,7 +399,7 @@ impl Resolution {
                         replacement
                             .provenance
                             .overrides
-                            .push((set.header.key.clone(), installed.version));
+                            .push(OverrideRef::from_installed(installed));
                         replacement.depth = ancestors[index].len();
                         replacement.preorder = preorder;
                         replacement.file_order = set
@@ -315,13 +407,16 @@ impl Resolution {
                             .order
                             .iter()
                             .position(|p| *p == EntryPosition::Override(i))
-                            .unwrap_or(i);
+                            .expect("canonical content order includes every override");
                         rules.push(replacement);
                     }
                 }
             }
             for (i, entry) in set.content.disable.iter().enumerate() {
-                if bad_targets.contains(&(index, format!("disable[{i}].target"))) {
+                if bad_targets.contains(&Modification {
+                    set_index: index,
+                    path: format!("disable[{i}].target"),
+                }) {
                     continue;
                 }
                 if let Some(position) = rules.iter().position(|rule| rule.full_id == entry.target) {

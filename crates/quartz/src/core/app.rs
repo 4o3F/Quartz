@@ -292,6 +292,25 @@ impl ShutdownPort {
     }
 }
 
+/// Completion and reply receivers may be dropped while shutdown joins the workers.
+trait SendDuringShutdown<T> {
+    fn send_during_shutdown(&self, value: T);
+}
+impl<T> SendDuringShutdown<T> for Sender<T> {
+    fn send_during_shutdown(&self, value: T) {
+        if self.send(value).is_err() {
+            tracing::debug!("receiver disconnected during worker shutdown");
+        }
+    }
+}
+impl SendDuringShutdown<MainCommand> for MainPort {
+    fn send_during_shutdown(&self, command: MainCommand) {
+        if let Err(error) = self.send(command) {
+            tracing::debug!(%error, "main receiver disconnected during worker shutdown");
+        }
+    }
+}
+
 struct WorkerGuard {
     worker: Worker,
     main: MainPort,
@@ -309,11 +328,11 @@ impl WorkerGuard {
         let result = run();
         if let Err(error) = &result {
             tracing::error!(?worker, %error, "worker failed");
-            let _ = guard.main.send(MainCommand::Fatal(worker));
+            guard.main.send_during_shutdown(MainCommand::Fatal(worker));
         }
         tracing::info!(?worker, "worker stopped");
-        let _ = completed.send(result);
-        let _ = finished.send(());
+        completed.send_during_shutdown(result);
+        finished.send_during_shutdown(());
     }
 }
 impl Drop for WorkerGuard {
@@ -338,10 +357,55 @@ impl Drop for WorkerGuard {
 mod tests {
     use super::*;
     use crate::capture::{PersistenceState, WriteQueue};
+    use crate::core::sources::{ClockReader, ReadClockError};
     use capture_loop::{CaptureLoop, Settlement};
     use crossbeam_channel::bounded;
     use quartz_domain::capture::*;
     use quartz_domain::rules::registry::{RegistryState, RuleRegistry};
+
+    struct TestClock(Timestamp);
+    impl ClockReader for TestClock {
+        fn read(&self) -> Result<Timestamp, ReadClockError> {
+            Ok(self.0)
+        }
+    }
+
+    #[test]
+    fn shutdown_notifications_deliver_values_and_tolerate_closed_receivers() {
+        let (sender, receiver) = bounded(CONTROL_CAPACITY);
+        sender.send_during_shutdown(Worker::Capture);
+        assert!(matches!(
+            receiver.recv().expect("completion"),
+            Worker::Capture
+        ));
+        drop(receiver);
+        sender.send_during_shutdown(Worker::Database);
+
+        let (sender, receiver) = bounded(CONTROL_CAPACITY);
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let main = MainPort {
+            sender,
+            wake: {
+                let wakes = Arc::clone(&wakes);
+                Arc::new(move || {
+                    wakes.fetch_add(1, Ordering::Relaxed);
+                })
+            },
+        };
+        main.send_during_shutdown(MainCommand::Fatal(Worker::Capture));
+        assert!(matches!(
+            receiver.recv().expect("fatal command"),
+            MainCommand::Fatal(Worker::Capture)
+        ));
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        drop(receiver);
+        main.send_during_shutdown(MainCommand::Fatal(Worker::Database));
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            1,
+            "no wake after receiver teardown"
+        );
+    }
 
     #[test]
     fn persistence_failure_selects_warning_indicator() {
@@ -406,6 +470,7 @@ mod tests {
                 wake: Arc::new(|| {}),
             },
             overloaded: Arc::new(AtomicBool::new(false)),
+            clock: Arc::new(TestClock(at)),
         };
         for event in [
             CaptureEvent::Session(SessionStatus::Ready(Default::default())),

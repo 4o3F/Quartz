@@ -16,7 +16,7 @@ impl Capture<'_> {
         run: RunId,
         at: Timestamp,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        let utc = CaptureColumn::new("capture_runs", "started_utc_ms").utc(at.utc)?;
+        let utc = CaptureColumn::new(capture_runs::started_utc_ms).utc(at.utc)?;
         let row = CaptureRunsRow {
             id: Some(Self::run_id(run)?.get()),
             device_id: self.metadata.device_id.clone(),
@@ -45,15 +45,13 @@ impl Capture<'_> {
                 .filter(capture_runs::ended_utc_ms.is_null()),
         )
         .set((
-            capture_runs::ended_utc_ms.eq(id
-                .context("capture_runs")
-                .field("ended_utc_ms")
-                .utc(at.utc)?),
+            capture_runs::ended_utc_ms
+                .eq(id.context().field(capture_runs::ended_utc_ms).utc(at.utc)?),
             capture_runs::confirmed_utc_ms.eq(None::<i64>),
             capture_runs::end_reason.eq(enums::RunEndReason::from(reason)),
         ))
         .execute(self.connection)?;
-        id.require_open("capture_runs", count)
+        id.require_open(capture_runs::table, count)
     }
     pub(super) fn open_clock_segment(
         &mut self,
@@ -61,8 +59,8 @@ impl Capture<'_> {
         segment: SegmentId,
         at: Timestamp,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        let utc = CaptureColumn::new("clock_segments", "start_utc_ms").utc(at.utc)?;
-        let mono = CaptureColumn::new("clock_segments", "start_mono_ms").mono(at.mono)?;
+        let utc = CaptureColumn::new(clock_segments::start_utc_ms).utc(at.utc)?;
+        let mono = CaptureColumn::new(clock_segments::start_mono_ms).mono(at.mono)?;
         let row = ClockSegmentsRow {
             id: None,
             run_id: Self::run_id(run)?.get(),
@@ -98,20 +96,21 @@ impl Capture<'_> {
         reason: ClockEndReason,
     ) -> Result<(), ExecuteCaptureBatchError> {
         let id = self.segment(run, segment)?;
-        let context = id.context("clock_segments");
+        let context = id.context();
         let count = diesel::update(
             clock_segments::table
                 .filter(clock_segments::id.eq(id.get()))
                 .filter(clock_segments::end_utc_ms.is_null()),
         )
         .set((
-            clock_segments::end_utc_ms.eq(context.field("end_utc_ms").utc(at.utc)?),
-            clock_segments::end_mono_ms.eq(context.field("end_mono_ms").mono(at.mono)?),
+            clock_segments::end_utc_ms.eq(context.field(clock_segments::end_utc_ms).utc(at.utc)?),
+            clock_segments::end_mono_ms
+                .eq(context.field(clock_segments::end_mono_ms).mono(at.mono)?),
             clock_segments::confirmed_utc_ms.eq(None::<i64>),
             clock_segments::confirmed_mono_ms.eq(None::<i64>),
             clock_segments::end_reason.eq(enums::ClockEndReason::from(reason)),
         ))
         .execute(self.connection)?;
-        id.require_open("clock_segments", count)
+        id.require_open(clock_segments::table, count)
     }
 }

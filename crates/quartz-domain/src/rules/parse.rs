@@ -20,6 +20,11 @@ use std::{
 };
 use toml::Spanned;
 
+/// Rule priority when the optional field is absent.
+const DEFAULT_PRIORITY: u16 = 50;
+/// Largest rule priority accepted by the published format.
+const MAX_PRIORITY: u16 = 1000;
+
 /// Names and builtin keys mapped to durable category UUIDs by the caller.
 #[derive(Debug, Clone, Default)]
 pub struct ReferenceCatalog {
@@ -173,6 +178,7 @@ impl RuleSet {
                         code: DiagnosticCode::Format,
                         set_key: file.into(),
                         path: "".into(),
+                        // A parser error without a span is anchored at the source's beginning.
                         location: SourceLocation::new(file, source, error.span().unwrap_or(0..0)),
                         message: error.message().into(),
                     },
@@ -183,6 +189,7 @@ impl RuleSet {
         let mut source_map = SourceMap::new(file, source);
         let root = source_map.flatten(root, "");
         let locations = source_map.locations;
+        // Diagnostics use the source file label until a set key is available.
         let key = root
             .pointer("/set/key")
             .and_then(Value::as_str)
@@ -202,31 +209,33 @@ impl RuleSet {
                 "expected format = \"quartz-rules/1\"",
             );
         }
+        // Missing headers enter the non-table diagnostic path while other fields are checked.
         let header = root.get("set").unwrap_or(&Value::Null);
         check.keys(
             header,
             "set",
             &["key", "kind", "name", "parent", "description", "chain"],
         );
-        let key = check
-            .string(header, "key", "set", Required::Yes)
-            .unwrap_or_default();
-        if key.is_empty()
-            || !key
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-_".contains(&b))
-            || (context.origin == RuleOrigin::User && key.starts_with("builtin."))
-        {
+        let key = check.required_string(header, "key", "set");
+        if key.as_deref().is_none_or(|key| {
+            key.is_empty()
+                || !key
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-_".contains(&b))
+                || (context.origin == RuleOrigin::User && key.starts_with("builtin."))
+        }) {
             check.error(
                 DiagnosticCode::Set,
                 "set.key",
                 "invalid or reserved rule-set key",
             );
         }
-        let kind_text = check
-            .string(header, "kind", "set", Required::Yes)
-            .unwrap_or_default();
-        let kind = RuleKind::parse(&kind_text).unwrap_or_else(|| {
+        let kind = check
+            .required_string(header, "kind", "set")
+            .as_deref()
+            .and_then(RuleKind::parse);
+        // Classification grammar collects the remaining diagnostics when the kind is invalid.
+        let kind = kind.unwrap_or_else(|| {
             check.error(DiagnosticCode::Set, "set.kind", "unknown rule kind");
             RuleKind::Classification
         });
@@ -237,9 +246,7 @@ impl RuleSet {
                 "this rule kind requires milestone M7 and is not supported yet",
             );
         }
-        let name = check
-            .string(header, "name", "set", Required::Yes)
-            .unwrap_or_default();
+        let name = check.required_string(header, "name", "set");
         let parent = check.string(header, "parent", "set", Required::No);
         let description = check.string(header, "description", "set", Required::No);
         let chain = check.string(
@@ -281,16 +288,19 @@ impl RuleSet {
                 let path = format!("{section}[{index}]");
                 if section == "disable" {
                     check.keys(entry, &path, &["target", "reason"]);
-                    let target = check
-                        .string(entry, "target", &path, Required::Yes)
-                        .unwrap_or_default();
-                    check.target(&target, &path);
+                    let target = check.required_string(entry, "target", &path);
+                    match &target {
+                        Some(target) => check.target(target, &path),
+                        None => check.invalid_target(&path),
+                    }
                     let reason = check.string(entry, "reason", &path, Required::No);
-                    content.disable.push(Disable { target, reason });
+                    if let Some(target) = target {
+                        content.disable.push(Disable { target, reason });
+                    }
                     continue;
                 }
                 let target = if section == "override" {
-                    check.string(entry, "target", &path, Required::Yes)
+                    check.required_string(entry, "target", &path)
                 } else {
                     None
                 };
@@ -307,21 +317,20 @@ impl RuleSet {
                     );
                 }
                 let id = if section == "rule" {
-                    check
-                        .string(entry, "id", &path, Required::Yes)
-                        .unwrap_or_default()
+                    check.required_string(entry, "id", &path)
                 } else {
                     target
                         .as_deref()
                         .and_then(|t| t.split_once('/'))
                         .map(|(_, id)| id.to_owned())
-                        .unwrap_or_default()
                 };
                 if section == "rule"
-                    && (id.is_empty()
-                        || !id
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                    && id.as_deref().is_none_or(|id| {
+                        id.is_empty()
+                            || !id
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    })
                 {
                     check.error(
                         DiagnosticCode::Value,
@@ -329,7 +338,10 @@ impl RuleSet {
                         "invalid rule identifier",
                     );
                 }
-                if section == "rule" && !ids.insert(id.clone()) {
+                // Missing and empty IDs share an incomplete-ID marker for duplicate diagnostics.
+                if section == "rule"
+                    && !ids.insert(id.as_ref().filter(|id| !id.is_empty()).cloned())
+                {
                     check.error(
                         DiagnosticCode::Dup,
                         &format!("{path}.id"),
@@ -377,9 +389,10 @@ impl RuleSet {
         } else {
             Ok(RuleSet {
                 header: SetHeader {
-                    key,
+                    key: key.expect("required set key exists when validation has no diagnostics"),
                     kind,
-                    name,
+                    name: name
+                        .expect("required set name exists when validation has no diagnostics"),
                     parent,
                     description,
                     chain,
@@ -414,12 +427,15 @@ impl Check<'_> {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
         }) {
-            self.error(
-                DiagnosticCode::Target,
-                &format!("{path}.target"),
-                "expected a target in set-key/rule-id format",
-            );
+            self.invalid_target(path);
         }
+    }
+    fn invalid_target(&mut self, path: &str) {
+        self.error(
+            DiagnosticCode::Target,
+            &format!("{path}.target"),
+            "expected a target in set-key/rule-id format",
+        );
     }
     fn error(&mut self, code: DiagnosticCode, path: &str, message: impl Into<String>) {
         let mut ancestor = path.to_owned();
@@ -460,6 +476,10 @@ impl Check<'_> {
                     .location = span.clone();
             }
         }
+    }
+    /// Records missing or mistyped fields and returns None so other fields can still be checked.
+    fn required_string(&mut self, table: &Value, key: &str, path: &str) -> Option<String> {
+        self.string(table, key, path, Required::Yes)
     }
     fn string(
         &mut self,
@@ -647,7 +667,7 @@ impl Check<'_> {
         entry: &Value,
         path: &str,
         kind: RuleKind,
-        id: String,
+        id: Option<String>,
         section: &str,
     ) -> Option<Rule> {
         let mut keys = vec!["label", "priority"];
@@ -721,26 +741,27 @@ impl Check<'_> {
             None
         };
         let priority = match entry.get("priority") {
-            None => 50,
+            None => DEFAULT_PRIORITY,
             Some(value) => match value
                 .as_u64()
-                .and_then(|v| u16::try_from(v).ok())
-                .filter(|v| *v <= 1000)
+                .filter(|value| *value <= u64::from(MAX_PRIORITY))
             {
-                Some(value) => value,
+                Some(value) => u16::try_from(value).expect("checked priority range fits in u16"),
                 None => {
                     self.error(
                         DiagnosticCode::Value,
                         &format!("{path}.priority"),
                         "priority must be an integer from 0 to 1000",
                     );
-                    50
+                    // The set is rejected; this value only permits collecting other diagnostics.
+                    DEFAULT_PRIORITY
                 }
             },
         };
         let mode =
             self.string(entry, "match", path, Required::No)
                 .map_or(MatchMode::All, |value| {
+                    // Invalid modes are diagnosed before checking the remaining rule fields.
                     MatchMode::parse(&value).unwrap_or_else(|| {
                         self.error(
                             DiagnosticCode::Value,
@@ -752,34 +773,27 @@ impl Check<'_> {
                 });
         let body = match kind {
             RuleKind::Classification => {
-                let category = self
-                    .string(entry, "category", path, Required::Yes)
-                    .unwrap_or_default();
-                let uuid = self
-                    .context
-                    .references
-                    .categories
-                    .get(&category)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        self.error(
-                            DiagnosticCode::Ref,
-                            &format!("{path}.category"),
-                            "category does not exist",
-                        );
-                        String::new()
-                    });
+                let category = self.required_string(entry, "category", path);
+                let uuid = category
+                    .as_ref()
+                    .and_then(|category| self.context.references.categories.get(category).cloned());
+                if uuid.is_none() {
+                    self.error(
+                        DiagnosticCode::Ref,
+                        &format!("{path}.category"),
+                        "category does not exist",
+                    );
+                }
+                let when = self.conditions(entry, "when", path, kind);
                 RuleBody::Classification {
-                    category: CategoryReference { uuid },
+                    category: CategoryReference { uuid: uuid? },
                     mode,
-                    when: self.conditions(entry, "when", path, kind),
+                    when,
                 }
             }
             RuleKind::Extraction => {
                 let app = self.conditions(entry, "app", path, kind);
-                let pattern = self
-                    .string(entry, "pattern", path, Required::Yes)
-                    .unwrap_or_default();
+                let pattern = self.required_string(entry, "pattern", path)?;
                 self.regex(&pattern, &format!("{path}.pattern"), kind);
                 RuleBody::Extraction { app, pattern }
             }
@@ -870,7 +884,7 @@ impl Check<'_> {
             }
         };
         Some(Rule {
-            id,
+            id: id?,
             label,
             priority,
             builtin,

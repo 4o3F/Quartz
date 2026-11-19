@@ -1,5 +1,10 @@
 //! Stable integer encodings shared with migration enum_labels.
 
+use super::{
+    identifiers::{ColumnName, EnumName},
+    schema,
+};
+
 use diesel::{
     deserialize::FromSqlRow,
     deserialize::{self, FromSql},
@@ -15,13 +20,13 @@ use strum::{IntoStaticStr, VariantArray};
 #[derive(Debug, snafu::Snafu)]
 #[snafu(display("unknown {enum_name} code {code}"))]
 pub(super) struct DecodeEnumError {
-    pub(super) enum_name: &'static str,
+    pub(super) enum_name: EnumName,
     pub(super) code: i32,
 }
 
 /// Column context attached to unknown integer codes.
 pub(super) trait EnumColumn {
-    const COLUMN: &'static str;
+    const COLUMN: EnumName;
 }
 
 /// Stable encodings and labels derived from each enum's explicit variants.
@@ -92,7 +97,7 @@ pub(crate) enum RunEndReason {
 }
 
 impl EnumColumn for RunEndReason {
-    const COLUMN: &'static str = "capture_runs.end_reason";
+    const COLUMN: EnumName = EnumName::column(schema::capture_runs::end_reason);
 }
 
 /// Why a UTC-to-monotonic clock segment ended.
@@ -113,7 +118,7 @@ pub(crate) enum ClockEndReason {
 }
 
 impl EnumColumn for ClockEndReason {
-    const COLUMN: &'static str = "clock_segments.end_reason";
+    const COLUMN: EnumName = EnumName::column(schema::clock_segments::end_reason);
 }
 
 /// Identity used to distinguish an application.
@@ -132,7 +137,7 @@ pub(super) enum ApplicationKind {
 }
 
 impl EnumColumn for ApplicationKind {
-    const COLUMN: &'static str = "applications.kind";
+    const COLUMN: EnumName = EnumName::column(schema::applications::kind);
 }
 
 /// Whether a foreground interval represents a window or no foreground.
@@ -147,7 +152,7 @@ pub(super) enum IntervalKind {
 }
 
 impl EnumColumn for IntervalKind {
-    const COLUMN: &'static str = "intervals.kind";
+    const COLUMN: EnumName = EnumName::column(schema::intervals::kind);
 }
 
 /// Why an interval has no foreground window.
@@ -164,7 +169,7 @@ pub(crate) enum NoForegroundReason {
 }
 
 impl EnumColumn for NoForegroundReason {
-    const COLUMN: &'static str = "intervals.no_foreground_reason";
+    const COLUMN: EnumName = EnumName::column(schema::intervals::no_foreground_reason);
 }
 
 /// Title availability shared by foreground and browser records.
@@ -189,7 +194,8 @@ pub(crate) enum TitleStatus {
 }
 
 impl EnumColumn for TitleStatus {
-    const COLUMN: &'static str = "title_status";
+    const COLUMN: EnumName =
+        EnumName::SharedColumn(ColumnName::of(schema::intervals::title_status));
 }
 
 /// Privacy level retained for a foreground interval.
@@ -208,7 +214,7 @@ pub(crate) enum CaptureLevel {
 }
 
 impl EnumColumn for CaptureLevel {
-    const COLUMN: &'static str = "intervals.capture_level";
+    const COLUMN: EnumName = EnumName::column(schema::intervals::capture_level);
 }
 
 /// Boundary that closed a foreground interval.
@@ -241,7 +247,7 @@ pub(crate) enum IntervalEndReason {
 }
 
 impl EnumColumn for IntervalEndReason {
-    const COLUMN: &'static str = "intervals.end_reason";
+    const COLUMN: EnumName = EnumName::column(schema::intervals::end_reason);
 }
 
 /// State recorded as an availability interval.
@@ -259,7 +265,7 @@ pub(crate) enum AvailabilityReason {
 }
 
 impl EnumColumn for AvailabilityReason {
-    const COLUMN: &'static str = "availability_intervals.reason";
+    const COLUMN: EnumName = EnumName::column(schema::availability_intervals::reason);
 }
 
 /// Boundary that closed an availability interval.
@@ -283,7 +289,7 @@ pub(crate) enum AvailabilityEndReason {
 }
 
 impl EnumColumn for AvailabilityEndReason {
-    const COLUMN: &'static str = "availability_intervals.end_reason";
+    const COLUMN: EnumName = EnumName::column(schema::availability_intervals::end_reason);
 }
 
 /// Exception that ended an idle interval early.
@@ -302,7 +308,7 @@ pub(crate) enum IdleException {
 }
 
 impl EnumColumn for IdleException {
-    const COLUMN: &'static str = "availability_intervals.exception";
+    const COLUMN: EnumName = EnumName::column(schema::availability_intervals::exception);
 }
 
 /// Boundary that closed a browser interval.
@@ -328,7 +334,7 @@ pub(super) enum WebEndReason {
 }
 
 impl EnumColumn for WebEndReason {
-    const COLUMN: &'static str = "web_intervals.end_reason";
+    const COLUMN: EnumName = EnumName::column(schema::web_intervals::end_reason);
 }
 
 /// Confidence of a browser interval's foreground association.
@@ -345,7 +351,7 @@ pub(super) enum LinkStatus {
 }
 
 impl EnumColumn for LinkStatus {
-    const COLUMN: &'static str = "web_intervals.link_status";
+    const COLUMN: EnumName = EnumName::column(schema::web_intervals::link_status);
 }
 
 /// Privacy level retained for a stored browser interval.
@@ -362,7 +368,7 @@ pub(super) enum WebLevel {
 }
 
 impl EnumColumn for WebLevel {
-    const COLUMN: &'static str = "web_intervals.web_level";
+    const COLUMN: EnumName = EnumName::column(schema::web_intervals::web_level);
 }
 
 /// Durable result used to acknowledge a browser message.
@@ -385,7 +391,7 @@ pub(super) enum IngestOutcome {
 }
 
 impl EnumColumn for IngestOutcome {
-    const COLUMN: &'static str = "ingest_receipts.outcome";
+    const COLUMN: EnumName = EnumName::column(schema::ingest_receipts::outcome);
 }
 
 /// Contribution of a category to focus and distraction totals.
@@ -401,7 +407,7 @@ pub(super) enum CategoryTendency {
 }
 
 impl EnumColumn for CategoryTendency {
-    const COLUMN: &'static str = "categories.tendency";
+    const COLUMN: EnumName = EnumName::column(schema::categories::tendency);
 }
 
 /// Rule family evaluated by a rule-set tree.
@@ -421,7 +427,7 @@ pub(super) enum RuleSetKind {
 }
 
 impl EnumColumn for RuleSetKind {
-    const COLUMN: &'static str = "rule_sets.kind";
+    const COLUMN: EnumName = EnumName::column(schema::rule_sets::kind);
 }
 
 /// Whether a rule set is built in or supplied by the user.
@@ -436,7 +442,7 @@ pub(super) enum RuleSetSource {
 }
 
 impl EnumColumn for RuleSetSource {
-    const COLUMN: &'static str = "rule_sets.source";
+    const COLUMN: EnumName = EnumName::column(schema::rule_sets::source);
 }
 
 /// User annotation applied over a time range.
@@ -458,7 +464,7 @@ pub(super) enum AnnotationKind {
 }
 
 impl EnumColumn for AnnotationKind {
-    const COLUMN: &'static str = "annotations.kind";
+    const COLUMN: EnumName = EnumName::column(schema::annotations::kind);
 }
 
 /// Fact source whose per-day version invalidates cached results.
@@ -479,7 +485,7 @@ pub(super) enum DataSource {
 }
 
 impl EnumColumn for DataSource {
-    const COLUMN: &'static str = "data_day_versions.source";
+    const COLUMN: EnumName = EnumName::column(schema::data_day_versions::source);
 }
 
 /// Failure that left a capture interval without trustworthy facts.
@@ -497,7 +503,7 @@ pub(crate) enum GapReason {
 }
 
 impl EnumColumn for GapReason {
-    const COLUMN: &'static str = "capture_gaps.reason";
+    const COLUMN: EnumName = EnumName::column(schema::capture_gaps::reason);
 }
 
 /// Persisted policy identities; scheduler-only slots have no database code.
@@ -525,7 +531,7 @@ pub(crate) enum TimedPolicyKind {
     Audible = 5,
 }
 impl EnumColumn for TimedPolicyKind {
-    const COLUMN: &'static str = "timed_policies.kind";
+    const COLUMN: EnumName = EnumName::column(schema::timed_policies::kind);
 }
 #[derive(
     Debug,
@@ -549,7 +555,7 @@ pub(crate) enum PrivacyMode {
     NoTitles = 3,
 }
 impl EnumColumn for PrivacyMode {
-    const COLUMN: &'static str = "timed_policies.privacy_mode";
+    const COLUMN: EnumName = EnumName::column(schema::timed_policies::privacy_mode);
 }
 impl From<quartz_domain::capture::TimedPolicyKind> for TimedPolicyKind {
     fn from(kind: quartz_domain::capture::TimedPolicyKind) -> Self {

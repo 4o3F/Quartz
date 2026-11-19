@@ -84,6 +84,15 @@ pub enum AppIdentity {
     Unresolved(String),
 }
 impl AppIdentity {
+    /// Prefers a packaged application's AUMID, otherwise normalizes its Windows executable path.
+    #[must_use]
+    pub fn from_process(executable: &str, aumid: Option<&str>) -> Self {
+        match aumid {
+            Some(value) => Self::Aumid(value.to_owned()),
+            None => Self::Exe(executable.replace('/', "\\").to_lowercase()),
+        }
+    }
+
     /// Produces the stable application dictionary key.
     pub fn key(&self) -> String {
         match self {

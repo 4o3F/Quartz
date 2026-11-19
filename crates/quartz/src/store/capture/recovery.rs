@@ -73,14 +73,18 @@ struct RecoveryRowIds {
     context: RowContext,
 }
 impl RecoveryRowIds {
+    /// Interval sequences begin at one when a run has no persisted intervals.
+    const FIRST_SEQUENCE: i64 = 1;
     fn allocate(&mut self) -> Result<RowId, DecodeCaptureRowError> {
         let id = self.next()?;
-        self.next = self.context.next_identifier(self.next, "sequence")?;
+        self.next = self
+            .context
+            .next_identifier(self.next, intervals::sequence)?;
         Ok(id)
     }
     fn next(&self) -> Result<RowId, DecodeCaptureRowError> {
         self.context
-            .unsigned(self.next, "sequence")
+            .unsigned(self.next, intervals::sequence)
             .map(RowId::from_persisted)
     }
 }
@@ -89,21 +93,21 @@ impl Capture<'_> {
         let last_run = capture_runs::table
             .select(diesel::dsl::max(capture_runs::id))
             .first::<Option<i64>>(self.connection)?;
-        let context = RowContext::new("capture_runs", last_run);
+        let context = RowContext::new(last_run);
         let next = match last_run {
-            Some(id) => context.next_identifier(id, "id")?,
+            Some(id) => context.next_identifier(id, capture_runs::id)?,
             None => 1,
         };
         let last_segment = clock_segments::table
             .select(diesel::dsl::max(clock_segments::id))
             .first::<Option<i64>>(self.connection)?;
-        let segment_context = RowContext::new("clock_segments", last_segment);
+        let segment_context = RowContext::new(last_segment);
         Ok(CaptureStartup {
-            next_run: RunId::new(context.unsigned(next, "id")?),
+            next_run: RunId::new(context.unsigned(next, capture_runs::id)?),
             last_segment: last_segment
                 .map(|id| {
                     segment_context
-                        .unsigned(id, "id")
+                        .unsigned(id, clock_segments::id)
                         .map(SegmentId::from_persisted)
                 })
                 .transpose()?,
@@ -126,10 +130,15 @@ impl Capture<'_> {
                 .first::<String>(self.connection)
                 .optional()?
             {
-                let millis = value
-                    .parse::<i64>()
-                    .map_err(|source| DecodeCaptureRowError::Deadline { key, value, source })?;
-                let at = RowContext::new("settings", None).utc(millis, key)?;
+                let millis =
+                    value
+                        .parse::<i64>()
+                        .map_err(|source| DecodeCaptureRowError::Deadline {
+                            owner,
+                            value,
+                            source,
+                        })?;
+                let at = RowContext::new(None).utc(millis, settings::value)?;
                 deadlines.push(PersistedDeadline { owner, at });
             }
         }
@@ -149,9 +158,9 @@ impl Capture<'_> {
         &mut self,
         row: CaptureRunsRow,
     ) -> Result<RecoverableRun, LoadRecoverableRunError> {
-        let context = RowContext::new("capture_runs", row.id);
-        let id = context.required(row.id, "id")?;
-        let run = RunId::new(context.unsigned(id, "id")?);
+        let context = RowContext::new(row.id);
+        let id = context.required(row.id, capture_runs::id)?;
+        let run = RunId::new(context.unsigned(id, capture_runs::id)?);
         self.keys.runs.insert(run, RunKeys::default());
         let confirmed = self.load_run_confirmation(&row)?;
         let segments = self.load_open_segments(run, DbRowId::new(id))?;
@@ -172,28 +181,29 @@ impl Capture<'_> {
         &mut self,
         row: &CaptureRunsRow,
     ) -> Result<Timestamp, LoadRecoverableRunError> {
-        let run_context = RowContext::new("capture_runs", row.id);
-        let id = run_context.required(row.id, "id")?;
+        let run_context = RowContext::new(row.id);
+        let id = run_context.required(row.id, capture_runs::id)?;
         let latest = clock_segments::table
             .filter(clock_segments::run_id.eq(id))
             .order(clock_segments::id.desc())
             .select(ClockSegmentsRow::as_select())
             .first::<ClockSegmentsRow>(self.connection)?;
-        let segment_context = RowContext::new("clock_segments", latest.id);
+        let segment_context = RowContext::new(latest.id);
         let mono = match latest.end_utc_ms {
             None => segment_context.mono(
-                segment_context.required(latest.confirmed_mono_ms, "confirmed_mono_ms")?,
-                "confirmed_mono_ms",
+                segment_context
+                    .required(latest.confirmed_mono_ms, clock_segments::confirmed_mono_ms)?,
+                clock_segments::confirmed_mono_ms,
             )?,
             Some(_) => segment_context.mono(
-                segment_context.required(latest.end_mono_ms, "end_mono_ms")?,
-                "end_mono_ms",
+                segment_context.required(latest.end_mono_ms, clock_segments::end_mono_ms)?,
+                clock_segments::end_mono_ms,
             )?,
         };
         Ok(Timestamp {
             utc: run_context.utc(
-                run_context.required(row.confirmed_utc_ms, "confirmed_utc_ms")?,
-                "confirmed_utc_ms",
+                run_context.required(row.confirmed_utc_ms, capture_runs::confirmed_utc_ms)?,
+                capture_runs::confirmed_utc_ms,
             )?,
             mono,
         })
@@ -211,16 +221,28 @@ impl Capture<'_> {
             .load(self.connection)?;
         let mut segments = Vec::new();
         for row in rows {
-            let context = RowContext::new("clock_segments", row.id);
-            let id = context.required(row.id, "id")?;
-            let segment = SegmentId::from_persisted(context.unsigned(id, "id")?);
+            let context = RowContext::new(row.id);
+            let id = context.required(row.id, clock_segments::id)?;
+            let segment = SegmentId::from_persisted(context.unsigned(id, clock_segments::id)?);
             self.run_keys(run)
                 .segments
                 .insert(segment, DbRowId::new(id));
-            let start = context.point(row.start_utc_ms, row.start_mono_ms, TimeColumns::Start)?;
+            let start = context.point(
+                row.start_utc_ms,
+                row.start_mono_ms,
+                TimeColumns::new(clock_segments::start_utc_ms, clock_segments::start_mono_ms),
+            )?;
             segments.push(ConfirmedSegment {
                 segment,
-                confirmed: context.confirmed(start, row.confirmed_utc_ms, row.confirmed_mono_ms)?,
+                confirmed: context.confirmed(
+                    start,
+                    row.confirmed_utc_ms,
+                    row.confirmed_mono_ms,
+                    TimeColumns::new(
+                        clock_segments::confirmed_utc_ms,
+                        clock_segments::confirmed_mono_ms,
+                    ),
+                )?,
             });
         }
         Ok(segments)
@@ -232,11 +254,13 @@ impl Capture<'_> {
         let maximum = intervals::table
             .filter(intervals::run_id.eq(run.get()))
             .select(diesel::dsl::max(intervals::sequence))
-            .first::<Option<i64>>(self.connection)?
-            .unwrap_or(0);
-        let context = RowContext::new("intervals", None);
+            .first::<Option<i64>>(self.connection)?;
+        let context = RowContext::new(None);
         Ok(RecoveryRowIds {
-            next: context.next_identifier(maximum, "sequence")?,
+            next: match maximum {
+                Some(sequence) => context.next_identifier(sequence, intervals::sequence)?,
+                None => RecoveryRowIds::FIRST_SEQUENCE,
+            },
             context,
         })
     }
@@ -259,16 +283,31 @@ impl Capture<'_> {
         run: RunId,
         row: IntervalsRow,
     ) -> Result<ConfirmedInterval, LoadRecoverableRunError> {
-        let context = RowContext::new("intervals", row.id);
-        let id = RowId::from_persisted(context.unsigned(row.sequence, "sequence")?);
+        let context = RowContext::new(row.id);
+        let id = RowId::from_persisted(context.unsigned(row.sequence, intervals::sequence)?);
         self.run_keys(run)
             .intervals
-            .insert(id, DbRowId::new(context.required(row.id, "id")?));
-        let segment = self.remember_segment(run, row.clock_segment_id, context)?;
-        let start = context.point(row.start_utc_ms, row.start_mono_ms, TimeColumns::Start)?;
-        let confirmed = context.confirmed(start, row.confirmed_utc_ms, row.confirmed_mono_ms)?;
-        let session =
-            domain::SessionKey::from_persisted(context.unsigned(row.session_key, "session_key")?);
+            .insert(id, DbRowId::new(context.required(row.id, intervals::id)?));
+        let segment = self.remember_segment(
+            run,
+            row.clock_segment_id,
+            context,
+            intervals::clock_segment_id,
+        )?;
+        let start = context.point(
+            row.start_utc_ms,
+            row.start_mono_ms,
+            TimeColumns::new(intervals::start_utc_ms, intervals::start_mono_ms),
+        )?;
+        let confirmed = context.confirmed(
+            start,
+            row.confirmed_utc_ms,
+            row.confirmed_mono_ms,
+            TimeColumns::new(intervals::confirmed_utc_ms, intervals::confirmed_mono_ms),
+        )?;
+        let session = domain::SessionKey::from_persisted(
+            context.unsigned(row.session_key, intervals::session_key)?,
+        );
         let fact = self.recover_interval_fact(run, row)?;
         Ok(ConfirmedInterval {
             row: domain::OpenInterval {
@@ -286,8 +325,9 @@ impl Capture<'_> {
         run: RunId,
         id: i64,
         context: RowContext,
+        column: impl crate::store::identifiers::SchemaColumn,
     ) -> Result<SegmentId, DecodeCaptureRowError> {
-        let segment = SegmentId::from_persisted(context.unsigned(id, "clock_segment_id")?);
+        let segment = SegmentId::from_persisted(context.unsigned(id, column)?);
         self.run_keys(run)
             .segments
             .insert(segment, DbRowId::new(id));
@@ -299,11 +339,11 @@ impl Capture<'_> {
         row: IntervalsRow,
     ) -> Result<domain::IntervalFact, LoadRecoverableRunError> {
         use crate::store::enums::IntervalKind;
-        let context = RowContext::new("intervals", row.id);
+        let context = RowContext::new(row.id);
         match row.kind {
             IntervalKind::NoForeground => Ok(domain::IntervalFact::NoForeground(
                 context
-                    .required(row.no_foreground_reason, "no_foreground_reason")?
+                    .required(row.no_foreground_reason, intervals::no_foreground_reason)?
                     .into(),
             )),
             IntervalKind::Window => {
@@ -325,7 +365,7 @@ impl Capture<'_> {
         id: i64,
         context: RowContext,
     ) -> Result<WindowId, DecodeCaptureRowError> {
-        let key = WindowId::from_persisted(context.unsigned(id, "window_instance_id")?);
+        let key = WindowId::from_persisted(context.unsigned(id, intervals::window_instance_id)?);
         self.run_keys(run).windows.insert(key, DbRowId::new(id));
         Ok(key)
     }
@@ -360,14 +400,35 @@ impl Capture<'_> {
         row: AvailabilityIntervalsRow,
         ids: &mut RecoveryRowIds,
     ) -> Result<ConfirmedAvailability, LoadRecoverableRunError> {
-        let context = RowContext::new("availability_intervals", row.id);
+        let context = RowContext::new(row.id);
         let id = ids.allocate()?;
-        self.run_keys(run)
-            .availability
-            .insert(id, DbRowId::new(context.required(row.id, "id")?));
-        let segment = self.remember_segment(run, row.clock_segment_id, context)?;
-        let start = context.point(row.start_utc_ms, row.start_mono_ms, TimeColumns::Start)?;
-        let confirmed = context.confirmed(start, row.confirmed_utc_ms, row.confirmed_mono_ms)?;
+        self.run_keys(run).availability.insert(
+            id,
+            DbRowId::new(context.required(row.id, availability_intervals::id)?),
+        );
+        let segment = self.remember_segment(
+            run,
+            row.clock_segment_id,
+            context,
+            availability_intervals::clock_segment_id,
+        )?;
+        let start = context.point(
+            row.start_utc_ms,
+            row.start_mono_ms,
+            TimeColumns::new(
+                availability_intervals::start_utc_ms,
+                availability_intervals::start_mono_ms,
+            ),
+        )?;
+        let confirmed = context.confirmed(
+            start,
+            row.confirmed_utc_ms,
+            row.confirmed_mono_ms,
+            TimeColumns::new(
+                availability_intervals::confirmed_utc_ms,
+                availability_intervals::confirmed_mono_ms,
+            ),
+        )?;
         let idle = row.idle_record(context, start)?;
         Ok(ConfirmedAvailability {
             row: domain::OpenAvailability {
@@ -391,7 +452,7 @@ impl IntervalsRow {
             self.title_status
                 .try_into()
                 .map_err(|source| DecodeCaptureRowError::Enum {
-                    field: context.field("title_status"),
+                    field: context.field(intervals::title_status),
                     value: self.title_status.code(),
                     source,
                 })?;
@@ -423,16 +484,34 @@ impl AvailabilityIntervalsRow {
         if self.reason != crate::store::enums::AvailabilityReason::Idle {
             return Ok(None);
         }
-        let last = context.required(self.last_input_utc_ms, "last_input_utc_ms")?;
-        let detected = context.required(self.detected_utc_ms, "detected_utc_ms")?;
-        let threshold = context.required(self.threshold_ms, "threshold_ms")?;
+        let last = context.required(
+            self.last_input_utc_ms,
+            availability_intervals::last_input_utc_ms,
+        )?;
+        let detected = context.required(
+            self.detected_utc_ms,
+            availability_intervals::detected_utc_ms,
+        )?;
+        let threshold =
+            context.required(self.threshold_ms, availability_intervals::threshold_ms)?;
         Ok(Some(domain::IdleRecord {
-            last_input: context.prior_point(start, last, "last_input_utc_ms")?,
+            last_input: context.prior_point(
+                start,
+                last,
+                availability_intervals::last_input_utc_ms,
+            )?,
             start,
-            detected: context.later_point(start, detected, "detected_utc_ms")?,
+            detected: context.later_point(
+                start,
+                detected,
+                availability_intervals::detected_utc_ms,
+            )?,
             policy: domain::IdlePolicy {
-                threshold: Duration::from_millis(context.unsigned(threshold, "threshold_ms")?),
-                version: context.policy_version(self.policy_version)?,
+                threshold: Duration::from_millis(
+                    context.unsigned(threshold, availability_intervals::threshold_ms)?,
+                ),
+                version: context
+                    .policy_version(self.policy_version, availability_intervals::policy_version)?,
             },
         }))
     }

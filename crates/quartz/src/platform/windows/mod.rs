@@ -97,9 +97,13 @@ impl StartCoreError {
                 source: store::OpenStoreError::NewerDatabase { .. },
             } => CoreError::new(
                 CoreErrorCode::NewerDatabase,
-                DataDirectory::resolve()
-                    .map(|directory| directory.available_backups())
-                    .unwrap_or_default(),
+                match DataDirectory::resolve() {
+                    Ok(directory) => directory.available_backups(),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not resolve migration backup directory");
+                        Vec::new()
+                    }
+                },
             ),
             Self::OpenStore {
                 source: store::OpenStoreError::Migrate { backup, .. },
@@ -110,8 +114,27 @@ impl StartCoreError {
     }
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
+/// Encodes a compile-time Win32 structure size into its DWORD size field.
+const fn structure_size<T>() -> u32 {
+    let bytes = size_of::<T>().to_le_bytes();
+    let mut index = size_of::<u32>();
+    while index < bytes.len() {
+        assert!(bytes[index] == 0, "Win32 structure size exceeds a DWORD");
+        index += 1;
+    }
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// Owned NUL-terminated UTF-16 text for synchronous Win32 calls.
+#[derive(Debug)]
+struct WideString(Vec<u16>);
+impl WideString {
+    fn new(text: &str) -> Self {
+        Self(text.encode_utf16().chain(Some(0)).collect())
+    }
+    fn as_ptr(&self) -> *const u16 {
+        self.0.as_ptr()
+    }
 }
 
 /// Attaches the parent console when one is available.
@@ -125,14 +148,26 @@ pub(super) fn attach_parent_console() {
 
 impl DataDirectory {
     fn available_backups(&self) -> Vec<PathBuf> {
-        let Ok(entries) = fs::read_dir(self.backups()) else {
-            return Vec::new();
+        let entries = match fs::read_dir(self.backups()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                tracing::warn!(%error, "could not list migration backups");
+                return Vec::new();
+            }
         };
-        let mut files: Vec<_> = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
-            .collect();
+        let mut files = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|ext| ext == "db") {
+                        files.push(path);
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "could not read migration backup entry"),
+            }
+        }
         files.sort();
         files
     }
@@ -143,12 +178,21 @@ enum CoreExit {
     UserExit,
     Shutdown,
     SessionEnded,
+    Failed,
 }
 impl CoreExit {
+    fn from_loop(result: &Result<Self, WaitCoreEventsError>) -> Self {
+        match result {
+            Ok(exit) => *exit,
+            Err(_) => Self::Failed,
+        }
+    }
     fn reason(self) -> RunEndReason {
         match self {
             Self::UserExit => RunEndReason::UserExit,
             Self::Shutdown | Self::SessionEnded => RunEndReason::Shutdown,
+            // Facts close at the current time; the error still propagates and is logged.
+            Self::Failed => RunEndReason::Shutdown,
         }
     }
 }
@@ -171,8 +215,8 @@ impl CoreProcess {
         }
     }
     /// Runs the Windows core on the calling main thread and reports startup failures.
-    pub(crate) fn run(mut self) -> ExitCode {
-        match self.start() {
+    pub(crate) fn run(mut self, autostart: crate::Autostart) -> ExitCode {
+        match self.start(autostart) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 let report = error.report();
@@ -184,7 +228,7 @@ impl CoreProcess {
             }
         }
     }
-    fn start(&mut self) -> Result<(), StartCoreError> {
+    fn start(&mut self, autostart: crate::Autostart) -> Result<(), StartCoreError> {
         let data_directory = DataDirectory::resolve().context(DataDirectorySnafu)?;
         data_directory
             .init_file_log(logging::LogTarget::Core)
@@ -241,19 +285,29 @@ impl CoreProcess {
         let mut sources = match Sources::start(tray.raw_window(), ingress) {
             Ok(sources) => sources,
             Err(error) => {
-                let at = SystemClock.read().context(ReadClockSnafu)?;
-                let _ = workers.request_shutdown(at, RunEndReason::Shutdown);
-                let _ = workers.join();
+                match SystemClock.read() {
+                    Ok(at) => {
+                        if let Err(error) = workers.request_shutdown(at, RunEndReason::Shutdown) {
+                            tracing::warn!(%error, "could not request shutdown after source startup failure");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not timestamp shutdown after source startup failure")
+                    }
+                }
+                if let Err(error) = workers.join() {
+                    tracing::warn!(%error, "could not join workers after source startup failure");
+                }
                 return Err(error).context(ObserveSystemSnafu);
             }
         };
         if let Err(error) = tray.update(self.tray_state(TrayTooltip::Ready)) {
             tracing::error!(?error, "could not update tray state");
         }
-        tracing::info!("core message loop started");
+        tracing::info!(?autostart, "core message loop started");
         let result = self.message_loop(&mut tray, &workers, &mut sources);
         self.ui = UiState::None;
-        let exit = result.as_ref().copied().unwrap_or(CoreExit::Shutdown);
+        let exit = CoreExit::from_loop(&result);
         let reason = exit.reason();
         let now = SystemClock.read().context(ReadClockSnafu)?;
         let request = match exit {
@@ -288,6 +342,7 @@ impl CoreProcess {
                 // SAFETY: The message was retrieved for this thread. The callback records actions
                 // without borrowing the UI state or tray across this reentrant Windows call.
                 unsafe {
+                    // The return value only says whether a character message was posted.
                     let _ = WindowsAndMessaging::TranslateMessage(&message);
                     WindowsAndMessaging::DispatchMessageW(&message);
                 }
@@ -422,6 +477,18 @@ mod tests {
     use super::*;
     use std::error::Error;
     use windows::{Win32::Foundation::ERROR_ACCESS_DENIED, core::HRESULT};
+
+    #[test]
+    fn message_loop_failure_settles_at_current_time_and_preserves_error() {
+        let result = Err::<CoreExit, _>(WaitCoreEventsError::WorkerFailed {
+            worker: Worker::Capture,
+        });
+        let exit = CoreExit::from_loop(&result);
+        assert_eq!(exit.reason(), RunEndReason::Shutdown);
+        assert!(result.is_err(), "the message-loop error still propagates");
+        assert_eq!(CoreExit::Shutdown.reason(), RunEndReason::Shutdown);
+        assert_eq!(CoreExit::UserExit.reason(), RunEndReason::UserExit);
+    }
 
     #[test]
     fn startup_error_preserves_win32_cause_and_call_name() {

@@ -1,13 +1,77 @@
 //! Checked conversion of system samples, without platform handles.
 
 use quartz_domain::capture::{
-    IdlePolicy, IdleSample, LastInput, MonoInstant, Timestamp, UtcInstant,
+    AdvanceTimeError, IdlePolicy, IdleSample, LastInput, MonoInstant, SessionStatus, Timestamp,
+    UtcInstant,
 };
 use snafu::Snafu;
 use std::time::Duration;
 
 const FILETIME_UNIX_EPOCH_TICKS: i128 = 116_444_736_000_000_000;
 const TICKS_PER_MILLISECOND: u64 = 10_000;
+
+/// Session initialization retries no sooner than five seconds after failure (02 §3).
+const SESSION_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionRegistration {
+    Pending,
+    Registered,
+}
+
+#[derive(Debug)]
+pub(crate) enum SessionAttempt<E> {
+    Deferred,
+    Ready(SessionStatus),
+    Failed(E),
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionInitialization {
+    registration: SessionRegistration,
+    retry: Option<MonoInstant>,
+}
+impl SessionInitialization {
+    pub(crate) fn new() -> Self {
+        Self {
+            registration: SessionRegistration::Pending,
+            retry: None,
+        }
+    }
+    pub(crate) fn registration(&self) -> SessionRegistration {
+        self.registration
+    }
+    pub(crate) fn retry(&self) -> Option<MonoInstant> {
+        self.retry
+    }
+    pub(crate) fn attempt<E>(
+        &mut self,
+        now: MonoInstant,
+        register: impl FnOnce() -> Result<(), E>,
+        query: impl FnOnce() -> Result<SessionStatus, E>,
+    ) -> Result<SessionAttempt<E>, AdvanceTimeError> {
+        if self.retry.is_some_and(|retry| now < retry) {
+            return Ok(SessionAttempt::Deferred);
+        }
+        let result = match self.registration {
+            SessionRegistration::Pending => register().map(|()| {
+                self.registration = SessionRegistration::Registered;
+            }),
+            SessionRegistration::Registered => Ok(()),
+        }
+        .and_then(|()| query());
+        match result {
+            Ok(status) => {
+                self.retry = None;
+                Ok(SessionAttempt::Ready(status))
+            }
+            Err(error) => {
+                self.retry = Some(now.checked_add(SESSION_RETRY_DELAY)?);
+                Ok(SessionAttempt::Failed(error))
+            }
+        }
+    }
+}
 
 #[derive(Debug, Snafu)]
 pub(crate) enum ReadClockError {
@@ -98,6 +162,65 @@ impl PowerNotice {
 mod tests {
     use super::*;
     use quartz_domain::capture::IdleStatus;
+
+    #[test]
+    fn session_registration_failure_retries_at_deadline_and_queries_before_ready() {
+        let mut session = SessionInitialization::new();
+        let start = MonoInstant::from_millis(0);
+        let deadline = start.checked_add(SESSION_RETRY_DELAY).expect("retry time");
+        let first = session
+            .attempt(
+                start,
+                || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                || panic!("failed registration must not query session state"),
+            )
+            .expect("retry deadline");
+        assert!(
+            matches!(first, SessionAttempt::Failed(error) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(session.registration(), SessionRegistration::Pending);
+        assert_eq!(session.retry(), Some(deadline));
+        let early = session
+            .attempt::<std::io::Error>(
+                deadline
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("before retry"),
+                || panic!("registration cannot retry before five seconds"),
+                || panic!("query cannot bypass the retry deadline"),
+            )
+            .expect("deferred attempt");
+        assert!(matches!(early, SessionAttempt::Deferred));
+        let failed_query = session
+            .attempt(
+                deadline,
+                || Ok(()),
+                || Err(std::io::Error::from(std::io::ErrorKind::NotConnected)),
+            )
+            .expect("query retry deadline");
+        assert!(
+            matches!(failed_query, SessionAttempt::Failed(error) if error.kind() == std::io::ErrorKind::NotConnected)
+        );
+        assert_eq!(session.registration(), SessionRegistration::Registered);
+        let next = deadline
+            .checked_add(SESSION_RETRY_DELAY)
+            .expect("next retry");
+        assert_eq!(session.retry(), Some(next));
+        let ready = session
+            .attempt::<std::io::Error>(
+                next,
+                || panic!("successful registration must not be repeated"),
+                || {
+                    Ok(SessionStatus::Ready(std::collections::BTreeSet::from([
+                        quartz_domain::capture::StopReason::Locked,
+                    ])))
+                },
+            )
+            .expect("successful retry");
+        assert!(
+            matches!(ready, SessionAttempt::Ready(SessionStatus::Ready(reasons)) if reasons == std::collections::BTreeSet::from([quartz_domain::capture::StopReason::Locked]))
+        );
+        assert_eq!(session.retry(), None);
+    }
 
     #[test]
     fn converts_filetime_epoch_and_floors_submillisecond_readings() {

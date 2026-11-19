@@ -8,11 +8,10 @@ use windows::{
         Foundation::{self, ERROR_SUCCESS, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader,
         UI::{
-            Shell::{NIN_POPUPOPEN, NIN_SELECT},
+            Shell::NIN_SELECT,
             WindowsAndMessaging::{
                 self, CREATESTRUCTW, GWLP_USERDATA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
-                WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,
-                WNDCLASSW,
+                WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_NCCREATE, WM_NCDESTROY, WNDCLASSW,
             },
         },
     },
@@ -43,6 +42,16 @@ impl AppMessage {
 // NIN_KEYSELECT is defined by shellapi.h as NIN_SELECT | NINF_KEY (0x1).
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
 
+/// Notification code in LOWORD(lParam) for NOTIFYICON_VERSION_4 callbacks.
+struct TrayNotification(LPARAM);
+impl TrayNotification {
+    fn code(self) -> u32 {
+        // LOWORD keeps the unsigned notification code even when LPARAM is negative.
+        const LOW_WORD_MASK: isize = 0xffff;
+        u32::try_from(self.0.0 & LOW_WORD_MASK).expect("a masked low word fits in u32")
+    }
+}
+
 /// Main-loop actions translated from window and notification icon messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CoreEvent {
@@ -58,11 +67,10 @@ impl CoreEvent {
     fn from_message(message: u32, lparam: LPARAM, taskbar_created: u32) -> Option<Self> {
         match AppMessage::from_raw(message) {
             // Version 4 encodes the notification in LOWORD(lParam).
-            Some(AppMessage::TrayCallback) => match (lparam.0 as u32) & 0xffff {
+            Some(AppMessage::TrayCallback) => match TrayNotification(lparam).code() {
                 NIN_SELECT | NIN_KEYSELECT => Some(Self::OpenUi),
                 WM_CONTEXTMENU => Some(Self::ShowTrayMenu),
                 // TODO(M3): Start UI prewarming on hover, with TTL and cooldown.
-                NIN_POPUPOPEN | WM_MOUSEMOVE => None,
                 _ => None,
             },
             Some(AppMessage::WakeCore | AppMessage::WakeWorkers) => None,
@@ -247,8 +255,10 @@ impl Drop for Window {
         unsafe {
             if !self.handle.is_invalid() {
                 WindowsAndMessaging::SetWindowLongPtrW(self.handle, GWLP_USERDATA, 0);
+                // Best-effort teardown: the window may already have been destroyed.
                 let _ = WindowsAndMessaging::DestroyWindow(self.handle);
             }
+            // Best-effort teardown: Drop cannot report class unregistration failures.
             let _ = WindowsAndMessaging::UnregisterClassW(
                 self.state.role.class_name(),
                 Some(self.instance),
@@ -270,7 +280,9 @@ impl CallbackWindow {
         if message == WM_NCCREATE {
             // SAFETY: WM_NCCREATE supplies a live CREATESTRUCTW. create() passed the stable address
             // of its owned WindowState as lpCreateParams, and retains that Box through destruction.
-            let creation = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
+            let creation = unsafe {
+                &*std::ptr::with_exposed_provenance::<CREATESTRUCTW>(lparam.0.cast_unsigned())
+            };
             let state = creation.lpCreateParams.cast::<WindowState>();
             if !state.is_null() {
                 // SAFETY: This callback owns the window on its creating thread; GWLP_USERDATA stores
@@ -281,7 +293,7 @@ impl CallbackWindow {
                     let previous = WindowsAndMessaging::SetWindowLongPtrW(
                         window,
                         GWLP_USERDATA,
-                        state as isize,
+                        state.expose_provenance().cast_signed(),
                     );
                     previous != 0 || Foundation::GetLastError() == ERROR_SUCCESS
                 };
@@ -292,8 +304,8 @@ impl CallbackWindow {
         }
         // SAFETY: The window is live for this callback; its user-data slot is zero until WM_NCCREATE
         // stores the WindowState pointer and is cleared before the owned Box can be dropped.
-        let state = unsafe { WindowsAndMessaging::GetWindowLongPtrW(window, GWLP_USERDATA) }
-            as *const WindowState;
+        let address = unsafe { WindowsAndMessaging::GetWindowLongPtrW(window, GWLP_USERDATA) };
+        let state = std::ptr::with_exposed_provenance::<WindowState>(address.cast_unsigned());
         if !state.is_null() {
             if message == WM_NCDESTROY {
                 // SAFETY: The window is being destroyed on its owning thread. Detach its borrowed
@@ -329,6 +341,7 @@ impl CallbackWindow {
                 if message == WM_TIMER {
                     // SAFETY: Cancel the window timer before returning to any nested message loop.
                     unsafe {
+                        // Cancellation is best-effort; a nested dispatch may already have cancelled it.
                         let _ = WindowsAndMessaging::KillTimer(Some(window), wparam.0);
                     }
                     use crate::core::sources::ClockReader;
@@ -355,14 +368,16 @@ impl CallbackWindow {
                     state.enqueue(event);
                     // SAFETY: The callback's live HWND receives a pointer-free wake message after
                     // enqueue() has released its RefCell borrow, allowing nested message dispatch.
-                    let _ = unsafe {
+                    if let Err(error) = unsafe {
                         WindowsAndMessaging::PostMessageW(
                             Some(window),
                             u32::from(AppMessage::WakeCore),
                             WPARAM(0),
                             LPARAM(0),
                         )
-                    };
+                    } {
+                        tracing::warn!(%error, "could not post queued core event wakeup");
+                    }
                     return LRESULT(0);
                 }
                 if AppMessage::from_raw(message).is_some() {
@@ -392,6 +407,7 @@ unsafe extern "system" fn window_procedure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::UI::{Shell::NIN_POPUPOPEN, WindowsAndMessaging::WM_MOUSEMOVE};
 
     #[test]
     fn custom_message_ids_round_trip() {
@@ -407,6 +423,11 @@ mod tests {
         let tray_callback = u32::from(AppMessage::TrayCallback);
         for (message, parameter, expected) in [
             (tray_callback, NIN_SELECT as isize, Some(CoreEvent::OpenUi)),
+            (
+                tray_callback,
+                isize::MIN | NIN_SELECT as isize,
+                Some(CoreEvent::OpenUi),
+            ),
             (
                 tray_callback,
                 NIN_KEYSELECT as isize,

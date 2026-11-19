@@ -56,13 +56,20 @@ impl Capture<'_> {
             .filter(availability_intervals::end_utc_ms.is_null())
             .select(AvailabilityIntervalsRow::as_select())
             .first(self.connection)?;
-        let context = id.context("availability_intervals");
-        let start = context.point(row.start_utc_ms, row.start_mono_ms, TimeColumns::Start)?;
+        let context = id.context();
+        let start = context.point(
+            row.start_utc_ms,
+            row.start_mono_ms,
+            TimeColumns::new(
+                availability_intervals::start_utc_ms,
+                availability_intervals::start_mono_ms,
+            ),
+        )?;
         let range = TimeRange { start, end: at };
         let pieces = range
             .split_midnights()
             .map_err(|source| ExecuteCaptureBatchError::Range {
-                field: context.field("end_utc_ms"),
+                field: context.field(availability_intervals::end_utc_ms),
                 start,
                 end: at,
                 source,
@@ -125,10 +132,9 @@ impl AvailabilityIntervalsRow {
         segment: DbRowId,
         open: &OpenAvailability,
     ) -> Result<Self, ExecuteCaptureBatchError> {
-        let utc =
-            CaptureColumn::new("availability_intervals", "start_utc_ms").utc(open.start.utc)?;
+        let utc = CaptureColumn::new(availability_intervals::start_utc_ms).utc(open.start.utc)?;
         let mono =
-            CaptureColumn::new("availability_intervals", "start_mono_ms").mono(open.start.mono)?;
+            CaptureColumn::new(availability_intervals::start_mono_ms).mono(open.start.mono)?;
         let mut row = Self {
             id: None,
             run_id: run.get(),
@@ -154,15 +160,14 @@ impl AvailabilityIntervalsRow {
     }
     fn apply_idle(&mut self, idle: IdleRecord) -> Result<(), ExecuteCaptureBatchError> {
         self.last_input_utc_ms = Some(
-            CaptureColumn::new("availability_intervals", "last_input_utc_ms")
+            CaptureColumn::new(availability_intervals::last_input_utc_ms)
                 .utc(idle.last_input.utc)?,
         );
         self.detected_utc_ms = Some(
-            CaptureColumn::new("availability_intervals", "detected_utc_ms")
-                .utc(idle.detected.utc)?,
+            CaptureColumn::new(availability_intervals::detected_utc_ms).utc(idle.detected.utc)?,
         );
         self.threshold_ms = Some(
-            CaptureColumn::new("availability_intervals", "threshold_ms")
+            CaptureColumn::new(availability_intervals::threshold_ms)
                 .duration(idle.policy.threshold)?,
         );
         self.policy_version = i64::from(idle.policy.version);
@@ -173,11 +178,23 @@ impl AvailabilityIntervalsRow {
         piece: TimeRange,
         reason: AvailabilityEndReason,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        let context = super::RowContext::new("availability_intervals", self.id);
-        self.start_utc_ms = context.field("start_utc_ms").utc(piece.start.utc)?;
-        self.start_mono_ms = context.field("start_mono_ms").mono(piece.start.mono)?;
-        self.end_utc_ms = Some(context.field("end_utc_ms").utc(piece.end.utc)?);
-        self.end_mono_ms = Some(context.field("end_mono_ms").mono(piece.end.mono)?);
+        let context = super::RowContext::new(self.id);
+        self.start_utc_ms = context
+            .field(availability_intervals::start_utc_ms)
+            .utc(piece.start.utc)?;
+        self.start_mono_ms = context
+            .field(availability_intervals::start_mono_ms)
+            .mono(piece.start.mono)?;
+        self.end_utc_ms = Some(
+            context
+                .field(availability_intervals::end_utc_ms)
+                .utc(piece.end.utc)?,
+        );
+        self.end_mono_ms = Some(
+            context
+                .field(availability_intervals::end_mono_ms)
+                .mono(piece.end.mono)?,
+        );
         self.confirmed_utc_ms = None;
         self.confirmed_mono_ms = None;
         self.end_reason = Some(reason.into());

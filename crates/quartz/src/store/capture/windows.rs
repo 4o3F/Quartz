@@ -49,17 +49,16 @@ impl Capture<'_> {
             pid: i64::from(instance.process.get()),
             process_created_utc_ms: instance
                 .process_created_utc
-                .map(|at| CaptureColumn::new("window_instances", "process_created_utc_ms").utc(at))
+                .map(|at| CaptureColumn::new(window_instances::process_created_utc_ms).utc(at))
                 .transpose()?,
-            hwnd: CaptureColumn::new("window_instances", "hwnd").integer(instance.handle.get())?,
-            generation: CaptureColumn::new("window_instances", "generation")
+            hwnd: CaptureColumn::new(window_instances::hwnd).integer(instance.handle.get())?,
+            generation: CaptureColumn::new(window_instances::generation)
                 .integer(instance.generation.get())?,
             retired_utc_ms: None,
             window_class: Some(instance.class.clone()),
-            first_seen_utc_ms: CaptureColumn::new("window_instances", "first_seen_utc_ms")
+            first_seen_utc_ms: CaptureColumn::new(window_instances::first_seen_utc_ms)
                 .utc(instance.first_seen.utc)?,
-            last_seen_utc_ms: CaptureColumn::new("window_instances", "last_seen_utc_ms")
-                .utc(at.utc)?,
+            last_seen_utc_ms: CaptureColumn::new(window_instances::last_seen_utc_ms).utc(at.utc)?,
         })
     }
     pub(super) fn retire_window(
@@ -69,12 +68,15 @@ impl Capture<'_> {
         at: Timestamp,
     ) -> Result<(), ExecuteCaptureBatchError> {
         let id = self.window(run, instance)?;
-        let context = id.context("window_instances");
+        let context = id.context();
         diesel::update(window_instances::table.filter(window_instances::id.eq(id.get())))
             .set((
-                window_instances::retired_utc_ms.eq(context.field("retired_utc_ms").utc(at.utc)?),
-                window_instances::last_seen_utc_ms
-                    .eq(context.field("last_seen_utc_ms").utc(at.utc)?),
+                window_instances::retired_utc_ms.eq(context
+                    .field(window_instances::retired_utc_ms)
+                    .utc(at.utc)?),
+                window_instances::last_seen_utc_ms.eq(context
+                    .field(window_instances::last_seen_utc_ms)
+                    .utc(at.utc)?),
             ))
             .execute(self.connection)?;
         self.run_keys(run).windows.remove(&instance);
@@ -113,8 +115,7 @@ impl ApplicationsRow {
             aumid: None,
             exe_name: instance.exe_name.clone(),
             display_name: instance.display_name.clone(),
-            first_seen_utc_ms: CaptureColumn::new("applications", "first_seen_utc_ms")
-                .utc(at.utc)?,
+            first_seen_utc_ms: CaptureColumn::new(applications::first_seen_utc_ms).utc(at.utc)?,
         };
         match &instance.app {
             AppIdentity::Exe(path) => {

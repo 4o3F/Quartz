@@ -21,7 +21,7 @@ use windows::{
     core::{HRESULT, PCWSTR},
 };
 
-use super::{handle::OwnedHandle, wide};
+use super::{WideString, handle::OwnedHandle};
 use crate::{data_directory::DataDirectory, instance_name::UserSid};
 
 /// Failures while identifying the current user and acquiring the core instance guards.
@@ -31,6 +31,8 @@ pub(crate) enum AcquireInstanceError {
     OpenProcessToken { source: windows::core::Error },
     #[snafu(display("could not read current token user (GetTokenInformation)"))]
     GetTokenInformation { source: windows::core::Error },
+    #[snafu(display("token user buffer exceeds addressable memory"))]
+    TokenBufferSize { source: std::num::TryFromIntError },
     #[snafu(display("could not create core session mutex (CreateMutexW)"))]
     CreateMutex { source: windows::core::Error },
     #[snafu(display("could not open quartz.lock (OpenOptions::open)"))]
@@ -63,7 +65,7 @@ impl DataDirectory {
     pub(crate) fn acquire_instance(&self) -> Result<AcquireInstance, AcquireInstanceError> {
         use std::os::windows::fs::OpenOptionsExt;
 
-        let name = wide(&UserSid::read()?.core_mutex_name());
+        let name = WideString::new(&UserSid::read()?.core_mutex_name());
         // SAFETY: The mutex name is NUL-terminated; default security and no initial ownership are used.
         let mutex = unsafe { Threading::CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
             .context(CreateMutexSnafu)?;
@@ -128,7 +130,12 @@ impl UserSid {
             return Err(source).context(GetTokenInformationSnafu);
         }
         // usize storage supplies alignment for TOKEN_USER and the SID inside the returned buffer.
-        let mut buffer = vec![0usize; (bytes as usize).div_ceil(size_of::<usize>())];
+        let mut buffer = vec![
+            0usize;
+            usize::try_from(bytes)
+                .context(TokenBufferSizeSnafu)?
+                .div_ceil(size_of::<usize>())
+        ];
         // SAFETY: The buffer is aligned and has at least the byte length queried above.
         unsafe {
             Security::GetTokenInformation(

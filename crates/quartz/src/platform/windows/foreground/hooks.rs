@@ -5,7 +5,7 @@ use crate::core::{
     app::{CaptureSender, ObserveCaptureError},
     foreground::{
         Desktop, EventDecision, EventKind, ForegroundTarget, NativeEvent, RebindDecision,
-        SELF_CHILD, Snapshot, TITLE_BUFFER_UNITS, TitleRead, WINDOW_OBJECT, title_snapshot,
+        SELF_CHILD, Snapshot, TITLE_BUFFER_UNITS, TitleRead, WINDOW_OBJECT,
     },
     sources::{ClockReader, ReadClockError},
 };
@@ -84,6 +84,7 @@ impl Hook {
 impl Drop for Hook {
     fn drop(&mut self) {
         // SAFETY: This hook is uniquely owned and dropped on its installing thread.
+        // Best-effort teardown: Drop cannot report hook removal failures.
         let _ = unsafe { Accessibility::UnhookWinEvent(self.0) };
     }
 }
@@ -312,7 +313,7 @@ impl Submission {
                 source,
                 kind,
                 window: Window::from_native(window).handle(),
-                title: title_snapshot(&buffer, read),
+                title: read.snapshot(&buffer),
                 desktop,
             })
             .map_err(|source| ObserveForegroundError::Deliver { source })

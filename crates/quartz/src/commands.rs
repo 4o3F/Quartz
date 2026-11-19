@@ -33,6 +33,15 @@ pub(crate) enum RestoreConfirmation {
     Required,
     Confirmed,
 }
+impl From<bool> for RestoreConfirmation {
+    fn from(confirmed: bool) -> Self {
+        if confirmed {
+            Self::Confirmed
+        } else {
+            Self::Required
+        }
+    }
+}
 
 pub(crate) struct RestoreBackupCommand<'file> {
     file: &'file std::path::Path,

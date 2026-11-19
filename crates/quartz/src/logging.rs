@@ -29,20 +29,6 @@ impl LogTarget {
             Self::Ui => "ui.log",
         }
     }
-
-    fn directory_call_context(self) -> &'static str {
-        match self {
-            Self::Core => " (create_dir_all)",
-            Self::Ui => "",
-        }
-    }
-
-    fn file_call_context(self) -> &'static str {
-        match self {
-            Self::Core => " (OpenOptions::open)",
-            Self::Ui => "",
-        }
-    }
 }
 
 #[cfg(any(windows, test))]
@@ -58,13 +44,13 @@ impl std::fmt::Display for LogTarget {
 #[cfg(any(windows, test))]
 #[derive(Debug, Snafu)]
 pub(crate) enum InitFileLogError {
-    #[snafu(display("could not create {target} log directory {}{}", path.display(), target.directory_call_context()))]
+    #[snafu(display("could not create {target} log directory {} (create_dir_all)", path.display()))]
     CreateDirectory {
         target: LogTarget,
         path: PathBuf,
         source: std::io::Error,
     },
-    #[snafu(display("could not open {target} log file {}{}", path.display(), target.file_call_context()))]
+    #[snafu(display("could not open {target} log file {} (OpenOptions::open)", path.display()))]
     OpenFile {
         target: LogTarget,
         path: PathBuf,

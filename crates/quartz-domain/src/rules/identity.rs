@@ -48,6 +48,28 @@ impl From<RuleSetKey> for String {
     }
 }
 
+/// A persisted revision number within one rule set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RuleVersion(u32);
+impl RuleVersion {
+    /// Carries a revision already supplied by the registry or persistence adapter.
+    #[must_use]
+    pub const fn new(version: u32) -> Self {
+        Self(version)
+    }
+    /// Returns the number at a persistence or protocol boundary.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+impl fmt::Display for RuleVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// Rule identifier local to its defining set, preserving ASCII letter case.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

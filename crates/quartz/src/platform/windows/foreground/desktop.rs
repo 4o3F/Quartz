@@ -117,6 +117,7 @@ impl InputDesktop {
 impl Drop for InputDesktop {
     fn drop(&mut self) {
         // SAFETY: This uniquely owned handle came from OpenInputDesktop.
+        // Best-effort teardown: Drop cannot report desktop closure failures.
         let _ = unsafe { StationsAndDesktops::CloseDesktop(self.0.0) };
     }
 }

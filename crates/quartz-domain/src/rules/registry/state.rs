@@ -118,17 +118,17 @@ impl RegistryState {
                 if !self.sets.contains_key(target.set_key()) {
                     continue;
                 }
-                let (old, base_target_version) =
+                let old =
                     self.ancestor_rule(parent, base_version, &target, AncestryRevision::Saved)?;
-                let (new, current_target_version) = self.ancestor_rule(
+                let new = self.ancestor_rule(
                     parent,
                     parent.current.version,
                     &target,
                     AncestryRevision::Current,
                 )?;
-                let state = if new.is_none() {
+                let state = if new.rule().is_none() {
                     Some(UpstreamState::TargetDeleted)
-                } else if old != new
+                } else if old.rule() != new.rule()
                     && entry
                         .current
                         .set
@@ -148,9 +148,10 @@ impl RegistryState {
                         base_parent_version: Some(i64::from(base_version)),
                         current_parent_version: i64::from(parent.current.version),
                         overlay_version: i64::from(entry.current.version),
-                        base_target_version: base_target_version.map(i64::from),
+                        base_target_version: old.version().map(i64::from),
+                        // Missing targets are reported against the inspected parent's revision.
                         current_target_version: i64::from(
-                            current_target_version.unwrap_or(parent.current.version),
+                            new.version().unwrap_or(parent.current.version),
                         ),
                         state,
                     });
@@ -165,7 +166,7 @@ impl RegistryState {
         mut version: u32,
         target: &RuleTarget,
         ancestry: AncestryRevision,
-    ) -> Result<(Option<Rule>, Option<u32>), ComputeUpstreamChangesError> {
+    ) -> Result<AncestorRule, ComputeUpstreamChangesError> {
         let mut visited = BTreeSet::new();
         let target_name = target.to_string();
         let mut replacement = None;
@@ -183,7 +184,10 @@ impl RegistryState {
                     .r#override
                     .iter()
                     .find(|entry| entry.target == target_name)
-                    .map(|entry| (entry.rule.clone(), version));
+                    .map(|entry| RuleRevision {
+                        rule: entry.rule.clone(),
+                        version,
+                    });
             }
             if entry.current.set.header.key == target.set_key().as_str() {
                 let definition = revision
@@ -192,15 +196,23 @@ impl RegistryState {
                     .iter()
                     .find(|rule| rule.id == target.rule_id().as_str())
                     .cloned();
-                return Ok(match (definition, replacement) {
-                    (Some(_), Some((rule, version))) => (Some(rule), Some(version)),
-                    (definition, _) => (definition, Some(version)),
+                if definition.is_some()
+                    && let Some(replacement) = replacement
+                {
+                    return Ok(AncestorRule::Revision {
+                        rule: Some(replacement.rule),
+                        version: replacement.version,
+                    });
+                }
+                return Ok(AncestorRule::Revision {
+                    rule: definition,
+                    version,
                 });
             }
             let (Some(parent), Some(parent_version)) =
                 (&entry.current.set.header.parent, revision.parent_version)
             else {
-                return Ok((None, None));
+                return Ok(AncestorRule::Missing);
             };
             let parent: RuleSetKey = parent.parse().context(super::upstream_error::SetKeySnafu)?;
             entry = self
@@ -214,6 +226,29 @@ impl RegistryState {
         }
     }
 }
+struct RuleRevision {
+    rule: Rule,
+    version: u32,
+}
+enum AncestorRule {
+    Missing,
+    Revision { rule: Option<Rule>, version: u32 },
+}
+impl AncestorRule {
+    fn rule(&self) -> Option<&Rule> {
+        match self {
+            Self::Missing => None,
+            Self::Revision { rule, .. } => rule.as_ref(),
+        }
+    }
+    fn version(&self) -> Option<u32> {
+        match self {
+            Self::Missing => None,
+            Self::Revision { version, .. } => Some(*version),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum AncestryRevision {
     Saved,

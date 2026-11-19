@@ -1,7 +1,7 @@
 use super::*;
 use crate::rules::{
     Field, FieldSnapshot,
-    registry::{RegistryCommand, RegistryState, RuleRegistry},
+    registry::{DecisionParts, RegistryCommand, RegistryState, RuleRegistry},
 };
 use crate::text::NfcText;
 use std::time::Duration;
@@ -100,7 +100,7 @@ impl Fixture {
             text: text.into(),
             base_version: version,
         });
-        let (_, reply, outcome) = decision.into_parts();
+        let DecisionParts { reply, outcome, .. } = decision.into_parts();
         reply.expect("valid rule input");
         self.rules
             .committed(outcome.expect("commit token"))
@@ -222,17 +222,30 @@ fn stop_reason_union_requires_review_and_preserves_overlaps() {
         [StopReason::Suspended, StopReason::Disconnected],
         [StopReason::Locked, StopReason::Disconnected],
     ] {
-        let mut fixture = Fixture::active();
-        let _ = fixture.send(at(10), CaptureEvent::Stop(StopChange::Begin(reasons[0])));
-        let _ = fixture.send(at(20), CaptureEvent::Stop(StopChange::Begin(reasons[1])));
-        let _ = fixture.send(at(30), CaptureEvent::Stop(StopChange::End(reasons[0])));
-        let ignored = fixture.review(at(35), 2, window(2, "while stopped"));
-        assert!(interval_opens(&ignored).is_empty());
-        let _ = fixture.send(at(40), CaptureEvent::Stop(StopChange::End(reasons[1])));
-        let ignored = fixture.hook(at(45), 3, window(2, "requires review"));
-        assert!(interval_opens(&ignored).is_empty());
-        let _ = fixture.review(at(50), 3, window(2, "reviewed"));
-        fixture.finish(at(60));
+        for ending in [reasons, [reasons[1], reasons[0]]] {
+            let mut fixture = Fixture::active();
+            let _ = fixture.send(at(10), CaptureEvent::Stop(StopChange::Begin(reasons[0])));
+            let _ = fixture.send(at(20), CaptureEvent::Stop(StopChange::Begin(reasons[1])));
+            let _ = fixture.send(at(30), CaptureEvent::Stop(StopChange::End(ending[0])));
+            assert!(matches!(
+                fixture.core.state(),
+                CaptureState::Stopped { reasons: remaining, .. }
+                    if remaining == BTreeSet::from([ending[1]])
+            ));
+            let ignored = fixture.review(at(35), 2, window(2, "while stopped"));
+            assert!(interval_opens(&ignored).is_empty());
+            let ended = fixture.send(at(40), CaptureEvent::Stop(StopChange::End(ending[1])));
+            assert!(interval_opens(&ended).is_empty());
+            assert!(ended.effects.contains(&CaptureEffect::ReviewForeground));
+            let ignored = fixture.hook(at(45), 3, window(2, "requires review"));
+            assert!(interval_opens(&ignored).is_empty());
+            let reviewed = fixture.review(at(50), 3, window(2, "reviewed"));
+            assert_eq!(
+                interval_opens(&reviewed).last().expect("fresh fact").start,
+                at(50)
+            );
+            fixture.finish(at(60));
+        }
     }
 }
 
@@ -250,16 +263,78 @@ fn startup_waits_for_session_query_and_registration_retry() {
                 ..
             }
         ));
-        let _ = fixture.send(
+        let ready = fixture.send(
             at(3),
             CaptureEvent::Session(SessionStatus::Ready(BTreeSet::from([reason]))),
         );
+        assert!(
+            ready.writes.iter().any(|write| matches!(
+                write,
+                CaptureWrite::OpenAvailability(row)
+                    if row.reason == AvailabilityReason::Stopped(reason) && row.start == at(0)
+            )),
+            "initial stop covers the run from its start"
+        );
+        assert!(ready.effects.contains(&CaptureEffect::ReviewForeground));
         let locked = fixture.review(at(4), 2, window(1, "locked"));
         assert!(interval_opens(&locked).is_empty());
-        let _ = fixture.send(at(10), CaptureEvent::Stop(StopChange::End(reason)));
-        let _ = fixture.review(at(11), 3, window(1, "ready"));
+        let resumed = fixture.send(at(10), CaptureEvent::Stop(StopChange::End(reason)));
+        assert!(interval_opens(&resumed).is_empty());
+        let ignored = fixture.hook(at(10), 3, window(1, "not reviewed"));
+        assert!(interval_opens(&ignored).is_empty());
+        let reviewed = fixture.review(at(11), 3, window(1, "ready"));
+        assert_eq!(
+            interval_opens(&reviewed).last().expect("fresh fact").start,
+            at(11)
+        );
         fixture.finish(at(20));
     }
+}
+
+#[test]
+fn sleep_resume_preserves_disconnect_across_wall_clock_boundary_until_review() {
+    let mut fixture = Fixture::active();
+    let _ = fixture.send(
+        at(10),
+        CaptureEvent::Stop(StopChange::Begin(StopReason::Suspended)),
+    );
+    let _ = fixture.send(
+        at(20),
+        CaptureEvent::Stop(StopChange::Begin(StopReason::Disconnected)),
+    );
+    let resume = Timestamp {
+        utc: utc(10_000),
+        mono: mono(30),
+    };
+    let resumed = fixture.send(
+        resume,
+        CaptureEvent::Stop(StopChange::End(StopReason::Suspended)),
+    );
+    assert!(matches!(fixture.core.state(),
+        CaptureState::Stopped { reasons, .. } if reasons == BTreeSet::from([StopReason::Disconnected])
+    ));
+    assert!(interval_opens(&resumed).is_empty());
+    assert!(resumed.writes.iter().any(|write| matches!(write,
+        CaptureWrite::OpenAvailability(row)
+            if row.reason == AvailabilityReason::Stopped(StopReason::Disconnected)
+                && row.segment.get() == 2 && row.start == resume
+    )));
+    let before_review = resume.advance(Duration::from_millis(10));
+    let blocked = fixture.review(before_review, 2, window(2, "still disconnected"));
+    assert!(interval_opens(&blocked).is_empty());
+    let _ = fixture.send(
+        before_review,
+        CaptureEvent::Stop(StopChange::End(StopReason::Disconnected)),
+    );
+    let ignored = fixture.hook(before_review, 3, window(2, "not reviewed"));
+    assert!(interval_opens(&ignored).is_empty());
+    let reviewed_at = resume.advance(Duration::from_millis(20));
+    let reviewed = fixture.review(reviewed_at, 3, window(2, "reconnected"));
+    assert_eq!(
+        interval_opens(&reviewed).last().expect("fresh fact").start,
+        reviewed_at
+    );
+    fixture.finish(resume.advance(Duration::from_millis(30)));
 }
 
 #[test]
@@ -549,10 +624,7 @@ fn checkpoint_confirms_all_open_targets_and_stop_settles_immediately() {
     let point = step
         .writes
         .iter()
-        .find_map(|write| match write {
-            CaptureWrite::Checkpoint(point) => Some(point),
-            _ => None,
-        })
+        .find_map(CaptureWrite::checkpoint)
         .expect("checkpoint");
     assert!(point.interval.is_none());
     assert_eq!(point.availability.len(), 2);
@@ -567,6 +639,41 @@ fn checkpoint_confirms_all_open_targets_and_stop_settles_immediately() {
             >= 3
     );
     fixture.finish(at(59_100));
+}
+
+#[test]
+fn checkpoint_cadence_keeps_its_deadline_across_foreground_boundaries() {
+    let mut fixture = Fixture::active();
+    let period = limits::CHECKPOINT_PERIOD;
+    let before = at(0).advance(period - Duration::from_millis(1));
+    let early = fixture.send(before, CaptureEvent::Wake);
+    assert!(
+        !early
+            .writes
+            .iter()
+            .any(|write| matches!(write, CaptureWrite::Checkpoint(_)))
+    );
+    let switched = fixture.hook(before, 2, window(2, "just before checkpoint"));
+    assert!(switched.writes.iter().any(|write| matches!(write,
+        CaptureWrite::Checkpoint(point) if point.at == before
+    )));
+    for cycle in 1..=2 {
+        let now = at(0).advance(period * cycle);
+        let step = fixture.send(now, CaptureEvent::Wake);
+        assert!(step.writes.iter().any(|write| matches!(write,
+            CaptureWrite::Checkpoint(point)
+                if point.at == now && point.commit_by_mono == now.advance(limits::BATCH_WAIT).mono
+        )));
+        assert!(step.effects.contains(&CaptureEffect::ReviewForeground));
+        assert!(
+            step.effects
+                .contains(&CaptureEffect::ScheduleTimer(Timer::Arm(
+                    now.advance(period).mono
+                )))
+        );
+        let _ = fixture.review(now, 2, window(2, "just before checkpoint"));
+    }
+    fixture.finish(at(0).advance(period * 2 + Duration::from_millis(1)));
 }
 
 #[test]
@@ -587,14 +694,24 @@ fn overload_gap_waits_for_review_and_splits_at_clock_boundary() {
             ..
         } if point.mono == mono(10)
     )));
+    assert!(overload.writes.iter().any(|write| matches!(write,
+        CaptureWrite::RecordGap(gap)
+            if gap.reason == GapReason::EventOverload
+                && gap.range == TimeRange { start: at(10), end: at(20) }
+    )));
     let _ = fixture.hook(at(25), 2, window(2, "untrusted"));
-    let _ = fixture.send(
+    let changed = fixture.send(
         Timestamp {
             utc: utc(-100),
             mono: mono(30),
         },
         CaptureEvent::ClockChanged(ClockChange::TimeChange),
     );
+    assert!(changed.writes.iter().any(|write| matches!(write,
+        CaptureWrite::RecordGap(gap)
+            if gap.segment.get() == 1 && gap.reason == GapReason::EventOverload
+                && gap.range == TimeRange { start: at(20), end: at(30) }
+    )));
     let recovered = fixture.review(
         Timestamp {
             utc: utc(-90),
@@ -605,10 +722,10 @@ fn overload_gap_waits_for_review_and_splits_at_clock_boundary() {
     );
     assert!(recovered.writes.iter().any(|write| matches!(
         write,
-        CaptureWrite::RecordGap(CaptureGap {
-            segment,
-            ..
-        }) if segment.get() == 2
+        CaptureWrite::RecordGap(gap)
+            if gap.segment.get() == 2 && gap.reason == GapReason::EventOverload
+                && gap.range.start == Timestamp { utc: utc(-100), mono: mono(30) }
+                && gap.range.end == Timestamp { utc: utc(-90), mono: mono(40) }
     )));
     fixture.finish(Timestamp {
         utc: utc(-80),

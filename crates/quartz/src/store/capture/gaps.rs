@@ -16,18 +16,17 @@ impl Capture<'_> {
         gap: &CaptureGap,
     ) -> Result<(), ExecuteCaptureBatchError> {
         let segment = self.segment(run, gap.segment)?;
-        CaptureColumn::new("capture_gaps", "end_mono_ms").range(gap.range.start, gap.range.end)?;
+        CaptureColumn::new(capture_gaps::end_mono_ms).range(gap.range.start, gap.range.end)?;
         let row = CaptureGapsRow {
             id: None,
             run_id: Self::run_id(run)?.get(),
             clock_segment_id: segment.get(),
-            start_utc_ms: CaptureColumn::new("capture_gaps", "start_utc_ms")
+            start_utc_ms: CaptureColumn::new(capture_gaps::start_utc_ms)
                 .utc(gap.range.start.utc)?,
-            end_utc_ms: CaptureColumn::new("capture_gaps", "end_utc_ms").utc(gap.range.end.utc)?,
-            start_mono_ms: CaptureColumn::new("capture_gaps", "start_mono_ms")
+            end_utc_ms: CaptureColumn::new(capture_gaps::end_utc_ms).utc(gap.range.end.utc)?,
+            start_mono_ms: CaptureColumn::new(capture_gaps::start_mono_ms)
                 .mono(gap.range.start.mono)?,
-            end_mono_ms: CaptureColumn::new("capture_gaps", "end_mono_ms")
-                .mono(gap.range.end.mono)?,
+            end_mono_ms: CaptureColumn::new(capture_gaps::end_mono_ms).mono(gap.range.end.mono)?,
             reason: gap.reason.into(),
         };
         diesel::insert_into(capture_gaps::table)
@@ -40,9 +39,8 @@ impl Capture<'_> {
         source: DataSource,
         range: TimeRange,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        let day_ms =
-            CaptureColumn::new("data_day_versions", "utc_date").duration(limits::UTC_DAY)?;
-        let context = CaptureColumn::new("data_day_versions", "utc_date");
+        let day_ms = CaptureColumn::new(data_day_versions::utc_date).duration(limits::UTC_DAY)?;
+        let context = CaptureColumn::new(data_day_versions::utc_date);
         let start = context.utc(range.start.utc)?;
         let end = context.utc(range.end.utc)?;
         context.range(range.start, range.end)?;
@@ -66,9 +64,7 @@ impl Capture<'_> {
         owner: SchedulerKind,
         at: UtcInstant,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        let value = CaptureColumn::new("settings", Self::deadline_key(owner))
-            .utc(at)?
-            .to_string();
+        let value = CaptureColumn::new(settings::value).utc(at)?.to_string();
         diesel::insert_into(settings::table)
             .values((
                 settings::key.eq(Self::deadline_key(owner)),

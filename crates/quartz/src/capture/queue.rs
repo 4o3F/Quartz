@@ -1,8 +1,8 @@
 //! One command budget shared by the producer, retained writes and the active transaction.
 
 use super::{
-    ExecuteCaptureBatchError, PersistenceOutcome, PersistenceResult, PersistenceState,
-    TRANSACTION_COMMANDS,
+    CommittedCheckpoint, ExecuteCaptureBatchError, PersistenceOutcome, PersistenceResult,
+    PersistenceState, TRANSACTION_COMMANDS,
 };
 use quartz_domain::capture::{
     BacklogFailure, CaptureParts, CaptureWrite, MonoInstant, Timestamp, WriteBacklog, limits,
@@ -163,10 +163,8 @@ impl QueueState {
             .backlog
             .batches()
             .flat_map(|batch| &batch.writes)
-            .filter_map(|write| match write {
-                CaptureWrite::Checkpoint(point) => Some(point.commit_by_mono),
-                _ => None,
-            })
+            .filter_map(CaptureWrite::checkpoint)
+            .map(|point| point.commit_by_mono)
             .min();
         batching
             .into_iter()
@@ -229,10 +227,29 @@ impl QueueState {
             effects: Vec::new(),
             outcome: self.outcome(),
             progress: super::FlushProgress::None,
+            checkpoints: Vec::new(),
         }
     }
 }
 impl TransactionPlan {
+    pub(super) fn checkpoints(&self) -> impl Iterator<Item = CommittedCheckpoint> + '_ {
+        let batches = match self {
+            Self::Batches(batches) => Some(batches),
+            Self::Empty | Self::Repair { .. } => None,
+        };
+        batches.into_iter().flatten().flat_map(|batch| {
+            batch
+                .writes
+                .iter()
+                .filter_map(CaptureWrite::checkpoint)
+                .map(move |point| CommittedCheckpoint {
+                    run: point.run,
+                    batch: batch.id,
+                    at: point.at,
+                    commit_by_mono: point.commit_by_mono,
+                })
+        })
+    }
     pub(super) fn progress(&self) -> super::FlushProgress {
         let commands = match self {
             Self::Empty => 0,

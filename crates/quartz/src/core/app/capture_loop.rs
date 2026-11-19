@@ -5,13 +5,15 @@ use super::{
     SendMainCommandError, Shutdown,
 };
 use crate::capture::WriteQueue;
+use crate::core::{foreground::EventKind, sources::ClockReader};
 use crate::store::capture::CaptureStartup;
 use crossbeam_channel::{Receiver, Sender, TrySendError, select_biased};
 use quartz_domain::{
     capture::{
         CaptureCore, CaptureEffect, CaptureEvent, CaptureInput, CaptureParts, CaptureState,
-        CaptureStep, CaptureWrite, ClockChange, Deadline, PolicyObservation, RunEndReason, RunId,
-        SchedulerKind, SessionStatus, StepCaptureError, StopChange, StopReason, Timestamp,
+        CaptureStep, CaptureWrite, ClockChange, Deadline, MonoInstant, ObservationSource,
+        PolicyObservation, RunEndReason, RunId, SchedulerKind, SessionStatus, StepCaptureError,
+        StopChange, StopReason, Timestamp,
     },
     rules::registry::SnapshotCell,
 };
@@ -78,6 +80,7 @@ pub(super) struct CaptureLoop {
     pub writer: WriteQueue,
     pub main: MainPort,
     pub overloaded: Arc<AtomicBool>,
+    pub clock: Arc<dyn ClockReader>,
 }
 impl CaptureLoop {
     pub(super) fn initialize(
@@ -174,17 +177,46 @@ impl CaptureLoop {
             match observation {
                 Observation::Event(event) => self.step(event, Settlement::Deferred),
                 #[cfg(windows)]
-                Observation::Foreground(snapshot) => match self.foreground.resolve(snapshot) {
-                    crate::platform::ForegroundResolution::Event(event) => {
-                        self.step(event, Settlement::Deferred)
+                Observation::Foreground(snapshot) => {
+                    let callback_at = snapshot.at.mono;
+                    let kind = snapshot.kind;
+                    let source = snapshot.source;
+                    match self.foreground.resolve(snapshot) {
+                        crate::platform::ForegroundResolution::Event(event) => {
+                            self.step(event, Settlement::Deferred)?;
+                            if source == ObservationSource::Hook {
+                                self.trace_callback_latency(callback_at, kind);
+                            }
+                            Ok(())
+                        }
+                        crate::platform::ForegroundResolution::Review => {
+                            self.main
+                                .send(MainCommand::Effect(CaptureEffect::ReviewForeground))?;
+                            Ok(())
+                        }
                     }
-                    crate::platform::ForegroundResolution::Review => {
-                        self.main
-                            .send(MainCommand::Effect(CaptureEffect::ReviewForeground))?;
-                        Ok(())
-                    }
-                },
+                }
             }
+        }
+    }
+    fn trace_callback_latency(&self, callback_at: MonoInstant, kind: EventKind) {
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+        let completed = match self.clock.read() {
+            Ok(at) => at.mono,
+            Err(error) => {
+                tracing::debug!(%error, "could not sample foreground completion clock");
+                return;
+            }
+        };
+        match completed.duration_since(callback_at) {
+            Ok(elapsed) => tracing::debug!(
+                ?kind,
+                callback_to_fact_ms = %elapsed.as_millis(),
+                "foreground callback processed"
+            ),
+            Err(error) => tracing::debug!(%error, "could not measure foreground callback latency"),
         }
     }
     fn discard_observations(&self) {
@@ -309,17 +341,135 @@ impl CaptureLoop {
 mod tests {
     use super::*;
     use crate::capture::PersistenceState;
-    use crate::core::app::CONTROL_CAPACITY;
+    use crate::core::app::{CONTROL_CAPACITY, CaptureSender};
+    use crate::core::sources::ReadClockError;
     use crossbeam_channel::bounded;
     use quartz_domain::capture::*;
     use quartz_domain::rules::registry::{RegistryState, RuleRegistry};
     use std::{thread, time::Duration};
+
+    struct TestClock(Timestamp);
+    impl ClockReader for TestClock {
+        fn read(&self) -> Result<Timestamp, ReadClockError> {
+            Ok(self.0)
+        }
+    }
 
     fn at(millis: u64) -> Timestamp {
         Timestamp {
             utc: UtcInstant::try_from(i64::try_from(millis).expect("test time")).expect("UTC"),
             mono: MonoInstant::from_millis(millis),
         }
+    }
+    #[test]
+    fn main_queue_overload_discards_stale_events_and_keeps_exact_gap_until_review() {
+        let run = RunId::new(1);
+        let mut started = CaptureCore::start(run, at(0)).expect("core");
+        let rules = RuleRegistry::from_state(RegistryState::default())
+            .expect("rules")
+            .snapshots();
+        for event in [
+            CaptureEvent::Session(SessionStatus::Ready(Default::default())),
+            CaptureEvent::Foreground {
+                generation: ForegroundGeneration::new(1),
+                source: ObservationSource::Review,
+                foreground: Foreground::None(NoForegroundReason::Empty),
+            },
+        ] {
+            // Seed the core's trusted foreground state; this test examines later overload writes.
+            let _ = started
+                .core
+                .step(CaptureInput {
+                    at: at(10),
+                    rules: rules.load(),
+                    event,
+                })
+                .expect("trusted foreground");
+        }
+        let (sender, observed) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let overloaded = Arc::new(AtomicBool::new(false));
+        let ingress = CaptureSender {
+            sender,
+            overloaded: Arc::clone(&overloaded),
+        };
+        let (done, completion) = bounded(CONTROL_CAPACITY);
+        let producer = thread::spawn(move || {
+            for _ in 0..=limits::MAIN_QUEUE_CAPACITY {
+                ingress
+                    .observe(ObservedEvent {
+                        at: at(20),
+                        event: CaptureEvent::Wake,
+                    })
+                    .expect("nonblocking observation");
+            }
+            done.send(()).expect("producer completion");
+        });
+        completion
+            .recv_timeout(Duration::from_secs(2))
+            .expect("full queue cannot block the main thread");
+        producer.join().expect("producer");
+        assert_eq!(observed.len(), limits::MAIN_QUEUE_CAPACITY);
+        assert!(overloaded.load(Ordering::Acquire));
+        let (_feedback, replies) = bounded(CONTROL_CAPACITY);
+        let (_shutdown, stop) = bounded(CONTROL_CAPACITY);
+        let (database, _writes) = bounded(CONTROL_CAPACITY);
+        let (main, commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let mut capture = CaptureLoop {
+            #[cfg(windows)]
+            foreground: crate::platform::ForegroundResolver::new(),
+            core: started.core,
+            run,
+            at: at(10),
+            snapshots: rules.clone(),
+            observed,
+            replies,
+            stop,
+            database,
+            writer: WriteQueue::new(),
+            main: MainPort {
+                sender: main,
+                wake: Arc::new(|| {}),
+            },
+            overloaded,
+            clock: Arc::new(TestClock(at(30))),
+        };
+        capture
+            .observe(capture.observed.recv().expect("first stale event"))
+            .expect("consume overload");
+        assert!(
+            capture.observed.is_empty(),
+            "queued events lose trust together"
+        );
+        assert!(!capture.overloaded.load(Ordering::Acquire));
+        assert_eq!(
+            capture.core.state(),
+            CaptureState::Gap(GapReason::EventOverload)
+        );
+        assert!(commands.try_iter().any(|command| matches!(
+            command,
+            MainCommand::Effect(CaptureEffect::ReviewForeground)
+        )));
+        let review = capture
+            .core
+            .step(CaptureInput {
+                at: at(30),
+                rules: rules.load(),
+                event: CaptureEvent::Foreground {
+                    generation: ForegroundGeneration::new(2),
+                    source: ObservationSource::Review,
+                    foreground: Foreground::None(NoForegroundReason::Empty),
+                },
+            })
+            .expect("fresh foreground review");
+        assert!(review.writes.iter().any(|write| matches!(write,
+            CaptureWrite::RecordGap(gap)
+                if gap.reason == GapReason::EventOverload
+                    // The overload checkpoint already settled the gap through at(20).
+                    && gap.range == TimeRange { start: at(20), end: at(30) }
+        )));
+        assert!(review.writes.iter().any(|write| matches!(write,
+            CaptureWrite::OpenInterval(row) if row.start == at(30)
+        )));
     }
     #[test]
     fn capture_loop_continues_after_command_overflow_with_database_wakeup_channel_full() {
@@ -359,6 +509,7 @@ mod tests {
                 wake: Arc::new(|| {}),
             },
             overloaded: Arc::new(AtomicBool::new(false)),
+            clock: Arc::new(TestClock(at(0))),
         };
         let (finished, completion) = bounded(CONTROL_CAPACITY);
         let worker = thread::spawn(move || {

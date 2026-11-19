@@ -1,6 +1,6 @@
 //! FileDescription selection using version-resource translations (i18n 10 §5).
 
-use crate::core::foreground::{Translation, version_translation};
+use crate::core::foreground::Translation;
 use windows::{
     Win32::{
         Foundation::{
@@ -87,7 +87,7 @@ struct Value<'a> {
 }
 impl Resource {
     fn read(path: &str) -> Result<Option<Self>, ReadVersionInfoError> {
-        let path = super::super::wide(path);
+        let path = super::super::WideString::new(path);
         // SAFETY: The path remains NUL-terminated, and clearing last error distinguishes malformed results.
         let length = unsafe {
             Foundation::SetLastError(ERROR_SUCCESS);
@@ -162,10 +162,10 @@ impl Resource {
                 }
             }
         };
-        let Some(selected) = version_translation(&translations, &preferred.identifiers) else {
+        let Some(selected) = Translation::select(&translations, &preferred.identifiers) else {
             return Ok(None);
         };
-        let key = super::super::wide(&format!(
+        let key = super::super::WideString::new(&format!(
             "\\StringFileInfo\\{:04x}{:04x}\\FileDescription",
             selected.language, selected.codepage
         ));

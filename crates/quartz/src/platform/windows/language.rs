@@ -8,7 +8,7 @@ use windows::{
 
 /// Supported UI language selected from Windows preferences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct UiLanguage(&'static str);
+pub(crate) struct UiLanguage(quartz_i18n::Language);
 
 impl UiLanguage {
     /// Detects the preferred supported language, warning and falling back to English on failure.
@@ -18,21 +18,28 @@ impl UiLanguage {
                 .map(|languages| languages.negotiate())
                 .unwrap_or_else(|error| {
                     tracing::warn!(%error, "using English UI language");
-                    "en"
+                    quartz_i18n::Language::English
                 }),
         )
     }
 
     /// Returns the locale identifier accepted by the translation and UI APIs.
     pub(crate) fn as_str(self) -> &'static str {
+        self.0.code()
+    }
+    pub(crate) fn language(self) -> quartz_i18n::Language {
         self.0
     }
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(display("could not read preferred Windows UI languages (GetUserPreferredUILanguages)"))]
-struct ReadUiLanguagesError {
-    source: windows::core::Error,
+enum ReadUiLanguagesError {
+    #[snafu(display(
+        "could not read preferred Windows UI languages (GetUserPreferredUILanguages)"
+    ))]
+    Read { source: windows::core::Error },
+    #[snafu(display("preferred UI language buffer exceeds addressable memory"))]
+    BufferSize { source: std::num::TryFromIntError },
 }
 
 #[derive(Debug)]
@@ -52,8 +59,8 @@ impl PreferredUiLanguages {
                 &mut length,
             )
         }
-        .context(ReadUiLanguagesSnafu)?;
-        let mut buffer = vec![0u16; length as usize];
+        .context(ReadSnafu)?;
+        let mut buffer = vec![0u16; usize::try_from(length).context(BufferSizeSnafu)?];
         // SAFETY: The buffer has the queried length; Windows writes at most that many UTF-16 units.
         unsafe {
             Globalization::GetUserPreferredUILanguages(
@@ -63,7 +70,7 @@ impl PreferredUiLanguages {
                 &mut length,
             )
         }
-        .context(ReadUiLanguagesSnafu)?;
+        .context(ReadSnafu)?;
         let languages: Vec<_> = buffer
             .split(|unit| *unit == 0)
             .filter(|name| !name.is_empty())
@@ -71,8 +78,8 @@ impl PreferredUiLanguages {
             .collect();
         Ok(Self { languages })
     }
-    fn negotiate(&self) -> &'static str {
+    fn negotiate(&self) -> quartz_i18n::Language {
         let preferred: Vec<_> = self.languages.iter().map(String::as_str).collect();
-        quartz_i18n::negotiate_language(&preferred)
+        quartz_i18n::Language::negotiate(&preferred)
     }
 }

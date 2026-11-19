@@ -5,8 +5,8 @@ use crate::store::{
     rules::{ExecuteRuleWritesError, LoadRulesError},
 };
 use quartz_domain::rules::registry::{
-    CommitRuleDecisionError, CreateRuleRegistryError, DecideRegistryCommandError, RegistryCommand,
-    RegistrySuccess, RuleRegistry, RuleWarning, RulesChanged, SnapshotCell,
+    CommitRuleDecisionError, CreateRuleRegistryError, DecideRegistryCommandError, DecisionParts,
+    RegistryCommand, RegistrySuccess, RuleRegistry, RuleWarning, RulesChanged, SnapshotCell,
 };
 use quartz_domain::rules::{self, ParseContext, ParseRuleSetError, RuleOrigin, RuleSet};
 use snafu::{ResultExt, Snafu};
@@ -48,12 +48,23 @@ pub(crate) struct RegistryShell {
     registry: RuleRegistry,
 }
 impl RegistryShell {
-    pub(crate) fn open(mut store: Store) -> Result<Self, OpenRegistryShellError> {
+    pub(crate) fn open(store: Store) -> Result<Self, OpenRegistryShellError> {
+        Self::open_with_builtin(
+            store,
+            rules::BUILTIN_PRIVACY,
+            rules::BUILTIN_PRIVACY_REVISION,
+        )
+    }
+    fn open_with_builtin(
+        mut store: Store,
+        source: &str,
+        revision: u32,
+    ) -> Result<Self, OpenRegistryShellError> {
         let state = store.rule_sets().load().context(open_error::LoadSnafu)?;
         let registry = RuleRegistry::from_state(state).context(open_error::CreateSnafu)?;
         let builtin = RuleSet::parse(
             "builtin-privacy.toml",
-            rules::BUILTIN_PRIVACY,
+            source,
             ParseContext {
                 origin: RuleOrigin::Builtin,
                 references: &registry.state().references,
@@ -64,7 +75,7 @@ impl RegistryShell {
         shell
             .run(RegistryCommand::InstallBuiltin {
                 set: builtin,
-                revision: rules::BUILTIN_PRIVACY_REVISION,
+                revision,
             })
             .context(open_error::UpgradeSnafu)?;
         // Startup exposes epoch zero only after embedded upgrades have committed.
@@ -88,7 +99,11 @@ impl RegistryShell {
         command: RegistryCommand,
     ) -> Result<RegistryResult, RunRegistryCommandError> {
         let decision = self.registry.decide(command);
-        let (writes, reply, outcome) = decision.into_parts();
+        let DecisionParts {
+            writes,
+            reply,
+            outcome,
+        } = decision.into_parts();
         let reply = reply.context(run_error::DecideSnafu)?;
         let event = if let Some(outcome) = outcome {
             let now = jiff::Timestamp::now().as_millisecond();
@@ -120,5 +135,109 @@ impl RegistryShell {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_directory::DataDirectory;
+    use quartz_domain::{
+        rules::{Action, Field, FieldSnapshot},
+        text::NfcText,
+    };
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn startup_installs_and_upgrades_builtin_before_publishing_and_keeps_user_overlay() {
+        let directory = tempfile::tempdir().expect("isolated rule database");
+        let data = DataDirectory::new(directory.path());
+        let old_source =
+            rules::BUILTIN_PRIVACY.replace("value = 'InPrivate'", "value = 'OldPrivate'");
+        assert_ne!(
+            old_source,
+            rules::BUILTIN_PRIVACY,
+            "fixture changes builtin contents"
+        );
+        let old_revision = rules::BUILTIN_PRIVACY_REVISION;
+        let next_revision = old_revision.checked_add(1).expect("next builtin revision");
+        let mut shell = RegistryShell::open_with_builtin(
+            Store::open(&data).expect("store"),
+            &old_source,
+            old_revision,
+        )
+        .expect("initial builtin installation");
+        assert_eq!(shell.snapshots().load().epoch().get(), 0);
+        let builtin_key = "builtin.privacy".parse().expect("builtin key");
+        assert_eq!(shell.core().state().sets[&builtin_key].current.version, 1);
+        shell
+            .run(RegistryCommand::Apply {
+                key: "user.overlay".parse().expect("overlay key"),
+                file: "overlay.toml".into(),
+                text: r"format='quartz-rules/1'
+[set]
+key='user.overlay'
+kind='privacy'
+name='Overlay'
+parent='builtin.privacy'
+[[override]]
+target='builtin.privacy/browser-private-edge'
+label='User replacement'
+preset='excluded'
+when=[{field='app.exe_name',op='equals',value='quartz-test.exe'}]
+"
+                .into(),
+                base_version: 0,
+            })
+            .expect("persist user overlay");
+        drop(shell);
+        let upgraded = RegistryShell::open_with_builtin(
+            Store::open(&data).expect("reopen store"),
+            rules::BUILTIN_PRIVACY,
+            next_revision,
+        )
+        .expect("startup builtin upgrade");
+        let snapshot = upgraded.snapshots().load();
+        assert_eq!(
+            snapshot.epoch().get(),
+            0,
+            "first published snapshot includes the upgrade"
+        );
+        let state = upgraded.core().state();
+        let builtin = &state.sets[&builtin_key];
+        assert_eq!(builtin.builtin_revision, Some(next_revision));
+        assert_eq!(builtin.current.version, 2);
+        assert_ne!(
+            builtin.versions[&1].content_hash(),
+            builtin.versions[&2].content_hash()
+        );
+        let overlay_key = "user.overlay".parse().expect("overlay key");
+        let overlay = &state.sets[&overlay_key];
+        assert_eq!(overlay.current.version, 1);
+        assert_eq!(overlay.versions[&1].parent_version, Some(1));
+        assert_eq!(snapshot.upstream_changes().len(), 1);
+        let fields = FieldSnapshot {
+            text: BTreeMap::from([(Field::ExeName, NfcText::new("quartz-test.exe"))]),
+            domain: None,
+        };
+        assert_eq!(
+            snapshot.privacy().evaluate(&fields).privacy.app,
+            Action::Drop
+        );
+        drop(upgraded);
+        let reopened = RegistryShell::open_with_builtin(
+            Store::open(&data).expect("second reopen"),
+            rules::BUILTIN_PRIVACY,
+            next_revision,
+        )
+        .expect("idempotent startup");
+        assert_eq!(reopened.snapshots().load().hashes(), snapshot.hashes());
+        let stored = crate::store::ReadOnlyStore::open(&data.database())
+            .expect("read-only rule database")
+            .rule_sets()
+            .load()
+            .expect("persisted rules");
+        assert_eq!(stored.sets[&builtin_key].versions.len(), 2);
+        assert_eq!(stored.sets[&overlay_key].versions.len(), 1);
     }
 }

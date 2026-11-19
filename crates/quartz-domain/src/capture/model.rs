@@ -355,6 +355,30 @@ pub enum CaptureWrite {
     /// Stores an identity-free unknown range.
     RecordGap(CaptureGap),
 }
+impl CaptureWrite {
+    /// Borrows the confirmation point carried by this write, when present.
+    pub fn checkpoint(&self) -> Option<&Checkpoint> {
+        match self {
+            Self::Checkpoint(point) => Some(point),
+            Self::OpenRun { .. }
+            | Self::CloseRun { .. }
+            | Self::OpenClockSegment { .. }
+            | Self::CloseClockSegment { .. }
+            | Self::ObserveWindow { .. }
+            | Self::RetireWindow { .. }
+            | Self::OpenInterval(_)
+            | Self::CloseInterval { .. }
+            | Self::OpenAvailability(_)
+            | Self::CloseAvailability { .. }
+            | Self::SettlePersistedRows { .. }
+            | Self::SetDeadline { .. }
+            | Self::SetTimedState(_)
+            | Self::ClearTimedPolicy(_)
+            | Self::ClearDeadline { .. }
+            | Self::RecordGap(_) => None,
+        }
+    }
+}
 /// Sanitized tray/subscription state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureState {

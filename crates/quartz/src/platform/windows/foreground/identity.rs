@@ -188,7 +188,7 @@ impl Resolver {
                             return Resolution::Review;
                         }
                     };
-                    if let Some(child) = foreground::content_window(&children, owner) {
+                    if let Some(child) = foreground::ChildWindow::content(&children, owner) {
                         let metadata = self.process(child.process);
                         if Window::from_handle(child.window).process() != child.process {
                             self.processes.evict_process(child.process);
@@ -290,7 +290,7 @@ impl Resolver {
                 .map_err(|source| ResolveProcessError::DecodeText { source })?;
         let path = image_path.replace('/', "\\").to_lowercase();
         let identity =
-            foreground::application_identity(&path, handle.application_user_model_id()?.as_deref());
+            AppIdentity::from_process(&path, handle.application_user_model_id()?.as_deref());
         let exe_name = path
             .rsplit('\\')
             .next()

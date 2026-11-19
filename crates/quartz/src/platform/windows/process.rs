@@ -52,7 +52,7 @@ impl UiProcess {
         command.push("\" ui");
         let mut command: Vec<_> = command.encode_wide().chain(Some(0)).collect();
         let startup = STARTUPINFOW {
-            cb: size_of::<STARTUPINFOW>() as u32,
+            cb: const { super::structure_size::<STARTUPINFOW>() },
             dwFlags: STARTF_FORCEONFEEDBACK,
             ..Default::default()
         };

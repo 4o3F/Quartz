@@ -1,12 +1,13 @@
 //! Database actor; each continuation requires observable flush progress.
 
 use super::{
-    COMMIT_HEADROOM, DatabaseCommand, Feedback, MainCommand, MainPort, SendMainCommandError,
+    COMMIT_HEADROOM, DatabaseCommand, Feedback, MainCommand, MainPort, SendDuringShutdown,
+    SendMainCommandError,
 };
 use crate::{
     capture::{
-        FlushProgress, FlushStalledError, Persistence, PersistenceOutcome, PersistenceResult,
-        PersistenceState, QueueShutdown,
+        CheckpointCollection, FlushProgress, FlushStalledError, Persistence, PersistenceOutcome,
+        PersistenceResult, PersistenceState, QueueShutdown,
     },
     core::sources::{ClockReader, ReadClockError},
     rules::registry::{RegistryResult, RegistryShell, RunRegistryCommandError},
@@ -90,10 +91,18 @@ enum DrainProgress {
     Waiting,
 }
 impl DatabaseLoop {
+    fn checkpoint_collection(&self) -> CheckpointCollection {
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            CheckpointCollection::Collect
+        } else {
+            CheckpointCollection::Skip
+        }
+    }
     fn now(&self) -> Result<Timestamp, ReadClockError> {
         self.clock.read()
     }
     fn publish(&self, result: PersistenceResult) -> Result<(), RunDatabaseLoopError> {
+        self.trace_commit_latency(&result);
         if let Some(error) = result.failure() {
             tracing::error!(%error, "capture write failed");
         }
@@ -106,6 +115,34 @@ impl DatabaseLoop {
                 })?;
         }
         Ok(())
+    }
+    fn trace_commit_latency(&self, result: &PersistenceResult) {
+        if !tracing::enabled!(tracing::Level::DEBUG) || result.checkpoints.is_empty() {
+            return;
+        }
+        let committed = match self.now() {
+            Ok(at) => at.mono,
+            Err(error) => {
+                tracing::debug!(%error, "could not sample capture commit clock");
+                return;
+            }
+        };
+        for point in &result.checkpoints {
+            match point.latency_at(committed) {
+                Ok(elapsed) => tracing::debug!(
+                    run = point.run.get(),
+                    batch = point.batch.get(),
+                    output_to_commit_ms = %elapsed.as_millis(),
+                    confirmed_mono_ms = point.at.mono.get(),
+                    commit_by_mono_ms = point.commit_by_mono.get(),
+                    committed_mono_ms = committed.get(),
+                    "capture batch committed"
+                ),
+                Err(error) => {
+                    tracing::debug!(%error, "could not measure capture commit latency")
+                }
+            }
+        }
     }
     pub(super) fn run(&mut self) -> Result<(), RunDatabaseLoopError> {
         loop {
@@ -131,7 +168,10 @@ impl DatabaseLoop {
         if !self.persistence.is_due(now) {
             return Ok(DrainProgress::Waiting);
         }
-        let result = self.persistence.flush(self.registry.store_mut(), now);
+        let checkpoints = self.checkpoint_collection();
+        let result = self
+            .persistence
+            .flush(self.registry.store_mut(), now, checkpoints);
         Self::ensure_progress(&result)
             .map_err(|source| RunDatabaseLoopError::Stalled { source })?;
         self.publish(result)?;
@@ -182,7 +222,10 @@ impl DatabaseLoop {
                 let now = self
                     .now()
                     .map_err(|source| RunDatabaseLoopError::Clock { source })?;
-                let result = self.persistence.flush_due(self.registry.store_mut(), now);
+                let checkpoints = self.checkpoint_collection();
+                let result =
+                    self.persistence
+                        .flush_due(self.registry.store_mut(), now, checkpoints);
                 self.publish(result)?;
             }
             Some(DatabaseCommand::Registry { command, reply }) => {
@@ -192,7 +235,10 @@ impl DatabaseLoop {
                 let now = self
                     .now()
                     .map_err(|source| RunDatabaseLoopError::Clock { source })?;
-                let result = self.persistence.flush(self.registry.store_mut(), now);
+                let checkpoints = self.checkpoint_collection();
+                let result = self
+                    .persistence
+                    .flush(self.registry.store_mut(), now, checkpoints);
                 Self::ensure_progress(&result)
                     .map_err(|source| RunDatabaseLoopError::Stalled { source })?;
                 self.publish(result)?;
@@ -213,7 +259,7 @@ impl DatabaseLoop {
                 }
             })?;
         }
-        let _ = reply.send(result);
+        reply.send_during_shutdown(result);
         Ok(())
     }
     fn shutdown(&mut self, request: QueueShutdown) -> Result<(), RunDatabaseLoopError> {
@@ -228,7 +274,12 @@ impl DatabaseLoop {
     fn flush_shutdown_with(
         &mut self,
         request: QueueShutdown,
-        mut flush: impl FnMut(&mut Persistence, &mut Store, Timestamp) -> PersistenceResult,
+        mut flush: impl FnMut(
+            &mut Persistence,
+            &mut Store,
+            Timestamp,
+            CheckpointCollection,
+        ) -> PersistenceResult,
     ) -> Result<(), ShutdownDatabaseError> {
         loop {
             if Instant::now() >= request.deadline {
@@ -243,7 +294,13 @@ impl DatabaseLoop {
             self.registry
                 .store_mut()
                 .limit_write_wait(request.deadline.saturating_duration_since(Instant::now()));
-            let result = flush(&mut self.persistence, self.registry.store_mut(), now);
+            let checkpoints = self.checkpoint_collection();
+            let result = flush(
+                &mut self.persistence,
+                self.registry.store_mut(),
+                now,
+                checkpoints,
+            );
             Self::ensure_progress(&result)
                 .map_err(|source| ShutdownDatabaseError::Stalled { source })?;
             if let DatabaseProgress::Ended = self.settle_shutdown(result, request.deadline)? {
@@ -256,6 +313,7 @@ impl DatabaseLoop {
         result: PersistenceResult,
         deadline: Instant,
     ) -> Result<DatabaseProgress, ShutdownDatabaseError> {
+        self.trace_commit_latency(&result);
         self.main
             .send_before(MainCommand::Persistence(result.state()), deadline)?;
         if Instant::now() >= deadline {
@@ -299,13 +357,10 @@ mod tests {
     use crossbeam_channel::bounded;
     use quartz_domain::capture::UtcInstant;
 
-    struct TestClock;
+    struct TestClock(Timestamp);
     impl ClockReader for TestClock {
         fn read(&self) -> Result<Timestamp, ReadClockError> {
-            Ok(Timestamp {
-                utc: UtcInstant::try_from(0).expect("UTC"),
-                mono: MonoInstant::from_millis(0),
-            })
+            Ok(self.0)
         }
     }
     struct Fixture {
@@ -340,7 +395,10 @@ mod tests {
                         sender,
                         wake: Arc::new(|| {}),
                     },
-                    clock: Arc::new(TestClock),
+                    clock: Arc::new(TestClock(Timestamp {
+                        utc: UtcInstant::try_from(0).expect("UTC"),
+                        mono: MonoInstant::from_millis(0),
+                    })),
                 },
                 _directory: directory,
                 _commands: commands,
@@ -360,6 +418,7 @@ mod tests {
             effects: Vec::new(),
             outcome: PersistenceOutcome::Buffered { commands: 1 },
             progress: FlushProgress::None,
+            checkpoints: Vec::new(),
         }
     }
     #[test]
@@ -367,7 +426,7 @@ mod tests {
         let mut fixture = Fixture::new();
         let request = fixture.shutdown_request(Instant::now() + SHUTDOWN_TIMEOUT);
         let mut attempts = 0;
-        let result = fixture.database.flush_shutdown_with(request, |_, _, _| {
+        let result = fixture.database.flush_shutdown_with(request, |_, _, _, _| {
             attempts += 1;
             stalled_result()
         });
@@ -378,9 +437,9 @@ mod tests {
     fn shutdown_deadline_prevents_another_flush() {
         let mut fixture = Fixture::new();
         let request = fixture.shutdown_request(Instant::now());
-        let result = fixture
-            .database
-            .flush_shutdown_with(request, |_, _, _| panic!("expired shutdown cannot flush"));
+        let result = fixture.database.flush_shutdown_with(request, |_, _, _, _| {
+            panic!("expired shutdown cannot flush")
+        });
         assert!(matches!(result, Err(ShutdownDatabaseError::Deadline)));
     }
     #[test]
@@ -389,5 +448,154 @@ mod tests {
         let mut committed = stalled_result();
         committed.progress = FlushProgress::Committed { commands: 1 };
         assert!(DatabaseLoop::ensure_progress(&committed).is_ok());
+    }
+
+    #[test]
+    fn commit_wait_reserves_headroom_and_never_waits_past_the_deadline() {
+        let fixture = Fixture::new();
+        let now = fixture.database.now().expect("scripted clock");
+        let deadline = now
+            .mono
+            .checked_add(quartz_domain::capture::limits::BATCH_WAIT)
+            .expect("commit deadline");
+        assert_eq!(
+            fixture
+                .database
+                .wait_duration(deadline)
+                .expect("commit wait"),
+            quartz_domain::capture::limits::BATCH_WAIT - COMMIT_HEADROOM
+        );
+        assert_eq!(
+            fixture
+                .database
+                .wait_duration(now.mono)
+                .expect("due commit"),
+            Duration::ZERO
+        );
+        let near_deadline = now
+            .mono
+            .checked_add(COMMIT_HEADROOM - Duration::from_millis(1))
+            .expect("near deadline");
+        assert_eq!(
+            fixture
+                .database
+                .wait_duration(near_deadline)
+                .expect("headroom already reached"),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn committed_checkpoint_latency_uses_the_injected_post_flush_clock() {
+        use quartz_domain::{
+            capture::{
+                CaptureCore, CaptureEvent, CaptureInput, Foreground, ForegroundGeneration,
+                NoForegroundReason, ObservationSource, RunId,
+            },
+            rules::registry::{RegistryState, RuleRegistry},
+        };
+        for checkpoints in [CheckpointCollection::Skip, CheckpointCollection::Collect] {
+            let mut fixture = Fixture::new();
+            let start = fixture.database.now().expect("scripted startup clock");
+            let run = RunId::new(1);
+            let mut started = CaptureCore::start(run, start).expect("capture core");
+            let rules = RuleRegistry::from_state(RegistryState::default())
+                .expect("rules")
+                .snapshots();
+            let _ = fixture
+                .database
+                .persistence
+                .accept(started.step.into_parts(run), start);
+            for event in [
+                CaptureEvent::Session(quartz_domain::capture::SessionStatus::Ready(
+                    Default::default(),
+                )),
+                CaptureEvent::Foreground {
+                    generation: ForegroundGeneration::new(1),
+                    source: ObservationSource::Review,
+                    foreground: Foreground::None(NoForegroundReason::Empty),
+                },
+            ] {
+                let parts = started
+                    .core
+                    .step(CaptureInput {
+                        at: start,
+                        rules: rules.load(),
+                        event,
+                    })
+                    .expect("startup observation")
+                    .into_parts(run);
+                let _ = fixture.database.persistence.accept(parts, start);
+            }
+            let initial = fixture.database.persistence.flush(
+                fixture.database.registry.store_mut(),
+                start,
+                CheckpointCollection::Skip,
+            );
+            assert!(initial.failure().is_none(), "{:?}", initial.failure());
+            let output = start
+                .checked_advance(quartz_domain::capture::limits::CHECKPOINT_PERIOD)
+                .expect("checkpoint time");
+            let parts = started
+                .core
+                .step(CaptureInput {
+                    at: output,
+                    rules: rules.load(),
+                    event: CaptureEvent::Wake,
+                })
+                .expect("checkpoint observation")
+                .into_parts(run);
+            let _ = fixture.database.persistence.accept(parts, output);
+            let queued = Duration::from_millis(100);
+            let transaction = Duration::from_millis(25);
+            let flush_at = output.checked_advance(queued).expect("flush clock");
+            let committed_at = flush_at
+                .checked_advance(transaction)
+                .expect("post-flush clock");
+            fixture.database.clock = Arc::new(TestClock(committed_at));
+            let level = match checkpoints {
+                CheckpointCollection::Skip => tracing::Level::INFO,
+                CheckpointCollection::Collect => tracing::Level::DEBUG,
+            };
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(level)
+                .with_writer(std::io::sink)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                assert_eq!(fixture.database.checkpoint_collection(), checkpoints);
+                let result = fixture.database.persistence.flush(
+                    fixture.database.registry.store_mut(),
+                    flush_at,
+                    checkpoints,
+                );
+                assert!(result.failure().is_none(), "{:?}", result.failure());
+                assert_eq!(result.state(), PersistenceState::Ready);
+                assert!(matches!(result.progress, FlushProgress::Committed { .. }));
+                match checkpoints {
+                    CheckpointCollection::Skip => assert!(result.checkpoints.is_empty()),
+                    CheckpointCollection::Collect => {
+                        assert_eq!(result.checkpoints.len(), 1);
+                        let point = &result.checkpoints[0];
+                        assert_eq!(point.at, output);
+                        assert_eq!(
+                            point.commit_by_mono,
+                            output
+                                .checked_advance(quartz_domain::capture::limits::BATCH_WAIT)
+                                .expect("deadline")
+                                .mono
+                        );
+                        let committed = fixture.database.now().expect("injected commit clock").mono;
+                        assert_eq!(
+                            point.latency_at(committed).expect("commit latency"),
+                            queued + transaction
+                        );
+                    }
+                }
+                fixture
+                    .database
+                    .publish(result)
+                    .expect("publish successful commit");
+            });
+        }
     }
 }

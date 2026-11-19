@@ -25,6 +25,24 @@ use std::{
     path::PathBuf,
 };
 
+/// First persisted revision of a new user rule set.
+const INITIAL_REVISION: u32 = 1;
+
+/// A client uses zero to request creation of a missing or deleted rule set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseVersion {
+    New,
+    Version(u32),
+}
+impl From<u32> for BaseVersion {
+    fn from(version: u32) -> Self {
+        match version {
+            0 => Self::New,
+            version => Self::Version(version),
+        }
+    }
+}
+
 /// A registry operation containing values only; the shell owns any reply channel.
 #[derive(Debug)]
 pub enum RegistryCommand {
@@ -184,6 +202,12 @@ pub enum DecideRegistryCommandError {
     /// Rule revision exceeds the supported range.
     #[snafu(display("rule revision exceeds the supported range"))]
     RevisionOverflow,
+    /// Sibling position exceeds the persisted integer range.
+    #[snafu(display("rule sibling order exceeds the supported range"))]
+    SiblingOrderOverflow {
+        /// Checked conversion failure.
+        source: std::num::TryFromIntError,
+    },
     /// Rule publication epoch exhausted.
     #[snafu(display("rule publication epoch exhausted"))]
     EpochOverflow,
@@ -254,6 +278,16 @@ pub struct Decision {
     reply: RegistryReply,
     outcome: Option<CommitOutcome>,
 }
+/// Named outputs of a registry decision, consumed by the persistence shell.
+#[derive(Debug)]
+pub struct DecisionParts {
+    /// Atomic writes to execute before acknowledging the candidate.
+    pub writes: Vec<RuleSetWrite>,
+    /// Command success or its structured rejection.
+    pub reply: RegistryReply,
+    /// Opaque candidate state to acknowledge after a successful commit.
+    pub outcome: Option<CommitOutcome>,
+}
 impl Decision {
     /// Borrows the exact writes that must succeed in one transaction.
     pub fn writes(&self) -> &[RuleSetWrite] {
@@ -264,8 +298,12 @@ impl Decision {
         &self.reply
     }
     /// Consumes the plan into write descriptions, its reply, and an opaque commit token.
-    pub fn into_parts(self) -> (Vec<RuleSetWrite>, RegistryReply, Option<CommitOutcome>) {
-        (self.writes, self.reply, self.outcome)
+    pub fn into_parts(self) -> DecisionParts {
+        DecisionParts {
+            writes: self.writes,
+            reply: self.reply,
+            outcome: self.outcome,
+        }
     }
 }
 /// Opaque candidate state returned to the core after its writes commit.
@@ -499,7 +537,10 @@ impl RuleRegistry {
                     let update = state.metadata(
                         &sibling.key,
                         None,
-                        Some(order as i64),
+                        Some(
+                            i64::try_from(order)
+                                .context(command_error::SiblingOrderOverflowSnafu)?,
+                        ),
                         RuleSetDeletion::Active,
                     )?;
                     writes.push(RuleSetWrite::Reorder(update));
@@ -563,17 +604,15 @@ impl RuleRegistry {
                     }
                 }
                 let old = state.sets.get(&key);
-                let version = old
-                    .map(|entry| {
-                        entry
-                            .current
-                            .version
-                            .checked_add(1)
-                            .ok_or(DecideRegistryCommandError::RevisionOverflow)
-                    })
-                    .transpose()?
-                    .unwrap_or(revision)
-                    .max(revision);
+                let version = match old {
+                    Some(entry) => entry
+                        .current
+                        .version
+                        .checked_add(1)
+                        .ok_or(DecideRegistryCommandError::RevisionOverflow)?
+                        .max(revision),
+                    None => revision,
+                };
                 let update =
                     state.content_update(set, version, RuleOrigin::Builtin, Some(revision))?;
                 state.apply_update(&update);
@@ -644,7 +683,9 @@ impl RegistryState {
             .get(key)
             .filter(|entry| entry.deletion == RuleSetDeletion::Active)
             .map(|entry| entry.current.version);
-        if current_version.unwrap_or(0) != base_version {
+        if current_version.map_or(BaseVersion::New, BaseVersion::Version)
+            != BaseVersion::from(base_version)
+        {
             return Err(DecideRegistryCommandError::Stale {
                 key: key.clone(),
                 base_version,
@@ -669,6 +710,7 @@ impl RegistryState {
         if old.is_some_and(|entry| entry.current.set.header.parent != set.header.parent) {
             return Err(DecideRegistryCommandError::ReparentSet);
         }
+        // New keys start at the initial revision; retained histories advance from their last revision.
         let version = old
             .map(|entry| {
                 entry
@@ -678,7 +720,7 @@ impl RegistryState {
                     .ok_or(DecideRegistryCommandError::RevisionOverflow)
             })
             .transpose()?
-            .unwrap_or(1);
+            .unwrap_or(INITIAL_REVISION);
         let update = self.content_update(set, version, RuleOrigin::User, None)?;
         self.apply_update(&update);
         Ok(RuleSetWrite::CommitVersion(update))
@@ -708,14 +750,12 @@ impl RegistryState {
         let enabled = old
             .filter(|entry| entry.deletion == RuleSetDeletion::Active)
             .map_or(Enablement::Enabled, |entry| entry.current.enabled);
-        let sibling_order = old.map_or(
-            if origin == RuleOrigin::Builtin {
-                0
-            } else {
-                self.installed_sets().len() as i64
-            },
-            |entry| entry.current.sibling_order,
-        );
+        let sibling_order = match old {
+            Some(entry) => entry.current.sibling_order,
+            None if origin == RuleOrigin::Builtin => 0,
+            None => i64::try_from(self.installed_sets().len())
+                .context(command_error::SiblingOrderOverflowSnafu)?,
+        };
         Ok(RuleSetUpdate {
             key,
             revision: RuleSetVersion {
@@ -761,6 +801,7 @@ impl RegistryState {
             revision,
             origin: old.origin,
             expected: ExpectedRuleVersion::Version(old.current.version),
+            // Absent metadata edits retain the persisted values.
             enabled: enabled.unwrap_or(old.current.enabled),
             sibling_order: order.unwrap_or(old.current.sibling_order),
             builtin_revision: old.builtin_revision,
