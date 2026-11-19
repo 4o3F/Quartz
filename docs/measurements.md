@@ -387,3 +387,95 @@ New-Item -ItemType Directory -Force target/windows/sim
 | Windows `cargo.exe build --release -p quartz --target-dir target/windows` | 通过 |
 
 回归覆盖缺失主键与无效端点的类型化解码错误、开放确认点、存储枚举标签序列化、停止状态并集与空闲掩码、固定种子的行数与事实哈希、三档标题参数、生产路径与已有文件拒绝写入，以及小型模拟库的基准读取。
+
+## 2026-11-18 M1-E2a：一年模拟数据与离线验收断言
+
+本次使用当前 main `201fedc28921e90f137ea28a3c16e07562e394fc`，Windows 11 build 26300、Intel Core i7-14700HX（28 个逻辑处理器）、Rust 1.100.0。Windows release 构建命令为 `cargo.exe build --release -p quartz --target-dir target/windows`，构建成功，`quartz.exe` 为 17,543,680 字节。生成与基准串行执行，使用同一个 release 文件；本轮没有启动采集核心、UI、预览或资源测量任务。
+
+在仓库根目录执行以下命令，两个数据库都是新文件，位于 gitignored 的 `D:\Documents\403F\Quartz\target\windows\sim`：
+
+```powershell
+New-Item -ItemType Directory -Force target/windows/sim
+.\target\windows\release\quartz.exe gen-data --db target/windows/sim/m1-e2a-typical-365d-20261118.db --profile typical --days 365 --seed 1
+.\target\windows\release\quartz.exe bench-query --db target/windows/sim/m1-e2a-typical-365d-20261118.db --runs 100
+.\target\windows\release\quartz.exe gen-data --db target/windows/sim/m1-e2a-heavy-365d-20261118.db --profile heavy --days 365 --seed 1
+.\target\windows\release\quartz.exe bench-query --db target/windows/sim/m1-e2a-heavy-365d-20261118.db --runs 100
+```
+
+生成耗时使用命令内部计时，包含迁移、逐日事务、关闭写连接时 WAL 写回、首日/中间日/末日守恒检查及行数统计。两档均按工作日完整参数、周末减半生成；网页写入尚待 M5，`web_intervals` 为零。与 [03 数据模型 §4.6](design/03-data-model.md) 决策后的 typical 150 MiB、heavy 442 MiB 估算对照时，需要同时考虑估算包含的网页行、工作日比例及当前生成事实的差异。
+
+| 档位 | 生成耗时（s） | 主库字节 | 主库（MiB） | 估算（MiB） | 与估算差值（MiB） | CaptureWrite 数 |
+|---|---:|---:|---:|---:|---:|---:|
+| typical | 141.173 | 99,586,048 | 94.973 | 150 | -55.027 | 1,257,685 |
+| heavy | 511.592 | 301,072,384 | 287.125 | 442 | -154.875 | 3,761,685 |
+
+主库分别为估算的 63.32% 和 64.96%，均未执行 VACUUM。两档结束后 WAL 均为 0 字节，SHM 为 32,768 字节；首日、中间日、末日的存储守恒检查均通过。
+
+| 表 | typical 行数 | heavy 行数 |
+|---|---:|---:|
+| applications | 4 | 4 |
+| availability_intervals | 1,199 | 1,199 |
+| capture_gaps | 53 | 53 |
+| capture_runs | 365 | 365 |
+| clock_segments | 418 | 418 |
+| intervals | 626,208 | 1,878,208 |
+| timed_policies | 0 | 0 |
+| titles | 172,150 | 532,100 |
+| web_intervals | 0 | 0 |
+| window_instances | 1,460 | 1,460 |
+
+### 一年库的事实范围读取
+
+查询起点为首个运行的 UTC `1735754401000`（2025-01-01 18:00:01Z），day、week、year 分别读取随后 1、7、365 个 24 小时范围。每档、每范围在同一进程内执行 100 次，包含首次读取；P50/P95 使用 nearest-rank。计时包含 SQLite 取行与 Rust 事实结果构造，结果释放在计时之外。读取连接为只读、每次读取使用一个 WAL 快照，进程与系统缓存沿用；没有清空系统缓存。
+
+| 档位 | 范围 | 前台与无前台 | 可用状态 | 缺口 | 总行数 | P50（ms） | P95（ms） | 最大值（ms） |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| typical | day | 2,000 | 3 | 1 | 2,004 | 2.657 | 2.915 | 3.961 |
+| typical | week | 12,004 | 23 | 1 | 12,028 | 19.958 | 21.368 | 23.585 |
+| typical | year | 626,208 | 1,199 | 53 | 627,460 | 2675.223 | 2864.804 | 2922.640 |
+| heavy | day | 6,000 | 3 | 1 | 6,004 | 9.394 | 10.015 | 10.498 |
+| heavy | week | 36,004 | 23 | 1 | 36,028 | 156.971 | 190.863 | 199.023 |
+| heavy | year | 1,878,208 | 1,199 | 53 | 1,879,460 | 8101.305 | 8702.371 | 8915.049 |
+
+### 预算对照与查询计划
+
+[08 资源预算 §1.4](design/08-resources.md) 的 typical 一年日、周 P95 < 100 ms 条件，在本次首日起点的两个范围均满足，分别余量 97.085 ms 和 78.632 ms。heavy 日范围也低于同一参考值，周 P95 190.863 ms，比 100 ms 高 90.863 ms（1.909 倍），作为压力档结果记录。
+
+typical 的 year 原始事实读取 P95 2864.804 ms，比年度汇总 500 ms 参考值高 2364.804 ms（5.730 倍）。heavy 的 year P95 为 8702.371 ms，比 500 ms 参考值高 8202.371 ms（17.405 倍）。M1 此命令读取前台、可用状态和缺口的全部相交事实并构造结果；年度汇总管线在 M2/M4 接入后验收。
+
+只读诊断使用 WSL Python 的 SQLite 3.45.1，连接设置 `mode=ro`、`PRAGMA query_only=ON`；heavy 静态主库在确认 WAL 为 0 字节后使用 `immutable=1` 读取。两档计划相同，使用与 `store::facts::load_range` 相同的谓词，对 year 范围执行以下查询：
+
+```sql
+EXPLAIN QUERY PLAN SELECT * FROM intervals
+WHERE start_utc_ms >= 1735668001000
+  AND start_utc_ms < 1767290401000 AND end_utc_ms > 1735754401000;
+EXPLAIN QUERY PLAN SELECT * FROM intervals
+WHERE end_utc_ms IS NULL
+  AND start_utc_ms < 1767290401000 AND confirmed_utc_ms > 1735754401000;
+EXPLAIN QUERY PLAN SELECT * FROM availability_intervals
+WHERE start_utc_ms >= 1735668001000
+  AND start_utc_ms < 1767290401000 AND end_utc_ms > 1735754401000;
+EXPLAIN QUERY PLAN SELECT * FROM availability_intervals
+WHERE end_utc_ms IS NULL
+  AND start_utc_ms < 1767290401000 AND confirmed_utc_ms > 1735754401000;
+EXPLAIN QUERY PLAN SELECT * FROM capture_gaps
+WHERE start_utc_ms < 1767290401000 AND end_utc_ms > 1735754401000;
+```
+
+| 分支 | EXPLAIN QUERY PLAN 的索引与范围 |
+|---|---|
+| 已关闭前台 | `intervals_time (start_utc_ms>? AND start_utc_ms<?)` |
+| 开放前台 | `intervals_time (start_utc_ms<?)` |
+| 已关闭可用状态 | `availability_time (start_utc_ms>? AND start_utc_ms<?)` |
+| 开放可用状态 | `availability_time (start_utc_ms<?)` |
+| 缺口 | `capture_gaps_time (start_utc_ms<?)` |
+
+这里的读取形态是按时间索引逐行返回事实。year 的前台事实数量为 typical 626,208、heavy 1,878,208；heavy 的 week 为 36,004。开放行分支只有开始时间上界，所列计划选择时间索引，并未选择 `intervals_one_open` / `availability_one_open`，仍需检查上界之前的历史候选。根据返回规模和该计划判断，全年逐行读取、结果构造及开放分支的历史候选扫描是后续需要分析的成本来源。本步骤保留查询、索引和缓存设置。
+
+### 离线工具验证与 E2b
+
+`deno task check`（fmt、lint、严格 TypeScript 类型检查）通过，`deno task test` 的 81 项测试通过，所有夹具为手写的小型 JSON 对象。命令行另验证文件输入、标准输入成功返回 0，缺少覆盖事实的输入返回 1。新增工具使用现有依赖，没有新增包，`deno.json` 的精确版本与 `deno.lock` 保持冻结。Rust 源码未修改，本轮运行 Windows release 构建。
+
+[人工验收手册](acceptance/m1.md) 包含 02 §6 的十组场景、M1 六条验收项、独立数据目录、托盘启动/退出、逐场景 dump/断言、崩溃前后快照和十分钟资源回归。现有 `LOCALAPPDATA` 覆盖可隔离到验收目录，无需新增生产路径配置；暂停、故障注入和精确时序采样入口的待准备条件在手册对应场景列出。
+
+`dump` 当前没有 `--db`，按数据目录直接读取 `Quartz\quartz.db`，本轮未对模拟库运行 `deno task acceptance`。真实采集、用户在场操作和会开关界面 20 次的资源回归由 E2b 执行。

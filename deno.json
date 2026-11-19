@@ -21,6 +21,8 @@
     "check-schema": "deno run --frozen --allow-read --allow-write --allow-run scripts/check-schema.ts",
     "verify-version": "deno run --frozen --allow-read --allow-write --allow-env=GITHUB_REF_NAME,GITHUB_OUTPUT scripts/verify-version.ts",
     "package": "deno run --frozen --allow-read --allow-write --allow-env=GITHUB_OUTPUT scripts/package.ts",
-    "measure": "deno run --frozen --allow-ffi --allow-run --allow-read --allow-write scripts/measure.ts"
+    "measure": "deno run --frozen --allow-ffi --allow-run --allow-read --allow-write scripts/measure.ts",
+    "acceptance": "deno run --frozen --allow-read scripts/acceptance.ts",
+    "test": "deno test --frozen scripts/*_test.ts"
   }
 }
