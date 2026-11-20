@@ -15,6 +15,13 @@ impl OwnedHandle {
         Self(handle)
     }
 
+    pub(super) fn into_file(self) -> std::fs::File {
+        use std::os::windows::io::FromRawHandle;
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: Ownership transfers from this guard to File exactly once.
+        unsafe { std::fs::File::from_raw_handle(this.0.0) }
+    }
+
     pub(super) fn raw(&self) -> HANDLE {
         self.0
     }

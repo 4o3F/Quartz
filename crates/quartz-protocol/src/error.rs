@@ -15,6 +15,8 @@ pub enum ErrorCode {
     BadRequest,
     /// The request operation is not recognized.
     UnknownOp,
+    /// The operation is defined but not implemented by this core.
+    NotImplemented,
     /// The first request must be hello.
     HandshakeRequired,
     /// The declared frame payload exceeds the byte limit.
@@ -40,9 +42,10 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every stable code that this core can send.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::BadRequest,
         Self::UnknownOp,
+        Self::NotImplemented,
         Self::HandshakeRequired,
         Self::FrameTooLarge,
         Self::ProtoMismatch,
@@ -60,6 +63,7 @@ impl ErrorCode {
         match self {
             Self::BadRequest => "bad_request",
             Self::UnknownOp => "unknown_op",
+            Self::NotImplemented => "not_implemented",
             Self::HandshakeRequired => "handshake_required",
             Self::FrameTooLarge => "frame_too_large",
             Self::ProtoMismatch => "proto_mismatch",
@@ -87,6 +91,7 @@ impl FromStr for ErrorCode {
         Ok(match value {
             "bad_request" => Self::BadRequest,
             "unknown_op" => Self::UnknownOp,
+            "not_implemented" => Self::NotImplemented,
             "handshake_required" => Self::HandshakeRequired,
             "frame_too_large" => Self::FrameTooLarge,
             "proto_mismatch" => Self::ProtoMismatch,
@@ -109,6 +114,7 @@ impl Serialize for ErrorCode {
             )),
             Self::BadRequest
             | Self::UnknownOp
+            | Self::NotImplemented
             | Self::HandshakeRequired
             | Self::FrameTooLarge
             | Self::ProtoMismatch
@@ -136,6 +142,8 @@ pub enum ErrorKind {
     BadRequest,
     /// The request operation is not recognized.
     UnknownOp,
+    /// The operation is defined but not implemented by this core.
+    NotImplemented,
     /// The first request must be hello.
     HandshakeRequired,
     /// The declared frame payload exceeds the byte limit.
@@ -172,6 +180,7 @@ impl ErrorKind {
         match self {
             Self::BadRequest => ErrorCode::BadRequest,
             Self::UnknownOp => ErrorCode::UnknownOp,
+            Self::NotImplemented => ErrorCode::NotImplemented,
             Self::HandshakeRequired => ErrorCode::HandshakeRequired,
             Self::FrameTooLarge => ErrorCode::FrameTooLarge,
             Self::ProtoMismatch { .. } => ErrorCode::ProtoMismatch,
@@ -226,6 +235,7 @@ mod tests {
             match code {
                 ErrorCode::BadRequest
                 | ErrorCode::UnknownOp
+                | ErrorCode::NotImplemented
                 | ErrorCode::HandshakeRequired
                 | ErrorCode::FrameTooLarge
                 | ErrorCode::ProtoMismatch
@@ -255,7 +265,7 @@ mod tests {
                 code
             );
         }
-        assert_eq!(ErrorCode::ALL.len(), 11);
+        assert_eq!(ErrorCode::ALL.len(), 12);
         assert_eq!(
             serde_json::from_str::<ErrorCode>("\"future_error\"").expect("unknown accepted"),
             ErrorCode::Unknown
@@ -267,6 +277,17 @@ mod tests {
             ErrorCode::Unknown
         );
         assert!(serde_json::to_value(ErrorCode::Unknown).is_err());
+    }
+
+    #[test]
+    fn defined_but_unimplemented_has_stable_code() {
+        let error = ProtocolError::new(ErrorKind::NotImplemented);
+        let wire = serde_json::json!({"code":"not_implemented"});
+        assert_eq!(serde_json::to_value(&error).expect("serialize"), wire);
+        assert_eq!(
+            serde_json::from_value::<ProtocolError>(wire).expect("deserialize"),
+            error
+        );
     }
 
     #[test]

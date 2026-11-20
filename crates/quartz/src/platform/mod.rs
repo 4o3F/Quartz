@@ -1,7 +1,7 @@
 //! Platform integration used by the entry point.
 
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 
 #[cfg(windows)]
 pub(super) use windows::{AcquireInstance, AcquireInstanceError, CoreProcess, UiLanguage};

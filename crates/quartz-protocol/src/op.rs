@@ -62,6 +62,9 @@ pub enum Op {
     /// The `core.status` request.
     #[serde(rename = "core.status")]
     CoreStatus,
+    /// Opens or activates the UI through the core.
+    #[serde(rename = "ui.open")]
+    UiOpen,
     /// The `ui.first_frame` request.
     #[serde(rename = "ui.first_frame")]
     UiFirstFrame,
@@ -220,6 +223,7 @@ impl Op {
         Self::Hello,
         Self::Subscribe,
         Self::CoreStatus,
+        Self::UiOpen,
         Self::UiFirstFrame,
         Self::QueryDay,
         Self::QueryTimeline,
@@ -278,7 +282,7 @@ impl Op {
             Self::Hello => OpFamily::Hello,
             Self::Subscribe => OpFamily::Subscribe,
             Self::CoreStatus => OpFamily::Core,
-            Self::UiFirstFrame => OpFamily::Ui,
+            Self::UiOpen | Self::UiFirstFrame => OpFamily::Ui,
             Self::QueryDay
             | Self::QueryTimeline
             | Self::QueryRange
@@ -335,6 +339,7 @@ impl Op {
             Self::Hello => Some("hello"),
             Self::Subscribe => Some("subscribe"),
             Self::CoreStatus => Some("core.status"),
+            Self::UiOpen => Some("ui.open"),
             Self::UiFirstFrame => Some("ui.first_frame"),
             Self::QueryDay => Some("query.day"),
             Self::QueryTimeline => Some("query.timeline"),

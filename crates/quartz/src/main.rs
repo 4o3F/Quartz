@@ -12,6 +12,8 @@ mod core;
 mod data_directory;
 mod dump;
 mod generate_data;
+#[cfg(windows)]
+mod ipc;
 mod logging;
 mod platform;
 mod rules;
@@ -186,6 +188,9 @@ impl std::fmt::Display for CliCommand {
 
 #[derive(Debug, Snafu)]
 enum DispatchCommandError {
+    #[cfg(windows)]
+    #[snafu(display("{source}"))]
+    Status { source: ipc::client::CallCoreError },
     #[snafu(display("{source}"))]
     Dump { source: dump::DumpDayError },
     #[snafu(display("{source}"))]
@@ -213,6 +218,8 @@ impl CliCommand {
     fn dispatch(self) -> Result<(), DispatchCommandError> {
         use snafu::ResultExt as _;
         let command = match self {
+            #[cfg(windows)]
+            Self::Status => return ipc::client::print_status().context(StatusSnafu),
             Self::Dump { date, format } => {
                 return dump::DumpDay::new(&date, format).run().context(DumpSnafu);
             }
@@ -529,6 +536,9 @@ mod tests {
                 continue;
             }
             if matches!(command, CliCommand::Rules(RulesCommand::Check { .. })) {
+                continue;
+            }
+            if matches!(command, CliCommand::Status) {
                 continue;
             }
             assert!(

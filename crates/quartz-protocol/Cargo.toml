@@ -10,7 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+codec = ["dep:tokio-util"]
+
 [dependencies]
+tokio-util = { workspace = true, optional = true }
 jiff = { workspace = true, default-features = false }
 serde.workspace = true
 serde_json.workspace = true

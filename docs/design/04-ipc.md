@@ -6,12 +6,14 @@
 
 - 管道名：`\\.\pipe\Quartz.<当前用户 SID>.v1`。SID 用来区分同一台机器上的不同用户；访问控制靠 DACL，不靠管道名。
 - 字节模式，双向。最多 8 个实例。
-- 安全描述符：`D:P(A;;GA;;;SY)(A;;GA;;;<用户 SID>)`，显式拒绝默认 ACL 里的 Everyone 和匿名访问。
+- 安全描述符：`D:P(A;;GA;;;SY)(A;;GA;;;<用户 SID>)`，只授予 SYSTEM 和当前用户访问权限，不继承默认 DACL 条目。
 - 设置 `PIPE_REJECT_REMOTE_CLIENTS`。首个实例设置 `FILE_FLAG_FIRST_PIPE_INSTANCE`。
 - 服务端用 `GetNamedPipeClientProcessId` 取得客户端 PID，然后检查：
   - 客户端与核心属于同一用户、同一个 Windows 会话；
   - 客户端 exe 的完整路径是核心自己的 `current_exe()`（界面、命令行），或同一安装目录中的 `quartz-host.exe`（host）；握手角色必须与该路径对应。
-- 客户端连接后，用 `GetNamedPipeServerProcessId` 反向检查服务端完整路径是否为同一安装目录中的 `quartz.exe`。
+- 客户端连接后，用 `GetNamedPipeServerProcessId` 反向检查服务端与自己同用户、同会话，且完整路径等于自己的 `current_exe()`（生产环境为同一安装目录中的 `quartz.exe`）。
+
+路径比较先用 `std::fs::canonicalize` 解析两端路径，统一为 Windows 扩展绝对路径并解析目录联接、符号链接和 `.` / `..`，再用 `CompareStringOrdinal(..., true)` 对 UTF-16 路径进行忽略大小写的序数比较。路径解析或身份查询失败时关闭连接，服务端只记录 PID 和失败原因。可执行文件路径决定允许的角色集合：核心自身路径允许 `ui`、`cli`，同安装目录的 `quartz-host.exe` 只允许 `host`。
 
 路径检查用来排除意外连接的程序。本地同一账户下的恶意程序可以绕过这个检查，所以真正的安全边界是用户账户本身。
 
@@ -48,6 +50,7 @@ u32 小端，JSON 字节长度 | UTF-8 JSON
 |---|---|---|
 | `bad_request` | 信封或操作参数不符合格式 | 无 |
 | `unknown_op` | 不认识请求操作名 | 无 |
+| `not_implemented` | 操作已定义，但当前核心尚未实现 | 无 |
 | `handshake_required` | 连接首帧不是 `hello` | 无 |
 | `frame_too_large` | 帧的 JSON 字节长度超过 256 KiB | 无 |
 | `proto_mismatch` | 客户端与核心支持的协议版本没有交集 | `supported: {min, max}`，核心支持的协议范围 |
@@ -63,6 +66,8 @@ u32 小端，JSON 字节长度 | UTF-8 JSON
 M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>` 交给 UI，核心随后返回失败退出码。当前稳定代码为 `newer_database`、`migration_failed`、`other_session`、`core_start_failed`。备份路径通过独立、可重复的 `--backup-path <路径>` 参数传递；`migration_failed` 必须带其迁移前备份路径。共享的 `CoreError` 使用 `code` 和 `backup_paths` 字段，后续管道沿用这些代码与字段。
 
 ## 4. 握手
+
+连接后 5 秒内未收到完整的 `hello` 帧即断开。
 
 连接后第一帧必须是 `hello`，否则断开：
 
@@ -92,9 +97,9 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 | 角色 | 可用操作 |
 |---|---|
-| `ui` | 全部查询、订阅、设置、规则、标注、删除、图标、浏览器 host 管理、维护、隐私模式；发送 `ui.first_frame` |
+| `ui` | 全部查询、订阅、设置、规则、标注、删除、图标、浏览器 host 管理、维护、隐私模式；发送 `ui.open`、`ui.first_frame` |
 | `host` | `hello`、`browser.*`；只能为它自己在握手里登记的 `browser_stream` 上报 |
-| `cli` | 只读 `query.*`、`apps.icon`、`browser_hosts.status`、`core.status`、`rules_text.validate`、`rules_text.preview`、`rules_text.diff`、`rules_text.export`、`rule_sets.tree`、`rule_sets.versions`、`rules.explain`（用于诊断、测试脚本与规则编写） |
+| `cli` | `ui.open`；只读 `query.*`、`apps.icon`、`browser_hosts.status`、`core.status`、`rules_text.validate`、`rules_text.preview`、`rules_text.diff`、`rules_text.export`、`rule_sets.tree`、`rule_sets.versions`、`rules.explain`（用于诊断、测试脚本与规则编写） |
 
 新增功能模块使用独立的操作前缀与订阅主题（例如以后的自控协议使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节），权限表按前缀授权。
 
@@ -106,11 +111,18 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 | op | 方向 | 说明 |
 |---|---|---|
-| `core.status` | 请求 | 运行状态：是否在记录、当前停止原因、扩展连接情况、数据库状态 |
+| `core.status` | 请求 | 参数 `{}`；返回 `recording`、`stop_reason`、`database`、`browser_streams`、`instance_id`、`core_version` |
+| `ui.open` | UI、CLI 请求 | 参数 `{}`；按托盘“打开”动作打开或激活界面，入主线程队列后返回 `{accepted:true}` |
 | `ui.show` | 核心 → 预热中的界面 | 显示主窗口 |
 | `ui.activate` | 核心 → 界面 | 把已有窗口提到前台 |
 | `ui.shutdown` | 核心 → 界面 | 用户退出 Quartz 时通知界面关闭 |
 | `ui.first_frame` | UI 请求 | 参数 `{}`；每次显示或激活请求后的首帧完成时发送，返回 `{accepted:true}`，核心清除 `show_requested` |
+
+`core.status` 从主线程发布的不可变快照读取，不访问 SQLite。`database` 为 `ok | persistence_failed`，`stop_reason` 在记录时为 `null`，停止时为稳定枚举：`persistence_failed`、`starting`、`session_unavailable`、`capture_gap`、`suspended`、`disconnected`、`locked`、`paused`、`awaiting_browser_context`、`no_foreground`、`ended`。多个条件重叠时按上述顺序选择；`ended` 表示已结束的采集运行，运行结束的历史原因保留在采集记录中。`browser_streams` 是类型化连接列表，条目包含 `browser_stream` 标识，M5 前为空。`instance_id` 每次核心启动重新生成，`core_version` 为核心的 crate 版本。
+
+核心只在握手能力列表中登记已实现的能力。已定义但当前核心尚未实现的操作返回 `not_implemented`；`host` 运行时实现前，`host` 握手返回 `forbidden` 并断开。
+
+客户端发现管道和等待响应各有 2 秒上限，使用 `CreateFileW` 连接，繁忙时在剩余连接期限内调用 `WaitNamedPipeW`。普通重复启动在连接失败时记录警告并成功退出；`--autostart` 重复启动直接退出。核心在取得实例锁、打开存储后启动 I/O 线程，随后启动采集来源；关闭时先停止管道并关闭连接，再结算采集与关闭数据库。I/O 线程加入使用现有的 8 秒关闭上限。错误响应排入队列后最多等待 500 毫秒供写任务完成及客户端读取，然后断开并补建实例。运行期间槽位故障记录错误，并按 25 毫秒起步、1 秒封顶的指数退避重建；其他槽位、采集和数据库写入继续运行。
 
 核心发给界面的控制消息使用 `evt` 帧，`topic = "control"`，操作名放在 `body.op`：
 

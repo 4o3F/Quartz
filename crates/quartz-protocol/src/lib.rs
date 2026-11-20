@@ -7,13 +7,14 @@ mod handshake;
 mod op;
 mod role;
 mod startup_error;
+mod status;
 mod topic;
 
 pub use envelope::{Envelope, Event, EventSeq, Request, RequestId, Response, ResponseOutcome};
 pub use error::{ErrorCode, ErrorKind, ProtocolError, RuleSetVersion};
-pub use frame::{
-    DecodeFrameError, DecodeJsonError, EncodeFrameError, Frame, FrameDecoder, MAX_FRAME_LEN,
-};
+#[cfg(feature = "codec")]
+pub use frame::frame_codec;
+pub use frame::{DecodeJsonError, EncodeFrameError, MAX_FRAME_LEN, decode_json, encode_json};
 pub use handshake::{
     BrowserHello, BrowserKind, Capability, ClientVersion, CoreVersion, Epoch, ExtensionId, Hello,
     HelloResponse, HelloRole, HostHello, InstanceId, NegotiateProtoError, PROTOCOL_VERSION,
@@ -23,3 +24,8 @@ pub use op::{ControlBody, ControlOp, Op, OpFamily};
 pub use role::{AuthorizeOpError, Role};
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};
 pub use topic::{LocalDate, ParseTopicError, Subscribe, Topic};
+
+pub use status::{
+    AcceptedBody, BrowserStream, BrowserStreamId, CoreStatusRequest, CoreStatusResponse,
+    DatabaseState, StopReason, UiFirstFrameRequest, UiOpenRequest,
+};

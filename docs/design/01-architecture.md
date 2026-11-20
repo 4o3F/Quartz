@@ -106,7 +106,7 @@ enum RulesCommand {
 ## 3. 单实例
 
 - 同一用户只允许一个采集会话。核心在初始化数据库与管道前，用 `LockFileEx` 独占数据目录的 `quartz.lock`，并在整个生命周期持有；锁文件跨 Windows 会话生效。
-- `Local\Quartz.<SID>.core` 互斥量只用于会话内快速转发。同会话重复启动时，把参数（例如"打开界面"）通过管道转发后退出。另一会话启动时，核心以 `other_session` 错误码启动 UI 错误窗口并返回失败退出码。
+- `Local\Quartz.<SID>.core` 互斥量只用于会话内快速转发。同会话的普通重复启动通过管道发送 `ui.open` 后退出；`--autostart` 重复启动直接退出。另一会话启动时，核心以 `other_session` 错误码启动 UI 错误窗口并返回失败退出码。
 - 首个管道实例使用 `FILE_FLAG_FIRST_PIPE_INSTANCE`，防止其他进程抢先创建同名管道。
 - 界面进程用互斥量 `Local\Quartz.<SID>.ui` 保证唯一。重复启动时，通过核心转发"激活窗口"请求后退出。
 

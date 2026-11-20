@@ -26,6 +26,8 @@ pub(in crate::platform::windows) enum AppMessage {
     TrayCallback = WM_APP + 1,
     WakeCore = WM_APP + 2,
     WakeWorkers = WM_APP + 3,
+    OpenUi = WM_APP + 4,
+    UiFirstFrame = WM_APP + 5,
 }
 
 impl AppMessage {
@@ -34,6 +36,8 @@ impl AppMessage {
             value if value == u32::from(Self::TrayCallback) => Some(Self::TrayCallback),
             value if value == u32::from(Self::WakeCore) => Some(Self::WakeCore),
             value if value == u32::from(Self::WakeWorkers) => Some(Self::WakeWorkers),
+            value if value == u32::from(Self::OpenUi) => Some(Self::OpenUi),
+            value if value == u32::from(Self::UiFirstFrame) => Some(Self::UiFirstFrame),
             _ => None,
         }
     }
@@ -73,7 +77,12 @@ impl CoreEvent {
                 // TODO(M3): Start UI prewarming on hover, with TTL and cooldown.
                 _ => None,
             },
-            Some(AppMessage::WakeCore | AppMessage::WakeWorkers) => None,
+            Some(
+                AppMessage::WakeCore
+                | AppMessage::WakeWorkers
+                | AppMessage::OpenUi
+                | AppMessage::UiFirstFrame,
+            ) => None,
             None if message == taskbar_created => Some(Self::RestoreTray),
             None if matches!(message, WM_CLOSE | WM_DESTROY) => Some(Self::Quit),
             None => None,

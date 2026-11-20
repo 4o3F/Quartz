@@ -70,12 +70,12 @@ impl Role {
             },
             Self::Cli => match op.family() {
                 OpFamily::Hello | OpFamily::Query | OpFamily::Core | OpFamily::Apps => true,
-                OpFamily::RuleSets
+                OpFamily::Ui
+                | OpFamily::RuleSets
                 | OpFamily::Rules
                 | OpFamily::RulesText
                 | OpFamily::BrowserHosts => op.cli_individual_permission(),
                 OpFamily::Subscribe
-                | OpFamily::Ui
                 | OpFamily::Categories
                 | OpFamily::Annotations
                 | OpFamily::Settings
@@ -98,7 +98,8 @@ impl Role {
 impl Op {
     fn cli_individual_permission(self) -> bool {
         match self {
-            Self::RuleSetsTree
+            Self::UiOpen
+            | Self::RuleSetsTree
             | Self::RuleSetsVersions
             | Self::RulesExplain
             | Self::RulesTextValidate
@@ -172,9 +173,9 @@ mod tests {
     #[test]
     fn every_role_and_operation_matches_the_independent_permission_table() {
         // Written as wire-name lists, independently of the production family helper.
-        let ui = "hello subscribe core.status ui.first_frame query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away rule_sets.tree rule_sets.get rule_sets.versions rule_sets.set_enabled rule_sets.reorder rule_sets.delete rule_sets.revert rule_sets.edit rules.preview rules.explain rules_text.validate rules_text.preview rules_text.diff rules_text.import rules_text.export categories.list categories.create categories.update categories.delete categories.reorder annotations.create annotations.update annotations.delete settings.get settings.set data.delete tracking.pause tracking.resume tracking.keep_alive apps.icon browser_hosts.status browser_hosts.enable browser_hosts.disable maintenance.backup maintenance.compact privacy_mode.set";
+        let ui = "hello subscribe core.status ui.open ui.first_frame query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away rule_sets.tree rule_sets.get rule_sets.versions rule_sets.set_enabled rule_sets.reorder rule_sets.delete rule_sets.revert rule_sets.edit rules.preview rules.explain rules_text.validate rules_text.preview rules_text.diff rules_text.import rules_text.export categories.list categories.create categories.update categories.delete categories.reorder annotations.create annotations.update annotations.delete settings.get settings.set data.delete tracking.pause tracking.resume tracking.keep_alive apps.icon browser_hosts.status browser_hosts.enable browser_hosts.disable maintenance.backup maintenance.compact privacy_mode.set";
         let host = "hello browser.hello browser.state browser.gap browser.purge_ack browser.query_site_today";
-        let cli = "hello query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away apps.icon browser_hosts.status core.status rules_text.validate rules_text.preview rules_text.diff rules_text.export rule_sets.tree rule_sets.versions rules.explain";
+        let cli = "hello ui.open query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away apps.icon browser_hosts.status core.status rules_text.validate rules_text.preview rules_text.diff rules_text.export rule_sets.tree rule_sets.versions rules.explain";
         for role in [Role::Ui, Role::Host, Role::Cli] {
             let expected = match role {
                 Role::Ui => ui,
@@ -211,6 +212,9 @@ mod tests {
 
     #[test]
     fn sensitive_permission_boundaries() {
+        assert!(Role::Ui.authorize(Op::UiOpen).is_ok());
+        assert!(Role::Cli.authorize(Op::UiOpen).is_ok());
+        assert!(Role::Host.authorize(Op::UiOpen).is_err());
         assert!(Role::Host.authorize(Op::DataDelete).is_err());
         assert!(Role::Cli.authorize(Op::AnnotationsCreate).is_err());
         assert!(Role::Cli.authorize(Op::Subscribe).is_err());

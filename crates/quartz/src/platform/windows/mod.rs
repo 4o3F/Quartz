@@ -3,6 +3,7 @@
 pub(crate) mod foreground;
 mod handle;
 mod instance;
+pub(crate) mod ipc;
 mod language;
 mod process;
 mod sources;
@@ -43,6 +44,12 @@ pub(crate) use language::UiLanguage;
 
 #[derive(Debug, Snafu)]
 enum StartCoreError {
+    #[snafu(display("could not start core pipe server"))]
+    StartPipe { source: ipc::StartPipeServerError },
+    #[snafu(display("could not stop core pipe server"))]
+    StopPipe {
+        source: ipc::server::StopPipeServerError,
+    },
     #[snafu(display("could not open core database"))]
     OpenStore { source: store::OpenStoreError },
     #[snafu(display("could not start capture workers"))]
@@ -57,6 +64,8 @@ enum StartCoreError {
     SessionId { source: windows::core::Error },
     #[snafu(display("could not create installation identity"))]
     CreateDeviceId { source: windows::core::Error },
+    #[snafu(display("could not create core instance identity"))]
+    CreateInstanceId { source: windows::core::Error },
     #[snafu(display("could not load installation identity"))]
     LoadDeviceId { source: store::LoadDeviceIdError },
     #[snafu(display("could not stop capture workers"))]
@@ -208,7 +217,7 @@ pub(crate) struct CoreProcess {
 impl CoreProcess {
     pub(crate) fn new() -> Self {
         Self {
-            ui: UiState::None,
+            ui: UiState::default(),
             capture: None,
             persistence: PersistenceState::Ready,
             untriggered_changes: 0,
@@ -239,7 +248,12 @@ impl CoreProcess {
             .context(AcquireInstanceSnafu)?
         {
             AcquireInstance::SameSession => {
-                // TODO(M2): Forward the open request through the core pipe before exiting.
+                if matches!(autostart, crate::Autostart::Disabled)
+                    && let Err(error) = crate::ipc::client::CoreClient::connect()
+                        .and_then(|mut client| client.open_ui())
+                {
+                    tracing::warn!(%error, "could not forward open request to existing core within timeout");
+                }
                 tracing::info!("core already running in this Windows session");
                 return Ok(());
             }
@@ -278,6 +292,36 @@ impl CoreProcess {
                 std::process::exit(1);
             }
         });
+        let instance_id = windows::core::GUID::new().context(CreateInstanceIdSnafu)?;
+        let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(format!(
+            "{instance_id:?}"
+        )));
+        let (ui_sender, ui_commands) =
+            crossbeam_channel::bounded(crate::ipc::MAIN_COMMAND_CAPACITY);
+        let ui_port: crate::ipc::UiPort = Arc::new(move |command| {
+            if let Err(error) = ui_sender.try_send(command) {
+                tracing::warn!(%error, "could not queue IPC command for main thread");
+                return Err(crate::ipc::QueueUiError);
+            }
+            let message = match command {
+                crate::ipc::UiCommand::Open => tray::window::AppMessage::OpenUi,
+                crate::ipc::UiCommand::FirstFrame => tray::window::AppMessage::UiFirstFrame,
+            };
+            // SAFETY: The main-thread queue exists; the message contains no pointers and posting does not block.
+            unsafe {
+                WindowsAndMessaging::PostThreadMessageW(
+                    main_thread,
+                    u32::from(message),
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                )
+            }
+            .map_err(|error| {
+                tracing::warn!(%error, "could not post IPC command to main thread");
+                crate::ipc::QueueUiError
+            })
+        });
+        let pipe = ipc::PipeServer::start(status.subscribe(), ui_port).context(StartPipeSnafu)?;
         let workers =
             Workers::start(store, metadata, sources::clock(), wake).context(StartWorkersSnafu)?;
         let ingress = SystemIngress::new(workers.sender.clone(), workers.shutdown_port());
@@ -285,6 +329,9 @@ impl CoreProcess {
         let mut sources = match Sources::start(tray.raw_window(), ingress) {
             Ok(sources) => sources,
             Err(error) => {
+                if let Err(error) = pipe.shutdown() {
+                    tracing::warn!(%error, "could not stop pipe after source startup failure");
+                }
                 match SystemClock.read() {
                     Ok(at) => {
                         if let Err(error) = workers.request_shutdown(at, RunEndReason::Shutdown) {
@@ -305,8 +352,9 @@ impl CoreProcess {
             tracing::error!(?error, "could not update tray state");
         }
         tracing::info!(?autostart, "core message loop started");
-        let result = self.message_loop(&mut tray, &workers, &mut sources);
-        self.ui = UiState::None;
+        let result = self.message_loop(&mut tray, &workers, &mut sources, &status, &ui_commands);
+        self.ui = UiState::default();
+        let pipe_stopped = pipe.shutdown();
         let exit = CoreExit::from_loop(&result);
         let reason = exit.reason();
         let now = SystemClock.read().context(ReadClockSnafu)?;
@@ -316,6 +364,7 @@ impl CoreProcess {
         };
         let joined = workers.join();
         drop(sources);
+        pipe_stopped.context(StopPipeSnafu)?;
         result.context(RunMessageLoopSnafu)?;
         request.context(RequestShutdownSnafu)?;
         joined.context(StopWorkersSnafu)?;
@@ -328,6 +377,8 @@ impl CoreProcess {
         tray: &mut Tray,
         workers: &Workers,
         sources: &mut Sources,
+        status: &crate::ipc::StatusPublisher,
+        ui_commands: &crossbeam_channel::Receiver<crate::ipc::UiCommand>,
     ) -> Result<CoreExit, WaitCoreEventsError> {
         loop {
             let mut message = MSG::default();
@@ -347,15 +398,32 @@ impl CoreProcess {
                     WindowsAndMessaging::DispatchMessageW(&message);
                 }
             }
+            while let Ok(command) = ui_commands.try_recv() {
+                match command {
+                    crate::ipc::UiCommand::Open => self.open_ui(tray),
+                    crate::ipc::UiCommand::FirstFrame => {
+                        self.ui.first_frame();
+                        if let Err(error) = tray.update(self.tray_state(TrayTooltip::Ready)) {
+                            tracing::warn!(%error, "could not restore tray after UI first frame");
+                        }
+                    }
+                }
+            }
             while let Ok(command) = workers.commands.try_recv() {
                 match command {
-                    MainCommand::Persistence(state) => self.persistence = state,
+                    MainCommand::Persistence(state) => {
+                        self.persistence = state;
+                        status.publish(self.capture.as_ref(), self.persistence);
+                    }
                     MainCommand::Fatal(worker) => {
                         tracing::error!(?worker, "stopping core after worker failure");
                         return Err(WaitCoreEventsError::WorkerFailed { worker });
                     }
                     MainCommand::Effect(effect) => match effect {
-                        CaptureEffect::StateChanged(state) => self.capture = Some(state),
+                        CaptureEffect::StateChanged(state) => {
+                            self.capture = Some(state);
+                            status.publish(self.capture.as_ref(), self.persistence);
+                        }
                         CaptureEffect::ScheduleTimer(timer) => {
                             sources.timer(timer).context(wait_error::ObserveSnafu)?
                         }
@@ -427,10 +495,7 @@ impl CoreProcess {
                 }
                 // Native dispatch can enqueue another batch of semantic commands.
             }
-            let handles = match &self.ui {
-                UiState::None => None,
-                UiState::Starting(process) => Some([process.raw()]),
-            };
+            let handles = self.ui.process().map(|process| [process.raw()]);
             // SAFETY: The optional process handle stays owned throughout the wait. Waiting for any
             // message or process exit on this thread needs neither polling nor a worker thread.
             let result = unsafe {
@@ -445,7 +510,7 @@ impl CoreProcess {
                 return Err(windows::core::Error::from_thread()).context(wait_error::WaitSnafu);
             }
             if handles.is_some() && result == WAIT_OBJECT_0 {
-                if let UiState::Starting(process) = &self.ui {
+                if let Some(process) = self.ui.process() {
                     process.log_exit();
                 }
                 self.ui.exited();

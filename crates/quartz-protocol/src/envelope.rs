@@ -156,7 +156,7 @@ pub struct Event {
     pub body: Value,
 }
 
-/// IPC message discriminator and data; framing is handled by [`crate::Frame`].
+/// IPC message discriminator and data; payload encoding uses [`crate::encode_json`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum Envelope {
@@ -174,7 +174,7 @@ pub enum Envelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ControlBody, ControlOp, ErrorCode, Frame};
+    use crate::{ControlBody, ControlOp, ErrorCode, decode_json, encode_json};
 
     #[test]
     fn doc_envelope_examples_have_exact_wire_shapes() {
@@ -188,9 +188,9 @@ mod tests {
         for wire in cases {
             let envelope: Envelope = serde_json::from_value(wire.clone()).expect("04 envelope");
             assert_eq!(serde_json::to_value(&envelope).expect("encode"), wire);
-            let frame = Frame::from_json(&envelope).expect("serialize frame");
+            let payload = encode_json(&envelope).expect("serialize frame");
             assert_eq!(
-                frame.decode_json::<Envelope>().expect("parse frame"),
+                decode_json::<Envelope>(&payload).expect("parse frame"),
                 envelope
             );
         }
@@ -204,10 +204,8 @@ mod tests {
             serde_json::json!({"t":"res","id":17,"ok":false,"err":{"code":"internal","future":true},"future":true}),
             serde_json::json!({"t":"evt","topic":"state","seq":42,"body":{},"future":true}),
         ] {
-            let frame = Frame::from_json(&wire).expect("JSON frame");
-            let envelope = frame
-                .decode_json::<Envelope>()
-                .expect("ignore unknown fields");
+            let payload = encode_json(&wire).expect("JSON frame");
+            let envelope = decode_json::<Envelope>(&payload).expect("ignore unknown fields");
             if let Envelope::Request(request) = envelope {
                 assert_eq!(request.id, RequestId(17));
                 assert_eq!(request.op, Op::Unknown);
@@ -315,10 +313,6 @@ mod tests {
             "[".repeat(10_000),
             "]".repeat(10_000)
         );
-        assert!(
-            Frame::new(wire.into_bytes())
-                .decode_json::<Envelope>()
-                .is_err()
-        );
+        assert!(decode_json::<Envelope>(wire.as_bytes()).is_err());
     }
 }

@@ -20,7 +20,7 @@ diesel_migrations.workspace = true
 libsqlite3-sys.workspace = true
 jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo"] }
 clap.workspace = true
-quartz-protocol.workspace = true
+quartz-protocol = { workspace = true, features = ["codec"] }
 quartz-domain.workspace = true
 serde_json.workspace = true
 serde.workspace = true
@@ -29,6 +29,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
 quartz-i18n.workspace = true
 quartz-ui.workspace = true
 windows = { workspace = true, features = [
@@ -37,6 +40,8 @@ windows = { workspace = true, features = [
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
     "Win32_Storage_FileSystem",
     "Win32_Storage_EnhancedStorage",
     "Win32_System_Com",
