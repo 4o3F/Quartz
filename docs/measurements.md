@@ -479,3 +479,54 @@ WHERE start_utc_ms < 1767290401000 AND end_utc_ms > 1735754401000;
 [人工验收手册](acceptance/m1.md) 包含 02 §6 的十组场景、M1 六条验收项、独立数据目录、托盘启动/退出、逐场景 dump/断言、崩溃前后快照和十分钟资源回归。现有 `LOCALAPPDATA` 覆盖可隔离到验收目录，无需新增生产路径配置；暂停、故障注入和精确时序采样入口的待准备条件在手册对应场景列出。
 
 `dump` 当前没有 `--db`，按数据目录直接读取 `Quartz\quartz.db`，本轮未对模拟库运行 `deno task acceptance`。真实采集、用户在场操作和会开关界面 20 次的资源回归由 E2b 执行。
+
+## 2026-11-20 M1-E2b：实机验收
+
+设备同 E2a（Windows 11 build 26300、Intel Core i7-14700HX），通过 RDP 与本机在场两种方式执行；多显示器轮为主屏 2560×1440 加副屏 1707×1067。所有轮次使用 `target/windows/release/quartz.exe`，独立数据目录 `target\windows\acceptance-e2b\suite\Quartz`（`LOCALAPPDATA` 覆盖），由 gitignored 的自动化脚本 `target\windows\acceptance-e2b\e2b-suite.ps1` 启动核心、驱动输入、以 `WM_CLOSE` 正常退出、逐日 dump 并运行 `deno task acceptance`。脚本只注入 Alt+Tab、Win 组合键、Ctrl+Tab、Shift 和任务栏按钮点击，使用独立的测试窗口与隔离浏览器配置；UAC 取消、Ctrl+Alt+Del 与解锁由用户操作，改系统时间由用户 UAC 授权的管理员辅助进程执行，结束时按单调计时恢复并与网络时间核对。
+
+切换误差由独立参考采样器给出：另一进程以约 1 ms 间隔轮询 `GetForegroundWindow` 并记录每次变化的 UTC 毫秒，按 HWND 匹配事实起点（窗口 −200…+2000 ms），误差取绝对值，按 `ceil(0.95 × N)` 取 P95。前台为空（HWND 0）不计；停留 ≥ 500 ms 却没有对应事实的变化计为漏记。
+
+| 轮次 | 手册 | 构建 | 内容 | 断言 | `untriggered_changes` | 回调→事实 P95 / 最大 |
+|---|---|---|---|---|---|---|
+| switch | §3 | `2900e92` | Alt+Tab 120 次（< 200 ms）、任务栏点击 20 次、虚拟桌面往返 20 次 | PASS | 0 | 15 / 36 ms |
+| monitor | §3 | `2900e92` | 跨显示器激活 20 次、跨显示器 Alt+Tab 20 次 | PASS | 0 | 6 / 10 ms |
+| same-title | §4 | `2900e92` | 同进程两个同标题窗口交替各 20 次 | PASS | 0 | 12 / 16 ms |
+| titles | §5、§12 | `7f40ab6` | 每秒标题 60 秒、每秒 10 次标题风暴、4,095/4,096/4,097 单元与代理项截断标题 | PASS | 0 | 11 / 16 ms |
+| titles2 | §5、§12 | `2900e92` | 终端标题 20 次、Edge 标签 Ctrl+Tab 20 次、挂起目标进程后切走再返回 | PASS | 0 | 6 / 11 ms |
+| uwp | §6 | `2900e92` | 设置最小化后还原、计算器冷启动停留 70 秒 | PASS | 0 | 114 / 114 ms（单样本，见下） |
+| uac | §6 | `2900e92` | UAC 停留后取消、Ctrl+Alt+Del 停留后取消、UAC 同意 | PASS | 0 | 13 / 16 ms |
+| crash | §9 | `7f40ab6` | 活动 70 秒后挂起、导出 before、强制结束、重启、正常退出 | PASS（`--before`） | 0 | 13 / 16 ms |
+| clock | §8 | `2900e92` | 前拨 5 分钟、回拨 10 分钟、恢复 | PASS | 0 | — |
+| midnight-utc | §8 | `2900e92` | 时间设为本地 07:58:30（UTC 23:58:30），跨 UTC 午夜后恢复 | PASS | 0 | — |
+| midnight-local | §8 | `2900e92` | 时间设为本地 23:58:30，跨本地午夜后恢复 | PASS | 0 | — |
+| idle | §8 | `2900e92` | 不操作 179 秒后输入，再不操作 190 秒后输入，6 秒后退出 | PASS | 0 | — |
+| lock | §7 | `c0a2ee6` | 锁屏 10 次，每次随即解锁 | PASS | 0 | 19 / 23 ms |
+| private | §6、H5 | `c0a2ee6` | Edge、Chrome、Firefox 普通窗口与 zh-CN、en-US 无痕窗口 | PASS | 0 | 10 / 12 ms |
+
+构建列为运行时工作树对应的提交；运行时这些改动尚未提交，提交内容与运行时一致。所有轮次批量提交 P95 为 914–923 ms，低于 1 秒提交期限。
+
+**切换误差**：switch 轮参考采样器记录 702 次变化，505 次与事实匹配，P95 12 ms、最大 187 ms，漏记 0；未匹配的变化中 132 次为前台为空，1 次为停留 180 ms 的过渡窗口（两次读取之间被替换，按 02 §1 接受不记录）。monitor 轮 104 次匹配，P95 7 ms、最大 29 ms，漏记 0。两项均满足 P95 < 100 ms。虚拟桌面与跨显示器切换均由 `EVENT_SYSTEM_FOREGROUND` 覆盖，无需补订阅。
+
+**通知覆盖**：全部轮次 `untriggered_changes` 为 0；本节合计约 30 分钟真实切换，一小时连续轮未执行。此前手动轮（重设计后首轮）出现过 2 次后备复核先于迟到的 `EVENT_SYSTEM_FOREGROUND` 读到变化的竞争，已按原生事件时间延后判定处理。
+
+**UWP**：计算器冷启动时内容窗口尚未挂入框架，身份由框架 AUMID 解析，显示名取自 AppsFolder（「计算器」）；34 秒后既有维护唤醒的内部复核以进程元数据补全 exe（`calculatorapp.exe`），窗口实例与 generation 不变、不切段。补全后的显示名来自 exe 版本信息（英文 “Calculator”）。该轮唯一的回调延迟样本 114 ms 来自首次 AppsFolder 查询初始化 Shell 命名空间；事实边界取回调开始时间，不受影响。
+
+**安全桌面与锁屏**：UAC 提示 17.1 秒、Ctrl+Alt+Del 11.7 秒、第二次 UAC 5.75 秒均为 `no_foreground/unknown_desktop`，前一段前台以 `no_foreground` 结束，返回后立即读取。锁屏 10 次各有一条 `unknown_desktop`（结束原因 `locked`）与 `locked` availability（结束原因 `resumed`）。修复前，锁屏与解锁时收到的 `WM_TIMECHANGE` 使时钟段每次切换（墙上与单调映射仅偏移 −5…+3 ms，系统日志无改时记录）；`c0a2ee6` 后同样 10 次锁屏只有一个时钟段。
+
+**时钟与空闲**：改时轮旧前台以 `clock_jump` 结束、旧段以 `time_change` 结束；UTC 午夜在本地 08:00:00 产生 `midnight_split`，片段共享 `session_key`；本地午夜不拆分事实，按本地日期 dump 两日均可读到跨午夜行。空闲轮 179 秒处未进入 idle；第二次 idle 起点等于 `last_input_utc_ms + 180000`，检测延迟 15 ms，注入输入后约 30 ms 以 `resumed` 结束。
+
+**浏览器无痕窗口（H5）**：
+
+| 浏览器 | 普通窗口标题 | 无痕窗口标题（zh-CN / en-US） | 结果 |
+|---|---|---|---|
+| Edge 157.0.4341.60 | `… - 用户配置 1 - Microsoft Edge` | `… - [InPrivate] - Microsoft Edge`（两种语言相同） | 命中 `browser-private-edge`，`title_hidden` |
+| Firefox 160.0.1 | `… — Mozilla Firefox` | `… — Mozilla Firefox 隐私浏览` / `… — Mozilla Firefox Private Browsing` | 命中对应语言规则，`title_hidden`；首个读取的标题为不含页面信息的 `Mozilla Firefox` |
+| Chrome 157.0.8103.80 | `… - Google Chrome` | `… - Google Chrome`（两种语言相同） | **无法识别**，页面标题完整保存 |
+
+Chrome 无痕窗口标题与普通窗口相同，`browser-private-chrome-zh-cn` 与 `browser-private-chrome-en` 在该版本不会命中。用户决定暂不启用 06 §3.4 的保守规则，记为 M1 已知缺口。
+
+**未执行**：按用户决定，睡眠 10 次、RDP 断开与重连、长锁屏崩溃、一小时连续轮、`deno task measure` 十分钟资源回归与 §18 体积和增量编译本轮未执行；H9、H10 的常驻内存与 08 §1.1 资源验收仍待 `measure`。
+
+**一年模拟库复测**：使用 `7f40ab6` 的 release 重新生成 `m1-e2b-typical-365d.db` 与 `m1-e2b-heavy-365d.db`（seed 1）。typical 生成 46.5 秒、99,586,048 字节，day/week/year P95 为 3.927/22.023/1197.072 ms；heavy 生成 141.2 秒、301,072,384 字节，day/week/year P95 为 9.589/212.614/8703.846 ms，三日守恒均通过。同一 heavy 库在被中止的前一次运行中 week P95 为 64.395 ms，生成耗时也比 E2a 快约 3 倍，读数随机器负载与缓存状态波动较大，正式对照需在空闲机器上重测。
+
+**后续事项**：窗口在身份解析期间关闭时 `window class unavailable` 以 WARN 记录，属正常竞争，可降为 DEBUG；锁屏广播 `WM_TIMECHANGE` 的来源未定位。
