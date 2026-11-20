@@ -46,7 +46,7 @@ impl Capture<'_> {
         context.range(range.start, range.end)?;
         let last = if end > start { end - 1 } else { end };
         for day in start.div_euclid(day_ms)..=last.div_euclid(day_ms) {
-            diesel::insert_into(data_day_versions::table)
+            let version = diesel::insert_into(data_day_versions::table)
                 .values((
                     data_day_versions::source.eq(source),
                     data_day_versions::utc_date.eq(day),
@@ -55,7 +55,19 @@ impl Capture<'_> {
                 .on_conflict((data_day_versions::source, data_day_versions::utc_date))
                 .do_update()
                 .set(data_day_versions::version.eq(data_day_versions::version + 1_i64))
-                .execute(self.connection)?;
+                .returning(data_day_versions::version)
+                .get_result(self.connection)?;
+            self.keys
+                .changed_versions
+                .push(crate::query::versions::FactVersion {
+                    key: crate::query::versions::VersionKey {
+                        source: crate::query::versions::VersionSource(
+                            super::super::enums::IntegerCode::code(source),
+                        ),
+                        day: crate::query::versions::UtcDay(day),
+                    },
+                    version,
+                });
         }
         Ok(())
     }

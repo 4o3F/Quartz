@@ -319,6 +319,8 @@ CREATE TABLE data_day_versions (
 
 `classification_version`、`extractor_version`、`privacy_version` 是对应类型**生效规则列表**的内容哈希（由各规则集当前版本的 `content_hash` 按解析顺序组合而成），不是手动递增的计数器：任何导入、编辑、启停、调整顺序都会自然改变哈希，回退到旧状态时哈希也恢复，可以复用缓存。`stats_policy_version` 仍保存在 `settings` 中，修改统计口径的事务里加一。
 
+`intervals` 来源也覆盖时钟段范围的建立、结束和确认点推进，使尚无前台事实的采集范围变化能使查询与日订阅失效。
+
 `settings.metadata_version` 在应用显示名、浏览器 profile 标签、分类名称、颜色、倾向或层级变化时，在同一事务加一。日缓存、托盘摘要和 `day` 订阅同时失效。限时策略的 UTC 截止时间由核心的截止时间调度器管理，重启后检查是否到期（01 第 6.1 节）。
 
 首版不建立持久的派生表，派生结果放在内存缓存里（见第 5 节）。
@@ -556,6 +558,8 @@ struct DerivedSegment {
 默认分类有 6 个：开发（`development`）、学习（`learning`）、沟通（`communication`）、娱乐（`entertainment`）、系统与工具（`system`）、未分类。括号内为 `builtin_key`，规则文本中写作 `builtin:<键>`；未分类不是分类行，而是“没有规则命中”。每个分类带一个倾向（专注、中性、分心）。首版预置约 50 条规则。
 
 ### 5.4 缓存
+
+日结果 LRU 只在 `bench-query` 实测的日、周查询 P95 未达到 08 第 1.4 节目标时启用；当前直接运行查询管线（实测见[测量记录](../measurements.md)）。
 
 | 层 | 键 | 值 | 失效 |
 |---|---|---|---|

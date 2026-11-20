@@ -5,6 +5,7 @@ mod error;
 mod frame;
 mod handshake;
 mod op;
+mod query;
 mod role;
 mod startup_error;
 mod state;
@@ -33,4 +34,12 @@ pub use state::{
 pub use status::{
     AcceptedBody, BrowserStream, BrowserStreamId, CoreStatusRequest, CoreStatusResponse,
     DatabaseState, StopReason, UiFirstFrameRequest, UiOpenRequest,
+};
+
+pub use query::{
+    Activity, ApplicationId, ApplicationRank, ApplicationRef, CategoryDuration, CategoryRef,
+    CategorySource, ClockSegmentId, CursorQuery, DayChanged, DayMetrics, HourStack,
+    MillisecondsPerPixel, QUERY_PAGE_BYTES, QueryCursor, QueryDayRequest, QueryDayResponse,
+    QueryGapReason, QueryStopReason, QueryTimelineRequest, QueryTimelineResponse, QueryVersions,
+    TimelineDetail, TimelineSegment,
 };

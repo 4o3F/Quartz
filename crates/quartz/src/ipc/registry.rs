@@ -59,7 +59,14 @@ pub(crate) struct RegistryHandle {
 pub(crate) struct QueueRegistryError;
 
 impl RegistryHandle {
+    #[cfg(test)]
     pub(crate) fn start(status: watch::Receiver<PublishedStatus>) -> Self {
+        Self::start_with_versions(status, None)
+    }
+    pub(crate) fn start_with_versions(
+        status: watch::Receiver<PublishedStatus>,
+        versions: Option<watch::Receiver<crate::query::versions::VersionState>>,
+    ) -> Self {
         let (mailbox, receiver) = mpsc::channel(REGISTRY_MAILBOX_CAPACITY);
         let handle = Self {
             mailbox,
@@ -69,6 +76,7 @@ impl RegistryHandle {
             ConnectionRegistry {
                 receiver,
                 status,
+                versions,
                 connections: BTreeMap::new(),
             }
             .run(),
@@ -176,15 +184,50 @@ impl StateThrottle {
         }
     }
 }
+#[derive(Debug)]
+struct DayThrottle {
+    latest: quartz_protocol::DayChanged,
+    next: Instant,
+    pending: StateChange,
+}
+impl DayThrottle {
+    fn new(latest: quartz_protocol::DayChanged, now: Instant) -> Self {
+        Self {
+            latest,
+            next: now + super::outbox::DAY_PUSH_INTERVAL,
+            pending: StateChange::Clean,
+        }
+    }
+    fn changed(&mut self, changed: quartz_protocol::DayChanged) {
+        if changed.versions != self.latest.versions {
+            self.latest = changed;
+            self.pending = StateChange::Pending;
+        }
+    }
+    fn deadline(&self) -> Option<Instant> {
+        (self.pending == StateChange::Pending).then_some(self.next)
+    }
+    fn take_due(&mut self, now: Instant) -> Option<quartz_protocol::DayChanged> {
+        if self.pending == StateChange::Pending && now >= self.next {
+            self.pending = StateChange::Clean;
+            self.next = now + super::outbox::DAY_PUSH_INTERVAL;
+            Some(self.latest.clone())
+        } else {
+            None
+        }
+    }
+}
 struct Connection {
     role: Role,
     subscriptions: Vec<Topic>,
     state: Option<StateThrottle>,
+    days: BTreeMap<quartz_protocol::LocalDate, DayThrottle>,
     outbox: OutboxHandle,
 }
 struct ConnectionRegistry {
     receiver: mpsc::Receiver<RegistryMessage>,
     status: watch::Receiver<PublishedStatus>,
+    versions: Option<watch::Receiver<crate::query::versions::VersionState>>,
     connections: BTreeMap<ConnectionId, Connection>,
 }
 impl ConnectionRegistry {
@@ -196,7 +239,13 @@ impl ConnectionRegistry {
                 .connections
                 .values()
                 .filter_map(|connection| {
-                    connection.state.as_ref().and_then(StateThrottle::deadline)
+                    connection
+                        .state
+                        .as_ref()
+                        .and_then(StateThrottle::deadline)
+                        .into_iter()
+                        .chain(connection.days.values().filter_map(DayThrottle::deadline))
+                        .min()
                 })
                 .min();
             tokio::select! {
@@ -205,7 +254,36 @@ impl ConnectionRegistry {
                     if let Err(error) = changed { tracing::debug!(%error, "main status publisher stopped"); return; }
                     for connection in self.connections.values_mut() { if let Some(state) = &mut connection.state { state.changed(); } }
                 }
+                changed = Self::version_changed(&mut self.versions) => {
+                    if changed.is_err() { self.versions = None; } else { self.update_days(); }
+                }
                 () = Self::deadline(deadline) => self.publish_due(),
+            }
+        }
+    }
+    async fn version_changed(
+        versions: &mut Option<watch::Receiver<crate::query::versions::VersionState>>,
+    ) -> Result<(), watch::error::RecvError> {
+        match versions {
+            Some(versions) => versions.changed().await,
+            None => std::future::pending().await,
+        }
+    }
+    fn update_days(&mut self) {
+        let Some(versions) = &self.versions else {
+            return;
+        };
+        // Release the publisher lock before resolving subscribed dates.
+        let state = versions.borrow().clone();
+        for connection in self.connections.values_mut() {
+            for (date, throttle) in &mut connection.days {
+                match state.day(*date) {
+                    Ok(changed) => throttle.changed(changed),
+                    Err(error) => {
+                        tracing::error!(%error, "could not update day subscription");
+                        connection.outbox.close();
+                    }
+                }
             }
         }
     }
@@ -224,6 +302,7 @@ impl ConnectionRegistry {
                         role,
                         subscriptions: Vec::new(),
                         state: None,
+                        days: BTreeMap::new(),
                         outbox,
                     },
                 );
@@ -293,6 +372,30 @@ impl ConnectionRegistry {
         subscription: Subscribe,
         response: Response,
     ) -> Result<(), QueueFrameError> {
+        let mut prepared_days = BTreeMap::new();
+        for topic in &subscription.topics {
+            if let Topic::Day(date) = topic {
+                let result = match &self.versions {
+                    Some(versions) => versions.borrow().day(*date).map_err(|error| error.kind()),
+                    None => Err(quartz_protocol::ErrorKind::Internal),
+                };
+                match result {
+                    Ok(changed) => {
+                        prepared_days.insert(*date, changed);
+                    }
+                    Err(kind) => {
+                        let connection =
+                            self.connections.get(&id).ok_or(QueueFrameError::Closed)?;
+                        return connection.outbox.response(Response {
+                            id: response.id,
+                            outcome: quartz_protocol::ResponseOutcome::Err {
+                                error: quartz_protocol::ProtocolError::new(kind),
+                            },
+                        });
+                    }
+                }
+            }
+        }
         let connection = self
             .connections
             .get_mut(&id)
@@ -301,6 +404,13 @@ impl ConnectionRegistry {
         for topic in subscription.topics {
             if !connection.subscriptions.contains(&topic) {
                 connection.subscriptions.push(topic);
+            }
+        }
+        for changed in prepared_days.into_values() {
+            let date = changed.date;
+            if let std::collections::btree_map::Entry::Vacant(entry) = connection.days.entry(date) {
+                connection.outbox.day(changed.clone());
+                entry.insert(DayThrottle::new(changed, Instant::now()));
             }
         }
         if connection.subscriptions.contains(&Topic::State) && connection.state.is_none() {
@@ -314,6 +424,11 @@ impl ConnectionRegistry {
         // Construct no event body unless at least one subscriber is actually due.
         let mut snapshot = None;
         for connection in self.connections.values_mut() {
+            for throttle in connection.days.values_mut() {
+                if let Some(changed) = throttle.take_due(now) {
+                    connection.outbox.day(changed);
+                }
+            }
             if connection
                 .state
                 .as_mut()

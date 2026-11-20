@@ -3,7 +3,7 @@
 use quartz_protocol::{
     AcceptedBody, CoreStatusRequest, CoreStatusResponse, Envelope, ErrorKind, Hello, HelloResponse,
     Op, PROTOCOL_VERSION, ProtoRange, ProtocolError, RequestId, Response, ResponseOutcome, Role,
-    Subscribe, SubscribeResponse, Topic, UiFirstFrameRequest, UiOpenRequest,
+    Subscribe, SubscribeResponse, UiFirstFrameRequest, UiOpenRequest,
 };
 
 /// Roles permitted by the authenticated executable path.
@@ -41,6 +41,7 @@ pub(crate) struct Decision {
     pub response: Response,
     pub command: Option<UiCommand>,
     pub subscription: Option<Subscribe>,
+    pub query: Option<crate::query::QueryRequest>,
 }
 impl Decision {
     pub(crate) fn error(id: Option<RequestId>, kind: ErrorKind) -> Self {
@@ -53,9 +54,10 @@ impl Decision {
             },
             command: None,
             subscription: None,
+            query: None,
         }
     }
-    fn success(id: RequestId, body: impl serde::Serialize) -> Self {
+    pub(crate) fn success(id: RequestId, body: impl serde::Serialize) -> Self {
         match serde_json::to_value(body) {
             Ok(body) => Self {
                 response: Response {
@@ -64,6 +66,7 @@ impl Decision {
                 },
                 command: None,
                 subscription: None,
+                query: None,
             },
             Err(error) => {
                 tracing::error!(%error, "could not encode IPC response body");
@@ -167,19 +170,31 @@ impl ConnectionSession {
                         else {
                             return Decision::error(Some(id), ErrorKind::BadRequest);
                         };
-                        // TODO(M2-C): Admit day topics with query-pipeline fact versions, atomically.
-                        if subscription
-                            .topics
-                            .iter()
-                            .any(|topic| matches!(topic, Topic::Day(_)))
-                        {
-                            return Decision::error(Some(id), ErrorKind::NotImplemented);
-                        }
                         let mut decision = Decision::success(id, SubscribeResponse {});
                         decision.subscription = Some(subscription);
                         decision
                     }
-                    // TODO(M2-C): Dispatch database queries.
+                    Op::QueryDay | Op::QueryTimeline => {
+                        let query = match request.op {
+                            Op::QueryDay => serde_json::from_value::<
+                                quartz_protocol::QueryDayRequest,
+                            >(request.body)
+                            .map(crate::query::QueryRequest::Day),
+                            Op::QueryTimeline => serde_json::from_value::<
+                                quartz_protocol::QueryTimelineRequest,
+                            >(request.body)
+                            .map(crate::query::QueryRequest::Timeline),
+                            _ => unreachable!("query dispatch arm"),
+                        };
+                        match query {
+                            Ok(query) => {
+                                let mut decision = Decision::success(id, serde_json::json!({}));
+                                decision.query = Some(query);
+                                decision
+                            }
+                            Err(_) => Decision::error(Some(id), ErrorKind::BadRequest),
+                        }
+                    }
                     _ => Decision::error(Some(id), ErrorKind::NotImplemented),
                 }
             }
@@ -191,6 +206,7 @@ impl ConnectionSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quartz_protocol::Topic;
     fn request(id: u64, op: Op, body: serde_json::Value) -> Envelope {
         Envelope::Request(quartz_protocol::Request {
             id: RequestId(id),
@@ -321,15 +337,10 @@ mod tests {
             ),
             status,
         );
-        assert!(rejected.subscription.is_none());
+        assert!(rejected.subscription.is_some());
         assert!(matches!(
             rejected.response.outcome,
-            ResponseOutcome::Err {
-                error: ProtocolError {
-                    kind: ErrorKind::NotImplemented,
-                    ..
-                }
-            }
+            ResponseOutcome::Ok { .. }
         ));
         let accepted = session.receive(
             request(

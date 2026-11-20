@@ -295,7 +295,7 @@ fn readonly_connection_settings_and_uri_escaping() {
     let nested = directory.path().join("data % # 中文");
     fs::create_dir(&nested).expect("special directory");
     let store = Store::open(&DataDirectory::new(&nested)).expect("special path startup");
-    let mut reader = store._reader.connection;
+    let mut reader = store._reader.expect("reader").connection;
     assert!(
         diesel::insert_into(schema::settings::table)
             .values((

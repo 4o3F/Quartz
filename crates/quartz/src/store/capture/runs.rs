@@ -7,8 +7,10 @@ use crate::store::{
     schema::{capture_runs, clock_segments},
 };
 use diesel::NullableExpressionMethods;
-use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl};
-use quartz_domain::capture::{ClockEndReason, RunEndReason, RunId, SegmentId, Timestamp};
+use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
+use quartz_domain::capture::{
+    ClockEndReason, RunEndReason, RunId, SegmentId, TimeRange, Timestamp,
+};
 
 impl Capture<'_> {
     pub(super) fn open_run(
@@ -86,7 +88,10 @@ impl Capture<'_> {
                 replacement: replacement.get(),
             });
         }
-        Ok(())
+        self.bump_days(
+            enums::DataSource::Intervals,
+            TimeRange { start: at, end: at },
+        )
     }
     pub(super) fn close_clock_segment(
         &mut self,
@@ -97,6 +102,16 @@ impl Capture<'_> {
     ) -> Result<(), ExecuteCaptureBatchError> {
         let id = self.segment(run, segment)?;
         let context = id.context();
+        let row = clock_segments::table
+            .filter(clock_segments::id.eq(id.get()))
+            .filter(clock_segments::end_utc_ms.is_null())
+            .select(ClockSegmentsRow::as_select())
+            .first::<ClockSegmentsRow>(self.connection)?;
+        let start = context.point(
+            row.start_utc_ms,
+            row.start_mono_ms,
+            super::TimeColumns::new(clock_segments::start_utc_ms, clock_segments::start_mono_ms),
+        )?;
         let count = diesel::update(
             clock_segments::table
                 .filter(clock_segments::id.eq(id.get()))
@@ -111,6 +126,7 @@ impl Capture<'_> {
             clock_segments::end_reason.eq(enums::ClockEndReason::from(reason)),
         ))
         .execute(self.connection)?;
-        id.require_open(clock_segments::table, count)
+        id.require_open(clock_segments::table, count)?;
+        self.bump_days(enums::DataSource::Intervals, TimeRange { start, end: at })
     }
 }

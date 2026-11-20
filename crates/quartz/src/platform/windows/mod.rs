@@ -342,9 +342,25 @@ impl CoreProcess {
                 crate::ipc::QueueUiError
             })
         });
-        let pipe = ipc::PipeServer::start(status.subscribe(), ui_port).context(StartPipeSnafu)?;
         let workers =
             Workers::start(store, metadata, sources::clock(), wake).context(StartWorkersSnafu)?;
+        let pipe = match ipc::PipeServer::start(
+            status.subscribe(),
+            ui_port,
+            workers.queries.clone(),
+            workers.versions.clone(),
+        ) {
+            Ok(pipe) => pipe,
+            Err(source) => {
+                if let Ok(at) = SystemClock.read() {
+                    let _ = workers.request_shutdown(at, RunEndReason::Shutdown);
+                }
+                if let Err(error) = workers.join() {
+                    tracing::error!(%error, "could not join workers after pipe startup failure");
+                }
+                return Err(source).context(StartPipeSnafu);
+            }
+        };
         let ingress = SystemIngress::new(workers.sender.clone(), workers.shutdown_port());
         tray.attach_capture(ingress.clone());
         let mut sources = match Sources::start(tray.raw_window(), ingress) {

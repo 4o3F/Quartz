@@ -13,6 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 crossbeam-channel.workspace = true
+sha2.workspace = true
+num-traits.workspace = true
+tokio.workspace = true
 num_enum.workspace = true
 strum.workspace = true
 diesel.workspace = true
@@ -29,7 +32,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-tokio.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
 quartz-i18n.workspace = true
@@ -42,6 +44,7 @@ windows = { workspace = true, features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
     "Win32_Storage_FileSystem",
     "Win32_Storage_EnhancedStorage",
     "Win32_System_Com",
@@ -69,7 +72,6 @@ tokio = { workspace = true, features = ["test-util"] }
 [dev-dependencies]
 quartz-i18n.workspace = true
 quartz-domain = { workspace = true, features = ["test-support"] }
-sha2.workspace = true
 tempfile.workspace = true
 
 [lints]

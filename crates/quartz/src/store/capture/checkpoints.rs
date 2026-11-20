@@ -3,7 +3,7 @@
 use super::{Capture, CaptureColumn, DbRowId, ExecuteCaptureBatchError, TimeColumns};
 use crate::store::{
     enums,
-    rows::{AvailabilityIntervalsRow, IntervalsRow},
+    rows::{AvailabilityIntervalsRow, ClockSegmentsRow, IntervalsRow},
     schema::{availability_intervals, capture_runs, clock_segments, intervals},
 };
 use diesel::NullableExpressionMethods;
@@ -130,6 +130,19 @@ impl Capture<'_> {
         at: Timestamp,
     ) -> Result<(), ExecuteCaptureBatchError> {
         let context = id.context();
+        let row = clock_segments::table
+            .filter(clock_segments::id.eq(id.get()))
+            .filter(clock_segments::end_utc_ms.is_null())
+            .select(ClockSegmentsRow::as_select())
+            .first::<ClockSegmentsRow>(self.connection)?;
+        let start = context.point(
+            context.required(row.confirmed_utc_ms, clock_segments::confirmed_utc_ms)?,
+            context.required(row.confirmed_mono_ms, clock_segments::confirmed_mono_ms)?,
+            TimeColumns::new(
+                clock_segments::confirmed_utc_ms,
+                clock_segments::confirmed_mono_ms,
+            ),
+        )?;
         let count = diesel::update(
             clock_segments::table
                 .filter(clock_segments::id.eq(id.get()))
@@ -144,7 +157,8 @@ impl Capture<'_> {
                 .mono(at.mono)?),
         ))
         .execute(self.connection)?;
-        id.require_open(clock_segments::table, count)
+        id.require_open(clock_segments::table, count)?;
+        self.bump_days(enums::DataSource::Intervals, TimeRange { start, end: at })
     }
     pub(super) fn settle_persisted(
         &mut self,

@@ -32,6 +32,8 @@ pub(crate) enum StartWorkersError {
     Recover { source: RecoverCaptureError },
     #[snafu(display("could not open registry"))]
     Registry { source: OpenRegistryShellError },
+    #[snafu(display("could not initialize query versions"))]
+    Query { source: crate::query::RunQueryError },
     #[snafu(display("could not read capture startup clock"))]
     Clock { source: ReadClockError },
     #[snafu(display("could not start capture core"))]
@@ -65,6 +67,8 @@ pub(crate) enum JoinWorkersError {
 pub(crate) struct Workers {
     pub sender: CaptureSender,
     pub commands: Receiver<MainCommand>,
+    pub queries: crate::query::dispatch::QueryPort,
+    pub versions: tokio::sync::watch::Receiver<crate::query::versions::VersionState>,
     shutdown: Sender<Shutdown>,
     finished: Receiver<()>,
     completed: Receiver<Result<(), WorkerFailure>>,
@@ -207,11 +211,23 @@ impl Workers {
         let Startup {
             persistence,
             startup,
-            registry,
+            mut registry,
             started,
             at,
             clock,
         } = startup;
+        let queries = crate::query::dispatch::QueryChannel::new();
+        let hash = registry
+            .snapshots()
+            .load()
+            .hashes()
+            .classification
+            .to_string();
+        let version_state = registry
+            .store_mut()
+            .version_state(&hash)
+            .map_err(|source| StartWorkersError::Query { source })?;
+        let (versions, version_updates) = tokio::sync::watch::channel(version_state);
         let capture = CaptureLoop {
             #[cfg(windows)]
             foreground: crate::platform::ForegroundResolver::new(),
@@ -231,6 +247,8 @@ impl Workers {
         let database = DatabaseLoop {
             persistence,
             registry,
+            queries: queries.receiver,
+            versions,
             writes: channels.database.receiver.clone(),
             feedback: channels.feedback.sender.clone(),
             main: main.clone(),
@@ -244,6 +262,8 @@ impl Workers {
                 overloaded: channels.overloaded,
             },
             commands: channels.main.receiver,
+            queries: queries.port,
+            versions: version_updates,
             shutdown: channels.shutdown.sender,
             finished: channels.finished.receiver,
             completed: channels.completed.receiver,

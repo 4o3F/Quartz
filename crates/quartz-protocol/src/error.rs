@@ -35,6 +35,8 @@ pub enum ErrorCode {
     CoreOffline,
     /// The core could not complete the request because of an internal failure.
     Internal,
+    /// The bounded query queue is full; retry later.
+    Busy,
     /// A code added by a later core; receive-only and excluded from `ALL`.
     #[serde(other)]
     Unknown,
@@ -42,7 +44,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every stable code that this core can send.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::BadRequest,
         Self::UnknownOp,
         Self::NotImplemented,
@@ -55,6 +57,7 @@ impl ErrorCode {
         Self::RuleSetStale,
         Self::CoreOffline,
         Self::Internal,
+        Self::Busy,
     ];
 
     /// Stable wire spelling; `unknown` is a diagnostic label and is never sent.
@@ -73,6 +76,7 @@ impl ErrorCode {
             Self::RuleSetStale => "rule_set_stale",
             Self::CoreOffline => "core_offline",
             Self::Internal => "internal",
+            Self::Busy => "busy",
             Self::Unknown => "unknown",
         }
     }
@@ -101,6 +105,7 @@ impl FromStr for ErrorCode {
             "rule_set_stale" => Self::RuleSetStale,
             "core_offline" => Self::CoreOffline,
             "internal" => Self::Internal,
+            "busy" => Self::Busy,
             _ => Self::Unknown,
         })
     }
@@ -123,6 +128,7 @@ impl Serialize for ErrorCode {
             | Self::StaleCursor
             | Self::RuleSetStale
             | Self::CoreOffline
+            | Self::Busy
             | Self::Internal => serializer.serialize_str(self.as_str()),
         }
     }
@@ -168,6 +174,8 @@ pub enum ErrorKind {
     CoreOffline,
     /// The core could not complete the request because of an internal failure.
     Internal,
+    /// The bounded query queue is full; retry later.
+    Busy,
     /// An unrecognized future code; additional fields are ignored by this client.
     #[serde(other, skip_serializing)]
     Unknown,
@@ -190,6 +198,7 @@ impl ErrorKind {
             Self::RuleSetStale { .. } => ErrorCode::RuleSetStale,
             Self::CoreOffline => ErrorCode::CoreOffline,
             Self::Internal => ErrorCode::Internal,
+            Self::Busy => ErrorCode::Busy,
             Self::Unknown => ErrorCode::Unknown,
         }
     }
@@ -244,6 +253,7 @@ mod tests {
                 | ErrorCode::StaleCursor
                 | ErrorCode::RuleSetStale
                 | ErrorCode::CoreOffline
+                | ErrorCode::Busy
                 | ErrorCode::Internal => {}
                 ErrorCode::Unknown => panic!("unknown code must not be in ALL"),
             }
@@ -265,7 +275,7 @@ mod tests {
                 code
             );
         }
-        assert_eq!(ErrorCode::ALL.len(), 12);
+        assert_eq!(ErrorCode::ALL.len(), 13);
         assert_eq!(
             serde_json::from_str::<ErrorCode>("\"future_error\"").expect("unknown accepted"),
             ErrorCode::Unknown

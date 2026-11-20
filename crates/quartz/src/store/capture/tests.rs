@@ -244,6 +244,7 @@ fn review_persists_resolved_content_in_new_window_generation() {
     assert_eq!(app.identity_key, facts.app.key());
     assert_eq!(app.exe_name, facts.exe_name);
     assert_eq!(app.display_name, facts.display_name);
+
     let intervals = fixture.intervals();
     assert_eq!(intervals.len(), 2);
     assert_eq!(intervals[0].window_instance_id, unresolved.id);
@@ -313,6 +314,12 @@ fn frame_aumid_metadata_enrichment_updates_app_without_new_persisted_instance() 
     assert_eq!(app.identity_key, facts.app.key());
     assert_eq!(app.exe_name, facts.exe_name);
     assert_eq!(app.display_name, facts.display_name);
+    let changes = fixture.store.take_committed_versions();
+    assert_eq!(
+        changes.metadata_version,
+        Some(1),
+        "metadata enrichment invalidates historical display fields"
+    );
     let intervals = fixture.intervals();
     assert_eq!(intervals.len(), 1);
     assert_eq!(intervals[0].window_instance_id, instance.id);
@@ -2263,4 +2270,95 @@ fn policy_scope_upserts_applications_and_restores_identity_after_display_rename(
         .expect("rename display metadata");
     let opened = Persistence::open(&mut fixture.store, metadata()).expect("restore scoped policy");
     assert_eq!(opened.startup.policies, vec![state]);
+}
+
+#[test]
+fn large_query_yields_to_capture_commits_before_the_one_second_limit() {
+    use crate::core::{
+        app::{MainCommand, Workers},
+        sources::ClockReader,
+    };
+    use std::time::{Duration, Instant};
+    const QUERY_FACTS: i64 = 20_000;
+    const COMMIT_LIMIT: Duration = Duration::from_secs(1);
+    const ADMISSION_POLL: Duration = Duration::from_millis(1);
+    let fixture = crate::store::query::test_support::QueryFixture::new(QUERY_FACTS);
+    let request = fixture.request_day();
+    let clock = Arc::new(RuntimeClock::new());
+    let workers = Workers::start(fixture.store, metadata(), clock.clone(), Arc::new(|| {}))
+        .expect("real workers");
+    let runtime = RuntimeFixture {
+        directory: fixture.directory,
+        workers,
+        clock,
+    };
+    runtime.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
+    runtime.observe(CaptureEvent::Foreground {
+        source: ObservationSource::Review,
+        foreground: Foreground::None(NoForegroundReason::Empty),
+    });
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let mut reply = runtime
+        .workers
+        .queries
+        .submit(request)
+        .expect("large query admission");
+    let admitted = Instant::now();
+    while runtime.workers.queries.queued_requests() > 0 {
+        assert!(
+            admitted.elapsed() < COMMIT_LIMIT,
+            "DB must start queued query"
+        );
+        std::thread::sleep(ADMISSION_POLL);
+    }
+    assert!(
+        matches!(
+            reply.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "large query is running when capture write is submitted"
+    );
+    let submitted = Instant::now();
+    runtime.observe(CaptureEvent::Stop(StopChange::Begin(StopReason::Paused)));
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let latency = submitted.elapsed();
+    assert!(
+        latency < COMMIT_LIMIT,
+        "capture commit took {latency:?} while query was running"
+    );
+    let mut inspection = runtime.reader();
+    let pauses = availability_intervals::table
+        .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Paused))
+        .count()
+        .get_result::<i64>(&mut inspection)
+        .expect("committed capture pause");
+    assert_eq!(pauses, 1);
+    assert!(reply.blocking_recv().expect("query reply").is_ok());
+    assert!(runtime.clock.read().is_ok());
+    runtime.shutdown();
+}
+
+#[test]
+fn clock_confirmation_invalidates_query_versions_before_first_foreground_fact() {
+    let mut fixture = Fixture::new(at(0));
+    let range = crate::query::input::QueryRange {
+        start: 0,
+        end: 60_000,
+    };
+    let before = fixture
+        .store
+        .version_state("classification-test")
+        .expect("initial versions")
+        .digest(range);
+    fixture.persist(at(59_000), CaptureEvent::Wake);
+    assert!(fixture.intervals().is_empty());
+    let after = fixture
+        .store
+        .version_state("classification-test")
+        .expect("confirmed versions")
+        .digest(range);
+    assert_ne!(
+        before, after,
+        "clock-only coverage changes invalidate cursors and day subscriptions"
+    );
 }

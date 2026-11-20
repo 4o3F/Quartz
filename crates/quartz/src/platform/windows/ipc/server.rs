@@ -90,6 +90,8 @@ impl Default for ConnectionTimeouts {
 pub(super) struct PipeServerConfig {
     pub(super) name: PipeName,
     pub(super) timeouts: ConnectionTimeouts,
+    pub(super) queries: Option<crate::query::dispatch::QueryPort>,
+    pub(super) versions: Option<watch::Receiver<crate::query::versions::VersionState>>,
 }
 
 #[derive(Debug, Snafu)]
@@ -125,11 +127,24 @@ impl PipeServer {
     pub(crate) fn start(
         status: watch::Receiver<crate::ipc::PublishedStatus>,
         ui: UiPort,
+        queries: crate::query::dispatch::QueryPort,
+        versions: watch::Receiver<crate::query::versions::VersionState>,
     ) -> Result<Self, StartPipeServerError> {
         let owner = ProcessIdentity::current().context(start_pipe_server_error::IdentitySnafu)?;
         let name = owner.pipe_name();
-        Self::start_named(name, owner, status, ui)
+        Self::start_configured(
+            PipeServerConfig {
+                name,
+                timeouts: ConnectionTimeouts::default(),
+                queries: Some(queries),
+                versions: Some(versions),
+            },
+            owner,
+            status,
+            ui,
+        )
     }
+    #[cfg(test)]
     pub(crate) fn start_named(
         name: PipeName,
         owner: ProcessIdentity,
@@ -140,6 +155,8 @@ impl PipeServer {
             PipeServerConfig {
                 name,
                 timeouts: ConnectionTimeouts::default(),
+                queries: None,
+                versions: None,
             },
             owner,
             status,
@@ -162,6 +179,8 @@ impl PipeServer {
                 owner,
             }),
             timeouts: config.timeouts,
+            queries: config.queries,
+            versions: config.versions,
             status,
             ui,
             stopping,
@@ -286,6 +305,8 @@ impl PipeListener {
     }
 }
 struct IoThread {
+    queries: Option<crate::query::dispatch::QueryPort>,
+    versions: Option<watch::Receiver<crate::query::versions::VersionState>>,
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
     status: watch::Receiver<crate::ipc::PublishedStatus>,
@@ -320,6 +341,7 @@ impl IoThread {
     fn slot(&self, registry: &RegistryHandle) -> Slot {
         Slot {
             registry: registry.clone(),
+            queries: self.queries.clone(),
             listener: Arc::clone(&self.listener),
             timeouts: self.timeouts,
             status: self.status.clone(),
@@ -327,7 +349,8 @@ impl IoThread {
         }
     }
     async fn serve(mut self, pipes: Vec<NamedPipeServer>) {
-        let registry = RegistryHandle::start(self.status.clone());
+        let registry =
+            RegistryHandle::start_with_versions(self.status.clone(), self.versions.take());
         let mut slots = JoinSet::new();
         for pipe in pipes {
             slots.spawn(self.slot(&registry).run(Some(pipe)));
@@ -420,6 +443,7 @@ impl SlotBackoff {
 }
 
 struct Slot {
+    queries: Option<crate::query::dispatch::QueryPort>,
     registry: RegistryHandle,
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
@@ -543,6 +567,21 @@ impl Slot {
                 }
                 Some(Err(error)) => return Err(error),
             };
+            if let Some(query) = decision.query.take() {
+                let result = match &self.queries {
+                    Some(port) => port.call(query).await,
+                    None => Err(ProtocolError::new(ErrorKind::Internal)),
+                };
+                decision.response.outcome = match result {
+                    Ok(response) => match serde_json::to_value(response) {
+                        Ok(body) => ResponseOutcome::Ok { body },
+                        Err(_) => ResponseOutcome::Err {
+                            error: ProtocolError::new(ErrorKind::Internal),
+                        },
+                    },
+                    Err(error) => ResponseOutcome::Err { error },
+                };
+            }
             if let Some(command) = decision.command
                 && let Err(error) = (self.ui)(command)
             {
@@ -660,6 +699,7 @@ mod tests {
         let publisher = StatusPublisher::new(quartz_protocol::InstanceId(format!("{suffix:?}")));
         Slot {
             registry: RegistryHandle::start(publisher.subscribe()),
+            queries: None,
             listener: Arc::new(PipeListener {
                 name: PipeName::for_test(suffix),
                 owner: ProcessIdentity::current().expect("test identity"),

@@ -83,6 +83,8 @@ pub(crate) enum DecodeCaptureRowError {
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub(crate) enum ExecuteCaptureBatchError {
+    #[snafu(display("invalid metadata version in settings"))]
+    MetadataVersion,
     #[snafu(display("could not execute capture writes"))]
     Database { source: diesel::result::Error },
     #[snafu(display("could not decode a persisted capture row before writing"))]

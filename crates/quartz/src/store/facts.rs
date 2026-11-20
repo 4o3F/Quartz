@@ -876,6 +876,7 @@ impl Store {
         let Self {
             _writer: writer,
             _reader: reader,
+            ..
         } = self;
         drop(reader);
         drop(writer);
@@ -897,7 +898,9 @@ impl Store {
         .context(super::LoadMigrationsSnafu)?;
         Ok(Self {
             _writer: writer,
-            _reader: ReadOnlyStore::connect(path)?,
+            _reader: Some(ReadOnlyStore::connect(path)?),
+            pending_versions: BTreeMap::new(),
+            pending_metadata_version: None,
         })
     }
 }

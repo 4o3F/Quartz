@@ -15,7 +15,7 @@ codec = ["dep:tokio-util"]
 
 [dependencies]
 tokio-util = { workspace = true, optional = true }
-jiff = { workspace = true, default-features = false }
+jiff = { workspace = true, default-features = false, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true

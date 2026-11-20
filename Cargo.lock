@@ -5134,6 +5134,7 @@ dependencies = [
  "futures-util",
  "jiff",
  "libsqlite3-sys",
+ "num-traits",
  "num_enum",
  "quartz-domain",
  "quartz-i18n",

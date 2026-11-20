@@ -20,12 +20,20 @@ struct Fixture {
     name: PipeName,
     status: StatusPublisher,
     commands: Receiver<UiCommand>,
+    database: crate::query::dispatch::test_support::TestDatabase,
 }
 impl Fixture {
     fn new() -> Self {
         Self::with_timeouts(server::ConnectionTimeouts::default())
     }
     fn with_timeouts(timeouts: server::ConnectionTimeouts) -> Self {
+        Self::with_query_port(timeouts, None)
+    }
+    fn with_query_port(
+        timeouts: server::ConnectionTimeouts,
+        query_port: Option<crate::query::dispatch::QueryPort>,
+    ) -> Self {
+        let database = crate::query::dispatch::test_support::TestDatabase::start();
         let suffix = windows::core::GUID::new().expect("unique pipe suffix");
         let name = PipeName::for_test(suffix);
         let status = StatusPublisher::new(quartz_protocol::InstanceId(format!("{suffix:?}")));
@@ -39,6 +47,8 @@ impl Fixture {
             server::PipeServerConfig {
                 name: name.clone(),
                 timeouts,
+                queries: Some(query_port.unwrap_or_else(|| database.port.clone())),
+                versions: Some(database.versions.clone()),
             },
             ProcessIdentity::current().expect("identity"),
             status.subscribe(),
@@ -50,6 +60,7 @@ impl Fixture {
             name,
             status,
             commands: received,
+            database,
         }
     }
     fn cli(&self) -> CoreClient {
@@ -226,7 +237,7 @@ fn unknown_operation_preserves_connection_and_permission_errors_are_typed() {
     assert!(cli.status().is_ok());
     let mut ui = fixture.ui();
     assert!(matches!(
-        ui.request(Op::QueryDay, &json!({})),
+        ui.request(Op::QueryRange, &json!({})),
         Err(CallCoreError::Protocol {
             kind: ErrorKind::NotImplemented
         })
@@ -446,7 +457,7 @@ fn subscribe_response_precedes_snapshot_and_ten_changes_coalesce() {
 }
 
 #[test]
-fn subscribe_rejects_cli_unknown_topics_and_entire_day_request() {
+fn subscribe_rejects_cli_and_unknown_topics() {
     let fixture = Fixture::new();
     let mut cli = fixture.cli();
     assert!(matches!(
@@ -457,18 +468,11 @@ fn subscribe_rejects_cli_unknown_topics_and_entire_day_request() {
     ));
     let mut ui = fixture.ui();
     assert!(matches!(
-        ui.request(Op::Subscribe, &json!({"topics":["state","day:2026-11-20"]})),
-        Err(CallCoreError::Protocol {
-            kind: ErrorKind::NotImplemented
-        })
-    ));
-    assert!(matches!(
         ui.request(Op::Subscribe, &json!({"topics":["weather"]})),
         Err(CallCoreError::Protocol {
             kind: ErrorKind::BadRequest
         })
     ));
-    // A rejected mixed request must not leave a state event ahead of this response.
     ui.status()
         .expect("connection remains unsubscribed and usable");
 }
@@ -619,4 +623,95 @@ fn subscriptions_add_idempotently_and_control_is_not_duplicated() {
         ),
         "no duplicate state or control event"
     );
+}
+
+#[test]
+fn cli_queries_temporary_database_over_pipe_and_host_cannot_query() {
+    let fixture = Fixture::new();
+    let mut cli = fixture.cli();
+    let day: quartz_protocol::QueryDayResponse = serde_json::from_value(
+        cli.request(Op::QueryDay, &json!({"local_date":"2025-01-02"}))
+            .expect("cli query.day"),
+    )
+    .expect("typed day body");
+    assert_eq!(day.metrics.expect("metrics").active_ms, 4000);
+    assert_eq!(day.applications.len(), 4);
+    let start = day.hours.expect("hours")[0].start_utc_ms;
+    let timeline: quartz_protocol::QueryTimelineResponse = serde_json::from_value(
+        cli.request(
+            Op::QueryTimeline,
+            &json!({"start_utc_ms":start,"end_utc_ms":start+5000,"detail":"raw","ms_per_pixel":1}),
+        )
+        .expect("timeline"),
+    )
+    .expect("typed timeline");
+    assert_eq!(timeline.segments.len(), 5);
+    assert!(quartz_protocol::Role::Host.authorize(Op::QueryDay).is_err());
+    assert!(
+        quartz_protocol::Role::Host
+            .authorize(Op::QueryTimeline)
+            .is_err()
+    );
+}
+#[test]
+fn overloaded_database_returns_busy_over_pipe() {
+    let channel = crate::query::dispatch::QueryChannel::new();
+    channel.saturate(crate::query::QueryRequest::Day(
+        quartz_protocol::QueryDayRequest {
+            local_date: "2025-01-02".parse().expect("date"),
+            cursor: None,
+        },
+    ));
+    let fixture = Fixture::with_query_port(
+        server::ConnectionTimeouts::default(),
+        Some(channel.port.clone()),
+    );
+    assert!(matches!(
+        fixture
+            .cli()
+            .request(Op::QueryDay, &json!({"local_date":"2025-01-02"})),
+        Err(CallCoreError::Protocol {
+            kind: ErrorKind::Busy
+        })
+    ));
+}
+#[test]
+fn day_subscription_pushes_latest_committed_version_after_throttle() {
+    let fixture = Fixture::new();
+    let mut ui = fixture.ui();
+    ui.request(Op::Subscribe, &json!({"topics":["day:2025-01-02"]}))
+        .expect("subscribe day");
+    let Envelope::Event(initial) = ui.read_envelope().expect("initial day version") else {
+        panic!("day event")
+    };
+    let first: quartz_protocol::DayChanged =
+        serde_json::from_value(initial.body).expect("day changed");
+    let received_at = std::time::Instant::now();
+    for _ in 0..3 {
+        fixture.database.append();
+    }
+    assert!(
+        matches!(
+            ui.read_envelope(),
+            Err(CallCoreError::ResponseTimeout { .. })
+        ),
+        "day push must stay pending during the throttle interval"
+    );
+    fixture.database.append();
+    std::thread::sleep(crate::ipc::outbox::DAY_PUSH_INTERVAL);
+    let Envelope::Event(event) = ui.read_envelope().expect("committed day push") else {
+        panic!("day event")
+    };
+    assert!(received_at.elapsed() >= crate::ipc::outbox::DAY_PUSH_INTERVAL);
+    assert_eq!(event.topic, quartz_protocol::Topic::Day(first.date));
+    let changed: quartz_protocol::DayChanged =
+        serde_json::from_value(event.body).expect("day changed body");
+    let expected = fixture
+        .database
+        .versions
+        .borrow()
+        .day(first.date)
+        .expect("latest committed version");
+    assert_eq!(changed, expected);
+    assert_ne!(first.versions, changed.versions);
 }

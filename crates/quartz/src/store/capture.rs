@@ -89,6 +89,8 @@ pub(crate) struct RunMetadata {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CaptureKeys {
     runs: BTreeMap<RunId, RunKeys>,
+    pub(super) changed_versions: Vec<crate::query::versions::FactVersion>,
+    pub(super) metadata_version: Option<i64>,
 }
 #[derive(Debug, Clone, Default)]
 struct RunKeys {

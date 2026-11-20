@@ -36,6 +36,8 @@ pub(crate) enum RunDatabaseLoopError {
     Feedback { source: SendError<()> },
     #[snafu(display("{source}"))]
     Stalled { source: FlushStalledError },
+    #[snafu(display("query connection could not be returned to the database loop"))]
+    Query { source: crate::query::RunQueryError },
     #[snafu(display("could not shut down database worker"))]
     Shutdown { source: Box<ShutdownDatabaseError> },
 }
@@ -78,9 +80,21 @@ pub(super) struct DatabaseLoop {
     pub registry: RegistryShell,
     pub persistence: Persistence,
     pub writes: Receiver<DatabaseCommand>,
+    pub queries: Receiver<crate::query::dispatch::QueryCommand>,
+    pub versions: tokio::sync::watch::Sender<crate::query::versions::VersionState>,
     pub feedback: Sender<Feedback>,
     pub main: MainPort,
     pub clock: Arc<dyn ClockReader>,
+}
+struct RunningQuery {
+    job: crate::query::QueryJob,
+    reply: tokio::sync::oneshot::Sender<
+        Result<crate::query::QueryResponse, quartz_protocol::ProtocolError>,
+    >,
+}
+enum DatabaseInput {
+    Write(Option<DatabaseCommand>),
+    Query(crate::query::dispatch::QueryCommand),
 }
 enum DatabaseProgress {
     Continue,
@@ -101,8 +115,9 @@ impl DatabaseLoop {
     fn now(&self) -> Result<Timestamp, ReadClockError> {
         self.clock.read()
     }
-    fn publish(&self, result: PersistenceResult) -> Result<(), RunDatabaseLoopError> {
+    fn publish(&mut self, result: PersistenceResult) -> Result<(), RunDatabaseLoopError> {
         self.trace_commit_latency(&result);
+        self.publish_versions();
         if let Some(error) = result.failure() {
             tracing::error!(%error, "capture write failed");
         }
@@ -144,7 +159,33 @@ impl DatabaseLoop {
             }
         }
     }
+    fn publish_versions(&mut self) {
+        let changes = self.registry.store_mut().take_committed_versions();
+        let hash = self
+            .registry
+            .snapshots()
+            .load()
+            .hashes()
+            .classification
+            .to_string();
+        if changes.facts.is_empty()
+            && changes.metadata_version.is_none()
+            && self.versions.borrow().classification_hash == hash
+        {
+            return;
+        }
+        self.versions.send_modify(|state| {
+            for fact in changes.facts {
+                state.days.insert(fact.key, fact.version);
+            }
+            if let Some(version) = changes.metadata_version {
+                state.settings.metadata_version = version;
+            }
+            state.classification_hash = hash;
+        });
+    }
     pub(super) fn run(&mut self) -> Result<(), RunDatabaseLoopError> {
+        let mut running: Option<RunningQuery> = None;
         loop {
             if let Some(request) = self.persistence.writer().shutdown() {
                 return self.shutdown(request);
@@ -152,9 +193,90 @@ impl DatabaseLoop {
             if let DrainProgress::Drained = self.drain_ready()? {
                 continue;
             }
-            let command = self.wait_for_command()?;
-            if let DatabaseProgress::Ended = self.handle_command(command)? {
-                return Ok(());
+            if let Ok(command) = self.writes.try_recv() {
+                if let DatabaseProgress::Ended = self.handle_command(Some(command))? {
+                    return Ok(());
+                }
+                continue;
+            }
+            if let Some(deadline) = self.persistence.next_deadline()
+                && self.wait_duration(deadline)?.is_zero()
+            {
+                if let DatabaseProgress::Ended = self.handle_command(None)? {
+                    return Ok(());
+                }
+                continue;
+            }
+            if let Some(mut active) = running.take() {
+                let result = if active.reply.is_closed() {
+                    Some(Err(quartz_protocol::ProtocolError::new(
+                        quartz_protocol::ErrorKind::Internal,
+                    )))
+                } else {
+                    match active.job.advance() {
+                        Ok(Some(response)) => Some(Ok(response)),
+                        Ok(None) => None,
+                        Err(error) => {
+                            tracing::warn!(%error, "could not compute query");
+                            Some(Err(quartz_protocol::ProtocolError::new(error.kind())))
+                        }
+                    }
+                };
+                if let Some(result) = result {
+                    match active.job.finish() {
+                        Ok(reader) => self.registry.store_mut().return_query_reader(reader),
+                        Err(source) => {
+                            let _ = active.reply.send(Err(quartz_protocol::ProtocolError::new(
+                                quartz_protocol::ErrorKind::Internal,
+                            )));
+                            return Err(RunDatabaseLoopError::Query { source });
+                        }
+                    }
+                    let _ = active.reply.send(result);
+                } else {
+                    running = Some(active);
+                }
+                continue;
+            }
+            match self.wait_for_input()? {
+                DatabaseInput::Write(command) => {
+                    if let DatabaseProgress::Ended = self.handle_command(command)? {
+                        return Ok(());
+                    }
+                }
+                DatabaseInput::Query(command) => running = self.start_query(command),
+            }
+        }
+    }
+    fn start_query(
+        &mut self,
+        command: crate::query::dispatch::QueryCommand,
+    ) -> Option<RunningQuery> {
+        if command.reply.is_closed() {
+            return None;
+        }
+        let hash = self
+            .registry
+            .snapshots()
+            .load()
+            .hashes()
+            .classification
+            .to_string();
+        let mut reader = self.registry.store_mut().take_query_reader();
+        match crate::query::QueryJob::start(&mut reader, command.request, &hash) {
+            Ok(job) => Some(RunningQuery {
+                job,
+                reply: command.reply,
+            }),
+            Err(error) => {
+                if let Some(reader) = reader {
+                    self.registry.store_mut().return_query_reader(reader);
+                }
+                tracing::warn!(%error, "could not start query");
+                let _ = command
+                    .reply
+                    .send(Err(quartz_protocol::ProtocolError::new(error.kind())));
+                None
             }
         }
     }
@@ -183,7 +305,18 @@ impl DatabaseLoop {
             _ => Ok(()),
         }
     }
-    fn wait_for_command(&self) -> Result<Option<DatabaseCommand>, RunDatabaseLoopError> {
+    fn wait_for_input(&self) -> Result<DatabaseInput, RunDatabaseLoopError> {
+        let wait = match self.persistence.next_deadline() {
+            Some(deadline) => self.wait_duration(deadline)?,
+            None => Duration::MAX,
+        };
+        crossbeam_channel::select_biased! {
+            recv(self.writes) -> command => command.map(|command| DatabaseInput::Write(Some(command))).map_err(|_| RunDatabaseLoopError::Receive { source: RecvError }),
+            recv(self.queries) -> command => match command { Ok(command) => Ok(DatabaseInput::Query(command)), Err(_) => self.wait_for_writes() },
+            default(wait) => Ok(DatabaseInput::Write(None)),
+        }
+    }
+    fn wait_for_writes(&self) -> Result<DatabaseInput, RunDatabaseLoopError> {
         let received = match self.persistence.next_deadline() {
             Some(deadline) => self.writes.recv_timeout(self.wait_duration(deadline)?),
             None => self
@@ -192,8 +325,8 @@ impl DatabaseLoop {
                 .map_err(|_| RecvTimeoutError::Disconnected),
         };
         match received {
-            Ok(command) => Ok(Some(command)),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Ok(command) => Ok(DatabaseInput::Write(Some(command))),
+            Err(RecvTimeoutError::Timeout) => Ok(DatabaseInput::Write(None)),
             Err(RecvTimeoutError::Disconnected) => {
                 Err(RunDatabaseLoopError::Receive { source: RecvError })
             }
@@ -252,6 +385,7 @@ impl DatabaseLoop {
         reply: Sender<Result<RegistryResult, RunRegistryCommandError>>,
     ) -> Result<(), RunDatabaseLoopError> {
         let result = self.registry.run(command);
+        self.publish_versions();
         if result.as_ref().is_ok_and(|result| result.event.is_some()) {
             self.feedback.send(Feedback::RulesChanged).map_err(|_| {
                 RunDatabaseLoopError::Feedback {
@@ -385,9 +519,19 @@ mod tests {
             let (_, writes) = bounded(CONTROL_CAPACITY);
             let (feedback, received_feedback) = bounded(CONTROL_CAPACITY);
             let (sender, commands) = bounded(CONTROL_CAPACITY);
+            let mut registry = RegistryShell::open(store).expect("registry");
+            let hash = registry
+                .snapshots()
+                .load()
+                .hashes()
+                .classification
+                .to_string();
+            let state = registry.store_mut().version_state(&hash).expect("versions");
             Self {
                 database: DatabaseLoop {
-                    registry: RegistryShell::open(store).expect("registry"),
+                    registry,
+                    queries: crossbeam_channel::never(),
+                    versions: tokio::sync::watch::channel(state).0,
                     persistence: opened.persistence,
                     writes,
                     feedback,

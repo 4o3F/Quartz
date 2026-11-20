@@ -6,6 +6,7 @@ use quartz_protocol::{
     frame_codec,
 };
 use std::{
+    collections::BTreeMap,
     io,
     sync::{Arc, Mutex},
     time::Duration,
@@ -21,6 +22,8 @@ use tokio_util::codec::FramedWrite;
 pub(crate) const SEND_BUFFER_LIMIT: usize = 1024 * 1024;
 /// Minimum spacing of completed state writes per connection (04 §7).
 pub(crate) const STATE_PUSH_INTERVAL: Duration = Duration::from_millis(250);
+/// Minimum spacing of completed day writes per date (04 §7).
+pub(crate) const DAY_PUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Actual writer progress can lag registry publication, so each writer enforces spacing too.
 #[derive(Debug, Default)]
@@ -33,12 +36,6 @@ impl StatePushClock {
     }
     fn sent(&mut self, now: tokio::time::Instant) {
         self.next = Some(now + STATE_PUSH_INTERVAL);
-    }
-    async fn deadline(&self) {
-        match self.next {
-            Some(next) => tokio::time::sleep_until(next).await,
-            None => std::future::pending().await,
-        }
     }
 }
 
@@ -112,7 +109,6 @@ impl<T> LatestSlot<T> {
     fn replace(&mut self, value: T) {
         self.0 = Some(value);
     }
-    #[cfg(test)]
     fn take(&mut self) -> Option<T> {
         self.0.take()
     }
@@ -121,7 +117,7 @@ impl<T> LatestSlot<T> {
 #[derive(Debug, Clone, Default)]
 struct LatestEvents {
     state: LatestSlot<StateSnapshot>,
-    // TODO(M2-C): one latest slot per subscribed day, keyed by date, carrying the fact version.
+    days: BTreeMap<quartz_protocol::LocalDate, LatestSlot<quartz_protocol::DayChanged>>,
 }
 
 /// Reliable mailbox entries own their byte reservations before enqueueing.
@@ -190,6 +186,15 @@ impl OutboxHandle {
         self.latest
             .send_modify(|latest| latest.state.replace(snapshot));
     }
+    pub(crate) fn day(&self, changed: quartz_protocol::DayChanged) {
+        self.latest.send_modify(|latest| {
+            latest
+                .days
+                .entry(changed.date)
+                .or_default()
+                .replace(changed)
+        });
+    }
     pub(crate) fn close(&self) {
         self.life.send_replace(OutboxLife::Closed);
     }
@@ -252,6 +257,7 @@ impl OutboxTask {
             handle: handle.clone(),
             sequence: EventSeq(0),
             state_clock: StatePushClock::default(),
+            day_clocks: BTreeMap::new(),
         };
         let task = tokio::spawn(actor.run(write));
         Self { handle, task }
@@ -276,6 +282,7 @@ struct OutboxActor {
     handle: OutboxHandle,
     sequence: EventSeq,
     state_clock: StatePushClock,
+    day_clocks: BTreeMap<quartz_protocol::LocalDate, tokio::time::Instant>,
 }
 impl OutboxActor {
     fn next_sequence(&mut self) -> io::Result<EventSeq> {
@@ -306,9 +313,14 @@ impl OutboxActor {
                 Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
                 Err(mpsc::error::TryRecvError::Empty) => {}
             }
-            let state_pending = self.snapshots.has_changed().map_err(io::Error::other)?;
-            if state_pending && self.state_clock.ready(tokio::time::Instant::now()) {
-                let state = self.snapshots.borrow_and_update().state.0.clone();
+            let pending = self.snapshots.borrow_and_update().clone();
+            let now = tokio::time::Instant::now();
+            if pending.state.0.is_some() && self.state_clock.ready(now) {
+                let mut state = None;
+                self.handle.latest.send_if_modified(|latest| {
+                    state = latest.state.take();
+                    state.is_some()
+                });
                 if let Some(state) = state {
                     let seq = self.next_sequence()?;
                     let payload =
@@ -323,17 +335,53 @@ impl OutboxActor {
                 }
                 continue;
             }
+            let due_date = pending
+                .days
+                .keys()
+                .find(|date| self.day_clocks.get(date).is_none_or(|next| now >= *next))
+                .copied();
+            if let Some(date) = due_date {
+                let mut changed = None;
+                self.handle.latest.send_if_modified(|latest| {
+                    changed = latest.days.remove(&date).and_then(|mut slot| slot.take());
+                    changed.is_some()
+                });
+                if let Some(changed) = changed {
+                    let seq = self.next_sequence()?;
+                    let payload = OutboxHandle::event(Topic::Day(date), seq, &changed)
+                        .map_err(io::Error::other)?;
+                    let reservation = self
+                        .handle
+                        .reserve(payload.len())
+                        .map_err(io::Error::other)?;
+                    writer.send(payload.as_slice()).await?;
+                    self.day_clocks
+                        .insert(date, tokio::time::Instant::now() + DAY_PUSH_INTERVAL);
+                    drop(reservation);
+                }
+                continue;
+            }
+            let deadline = self
+                .day_clocks
+                .iter()
+                .filter(|entry| pending.days.contains_key(entry.0))
+                .map(|entry| *entry.1)
+                .chain(pending.state.0.as_ref().and(self.state_clock.next))
+                .min();
             tokio::select! {
                 message = self.receiver.recv() => {
                     let Some(message) = message else { return Ok(()); };
                     if self.reliable(message, &mut writer).await? == WriteProgress::Finished { return Ok(()); }
                 }
-                () = self.state_clock.deadline(), if state_pending => {},
-                changed = self.snapshots.changed(), if !state_pending => {
-                    changed.map_err(io::Error::other)?;
-                    self.snapshots.mark_changed();
-                }
+                () = Self::deadline(deadline) => {},
+                changed = self.snapshots.changed() => { changed.map_err(io::Error::other)?; }
             }
+        }
+    }
+    async fn deadline(deadline: Option<tokio::time::Instant>) {
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
         }
     }
     async fn reliable<W: AsyncWrite + Unpin>(

@@ -60,7 +60,7 @@
 - `EmptyWorkingSet` 不作为优化手段，也不在验收时调用。
 - 模块检查：测量任务通过 `EnumProcessModulesEx` 列出核心与界面加载的模块，检查核心没有 `nv*.dll`。
 - 唤醒和线程活动：用 WPR 的 CPU 和 Generic Events profile 录制 10 分钟空闲，在 WPA 里看各线程的唤醒次数和原因。
-- 查询性能：M1 使用 `quartz gen-data --db <新文件> [--profile light|typical|heavy] [--seed N] [--days N]` 生成模拟数据，参数见 03 第 4.6 节；`quartz bench-query --db <模拟库> [--runs N]` 从最早运行的开始时间分别读取 1、7、365 天内的前台、可用状态和缺口。各范围默认 100 次，包含首次读取，输出按排序后第 `ceil(次数 × 百分位)` 个样本计算的 P50、P95、最大耗时及各类返回行数，计时包含取出事实行和构造读取结果。已结束前台与可用状态使用 `start_utc_ms >= from - 86_400_000` 的索引条件，开放行和缺口使用完整相交条件；连接为只读，每次读取使用一个快照事务。M2 接入最小查询管线，M4 验收完整管线。 M1-E1 的 typical 档 30 日实测结果见 [2026-11-18 测量记录](../measurements.md)。
+- 查询性能：M1 使用 `quartz gen-data --db <新文件> [--profile light|typical|heavy] [--seed N] [--days N]` 生成模拟数据，参数见 03 第 4.6 节；`quartz bench-query --db <模拟库> [--runs N]` 从最早运行的开始时间分别读取 1、7、365 天内的前台、可用状态和缺口。各范围默认 100 次，包含首次读取，输出按排序后第 `ceil(次数 × 百分位)` 个样本计算的 P50、P95、最大耗时及各类返回行数，计时包含取出事实行和构造读取结果。已结束前台与可用状态使用 `start_utc_ms >= from - 86_400_000` 的索引条件，开放行和缺口使用完整相交条件；连接为只读，每次读取使用一个快照事务。`bench-query` 另外测量 `query.day`、应用细节的日与七日 `query.timeline`，使用同一只读快照管线，包含切片、聚合、分页选择和第一页编码；时间轴采用 60,000 毫秒/像素。逻辑日取最早运行所在的当前系统本地日期，沿用 `day.start_offset_min`；后续页使用同样的管线重新计算并检查版本。Windows 基准先运行管线，再运行原始事实读取；以管线开始前的 `PrivateUsage` 为共同空闲基线，每次查询前后用 `GetProcessMemoryInfo` 采样，输出采样峰值及增量。其他平台输出 `not_measured`。M4 验收完整管线。 M1-E1 的 typical 档 30 日实测结果见 [2026-11-18 测量记录](../measurements.md)。
 
 ### 2.2 场景
 

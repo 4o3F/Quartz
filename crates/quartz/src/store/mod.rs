@@ -9,6 +9,8 @@ mod enums;
 pub(crate) mod facts;
 mod identifiers;
 mod migrations;
+pub(crate) mod query;
+pub(crate) mod query_error;
 mod raw;
 #[expect(
     dead_code,
@@ -70,7 +72,9 @@ pub(crate) enum OpenStoreError {
 /// Owns both connections on the database thread.
 pub(crate) struct Store {
     _writer: SqliteConnection,
-    _reader: ReadOnlyStore,
+    _reader: Option<ReadOnlyStore>,
+    pending_versions: std::collections::BTreeMap<crate::query::versions::VersionKey, i64>,
+    pending_metadata_version: Option<i64>,
 }
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -95,6 +99,8 @@ impl Store {
         execute: impl FnOnce(&mut capture::Capture<'_>) -> Result<T, capture::ExecuteCaptureBatchError>,
     ) -> Result<T, capture::ExecuteCaptureBatchError> {
         let mut staged = keys.clone();
+        staged.changed_versions.clear();
+        staged.metadata_version = None;
         let result = self._writer.immediate_transaction(|connection| {
             execute(&mut capture::Capture::new(
                 connection,
@@ -102,6 +108,12 @@ impl Store {
                 metadata,
             ))
         })?;
+        for changed in staged.changed_versions.drain(..) {
+            self.pending_versions.insert(changed.key, changed.version);
+        }
+        if let Some(version) = staged.metadata_version.take() {
+            self.pending_metadata_version = Some(version);
+        }
         *keys = staged;
         Ok(result)
     }
@@ -180,7 +192,9 @@ impl Store {
         let reader = ReadOnlyStore::connect(&path)?;
         Ok(Self {
             _writer: writer,
-            _reader: reader,
+            _reader: Some(reader),
+            pending_versions: std::collections::BTreeMap::new(),
+            pending_metadata_version: None,
         })
     }
 }

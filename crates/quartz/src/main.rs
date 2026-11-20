@@ -16,6 +16,7 @@ mod generate_data;
 mod ipc;
 mod logging;
 mod platform;
+mod query;
 mod rules;
 mod rules_check;
 mod simulation;
