@@ -159,7 +159,7 @@ Windows 和扩展的标题上限统一为 4,096 个 UTF-16 单元；Windows 含�
 
 - 每次核心启动是一次采集运行（`capture_runs`），记录设备 ID、Windows 会话 ID、启动和结束时间。
 - 每次运行内，UTC 与单调时钟的对应关系是一个时钟段（`clock_segments`）。以下情况结束当前时钟段并开始新的：
-  - 收到 `WM_TIMECHANGE`；
+  - 收到 `WM_TIMECHANGE` 且相对于当前时钟段锚点的映射偏差严格超过 `CLOCK_DRIFT`（2 秒），判定复用 `Timestamp::drifted_from`；容差内（含恰好 2 秒）的通知不构成时钟边界。
   - 睡眠恢复；
   - 每次复核时发现"UTC 变化量 − 单调时钟变化量"的绝对值超过 2 秒。
 - 前台与可用状态保存 `start_mono_ms`、`confirmed_mono_ms`、`end_mono_ms`。时钟跳变时，旧区间终点使用旧段 UTC 锚点加单调增量，保证结束不早于开始，`end_reason = clock_jump`；新 UTC 仅作新时钟段锚点。仍有效的可用状态在新段重开。

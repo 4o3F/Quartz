@@ -522,6 +522,152 @@ fn window_retirement_class_change_and_process_reuse_allocate_new_generations() {
 }
 
 #[test]
+fn time_change_ignores_zero_and_small_offsets_without_splitting_open_rows() {
+    for offset_ms in [0, -5, 5] {
+        for stop in [None, Some(StopReason::Locked)] {
+            let mut fixture = Fixture::active();
+            if let Some(reason) = stop {
+                let _ = fixture.send(at(100), CaptureEvent::Stop(StopChange::Begin(reason)));
+            }
+            let state = fixture.core.state();
+            let now = Timestamp {
+                utc: utc(10_000 + offset_ms),
+                mono: mono(10_000),
+            };
+            assert!(!now.drifted_from(at(0)));
+            let step = fixture.send(now, CaptureEvent::ClockChanged(ClockChange::TimeChange));
+            assert!(step.writes.is_empty());
+            assert_eq!(fixture.core.state(), state);
+            assert!(!step.effects.contains(&CaptureEffect::ReviewForeground));
+            fixture.finish(now.advance(Duration::from_millis(100)));
+        }
+    }
+}
+
+#[test]
+fn time_change_at_exact_drift_tolerance_does_not_create_a_boundary() {
+    let tolerance_ms =
+        i64::try_from(limits::CLOCK_DRIFT.as_millis()).expect("test tolerance fits i64");
+    for offset_ms in [-tolerance_ms, tolerance_ms] {
+        let mut fixture = Fixture::active();
+        let now = Timestamp {
+            utc: utc(10_000 + offset_ms),
+            mono: mono(10_000),
+        };
+        assert!(!now.drifted_from(at(0)), "tolerance is strict");
+        let step = fixture.send(now, CaptureEvent::ClockChanged(ClockChange::TimeChange));
+        assert!(step.writes.is_empty());
+        assert!(!step.effects.contains(&CaptureEffect::ReviewForeground));
+        fixture.finish(now.advance(Duration::from_millis(100)));
+    }
+}
+
+#[test]
+fn time_change_beyond_tolerance_keeps_time_change_and_clock_jump_semantics() {
+    let tolerance_ms =
+        i64::try_from(limits::CLOCK_DRIFT.as_millis()).expect("test tolerance fits i64");
+    for offset_ms in [
+        -(tolerance_ms + 1),
+        -tolerance_ms * 2,
+        tolerance_ms + 1,
+        tolerance_ms * 2,
+    ] {
+        for stop in [None, Some(StopReason::Locked)] {
+            let mut fixture = Fixture::active();
+            if let Some(reason) = stop {
+                let _ = fixture.send(at(100), CaptureEvent::Stop(StopChange::Begin(reason)));
+            }
+            let now = Timestamp {
+                utc: utc(10_000 + offset_ms),
+                mono: mono(10_000),
+            };
+            assert!(now.drifted_from(at(0)));
+            let step = fixture.send(now, CaptureEvent::ClockChanged(ClockChange::TimeChange));
+            assert!(step.writes.iter().any(|write| matches!(write,
+                CaptureWrite::CloseClockSegment { segment, at: end, reason: ClockEndReason::TimeChange }
+                    if segment.get() == 1 && *end == at(10_000)
+            )));
+            assert!(step.writes.iter().any(|write| matches!(write,
+                CaptureWrite::OpenClockSegment { segment, at: start } if segment.get() == 2 && *start == now
+            )));
+            match stop {
+                None => {
+                    assert!(step.writes.iter().any(|write| matches!(write,
+                        CaptureWrite::CloseInterval { at: end, reason: IntervalEndReason::ClockJump, .. } if *end == at(10_000)
+                    )));
+                    let _ = fixture.review(now, window(1, "initial"));
+                }
+                Some(reason) => {
+                    assert!(step.writes.iter().any(|write| matches!(write,
+                        CaptureWrite::CloseAvailability { at: end, reason: AvailabilityEndReason::ClockJump, .. } if *end == at(10_000)
+                    )));
+                    assert!(step.writes.iter().any(|write| matches!(write,
+                        CaptureWrite::OpenAvailability(row) if row.reason == AvailabilityReason::Stopped(reason) && row.segment.get() == 2 && row.start == now
+                    )));
+                }
+            }
+            assert!(step.effects.contains(&CaptureEffect::ReviewForeground));
+            fixture.finish(now.advance(Duration::from_millis(100)));
+        }
+    }
+}
+
+#[test]
+fn time_change_compares_against_segment_anchor_across_ignored_notices() {
+    let mut fixture = Fixture::active();
+    let tolerance_ms =
+        i64::try_from(limits::CLOCK_DRIFT.as_millis()).expect("test tolerance fits i64");
+    let first = Timestamp {
+        utc: utc(10_000 + tolerance_ms),
+        mono: mono(10_000),
+    };
+    let ignored = fixture.send(first, CaptureEvent::ClockChanged(ClockChange::TimeChange));
+    assert!(ignored.writes.is_empty());
+    let next = Timestamp {
+        utc: utc(20_000 + tolerance_ms + 1),
+        mono: mono(20_000),
+    };
+    let changed = fixture.send(next, CaptureEvent::ClockChanged(ClockChange::TimeChange));
+    assert!(changed.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::CloseClockSegment {
+            reason: ClockEndReason::TimeChange,
+            ..
+        }
+    )));
+    let _ = fixture.review(next, window(1, "initial"));
+    fixture.finish(next.advance(Duration::from_millis(100)));
+}
+
+#[test]
+fn ignored_time_change_preserves_pending_policy_work_in_the_same_step() {
+    let mut fixture = Fixture::active();
+    fixture.policy(
+        &rule(
+            "title_hidden",
+            "{field='app.exe_name',op='equals',value='app.exe'}",
+        ),
+        0,
+    );
+    let step = fixture.send(
+        at(1_000),
+        CaptureEvent::ClockChanged(ClockChange::TimeChange),
+    );
+    assert!(step.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::CloseInterval {
+            reason: IntervalEndReason::PolicyChanged,
+            ..
+        }
+    )));
+    assert!(!step.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::OpenClockSegment { .. } | CaptureWrite::CloseClockSegment { .. }
+    )));
+    fixture.finish(at(1_100));
+}
+
+#[test]
 fn clock_rollback_projects_old_end_and_reopens_stop_masks() {
     let mut fixture = Fixture::active();
     let _ = fixture.send(
@@ -955,7 +1101,7 @@ fn overload_gap_waits_for_fresh_read_and_splits_at_clock_boundary() {
     )));
     let changed = fixture.send(
         Timestamp {
-            utc: utc(-100),
+            utc: utc(-5_100),
             mono: mono(30),
         },
         CaptureEvent::ClockChanged(ClockChange::TimeChange),
@@ -967,7 +1113,7 @@ fn overload_gap_waits_for_fresh_read_and_splits_at_clock_boundary() {
     )));
     let recovered = fixture.review(
         Timestamp {
-            utc: utc(-90),
+            utc: utc(-5_090),
             mono: mono(40),
         },
         window(2, "recovered"),
@@ -976,11 +1122,11 @@ fn overload_gap_waits_for_fresh_read_and_splits_at_clock_boundary() {
         write,
         CaptureWrite::RecordGap(gap)
             if gap.segment.get() == 2 && gap.reason == GapReason::EventOverload
-                && gap.range.start == Timestamp { utc: utc(-100), mono: mono(30) }
-                && gap.range.end == Timestamp { utc: utc(-90), mono: mono(40) }
+                && gap.range.start == Timestamp { utc: utc(-5_100), mono: mono(30) }
+                && gap.range.end == Timestamp { utc: utc(-5_090), mono: mono(40) }
     )));
     fixture.finish(Timestamp {
-        utc: utc(-80),
+        utc: utc(-5_080),
         mono: mono(50),
     });
 }
@@ -1381,7 +1527,7 @@ fn clock_boundary_batch_loss_preserves_segments_and_identity_free_gaps() {
     let mut persisted = fixture.writes.clone();
     let jump = fixture.send(
         Timestamp {
-            utc: utc(-100),
+            utc: utc(-5_100),
             mono: mono(20),
         },
         CaptureEvent::ClockChanged(ClockChange::TimeChange),
@@ -1397,7 +1543,7 @@ fn clock_boundary_batch_loss_preserves_segments_and_identity_free_gaps() {
         assert!(backlog.committed_gap(run, gap));
     }
     let now = Timestamp {
-        utc: utc(599_900),
+        utc: utc(594_900),
         mono: mono(600_020),
     };
     persisted.extend(
@@ -1407,7 +1553,7 @@ fn clock_boundary_batch_loss_preserves_segments_and_identity_free_gaps() {
                 CaptureEvent::PersistenceGap {
                     reason: GapReason::WriteQueueOverload,
                     lost_through: Timestamp {
-                        utc: utc(-100),
+                        utc: utc(-5_100),
                         mono: mono(20),
                     },
                 },

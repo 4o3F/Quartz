@@ -256,14 +256,14 @@ impl CaptureCore {
                 }
             }
             CaptureEvent::Stop(change) => self.stop(change, at, step),
-            CaptureEvent::ClockChanged(change) => self.clock_boundary(
-                at,
-                match change {
-                    ClockChange::TimeChange => ClockEndReason::TimeChange,
-                    ClockChange::Resume => ClockEndReason::Resume,
-                },
-                step,
-            ),
+            CaptureEvent::ClockChanged(ClockChange::TimeChange) => {
+                if at.drifted_from(self.clock.anchor) {
+                    self.clock_boundary(at, ClockEndReason::TimeChange, step);
+                }
+            }
+            CaptureEvent::ClockChanged(ClockChange::Resume) => {
+                self.clock_boundary(at, ClockEndReason::Resume, step);
+            }
             CaptureEvent::Wake => self.wake(at, rules, step),
             CaptureEvent::Idle(sample) => self.idle(sample, at, step),
             CaptureEvent::PolicyChanged(foreground) => {
