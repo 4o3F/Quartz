@@ -786,7 +786,9 @@ impl Check<'_> {
                 }
                 let when = self.conditions(entry, "when", path, kind);
                 RuleBody::Classification {
-                    category: CategoryReference { uuid: uuid? },
+                    category: CategoryReference {
+                        uuid: crate::categories::CategoryUuid(uuid?),
+                    },
                     mode,
                     when,
                 }

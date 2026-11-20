@@ -52,6 +52,47 @@ struct PrivacyMatch {
     action: PrivacyAction,
 }
 
+/// Literal comparisons in one classification share each field's normalized forms.
+struct ClassificationFields<'snapshot> {
+    snapshot: &'snapshot FieldSnapshot,
+    values: BTreeMap<Field, ClassificationValue>,
+}
+struct ClassificationValue {
+    nfc: NfcText,
+    folded: FoldedKey,
+}
+impl ClassificationValue {
+    fn new(value: &str) -> Self {
+        let value = bounded(value);
+        Self {
+            nfc: NfcText::new(&value),
+            folded: FoldedKey::new(&value),
+        }
+    }
+}
+impl ClassificationFields<'_> {
+    fn matches(&mut self, condition: &CompiledCondition) -> bool {
+        let Some(raw) = self.snapshot.value(condition.condition.field) else {
+            return condition.condition.negate;
+        };
+        let value = self
+            .values
+            .entry(condition.condition.field)
+            .or_insert_with(|| ClassificationValue::new(raw));
+        let matched = if let Some(regex) = &condition.regex {
+            regex.is_match(value.nfc.as_str())
+        } else if let Some(domain) = &condition.domain {
+            self.snapshot
+                .domain
+                .as_ref()
+                .is_some_and(|input| input.matches_suffix(domain))
+        } else {
+            condition.matches_literal(value)
+        };
+        matched != condition.condition.negate
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CompiledCondition {
     condition: Condition,
@@ -61,6 +102,25 @@ struct CompiledCondition {
     domain: Option<DomainName>,
 }
 impl CompiledCondition {
+    fn matches_literal(&self, value: &ClassificationValue) -> bool {
+        let input = match self.condition.case {
+            CaseSensitivity::Sensitive => value.nfc.as_str(),
+            CaseSensitivity::Folded => value.folded.as_str(),
+        };
+        let pattern = match self.condition.case {
+            CaseSensitivity::Sensitive => self.nfc.as_str(),
+            CaseSensitivity::Folded => self.folded.as_str(),
+        };
+        match self.condition.op {
+            Operator::Equals => input == pattern,
+            Operator::Contains => input.contains(pattern),
+            Operator::StartsWith => input.starts_with(pattern),
+            Operator::EndsWith => input.ends_with(pattern),
+            Operator::Regex | Operator::DomainSuffix => {
+                unreachable!("compiled operators are handled before literal comparison")
+            }
+        }
+    }
     fn compile(condition: &Condition) -> Result<Self, CompileRulesError> {
         Ok(Self {
             condition: condition.clone(),
@@ -295,7 +355,49 @@ impl EffectiveRules {
         })
     }
 }
+/// First matching classification rule, without allocating an explanation for every rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassificationMatch {
+    /// UUID resolved at import time.
+    pub category: crate::categories::CategoryUuid,
+    /// Exact defining rule revision.
+    pub rule: ExplanationId,
+}
 impl CompiledRules {
+    /// Lists fields read by compiled conditions for deriving cache dependencies.
+    pub fn fields(&self) -> impl Iterator<Item = Field> + '_ {
+        self.conditions
+            .iter()
+            .flatten()
+            .map(|condition| condition.condition.field)
+    }
+
+    /// Evaluates classification in effective priority, depth, and file order.
+    pub fn classify(&self, snapshot: &FieldSnapshot) -> Option<ClassificationMatch> {
+        let mut fields = ClassificationFields {
+            snapshot,
+            values: BTreeMap::new(),
+        };
+        for index in 0..self.effective.rules.len() {
+            let entry = &self.effective.rules[index];
+            let RuleBody::Classification { category, mode, .. } = &entry.rule.body else {
+                continue;
+            };
+            let conditions = &self.conditions[index];
+            let matched = match mode {
+                MatchMode::All => conditions.iter().all(|condition| fields.matches(condition)),
+                MatchMode::Any => conditions.iter().any(|condition| fields.matches(condition)),
+            };
+            if matched {
+                return Some(ClassificationMatch {
+                    category: category.uuid.clone(),
+                    rule: ExplanationId(entry.explanation_id().into()),
+                });
+            }
+        }
+        None
+    }
+
     /// Returns the label snapshot for a revision-qualified privacy explanation.
     pub fn privacy_label(&self, explanation_id: &ExplanationId) -> Option<PrivacyLabelSnapshot> {
         self.effective
@@ -433,7 +535,7 @@ impl CompiledRules {
                 result.selected = Some(entry.explanation_id());
                 result.extraction = captures;
                 if let RuleBody::Classification { category, .. } = &entry.rule.body {
-                    result.category_uuid = Some(category.uuid.clone());
+                    result.category_uuid = Some(category.uuid.0.clone());
                 }
                 RuleStatus::Selected
             };
@@ -527,8 +629,20 @@ const _: () = {
 };
 
 /// Revision-qualified explanation identity used by privacy metadata lookups.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExplanationId(String);
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ExplanationId(std::sync::Arc<str>);
+impl TryFrom<String> for ExplanationId {
+    type Error = ParseExplanationIdError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+impl From<ExplanationId> for String {
+    fn from(value: ExplanationId) -> Self {
+        value.as_str().to_owned()
+    }
+}
 impl ExplanationId {
     /// Borrows its revision-qualified representation.
     #[must_use]
@@ -577,6 +691,6 @@ impl std::str::FromStr for ExplanationId {
         revision
             .parse::<std::num::NonZeroU32>()
             .map_err(|source| ParseExplanationIdError::Revision { source })?;
-        Ok(Self(value.to_owned()))
+        Ok(Self(value.into()))
     }
 }

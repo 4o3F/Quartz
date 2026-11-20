@@ -49,6 +49,18 @@ pub(crate) enum BenchQueryError {
     Registry {
         source: quartz_domain::rules::registry::CreateRuleRegistryError,
     },
+    #[snafu(display("could not prepare isolated benchmark database: {source}"))]
+    Temporary { source: io::Error },
+    #[snafu(display("could not install benchmark builtin data: {source}"))]
+    Builtins {
+        source: crate::rules::registry::OpenRegistryShellError,
+    },
+    #[snafu(display("could not prepare classification workload: {source}"))]
+    Workload {
+        source: Box<crate::store::facts::PrepareClassificationWorkloadError>,
+    },
+    #[snafu(display("prepared database has no builtin classification set"))]
+    MissingClassification,
     #[snafu(display("runs must be positive"))]
     Runs,
     #[cfg(windows)]
@@ -57,21 +69,101 @@ pub(crate) enum BenchQueryError {
     #[snafu(display("could not write benchmark output: {source}"))]
     Output { source: io::Error },
 }
+/// Selects the measured query pipelines, optionally followed by raw fact scans.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum BenchQueryScope {
+    #[default]
+    All,
+    Pipeline,
+}
+/// Uses an isolated workload copy, or reads a previously prepared database unchanged.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum BenchQueryInput {
+    #[default]
+    Isolated,
+    Prepared,
+}
 #[derive(Debug)]
 pub(crate) struct BenchQuery<'path> {
     path: &'path Path,
     runs: u32,
+    scope: BenchQueryScope,
+    input: BenchQueryInput,
 }
 impl<'path> BenchQuery<'path> {
     pub(crate) fn new(path: &'path Path, runs: u32) -> Self {
-        Self { path, runs }
+        Self {
+            path,
+            runs,
+            scope: BenchQueryScope::All,
+            input: BenchQueryInput::Isolated,
+        }
+    }
+    pub(crate) fn with_scope(mut self, scope: BenchQueryScope) -> Self {
+        self.scope = scope;
+        self
+    }
+    pub(crate) fn with_input(mut self, input: BenchQueryInput) -> Self {
+        self.input = input;
+        self
     }
     pub(crate) fn run(&self) -> Result<(), BenchQueryError> {
         let path = SimulationPath::offline(self.path).context(PathSnafu)?;
-        let reader = ReadOnlyStore::open_facts(path.as_path()).context(OpenSnafu)?;
-        self.measure(reader, &mut io::stdout().lock())
+        if self.input == BenchQueryInput::Prepared {
+            let mut reader = ReadOnlyStore::open_facts(path.as_path()).context(OpenSnafu)?;
+            let state = reader.rule_sets().load().context(RulesSnafu)?;
+            snafu::ensure!(
+                state
+                    .sets
+                    .keys()
+                    .any(|key| key.as_str() == "builtin.classification"),
+                MissingClassificationSnafu
+            );
+            return self.measure(reader, &mut io::stdout().lock());
+        }
+        let temporary = tempfile::Builder::new()
+            .prefix("quartz-bench-query-")
+            .tempdir()
+            .context(TemporarySnafu)?;
+        let directory = crate::data_directory::DataDirectory::new(temporary.path());
+        let mut original = ReadOnlyStore::open_facts(path.as_path()).context(OpenSnafu)?;
+        original
+            .copy_simulation(&directory.database())
+            .context(OpenSnafu)?;
+        let mut store = crate::store::Store::open(&directory).context(OpenSnafu)?;
+        crate::rules::registry::RegistryShell::open(
+            &mut store,
+            quartz_domain::capture::UtcInstant::try_from(0).expect("benchmark UTC origin"),
+        )
+        .context(BuiltinsSnafu)?;
+        let mut output = io::stdout().lock();
+        writeln!(
+            output,
+            "isolated snapshot copy; builtin categories and rules installed before timing; runs={}",
+            self.runs
+        )
+        .context(OutputSnafu)?;
+        let mut reader = ReadOnlyStore::open_facts(&directory.database()).context(OpenSnafu)?;
+        let from = reader
+            .extent()
+            .context(ReadSnafu)?
+            .ok_or(BenchQueryError::Empty)?
+            .from_utc_ms;
+        let baseline = memory::PrivateBytes::sample()?;
+        reader = self.measure_pipeline(reader, from, baseline, &mut output)?;
+        store
+            .use_classification_workload()
+            .map_err(|source| BenchQueryError::Workload {
+                source: Box::new(source),
+            })?;
+        writeln!(output, "classification workload: editor=code.exe terminal=windowsterminal.exe player=vlc.exe browser=msedge.exe (unclassified)").context(OutputSnafu)?;
+        reader = self.measure_pipeline(reader, from, baseline, &mut output)?;
+        if self.scope == BenchQueryScope::All {
+            self.measure_fact_reads(&mut reader, from, &mut output)?;
+        }
+        Ok(())
     }
-    pub(crate) fn measure(
+    fn measure(
         &self,
         mut reader: ReadOnlyStore,
         output: &mut impl Write,
@@ -80,7 +172,18 @@ impl<'path> BenchQuery<'path> {
         snafu::ensure!(self.runs > 0, RunsSnafu);
         let extent = reader.extent().context(ReadSnafu)?.context(EmptySnafu)?;
         let from = extent.from_utc_ms;
-        reader = self.measure_pipeline(reader, from, output)?;
+        reader = self.measure_pipeline(reader, from, memory::PrivateBytes::sample()?, output)?;
+        match self.scope {
+            BenchQueryScope::All => self.measure_fact_reads(&mut reader, from, output),
+            BenchQueryScope::Pipeline => Ok(()),
+        }
+    }
+    fn measure_fact_reads(
+        &self,
+        reader: &mut ReadOnlyStore,
+        from: i64,
+        output: &mut impl Write,
+    ) -> Result<(), BenchQueryError> {
         writeln!(
             output,
             concat!(
@@ -134,6 +237,7 @@ impl<'path> BenchQuery<'path> {
         &self,
         mut reader: ReadOnlyStore,
         from: i64,
+        idle: memory::PrivateBytes,
         output: &mut impl Write,
     ) -> Result<ReadOnlyStore, BenchQueryError> {
         use crate::query::{QueryJob, QueryRequest};
@@ -144,12 +248,7 @@ impl<'path> BenchQuery<'path> {
             reader.rule_sets().load().context(RulesSnafu)?,
         )
         .context(RegistrySnafu)?;
-        let hash = registry
-            .snapshots()
-            .load()
-            .hashes()
-            .classification
-            .to_string();
+        let rules = registry.snapshots().load();
         let local_date = jiff::Timestamp::from_millisecond(from)
             .map_err(crate::query::RunQueryError::from)
             .context(QuerySnafu)?
@@ -184,7 +283,7 @@ impl<'path> BenchQuery<'path> {
             timeline(1),
             timeline(WEEK_DAYS),
         ];
-        let idle = memory::PrivateBytes::sample()?;
+        snafu::ensure!(self.runs > 0, RunsSnafu);
         for query in queries {
             let name = match &query {
                 QueryRequest::Day(_) => "pipeline.day",
@@ -203,7 +302,7 @@ impl<'path> BenchQuery<'path> {
                 let mut snapshot_reader = Some(reader);
                 memory.observe(memory::PrivateBytes::sample()?);
                 let started = Instant::now();
-                let job = QueryJob::start(&mut snapshot_reader, query.clone(), &hash)
+                let job = QueryJob::start(&mut snapshot_reader, query.clone(), rules.clone())
                     .context(QuerySnafu)?;
                 let prepare = started.elapsed();
                 let mut completed = job.run_measured().context(QuerySnafu)?;
@@ -243,6 +342,7 @@ impl<'path> BenchQuery<'path> {
 struct StageSamples {
     read: Vec<std::time::Duration>,
     slice: Vec<std::time::Duration>,
+    classify: Vec<std::time::Duration>,
     aggregate: Vec<std::time::Duration>,
     page_encode: Vec<std::time::Duration>,
 }
@@ -250,12 +350,14 @@ impl StageSamples {
     fn push(&mut self, timings: crate::query::timing::QueryTimings) {
         self.read.push(timings.read);
         self.slice.push(timings.slice);
+        self.classify.push(timings.classify);
         self.aggregate.push(timings.aggregate);
         self.page_encode.push(timings.page_encode);
     }
     fn write(&self, name: &str, output: &mut impl Write) -> io::Result<()> {
         self.write_stage(name, "read", &self.read, output)?;
         self.write_stage(name, "slice", &self.slice, output)?;
+        self.write_stage(name, "classification", &self.classify, output)?;
         self.write_stage(name, "aggregate_merge", &self.aggregate, output)?;
         self.write_stage(name, "paging_encode", &self.page_encode, output)
     }
@@ -298,11 +400,75 @@ mod tests {
                 &mut Vec::new(),
             )
             .expect("generate");
-        let reader = ReadOnlyStore::open(&path).expect("read-only database");
+        let original = std::fs::read(&path).expect("original bytes");
+        assert!(
+            matches!(
+                BenchQuery::new(&path, 2)
+                    .with_input(BenchQueryInput::Prepared)
+                    .with_scope(BenchQueryScope::Pipeline)
+                    .run(),
+                Err(BenchQueryError::MissingClassification)
+            ),
+            "prepared inputs must include builtin classification rules"
+        );
+        let isolated = DataDirectory::new(temporary.path().join("benchmark"));
+        std::fs::create_dir(isolated.as_path()).expect("benchmark directory");
+        ReadOnlyStore::open(&path)
+            .expect("source database")
+            .copy_simulation(&isolated.database())
+            .expect("copy source");
+        let mut store = crate::store::Store::open(&isolated).expect("copied store");
+        let shell = crate::rules::registry::RegistryShell::open(
+            &mut store,
+            quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        )
+        .expect("builtin data");
+        store
+            .use_classification_workload()
+            .expect("representative application names");
+        let mut reader = ReadOnlyStore::open(&isolated.database()).expect("read-only database");
+        let extent = reader.extent().expect("extent").expect("capture extent");
         let mut output = Vec::new();
         BenchQuery::new(&path, 2)
             .measure(reader, &mut output)
             .expect("benchmark");
+        let mut reader = store.take_query_reader();
+        let request = crate::query::QueryRequest::Timeline(quartz_protocol::QueryTimelineRequest {
+            start_utc_ms: extent.from_utc_ms,
+            end_utc_ms: extent.to_utc_ms,
+            detail: quartz_protocol::TimelineDetail::App,
+            ms_per_pixel: quartz_protocol::MillisecondsPerPixel(std::num::NonZeroU64::MIN),
+            cursor: None,
+        });
+        let completed =
+            crate::query::QueryJob::start(&mut reader, request, shell.snapshots().load())
+                .expect("mapped query")
+                .run_measured()
+                .expect("mapped result");
+        let crate::query::QueryResponse::Timeline(response) = completed.response else {
+            panic!("timeline");
+        };
+        assert!(
+            response.segments.iter().any(|segment| matches!(
+                segment.category_source,
+                quartz_protocol::CategorySource::Rule { .. }
+            )),
+            "mapped workload must execute matching rules"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("source bytes"),
+            original,
+            "benchmark preparation preserves its source"
+        );
+        assert!(
+            matches!(
+                store.use_classification_workload(),
+                Err(
+                    crate::store::facts::PrepareClassificationWorkloadError::MissingApplication { .. }
+                )
+            ),
+            "missing simulation identities are explicit errors"
+        );
         let output = String::from_utf8(output).expect("UTF-8 output");
         for name in [
             "day from_utc_ms=",
@@ -313,6 +479,7 @@ mod tests {
             "max_ms=",
             ".read p50_ms=",
             ".slice p50_ms=",
+            ".classification p50_ms=",
             ".aggregate_merge p50_ms=",
             ".paging_encode p50_ms=",
             ".memory ",

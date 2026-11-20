@@ -2,6 +2,7 @@
 
 use super::{
     calendar::DayCalendar,
+    classification::{ClassificationId, Classifier},
     input::{
         Availability, CaptureLevel, ClockSegment, FactId, ForegroundKind, InputRow, QueryRange,
     },
@@ -34,6 +35,11 @@ pub(crate) struct DerivedSegment {
     pub display: TimelineSegment,
     pub interval_id: Option<FactId>,
     pub capture_level: Option<CaptureLevel>,
+}
+#[derive(Debug)]
+pub(super) struct ClassifiedInput {
+    input: InputRow,
+    classification: ClassificationId,
 }
 #[derive(Debug)]
 enum BoundaryEdge {
@@ -69,17 +75,19 @@ impl Sweep {
 #[derive(Debug)]
 pub(crate) struct Pipeline {
     range: QueryRange,
-    rows: Vec<InputRow>,
+    rows: Vec<ClassifiedInput>,
     clocks: BTreeMap<ClockSegmentId, Sweep>,
     clock_order: BTreeSet<ClockOrder>,
     segments: Vec<DerivedSegment>,
     coverage: BTreeMap<i64, i64>,
     offline: VecDeque<QueryRange>,
+    classifier: Classifier,
 }
 impl Pipeline {
-    pub(crate) fn new(range: QueryRange) -> Self {
+    pub(crate) fn new(range: QueryRange, classifier: Classifier) -> Self {
         Self {
             range,
+            classifier,
             rows: Vec::new(),
             clocks: BTreeMap::new(),
             clock_order: BTreeSet::new(),
@@ -88,8 +96,33 @@ impl Pipeline {
             offline: VecDeque::new(),
         }
     }
-    pub(crate) fn ingest(&mut self, row: InputRow) -> Result<(), DeriveSegmentsError> {
-        if let InputRow::Clock(clock) = row {
+    pub(super) fn classify_rows(&mut self, rows: Vec<InputRow>) -> Vec<ClassifiedInput> {
+        rows.into_iter()
+            .map(|input| ClassifiedInput {
+                classification: self.classify_row(&input),
+                input,
+            })
+            .collect()
+    }
+    fn classify_row(&mut self, row: &InputRow) -> ClassificationId {
+        match row {
+            InputRow::Foreground(row) => self.classifier.classify(row),
+            _ => ClassificationId::UNCLASSIFIED,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn ingest(&mut self, input: InputRow) -> Result<(), DeriveSegmentsError> {
+        let classification = self.classify_row(&input);
+        self.ingest_classified(ClassifiedInput {
+            input,
+            classification,
+        })
+    }
+    pub(super) fn ingest_classified(
+        &mut self,
+        row: ClassifiedInput,
+    ) -> Result<(), DeriveSegmentsError> {
+        if let InputRow::Clock(clock) = row.input {
             if clock.end_utc_ms < clock.start_utc_ms || clock.end_mono_ms < clock.start_mono_ms {
                 return Err(DeriveSegmentsError::InvalidSpan);
             }
@@ -128,7 +161,7 @@ impl Pipeline {
             );
             return Ok(());
         }
-        if let Some(span) = row.span() {
+        if let Some(span) = row.input.span() {
             if span.end_mono_ms < span.start_mono_ms || span.end_utc_ms < span.start_utc_ms {
                 return Err(DeriveSegmentsError::InvalidSpan);
             }
@@ -216,8 +249,13 @@ impl Pipeline {
             if let Some(start) = sweep.previous
                 && boundary.at > start
             {
-                self.segments
-                    .push(Self::derive(&self.rows, sweep, start, boundary.at));
+                self.segments.push(Self::derive(
+                    &self.rows,
+                    sweep,
+                    start,
+                    boundary.at,
+                    &self.classifier,
+                ));
             }
             for index in boundary.leaving {
                 sweep.active.remove(&index);
@@ -229,20 +267,28 @@ impl Pipeline {
         }
         false
     }
-    fn derive(rows: &[InputRow], sweep: &Sweep, start: i64, end: i64) -> DerivedSegment {
+    fn derive(
+        rows: &[ClassifiedInput],
+        sweep: &Sweep,
+        start: i64,
+        end: i64,
+        classifier: &Classifier,
+    ) -> DerivedSegment {
         let mut foreground = None;
+        let mut classification = ClassificationId::UNCLASSIFIED;
         let mut idle = false;
         let mut reasons = BTreeSet::new();
         let mut gap = None;
         let mut stopped_span = None;
         let mut gap_span = None;
         for &index in &sweep.active {
-            match &rows[index] {
+            match &rows[index].input {
                 InputRow::Foreground(row) => {
                     if foreground
                         .is_none_or(|old: &super::input::Foreground| old.span.id < row.span.id)
                     {
                         foreground = Some(row);
+                        classification = rows[index].classification;
                     }
                 }
                 InputRow::Availability {
@@ -308,6 +354,7 @@ impl Pipeline {
             Some(span) => span.duration_within(range),
             None => sweep.clock.duration_within(range),
         };
+        let classification = classifier.result(classification);
         let start_utc_ms = start;
         let end_utc_ms = end;
         DerivedSegment {
@@ -317,8 +364,8 @@ impl Pipeline {
                 duration_ms,
                 clock_segment_id: Some(quartz_protocol::ClockSegmentId(sweep.clock.id.0)),
                 activity,
-                category: CategoryRef::Unclassified,
-                category_source: CategorySource::Unclassified,
+                category: classification.category.clone(),
+                category_source: classification.source.clone(),
                 app: foreground
                     .filter(|row| row.level != CaptureLevel::Excluded)
                     .and_then(|row| row.app.as_ref())
@@ -369,6 +416,11 @@ pub(crate) struct DayAccumulator {
     switches: u32,
     ranking: BTreeMap<ApplicationId, ApplicationRank>,
     previous: Option<PreviousActive>,
+    focus_ms: i64,
+    distract_ms: i64,
+    unclassified_ms: i64,
+    focus_run_ms: i64,
+    longest_focus_ms: i64,
 }
 impl DayAccumulator {
     pub(crate) fn new(calendar: DayCalendar) -> Self {
@@ -378,18 +430,45 @@ impl DayAccumulator {
             switches: 0,
             ranking: BTreeMap::new(),
             previous: None,
+            focus_ms: 0,
+            distract_ms: 0,
+            unclassified_ms: 0,
+            focus_run_ms: 0,
+            longest_focus_ms: 0,
         }
     }
     pub(crate) fn push(&mut self, segment: &DerivedSegment) {
         let current = &segment.display;
         if current.activity != Activity::Active {
             self.previous = None;
+            self.focus_run_ms = 0;
             return;
         }
         if current.duration_ms == 0 {
             return;
         }
         self.active_ms += current.duration_ms;
+        let adjacent = self.previous.as_ref().is_some_and(|previous| {
+            previous.segment == current.clock_segment_id && previous.end == current.start_utc_ms
+        });
+        match current.category.tendency() {
+            quartz_protocol::CategoryTendency::Focus => {
+                self.focus_ms += current.duration_ms;
+                if !adjacent {
+                    self.focus_run_ms = 0;
+                }
+                self.focus_run_ms += current.duration_ms;
+                self.longest_focus_ms = self.longest_focus_ms.max(self.focus_run_ms);
+            }
+            quartz_protocol::CategoryTendency::Distraction => {
+                self.distract_ms += current.duration_ms;
+                self.focus_run_ms = 0;
+            }
+            quartz_protocol::CategoryTendency::Neutral => self.focus_run_ms = 0,
+        }
+        if current.category == CategoryRef::Unclassified {
+            self.unclassified_ms += current.duration_ms;
+        }
         if let Some(app) = &current.app {
             self.ranking
                 .entry(app.id)
@@ -426,14 +505,25 @@ impl DayAccumulator {
                 {
                     Some(bucket) => bucket.duration_ms += duration_ms,
                     None => hour.categories.push(quartz_protocol::CategoryDuration {
-                        category: current.category,
+                        category: current.category.clone(),
                         duration_ms,
                     }),
                 }
             }
         }
     }
+    fn ratio(&self, duration_ms: i64) -> f64 {
+        use num_traits::ToPrimitive;
+        if self.active_ms == 0 {
+            0.0
+        } else {
+            duration_ms.to_f64().expect("duration fits f64")
+                / self.active_ms.to_f64().expect("active duration fits f64")
+        }
+    }
     pub(crate) fn finish(self) -> DayAggregation {
+        let focus_ratio = self.ratio(self.focus_ms);
+        let distract_ratio = self.ratio(self.distract_ms);
         let mut ranking: Vec<_> = self.ranking.into_values().collect();
         ranking.sort_by(|left, right| {
             right
@@ -444,10 +534,10 @@ impl DayAccumulator {
         DayAggregation {
             metrics: DayMetrics {
                 active_ms: self.active_ms,
-                focus_ratio: 0.0,
-                distract_ratio: 0.0,
-                unclassified_ms: self.active_ms,
-                longest_focus_ms: 0,
+                focus_ratio,
+                distract_ratio,
+                unclassified_ms: self.unclassified_ms,
+                longest_focus_ms: self.longest_focus_ms,
                 switches_per_hour: if self.active_ms == 0 {
                     0.0
                 } else {
@@ -490,12 +580,16 @@ impl TimelineProjection {
             && last.clock_segment_id == current.clock_segment_id
             && last.activity == current.activity
             && last.category == current.category
-            && last.category_source == current.category_source
+            && (detail == TimelineDetail::Category
+                || last.category_source == current.category_source)
             && last.app == current.app
             && last.title == current.title
             && u64::try_from(current.end_utc_ms - last.start_utc_ms)
                 .is_ok_and(|width| width < pixel_ms)
         {
+            if last.category_source != current.category_source {
+                last.category_source = CategorySource::Mixed;
+            }
             last.end_utc_ms = current.end_utc_ms;
             last.duration_ms = last
                 .duration_ms

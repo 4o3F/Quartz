@@ -16,9 +16,13 @@ use snafu::{ResultExt, Snafu};
 pub(crate) enum OpenRegistryShellError {
     #[snafu(display("could not read persisted registry state"))]
     Load { source: LoadRulesError },
+    #[snafu(display("could not seed builtin categories"))]
+    Seed {
+        source: crate::store::categories::SeedCategoriesError,
+    },
     #[snafu(display("could not initialize registry core"))]
     Create { source: CreateRuleRegistryError },
-    #[snafu(display("embedded privacy rules failed validation"))]
+    #[snafu(display("embedded rules failed validation"))]
     Parse { source: ParseRuleSetError },
     #[snafu(display("could not install embedded rule revision"))]
     Upgrade { source: RunRegistryCommandError },
@@ -64,6 +68,7 @@ impl RegistryShell {
         source: &str,
         revision: u32,
     ) -> Result<Self, OpenRegistryShellError> {
+        store.seed_categories().context(open_error::SeedSnafu)?;
         let state = store.rule_sets().load().context(open_error::LoadSnafu)?;
         let registry = RuleRegistry::from_state(state).context(open_error::CreateSnafu)?;
         let builtin = RuleSet::parse(
@@ -83,6 +88,25 @@ impl RegistryShell {
                 RegistryCommand::InstallBuiltin {
                     set: builtin,
                     revision,
+                },
+            )
+            .context(open_error::UpgradeSnafu)?;
+        let classification = RuleSet::parse(
+            "builtin-classification.toml",
+            rules::BUILTIN_CLASSIFICATION,
+            ParseContext {
+                origin: RuleOrigin::Builtin,
+                references: &shell.registry.state().references,
+            },
+        )
+        .context(open_error::ParseSnafu)?;
+        shell
+            .run(
+                store,
+                now,
+                RegistryCommand::InstallBuiltin {
+                    set: classification,
+                    revision: rules::BUILTIN_CLASSIFICATION_REVISION,
                 },
             )
             .context(open_error::UpgradeSnafu)?;

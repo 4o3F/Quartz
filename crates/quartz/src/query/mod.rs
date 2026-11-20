@@ -1,6 +1,7 @@
 //! Snapshot query orchestration around pure slicing, aggregation, and paging.
 
 pub(crate) mod calendar;
+pub(crate) mod classification;
 #[cfg(any(windows, test))]
 pub(crate) mod dispatch;
 pub(crate) mod input;
@@ -152,10 +153,14 @@ impl QueryJob {
     pub(crate) fn start(
         reader: &mut Option<ReadOnlyStore>,
         request: QueryRequest,
-        classification_hash: &str,
+        rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
     ) -> Result<Self, RunQueryError> {
         let mut snapshot = reader.take().ok_or(RunQueryError::InvalidFacts)?.snapshot();
-        match Self::prepare(&mut snapshot, &request, classification_hash) {
+        match Self::prepare(
+            &mut snapshot,
+            &request,
+            &rules.hashes().classification.to_string(),
+        ) {
             Ok(prepared) => Ok(Self {
                 snapshot,
                 request,
@@ -164,7 +169,10 @@ impl QueryJob {
                 parameters: prepared.parameters,
                 position: prepared.position,
                 calendar: prepared.calendar,
-                stage: Stage::Read(Pipeline::new(prepared.range)),
+                stage: Stage::Read(Pipeline::new(
+                    prepared.range,
+                    classification::Classifier::new(rules, prepared.categories),
+                )),
             }),
             Err(error) => {
                 *reader = Some(snapshot.finish()?);
@@ -219,7 +227,9 @@ impl QueryJob {
             QueryRequest::Timeline(timeline) => timeline.cursor.as_ref(),
         };
         let position = PagePosition::from_cursor(cursor, &versions, &parameters)?;
+        let categories = snapshot.categories()?;
         Ok(PreparedQuery {
+            categories,
             range,
             versions,
             parameters,
@@ -244,9 +254,11 @@ impl QueryJob {
                         .map_err(RunQueryError::from)
                 })? {
                     Some(rows) => {
+                        let rows =
+                            timer.measure(QueryStage::Classify, || pipeline.classify_rows(rows));
                         timer.measure(QueryStage::Slice, || {
                             for row in rows {
-                                pipeline.ingest(row)?;
+                                pipeline.ingest_classified(row)?;
                             }
                             Ok::<(), RunQueryError>(())
                         })?;
@@ -381,6 +393,7 @@ pub(crate) struct CompletedQuery {
 
 #[derive(Debug)]
 struct PreparedQuery {
+    categories: Vec<quartz_domain::categories::Category>,
     range: QueryRange,
     versions: QueryVersions,
     parameters: CursorQuery,

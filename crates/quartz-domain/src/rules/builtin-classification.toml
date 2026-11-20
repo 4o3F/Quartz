@@ -1,0 +1,524 @@
+format = "quartz-rules/1"
+
+[set]
+key = "builtin.classification"
+kind = "classification"
+name = "Builtin classification"
+
+[[rule]]
+id = "vscode"
+label = "VS Code"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "code.exe" },
+]
+
+[[rule]]
+id = "visual-studio"
+label = "Visual Studio"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "devenv.exe" },
+]
+
+[[rule]]
+id = "idea"
+label = "IntelliJ IDEA"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "idea64.exe" },
+]
+
+[[rule]]
+id = "pycharm"
+label = "PyCharm"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "pycharm64.exe" },
+]
+
+[[rule]]
+id = "webstorm"
+label = "WebStorm"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "webstorm64.exe" },
+]
+
+[[rule]]
+id = "rider"
+label = "Rider"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "rider64.exe" },
+]
+
+[[rule]]
+id = "clion"
+label = "CLion"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "clion64.exe" },
+]
+
+[[rule]]
+id = "rustrover"
+label = "RustRover"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "rustrover64.exe" },
+]
+
+[[rule]]
+id = "android-studio"
+label = "Android Studio"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "studio64.exe" },
+]
+
+[[rule]]
+id = "sublime-text"
+label = "Sublime Text"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "sublime_text.exe" },
+]
+
+[[rule]]
+id = "notepad-plus-plus"
+label = "Notepad++"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "notepad++.exe" },
+]
+
+[[rule]]
+id = "neovim"
+label = "Neovim"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "nvim.exe" },
+  { field = "app.exe_name", op = "equals", value = "gvim.exe" },
+]
+
+[[rule]]
+id = "windows-terminal"
+label = "Windows Terminal"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "windowsterminal.exe" },
+]
+
+[[rule]]
+id = "powershell"
+label = "PowerShell"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "powershell.exe" },
+  { field = "app.exe_name", op = "equals", value = "pwsh.exe" },
+]
+
+[[rule]]
+id = "command-prompt"
+label = "Command Prompt"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "cmd.exe" },
+]
+
+[[rule]]
+id = "git-tools"
+label = "Git tools"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "git-bash.exe" },
+  { field = "app.exe_name", op = "equals", value = "git-gui.exe" },
+  { field = "app.exe_name", op = "equals", value = "fork.exe" },
+  { field = "app.exe_name", op = "equals", value = "sourcetree.exe" },
+]
+
+[[rule]]
+id = "api-tools"
+label = "API clients"
+category = "builtin:development"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "postman.exe" },
+  { field = "app.exe_name", op = "equals", value = "insomnia.exe" },
+]
+
+[[rule]]
+id = "word"
+label = "Microsoft Word"
+category = "builtin:learning"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "winword.exe" },
+]
+
+[[rule]]
+id = "excel"
+label = "Microsoft Excel"
+category = "builtin:learning"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "excel.exe" },
+]
+
+[[rule]]
+id = "powerpoint"
+label = "Microsoft PowerPoint"
+category = "builtin:learning"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "powerpnt.exe" },
+]
+
+[[rule]]
+id = "onenote"
+label = "Microsoft OneNote"
+category = "builtin:learning"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "onenote.exe" },
+]
+
+[[rule]]
+id = "libreoffice"
+label = "LibreOffice"
+category = "builtin:learning"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "soffice.bin" },
+  { field = "app.exe_name", op = "equals", value = "soffice.exe" },
+]
+
+[[rule]]
+id = "obsidian"
+label = "Obsidian"
+category = "builtin:learning"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "obsidian.exe" },
+]
+
+[[rule]]
+id = "zotero"
+label = "Zotero"
+category = "builtin:learning"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "zotero.exe" },
+]
+
+[[rule]]
+id = "anki"
+label = "Anki"
+category = "builtin:learning"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "anki.exe" },
+]
+
+[[rule]]
+id = "sumatra-pdf"
+label = "Sumatra PDF"
+category = "builtin:learning"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "sumatrapdf.exe" },
+]
+
+[[rule]]
+id = "calibre"
+label = "Calibre reader"
+category = "builtin:learning"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "ebook-viewer.exe" },
+]
+
+[[rule]]
+id = "wechat"
+label = "WeChat"
+category = "builtin:communication"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "weixin.exe" },
+  { field = "app.exe_name", op = "equals", value = "wechat.exe" },
+]
+
+[[rule]]
+id = "qq"
+label = "QQ"
+category = "builtin:communication"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "qq.exe" },
+]
+
+[[rule]]
+id = "teams"
+label = "Microsoft Teams"
+category = "builtin:communication"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "ms-teams.exe" },
+  { field = "app.exe_name", op = "equals", value = "teams.exe" },
+]
+
+[[rule]]
+id = "outlook"
+label = "Microsoft Outlook"
+category = "builtin:communication"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "outlook.exe" },
+  { field = "app.exe_name", op = "equals", value = "olk.exe" },
+]
+
+[[rule]]
+id = "thunderbird"
+label = "Thunderbird"
+category = "builtin:communication"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "thunderbird.exe" },
+]
+
+[[rule]]
+id = "slack"
+label = "Slack"
+category = "builtin:communication"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "slack.exe" },
+]
+
+[[rule]]
+id = "zoom"
+label = "Zoom"
+category = "builtin:communication"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "zoom.exe" },
+]
+
+[[rule]]
+id = "dingtalk"
+label = "DingTalk"
+category = "builtin:communication"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "dingtalk.exe" },
+]
+
+[[rule]]
+id = "feishu"
+label = "Feishu and Lark"
+category = "builtin:communication"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "feishu.exe" },
+  { field = "app.exe_name", op = "equals", value = "lark.exe" },
+]
+
+[[rule]]
+id = "tencent-meeting"
+label = "Tencent Meeting"
+category = "builtin:communication"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "wemeetapp.exe" },
+]
+
+[[rule]]
+id = "steam"
+label = "Steam"
+category = "builtin:entertainment"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "steam.exe" },
+]
+
+[[rule]]
+id = "epic-games"
+label = "Epic Games Launcher and Fortnite"
+category = "builtin:entertainment"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "epicgameslauncher.exe" },
+  { field = "app.exe_name", op = "equals", value = "fortniteclient-win64-shipping.exe" },
+]
+
+[[rule]]
+id = "battle-net"
+label = "Battle.net"
+category = "builtin:entertainment"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "battle.net.exe" },
+]
+
+[[rule]]
+id = "riot-client"
+label = "Riot Client, League of Legends and Valorant"
+category = "builtin:entertainment"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "riotclientservices.exe" },
+  { field = "app.exe_name", op = "equals", value = "league of legends.exe" },
+  { field = "app.exe_name", op = "equals", value = "valorant-win64-shipping.exe" },
+]
+
+[[rule]]
+id = "vlc"
+label = "VLC"
+category = "builtin:entertainment"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "vlc.exe" },
+]
+
+[[rule]]
+id = "potplayer"
+label = "PotPlayer"
+category = "builtin:entertainment"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "potplayer64.exe" },
+  { field = "app.exe_name", op = "equals", value = "potplayer.exe" },
+]
+
+[[rule]]
+id = "spotify"
+label = "Spotify"
+category = "builtin:entertainment"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "spotify.exe" },
+]
+
+[[rule]]
+id = "cloud-music"
+label = "NetEase Cloud Music"
+category = "builtin:entertainment"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "cloudmusic.exe" },
+]
+
+[[rule]]
+id = "explorer"
+label = "Windows Explorer"
+category = "builtin:system"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "explorer.exe" },
+]
+
+[[rule]]
+id = "settings"
+label = "Windows Settings"
+category = "builtin:system"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "systemsettings.exe" },
+]
+
+[[rule]]
+id = "task-manager"
+label = "Task Manager"
+category = "builtin:system"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "taskmgr.exe" },
+]
+
+[[rule]]
+id = "control-panel"
+label = "Control Panel"
+category = "builtin:system"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "control.exe" },
+]
+
+[[rule]]
+id = "system-utilities"
+label = "Windows utilities"
+category = "builtin:system"
+priority = 50
+match = "any"
+when = [
+  { field = "app.exe_name", op = "equals", value = "regedit.exe" },
+  { field = "app.exe_name", op = "equals", value = "mmc.exe" },
+  { field = "app.exe_name", op = "equals", value = "resmon.exe" },
+  { field = "app.exe_name", op = "equals", value = "msinfo32.exe" },
+]

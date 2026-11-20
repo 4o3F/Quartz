@@ -147,9 +147,11 @@ when = [
 
 | 规则类型 | 可用字段 | 原因 |
 |---|---|---|
-| `classification` | `app.*`、`window.class`、`title.*`、`doc.*`、`web.*`、`browser.profile_label` | 分类不能依赖分类本身 |
+| `classification` | `app.identity_key`、`app.exe_name`、`app.display_name`、`title.raw` | 使用当前查询输入，不能依赖分类本身 |
 | `privacy` | `app.*`、`window.class`、`title.raw`、`web.domain`、`web.tab_title`、`browser.profile_label` | 隐私规则在入库前求值，只能用采集时就有的字段 |
 | `precedent`、`policy_check` | 全部字段 | 基于已入库并已分类的片段 |
+
+`title.normalized`、`doc.*` 和 `web.*` 在 M4/M5 接入查询输入前均于校验阶段返回 `E-RULE-FIELD`，其他尚未接入的字段也按此处理。
 
 `web.*` 只在浏览器扩展已连接且关联到当前窗口时存在。字段不存在时，普通条件不成立，`negate = true` 的条件成立。
 
@@ -188,6 +190,8 @@ priority = 50                      # 0–1000，默认 50
 match = "all"
 when = [{ field = "app.exe_name", op = "equals", value = "code.exe" }]
 ```
+
+分类引用也可使用分类 UUID，导入时将名称或内置键解析成 UUID 并保存。第一条匹配规则引用的分类在查询时已归档或被删除，结果为未分类，诊断保留规则 ID 和分类 UUID。
 
 内置分类的键：`builtin:development`（开发）、`builtin:learning`（学习）、`builtin:communication`（沟通）、`builtin:entertainment`（娱乐）、`builtin:system`（系统与工具）。未分类不需要规则。
 
@@ -362,7 +366,7 @@ when = [
 ]
 ```
 
-**需求**：“内置规则把 Windows Terminal 算成系统工具，我想算开发；另外不要把微信算沟通。”
+**需求**：“内置规则把 Windows Terminal 算成开发，我想算系统与工具；另外不要把微信算沟通。”
 
 ```toml
 format = "quartz-rules/1"
@@ -375,8 +379,8 @@ parent = "builtin.classification"
 
 [[override]]
 target = "builtin.classification/windows-terminal"
-label = "Windows Terminal 算开发"
-category = "builtin:development"
+label = "Windows Terminal 算系统与工具"
+category = "builtin:system"
 priority = 50
 match = "all"
 when = [{ field = "app.identity_key", op = "starts_with", value = "aumid:Microsoft.WindowsTerminal_" }]

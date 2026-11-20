@@ -74,9 +74,7 @@ impl Field {
     pub(super) const fn allows(self, kind: RuleKind) -> bool {
         match kind {
             RuleKind::Extraction => self.is_app(),
-            RuleKind::Classification => {
-                !matches!(self, Self::Category | Self::Tendency | Self::Activity)
-            }
+            RuleKind::Classification => self.is_app() || matches!(self, Self::RawTitle),
             RuleKind::Privacy => {
                 self.is_app()
                     || matches!(
@@ -159,7 +157,7 @@ pub enum RuleOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CategoryReference {
     /// Durable category identifier stored instead of a display name.
-    pub uuid: String,
+    pub uuid: crate::categories::CategoryUuid,
 }
 /// One validated field comparison.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

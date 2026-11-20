@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 pub(crate) enum QueryStage {
     Read,
     Slice,
+    Classify,
     Aggregate,
     PageEncode,
 }
@@ -13,6 +14,7 @@ pub(crate) enum QueryStage {
 pub(crate) struct QueryTimings {
     pub read: Duration,
     pub slice: Duration,
+    pub classify: Duration,
     pub aggregate: Duration,
     pub page_encode: Duration,
 }
@@ -39,6 +41,7 @@ impl<'timings> QueryTimer<'timings> {
         match stage {
             QueryStage::Read => timings.read += elapsed,
             QueryStage::Slice => timings.slice += elapsed,
+            QueryStage::Classify => timings.classify += elapsed,
             QueryStage::Aggregate => timings.aggregate += elapsed,
             QueryStage::PageEncode => timings.page_encode += elapsed,
         }

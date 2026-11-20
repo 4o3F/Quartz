@@ -175,4 +175,48 @@ mod tests {
         publisher.publish(&mut fixture.store);
         assert!(port.updates.borrow().days.is_empty());
     }
+    #[test]
+    fn classification_install_and_upgrade_invalidate_subscribed_days() {
+        use crate::rules::registry::RegistryShell;
+        use quartz_domain::{
+            capture::UtcInstant,
+            rules::{self, ParseContext, RuleOrigin, RuleSet, registry::RegistryCommand},
+        };
+        let mut fixture = QueryFixture::new(4);
+        let now = UtcInstant::try_from(0).expect("UTC");
+        let mut shell = RegistryShell::open(&mut fixture.store, now).expect("installed builtins");
+        let VersionChannel {
+            mut publisher,
+            port,
+        } = VersionPublisher::open(&mut fixture.store, shell.snapshots()).expect("publisher");
+        publisher.publish(&mut fixture.store);
+        let date = "2025-01-02".parse().expect("date");
+        let first = set_days(&mut publisher, BTreeSet::from([date]));
+        let changed =
+            rules::BUILTIN_CLASSIFICATION.replace("builtin:development", "builtin:learning");
+        let set = RuleSet::parse(
+            "builtin.toml",
+            &changed,
+            ParseContext {
+                origin: RuleOrigin::Builtin,
+                references: &shell.core().state().references,
+            },
+        )
+        .expect("changed builtin");
+        shell
+            .run(
+                &mut fixture.store,
+                now,
+                RegistryCommand::InstallBuiltin { set, revision: 2 },
+            )
+            .expect("builtin upgrade");
+        publisher.publish(&mut fixture.store);
+        assert_ne!(
+            first.days[&date].versions,
+            port.updates.borrow().days[&date].versions
+        );
+        let upgraded = port.updates.borrow().days[&date].versions.clone();
+        publisher.publish(&mut fixture.store);
+        assert_eq!(upgraded, port.updates.borrow().days[&date].versions);
+    }
 }

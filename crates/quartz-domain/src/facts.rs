@@ -3,22 +3,27 @@
 use crate::capture::{GapReason, StopReason};
 
 /// Persistent application identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ApplicationId(pub i64);
 /// Persistent clock-segment identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClockSegmentId(pub i64);
 /// Application metadata retained by a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationRef {
     pub id: ApplicationId,
+    pub identity_key: String,
     pub exe_name: Option<String>,
     pub display_name: String,
     pub aumid: Option<String>,
 }
 
+/// Persistent title dictionary identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TitleId(pub i64);
+
 /// Persistent row identity, independent of capture's per-run row sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FactId(pub i64);
 pub use crate::capture::CaptureLevel;
 #[derive(Debug, Clone)]
@@ -89,8 +94,9 @@ pub struct Foreground {
     pub span: FactSpan,
     pub kind: ForegroundKind,
     pub level: CaptureLevel,
-    pub app: Option<ApplicationRef>,
+    pub app: Option<std::sync::Arc<ApplicationRef>>,
     pub title: Option<String>,
+    pub title_id: Option<TitleId>,
 }
 #[derive(Debug, Clone, Copy)]
 pub enum Availability {

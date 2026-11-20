@@ -269,6 +269,7 @@ fn deletion_retains_relational_history_and_restoring_clears_the_null_marker() {
     assert!(marker.is_none());
     assert_eq!(
         schema::settings::table
+            .filter(schema::settings::key.ne(crate::store::versions::METADATA_VERSION_KEY))
             .count()
             .get_result::<i64>(&mut fixture.connection())
             .expect("configuration count"),
@@ -388,6 +389,7 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
     assert_eq!(same.reply.epoch, result.reply.epoch);
     assert_eq!(
         schema::settings::table
+            .filter(schema::settings::key.ne(crate::store::versions::METADATA_VERSION_KEY))
             .count()
             .get_result::<i64>(&mut fixture.connection())
             .expect("configuration count"),

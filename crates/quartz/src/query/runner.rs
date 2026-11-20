@@ -19,13 +19,13 @@ impl QueryRunner {
         &mut self,
         store: &mut Store,
         command: QueryCommand,
-        classification_hash: &str,
+        rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
     ) {
         if command.reply.is_closed() {
             return;
         }
         let mut reader = store.take_query_reader();
-        match QueryJob::start(&mut reader, command.request, classification_hash) {
+        match QueryJob::start(&mut reader, command.request, rules) {
             Ok(job) => {
                 self.running = Some(RunningQuery {
                     job,

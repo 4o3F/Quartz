@@ -149,11 +149,13 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 
 查询结果按页返回，每页不超过 200 KiB。分页用不透明游标，响应和游标都绑定事实、规则、元数据与查询语义的输入版本。数据库线程用只读连接持有 WAL 快照分批计算；版本变化返回 `stale_cursor`，客户端丢弃旧分页并重查（03 第 4.1 节）。
 
-`query.day` 返回 `metrics`（`active_ms`、`focus_ratio`、`distract_ratio`、`unclassified_ms`、`longest_focus_ms`、`switches_per_hour`）、`hours`、`applications`、`versions` 和 `next_cursor`。`metrics` 和 `hours` 仅出现在第一页，应用排行按活跃时长降序、同值按应用 ID 排序，完整列表可继续分页；域名和文档排行字段分别在 M5、M4 接入。专注与分心占比、最长连续专注时长按分类倾向计算；每小时切换次数为连续活跃片段之间的应用切换次数除以活跃小时数，活跃时长为 0 时返回 0。
+`query.day` 返回 `metrics`（`active_ms`、`focus_ratio`、`distract_ratio`、`unclassified_ms`、`longest_focus_ms`、`switches_per_hour`）、`hours`、`applications`、`versions` 和 `next_cursor`。`metrics` 和 `hours` 仅出现在第一页，应用排行按活跃时长降序、同值按应用 ID 排序，完整列表可继续分页。专注与分心占比按分类倾向时长除以活跃时长计算，最长连续专注段按同一时钟段内首尾相接的专注活跃片段累计（03 第 5.3 节）；每小时切换次数为连续活跃片段之间的应用切换次数除以活跃小时数，活跃时长为 0 时返回 0。
 
 逻辑日按 `day.start_offset_min`（默认 0 分钟）加到本地日期后交给 jiff 转换，小时桶由 jiff 逐小时推进，携带 UTC 起止、本地时间标签和 `categories: [{category, duration_ms}]` 分类堆叠。`query.timeline` 使用 UTC 范围，最长 366 天；返回 `segments`、`versions`、`next_cursor`。每个片段携带 UTC 起止、按单调时间计算的 `duration_ms`、时钟段 ID、活动状态、分类及来源；`app` / `raw` 细节附应用 ID、exe 名、显示名和 AUMID，`raw` 仅在 Full 采集级别附标题。
 
-时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`raw` 还要求来自同一前台事实。合并保留单调时长之和。
+分类引用为 `{kind:"unclassified"}` 或 `{kind:"classified", id, uuid, builtin_key, name, color, tendency}`。`builtin_key` 是稳定内置键，`name` 为用户输入或 null；名称为 null 时由界面翻译 `category.builtin.<key>`。规则来源为 `{kind:"rule", rule:"<规则集>/<规则>@<版本>"}`，未分类来源为 `{kind:"unclassified"}`。分类元数据从查询的数据库快照读取，求值使用生成游标规则哈希的同一规则快照。
+
+时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，`raw` 还要求来自同一前台事实。合并保留单调时长之和。
 
 游标是 `quartz-protocol::QueryCursor` 的 JSON 对象，私有字段保存 `versions`、类型化的 `query` 参数和下一项 `position`，客户端原样保存和回传。
 

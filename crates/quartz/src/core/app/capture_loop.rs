@@ -539,6 +539,9 @@ mod tests {
     }
     #[test]
     fn capture_loop_continues_after_command_overflow_with_database_wakeup_channel_full() {
+        const CAPTURE_PROGRESS_WAIT: Duration = Duration::from_secs(2);
+        let discarded_deadline = at(3);
+        let fresh_deadline = at(4);
         let run = RunId::new(1);
         let mut started = CaptureCore::start(run, at(0)).expect("core");
         let extra = limits::WRITE_QUEUE_CAPACITY - started.step.writes.len();
@@ -553,8 +556,10 @@ mod tests {
         let (feedback, replies) = bounded(CONTROL_CAPACITY);
         let (shutdown, stop) = bounded(CONTROL_CAPACITY);
         // Keep this receiver alive without reading it, like a database busy with SQLite.
-        let (database, _busy_database) = bounded(CONTROL_CAPACITY);
-        let (main, commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let (database, busy_database) = bounded(CONTROL_CAPACITY);
+        let (main, published) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let (reported, commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let before_discard = sender.clone();
         let rules = RuleRegistry::from_state(RegistryState::default())
             .expect("rules")
             .snapshots();
@@ -570,7 +575,37 @@ mod tests {
             writer: WriteQueue::new(),
             main: MainPort {
                 sender: main,
-                wake: Arc::new(|| {}),
+                wake: Arc::new(move || {
+                    let command = published.try_recv().expect("published main command");
+                    if matches!(
+                        &command,
+                        MainCommand::CaptureSnapshot {
+                            state: CaptureState::Gap(GapReason::WriteQueueOverload),
+                            ..
+                        }
+                    ) {
+                        // A fast main-thread response to Gap still precedes queue cleanup.
+                        before_discard
+                            .send(Observation::Event(ObservedEvent {
+                                at: at(2),
+                                event: CaptureEvent::RegisterDeadline {
+                                    owner: SchedulerKind::Midnight,
+                                    deadline: Deadline::Utc(discarded_deadline.utc),
+                                },
+                            }))
+                            .expect("observation before queue cleanup");
+                    }
+                    if matches!(
+                        &command,
+                        MainCommand::Effect(CaptureEffect::DiscardQueuedObservations)
+                    ) {
+                        assert!(
+                            before_discard.is_empty(),
+                            "cleanup discards the response queued after Gap"
+                        );
+                    }
+                    reported.send(command).expect("main-thread observation");
+                }),
             },
             overloaded: Arc::new(AtomicBool::new(false)),
             clock: Arc::new(TestClock(at(0))),
@@ -605,36 +640,67 @@ mod tests {
                 },
             }))
             .expect("overflow boundary");
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let overflow_deadline = Instant::now() + CAPTURE_PROGRESS_WAIT;
         loop {
             if let MainCommand::CaptureSnapshot {
                 state: CaptureState::Gap(reason),
                 ..
             } = commands
-                .recv_deadline(deadline)
+                .recv_deadline(overflow_deadline)
                 .expect("overflow completes without a database wait")
             {
                 assert_eq!(reason, GapReason::WriteQueueOverload);
                 break;
             }
         }
+        let cleanup_deadline = Instant::now() + CAPTURE_PROGRESS_WAIT;
+        loop {
+            if let MainCommand::Effect(CaptureEffect::DiscardQueuedObservations) = commands
+                .recv_deadline(cleanup_deadline)
+                .expect("overflow finishes discarding queued observations")
+            {
+                break;
+            }
+        }
+        assert_eq!(busy_database.len(), CONTROL_CAPACITY);
         sender
             .send(Observation::Event(ObservedEvent {
                 at: at(2),
                 event: CaptureEvent::RegisterDeadline {
                     owner: SchedulerKind::Midnight,
-                    deadline: Deadline::Utc(at(86_400_000).utc),
+                    deadline: Deadline::Utc(fresh_deadline.utc),
                 },
             }))
             .expect("fresh work after discarded observations");
+        let processing_deadline = Instant::now() + CAPTURE_PROGRESS_WAIT;
         loop {
-            if let MainCommand::Persistence(PersistenceState::Buffered { commands: 1 }) = commands
-                .recv_deadline(deadline)
-                .expect("capture continues while the database wakeup channel is full")
+            if let MainCommand::Effect(CaptureEffect::ScheduleTimer(Timer::Arm(timer_at))) =
+                commands.recv_deadline(processing_deadline).expect(
+                    "capture registers fresh work while the database wakeup channel is full",
+                )
             {
+                assert_ne!(
+                    timer_at, discarded_deadline.mono,
+                    "the pre-cleanup observation was discarded"
+                );
+                if timer_at == fresh_deadline.mono {
+                    break;
+                }
+            }
+        }
+        loop {
+            if let MainCommand::Persistence(PersistenceState::Buffered { commands }) = commands
+                .recv_deadline(processing_deadline)
+                .expect("fresh deadline write is buffered without a database-capacity wait")
+            {
+                assert!(
+                    commands >= 1,
+                    "the fresh registration adds a buffered write"
+                );
                 break;
             }
         }
+        assert_eq!(busy_database.len(), CONTROL_CAPACITY);
         shutdown
             .send(Shutdown::new(at(3), RunEndReason::Shutdown))
             .expect("shutdown");
@@ -642,7 +708,7 @@ mod tests {
             .send(Feedback::Ended)
             .expect("scripted database completion");
         completion
-            .recv_deadline(deadline)
+            .recv_timeout(CAPTURE_PROGRESS_WAIT)
             .expect("capture exits without a database-capacity wait")
             .expect("capture result");
         worker.join().expect("capture worker");

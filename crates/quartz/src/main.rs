@@ -114,6 +114,10 @@ enum CliCommand {
         db: PathBuf,
         #[arg(long, default_value_t = bench_query::DEFAULT_RUNS, value_parser = clap::value_parser!(u32).range(1..))]
         runs: u32,
+        #[arg(long, value_enum, default_value_t = bench_query::BenchQueryScope::All)]
+        scope: bench_query::BenchQueryScope,
+        #[arg(long, value_enum, default_value_t = bench_query::BenchQueryInput::Isolated)]
+        input: bench_query::BenchQueryInput,
     },
     /// Restore a database backup while the core is stopped.
     RestoreBackup {
@@ -223,8 +227,15 @@ impl CliCommand {
                     .run()
                     .context(GenerateSnafu);
             }
-            Self::BenchQuery { db, runs } => {
+            Self::BenchQuery {
+                db,
+                runs,
+                scope,
+                input,
+            } => {
                 return bench_query::BenchQuery::new(&db, runs)
+                    .with_scope(scope)
+                    .with_input(input)
                     .run()
                     .context(BenchSnafu);
             }
@@ -499,6 +510,25 @@ mod tests {
                 CliCommand::BenchQuery {
                     db: "simulation.db".into(),
                     runs: bench_query::DEFAULT_RUNS,
+                    scope: bench_query::BenchQueryScope::All,
+                    input: bench_query::BenchQueryInput::Isolated,
+                },
+            ),
+            (
+                vec![
+                    "bench-query",
+                    "--db",
+                    "simulation.db",
+                    "--scope",
+                    "pipeline",
+                    "--input",
+                    "prepared",
+                ],
+                CliCommand::BenchQuery {
+                    db: "simulation.db".into(),
+                    runs: bench_query::DEFAULT_RUNS,
+                    scope: bench_query::BenchQueryScope::Pipeline,
+                    input: bench_query::BenchQueryInput::Prepared,
                 },
             ),
             (

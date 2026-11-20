@@ -53,7 +53,7 @@ pub enum PrivacyMode {
     NoTitles,
 }
 /// Foreground-field retention summary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CaptureLevel {
     /// Retain all allowed foreground fields.
     Full,

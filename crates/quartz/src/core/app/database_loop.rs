@@ -191,11 +191,10 @@ impl DatabaseLoop {
                         return Ok(());
                     }
                 }
-                DatabaseInput::Query(command) => self.runner.start(
-                    &mut self.store,
-                    command,
-                    &self.versions.classification_hash(),
-                ),
+                DatabaseInput::Query(command) => {
+                    self.runner
+                        .start(&mut self.store, command, self.registry.snapshots().load())
+                }
                 DatabaseInput::Versions(command) => self.versions.receive(command),
             }
         }

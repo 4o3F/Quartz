@@ -77,6 +77,11 @@ impl QueryFixture {
                 Ok(())
             })
             .expect("fixture facts");
+        crate::rules::registry::RegistryShell::open(
+            &mut store,
+            quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        )
+        .expect("initial builtin rules");
         Self {
             store,
             start,
@@ -146,14 +151,22 @@ impl QueryFixture {
             cursor: None,
         })
     }
+    pub(crate) fn rules(&mut self) -> std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot> {
+        crate::rules::registry::RegistryShell::open(
+            &mut self.store,
+            quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        )
+        .expect("rules")
+        .snapshots()
+        .load()
+    }
     pub(crate) fn start(&mut self, request: QueryRequest) -> QueryJob {
         let mut reader = self.store.take_query_reader();
-        QueryJob::start(&mut reader, request, "fixture-classification-v1")
-            .expect("start snapshot query")
+        QueryJob::start(&mut reader, request, self.rules()).expect("start snapshot query")
     }
     pub(crate) fn run(&mut self, request: QueryRequest) -> Result<QueryResponse, RunQueryError> {
         let mut reader = self.store.take_query_reader();
-        match QueryJob::start(&mut reader, request, "fixture-classification-v1") {
+        match QueryJob::start(&mut reader, request, self.rules()) {
             Ok(mut job) => {
                 let result = loop {
                     match job.advance() {

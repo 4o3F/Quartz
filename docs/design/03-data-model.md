@@ -555,16 +555,30 @@ struct DerivedSegment {
 - 浏览器在前台且有网页区间时，规则可以同时看到 `web.*` 和 `title.*` 字段。
 - 没有规则匹配就是"未分类"。
 
-默认分类有 6 个：开发（`development`）、学习（`learning`）、沟通（`communication`）、娱乐（`entertainment`）、系统与工具（`system`）、未分类。括号内为 `builtin_key`，规则文本中写作 `builtin:<键>`；未分类不是分类行，而是“没有规则命中”。每个分类带一个倾向（专注、中性、分心）。首版预置约 50 条规则。
+默认分类有 6 个：开发（`development`）、学习（`learning`）、沟通（`communication`）、娱乐（`entertainment`）、系统与工具（`system`）、未分类。括号内为 `builtin_key`，规则文本中写作 `builtin:<键>`；未分类不是分类行，而是“没有规则命中”。每个分类带一个倾向（专注、中性、分心）。默认值如下，用户新建分类的倾向默认为中性：
+
+| 内置键 | 倾向 | 色板键 | 排序 |
+|---|---|---|---|
+| `development` | `focus` | `cat.8` | 0 |
+| `learning` | `focus` | `cat.1` | 1 |
+| `communication` | `neutral` | `cat.3` | 2 |
+| `entertainment` | `distraction` | `cat.13` | 3 |
+| `system` | `neutral` | `cat.10` | 4 |
+
+`builtin.classification` 包含 50 条规则：开发 17 条、学习 10 条、沟通 10 条、娱乐 8 条、系统与工具 5 条。规则以可执行文件名精确匹配，覆盖编辑器、开发环境、终端、Office、阅读与学习工具、聊天、邮件、会议、游戏及启动器、播放器和系统工具；浏览器按应用保持未分类。分类导入仅接受查询能够提供的 `app.identity_key`、`app.exe_name`、`app.display_name`、`title.raw`，未知或尚未提供的字段返回 `E-RULE-FIELD`。文档提取与网页上下文的交付范围见 09。
+
+分类规则只读取采集级别允许保留的字段：`TitleHidden` 提供应用字段，`title.raw` 缺失；`Excluded` 不参与分类。普通条件对缺失字段不成立，取反条件的行为遵循规则格式第 2 节。导入时把内置键、分类名或 UUID 解析为分类 UUID；查询中第一条匹配规则引用的分类已归档或不存在时，结果为未分类，并记录包含规则 ID 和分类 UUID 的诊断。
+
+专注和分心占比以活跃时长为分母，分母为零时均为 0。最长连续专注段是同一时钟段内 UTC 首尾相接、倾向均为 `focus` 的活跃片段的单调时长之和；允许跨应用和跨专注分类，非活跃片段、其他倾向或时间间隙会中断连续段。
 
 ### 5.4 缓存
 
-日结果 LRU 只在 `bench-query` 实测的日、周查询 P95 未达到 08 第 1.4 节目标时启用；当前直接运行查询管线（实测见[测量记录](../measurements.md)）。
+分类按前台事实计算一次，切片通过查询内的结果索引读取分类。单次查询内使用 `HashMap`，键为 `(app_id, title_id, capture_level)`，规则哈希由持有缓存的规则快照固定；只有有效规则读取 `title.raw` 时才把标题 ID 放入键中，应用规则可以跨标题复用结果。只为规则实际读取的字段构造规范化文本。应用元数据按批次收集尚未读取的应用 ID，在同一数据库快照内读取一次并通过共享引用供事实使用；分类元数据和规则标识也共享存储，切片与聚合克隆引用。查询结束即释放这些缓存和结果表。`TitleHidden` 的标题键为空，`Excluded` 不进入缓存。分类与日结果的跨查询 LRU 只在 `bench-query` 实测的日、周查询 P95 未达到 08 第 1.4 节目标时启用；当前直接运行查询管线（实测见[测量记录](../measurements.md)）。
 
 | 层 | 键 | 值 | 失效 |
 |---|---|---|---|
 | 提取缓存 | `(app_id, title_id, extractor_version, metadata_version)` | 提取结果 | 提取规则或元数据版本变化 |
-| 分类匹配缓存 | `(classification_version, extractor_version, metadata_version, app_id, title_id, domain_id, tab_title_id, stream_id)` | `(category_id, rule_id)` | 任一输入版本变化 |
+| 分类匹配缓存 | `(classification_version, extractor_version, metadata_version, app_id, title_id, capture_level, domain_id, tab_title_id, stream_id)` | `(category_id, rule_id)` | 任一输入版本变化 |
 | 日结果缓存 | `(逻辑日期, 时区, 日起点偏移, 查询语义版本, metadata_version, 各规则版本, 覆盖的 UTC 日期的 data_day_versions 摘要)` | 该日完整的派生片段和各维度完整聚合 | 任一依赖版本变化 |
 
 分类匹配字段与缓存依赖：
@@ -582,7 +596,7 @@ struct DerivedSegment {
 
 缺失字段用独立空值，与空字符串区分。分类条件的增删改由 `classification_version` 覆盖。
 
-- 三层缓存都在内存里，用 LRU 限制大小：提取和分类各 4,096 条；日结果最多 31 天，总字节预算 8 MiB。单日超过 2 MiB 不缓存，直接分页计算。
+- 跨查询缓存启用后使用内存 LRU：提取和分类各 4,096 条；日结果最多 31 天，总字节预算 8 MiB。单日超过 2 MiB 不缓存，直接分页计算。
 - 日结果保存完整的分组，不截断成前 N 名。展示时再取前 N 名，否则跨日累加会出错。
 - 今天的结果分两部分：已完成的部分可以缓存，进行中的区间每次请求时现算。
 - 计算时读取一个一致快照。发布缓存前再检查一次输入版本，有变化就丢弃这次结果。
@@ -669,7 +683,7 @@ struct DerivedSegment {
 
 ### 8.5 内置规则集升级
 
-内置规则集（`builtin.classification`、`builtin.extraction`、`builtin.privacy`）以 `quartz-rules/1` 文本编译进 exe，带版本号。核心启动时：
+内置规则集（`builtin.classification`、`builtin.extraction`、`builtin.privacy`）以 `quartz-rules/1` 文本编译进 exe，带版本号。核心启动时先按 `categories.builtin_key` 插入缺少的五个内置分类，`name` 为 NULL，UUID 采用固定内置值；已有行的名称、颜色、倾向、排序、层级和归档状态全部保留。同一事务中只要插入了分类行，就把 `metadata_version` 加一，提交后发布元数据变化。随后安装内置规则集：
 
 1. exe 中的版本高于数据库当前版本时，写入新版本并设为当前版本；旧版本保留。exe 中新出现的内置规则集直接创建。
 2. 重新解析每类规则集树，检查用户子规则集的差异：

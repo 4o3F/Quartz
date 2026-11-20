@@ -8,6 +8,8 @@ pub(crate) enum ReadQueryError {
     InvalidSettings,
     #[snafu(display("invalid persisted capture facts"))]
     InvalidFacts,
+    #[snafu(display("invalid persisted category metadata"))]
+    InvalidCategories,
 }
 impl From<diesel::result::Error> for ReadQueryError {
     fn from(source: diesel::result::Error) -> Self {

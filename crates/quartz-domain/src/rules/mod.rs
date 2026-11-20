@@ -12,9 +12,9 @@ mod resolve;
 pub use content_hash::{ContentHash, ParseContentHashError};
 pub use diagnostic::{Diagnostic, DiagnosticCode, SourceLocation};
 pub use evaluate::{
-    CompileRulesError, CompiledRules, ConditionOutcome, Evaluation, ExplanationId, Extraction,
-    ExtractionStatus, FieldSnapshot, ParseExplanationIdError, PrivacyLabelSnapshot, PrivacySources,
-    RuleOutcome, RuleStatus, ShadowReason,
+    ClassificationMatch, CompileRulesError, CompiledRules, ConditionOutcome, Evaluation,
+    ExplanationId, Extraction, ExtractionStatus, FieldSnapshot, ParseExplanationIdError,
+    PrivacyLabelSnapshot, PrivacySources, RuleOutcome, RuleStatus, ShadowReason,
 };
 pub use identity::{
     ParseRuleIdError, ParseRuleSetKeyError, ParseRuleTargetError, RuleId, RuleSetKey, RuleTarget,
@@ -35,6 +35,11 @@ pub use resolve::{
 pub const BUILTIN_PRIVACY: &str = include_str!("builtin-privacy.toml");
 /// Revision installed in the database at core startup.
 pub const BUILTIN_PRIVACY_REVISION: u32 = 1;
+
+/// Embedded application classification rules, using currently captured fields.
+pub const BUILTIN_CLASSIFICATION: &str = include_str!("builtin-classification.toml");
+/// Initial published classification revision.
+pub const BUILTIN_CLASSIFICATION_REVISION: u32 = 1;
 
 #[cfg(test)]
 mod tests;

@@ -87,17 +87,40 @@ pub struct ApplicationRef {
     pub display_name: String,
     pub aumid: Option<String>,
 }
-/// Classification result; C2 adds classified references here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+pub use quartz_domain::categories::{
+    BuiltinCategory, Category, CategoryId, CategoryTendency, CategoryUuid,
+};
+pub use quartz_domain::rules::ExplanationId as ClassificationRuleId;
+
+/// Classification result with language-independent category metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CategoryRef {
     Unclassified,
+    Classified {
+        #[serde(flatten)]
+        category: std::sync::Arc<Category>,
+    },
+}
+impl CategoryRef {
+    /// Missing classification contributes a neutral tendency.
+    pub fn tendency(&self) -> CategoryTendency {
+        match self {
+            Self::Unclassified => CategoryTendency::Neutral,
+            Self::Classified { category } => category.tendency,
+        }
+    }
 }
 /// Provenance of a classification result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CategorySource {
     Unclassified,
+    Rule {
+        rule: ClassificationRuleId,
+    },
+    /// A category projection merged slices with different classification sources.
+    Mixed,
 }
 /// Reasons that stop recording; multiple reasons can overlap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -268,5 +291,41 @@ mod tests {
                 .expect("typed timeline cursor");
         assert_eq!(decoded.query(), &CursorQuery::from(&request));
         assert_eq!(decoded.position(), 10);
+    }
+    #[test]
+    fn category_metadata_and_revision_qualified_sources_round_trip() {
+        let category = CategoryRef::Classified {
+            category: Category {
+                id: CategoryId(7),
+                uuid: BuiltinCategory::Development.uuid(),
+                builtin_key: Some(BuiltinCategory::Development),
+                name: None,
+                color: "cat.8".into(),
+                tendency: CategoryTendency::Focus,
+            }
+            .into(),
+        };
+        let value = serde_json::to_value(&category).expect("category JSON");
+        assert_eq!(value["builtin_key"], "development");
+        assert_eq!(value["tendency"], "focus");
+        assert!(value["name"].is_null());
+        assert_eq!(
+            category,
+            serde_json::from_value(value).expect("category round trip")
+        );
+        let source = CategorySource::Rule {
+            rule: "builtin.classification/vscode@2".parse().expect("rule id"),
+        };
+        assert_eq!(
+            source,
+            serde_json::from_value(serde_json::to_value(&source).expect("source JSON"))
+                .expect("source round trip")
+        );
+        assert!(
+            serde_json::from_value::<CategorySource>(
+                serde_json::json!({"kind":"rule","rule":"vscode"})
+            )
+            .is_err()
+        );
     }
 }

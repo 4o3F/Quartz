@@ -227,7 +227,7 @@ fn diagnostics_collect_independent_failures_and_exact_unicode_locations() {
     assert_eq!(&source[field.location.bytes.clone()], "'app.nope'");
 }
 #[test]
-fn specification_examples_validate_and_m7_example_is_explicitly_rejected() {
+fn specification_examples_validate_or_report_unavailable_capabilities() {
     let specification = include_str!("../../../../docs/rules/rule-format.md");
     let section = specification
         .split("## 5. 示例")
@@ -255,8 +255,16 @@ fn specification_examples_validate_and_m7_example_is_explicitly_rejected() {
                     .iter()
                     .any(|d| d.code == DiagnosticCode::Set)
             );
+        } else if source.contains("field = \"web.") {
+            assert!(
+                parsed
+                    .expect_err("web classification requires a supplied field")
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == DiagnosticCode::Field)
+            );
         } else {
-            parsed.expect("M1 specification example");
+            parsed.expect("supported specification example");
         }
         count += 1;
     }
@@ -1064,4 +1072,144 @@ fn required_field_diagnostics_preserve_messages_order_and_locations() {
         "df2dc9ff90d1c59ec39ca9a005fa48817197f443433ba935166a9b6e81f4c23f",
         "required-field diagnostic messages, order, and source locations changed: {diagnostics:#?}"
     );
+}
+
+#[test]
+fn builtin_classification_validates_and_matches_only_current_fields_and_known_categories() {
+    let set = RuleSet::parse(
+        "builtin-classification.toml",
+        BUILTIN_CLASSIFICATION,
+        ParseContext {
+            origin: RuleOrigin::Builtin,
+            references: &catalog(),
+        },
+    )
+    .expect("valid embedded classification");
+    assert_eq!(set.content.rule.len(), 50);
+    for rule in &set.content.rule {
+        let RuleBody::Classification { category, when, .. } = &rule.body else {
+            panic!("classification body");
+        };
+        assert!(
+            catalog()
+                .categories
+                .values()
+                .any(|uuid| uuid == &category.uuid.0)
+        );
+        assert!(when.iter().all(|condition| matches!(
+            condition.field,
+            Field::IdentityKey | Field::ExeName | Field::DisplayName | Field::RawTitle
+        )));
+    }
+    let effective = Resolution::resolve(&[installed(set)], RuleKind::Classification)
+        .effective
+        .compile()
+        .expect("compiled classification");
+    for exe in [
+        "code.exe",
+        "CODE.EXE",
+        "ＷＩＮＷＯＲＤ.exe",
+        "msedge.exe",
+        "unknown.exe",
+    ] {
+        let fields = FieldSnapshot {
+            text: BTreeMap::from([(Field::ExeName, NfcText::new(exe))]),
+            domain: None,
+        };
+        let fast = effective.classify(&fields);
+        let explained = effective.evaluate(&fields);
+        assert_eq!(
+            fast.as_ref().map(|matched| matched.rule.as_str()),
+            explained.selected.as_deref(),
+            "{exe}"
+        );
+        assert_eq!(
+            fast.as_ref().map(|matched| matched.category.0.as_str()),
+            explained.category_uuid.as_deref(),
+            "{exe}"
+        );
+    }
+    for field in [
+        "app.name",
+        "window.class",
+        "title.normalized",
+        "doc.document",
+        "web.domain",
+        "browser.profile_label",
+    ] {
+        let source = format!(
+            "format='quartz-rules/1'\n[set]\nkey='user.future'\nkind='classification'\nname='Future'\n[[rule]]\nid='future'\nlabel='Future'\ncategory='builtin:learning'\nwhen=[{{field='{field}',op='equals',value='example'}}]"
+        );
+        let error = RuleSet::parse(
+            "future.toml",
+            &source,
+            ParseContext {
+                origin: RuleOrigin::User,
+                references: &catalog(),
+            },
+        )
+        .expect_err("unavailable field");
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == DiagnosticCode::Field),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn first_match_classification_preserves_explained_literal_regex_and_missing_field_semantics() {
+    let values = [
+        None,
+        Some("CAFÉ"),
+        Some("Ｃａｆｅ\u{301} notes"),
+        Some("other"),
+    ];
+    for operator in [
+        Operator::Equals,
+        Operator::Contains,
+        Operator::StartsWith,
+        Operator::EndsWith,
+        Operator::Regex,
+    ] {
+        for case in [CaseSensitivity::Sensitive, CaseSensitivity::Folded] {
+            for negate in [false, true] {
+                let set = user(&format!(
+                    r#"format='quartz-rules/1'
+[set]
+key='user.comparison'
+kind='classification'
+name='Comparison'
+[[rule]]
+id='comparison'
+label='Compare a title'
+category='builtin:learning'
+when=[{{field='title.raw',op='{}',value='Café',case_sensitive={},negate={}}}]
+"#,
+                    operator.as_str(),
+                    case == CaseSensitivity::Sensitive,
+                    negate
+                ));
+                let compiled = Resolution::resolve(&[installed(set)], RuleKind::Classification)
+                    .effective
+                    .compile()
+                    .expect("compiled rule");
+                for value in values {
+                    let mut fields = FieldSnapshot::default();
+                    if let Some(value) = value {
+                        fields.text.insert(Field::RawTitle, NfcText::new(value));
+                    }
+                    let fast = compiled.classify(&fields);
+                    let explained = compiled.evaluate(&fields);
+                    assert_eq!(
+                        fast.as_ref().map(|matched| matched.rule.as_str()),
+                        explained.selected.as_deref(),
+                        "{operator:?} {case:?} negate={negate} value={value:?}"
+                    );
+                }
+            }
+        }
+    }
 }

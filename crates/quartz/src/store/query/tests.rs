@@ -44,7 +44,10 @@ fn unpaged_timeline(
         .expect("reader")
         .snapshot();
     snapshot.begin().expect("begin unpaged snapshot");
-    let mut pipeline = crate::query::pipeline::Pipeline::new(range);
+    let mut pipeline = crate::query::pipeline::Pipeline::new(
+        range,
+        crate::query::classification::Classifier::new(fixture.rules(), Vec::new()),
+    );
     while let Some(rows) = snapshot.read_batch(range).expect("typed batch") {
         for row in rows {
             pipeline.ingest(row).expect("valid facts");
@@ -170,7 +173,14 @@ fn old_cursor_is_rejected_after_fact_metadata_or_rule_changes() {
         } else {
             let mut reader = fixture.store.take_query_reader();
             assert!(matches!(
-                QueryJob::start(&mut reader, old, "changed-classification-hash"),
+                QueryJob::start(
+                    &mut reader,
+                    old,
+                    quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+                        .expect("changed rules")
+                        .snapshots()
+                        .load()
+                ),
                 Err(RunQueryError::StaleCursor)
             ));
             fixture
@@ -204,6 +214,47 @@ fn query_holds_one_snapshot_while_writer_commits_and_next_query_sees_change() {
     assert_eq!(new.applications.len(), 1001);
     assert_ne!(old.versions, new.versions);
 }
+#[test]
+fn shared_application_metadata_stays_in_one_snapshot_and_refreshes_on_the_next_query() {
+    let count = i64::try_from(READ_BATCH_ROWS + 1).expect("fixture count");
+    let mut fixture = QueryFixture::new(count);
+    diesel::update(intervals::table)
+        .set(intervals::app_id.eq(1_i64))
+        .execute(&mut fixture.store.writer)
+        .expect("one application across fact batches");
+    let request = fixture.request_day();
+    let mut job = fixture.start(request.clone());
+    assert!(job.advance().expect("read clocks").is_none());
+    assert!(job.advance().expect("read first fact batch").is_none());
+    diesel::update(applications::table.filter(applications::id.eq(1_i64)))
+        .set(applications::display_name.eq("Renamed application"))
+        .execute(&mut fixture.store.writer)
+        .expect("rename application");
+    let mut effects = crate::store::versions::TxEffects::default();
+    effects
+        .bump_metadata(&mut fixture.store.writer)
+        .expect("metadata version");
+    fixture.store.pending_effects.merge(effects);
+    let old = loop {
+        if let Some(response) = job.advance().expect("remaining snapshot batches") {
+            break response;
+        }
+    };
+    fixture
+        .store
+        .return_query_reader(job.finish().expect("finish old snapshot"));
+    let QueryResponse::Day(old) = old else {
+        panic!("day response")
+    };
+    assert_eq!(old.applications.len(), 1);
+    assert_eq!(old.applications[0].app.display_name, "Application 1");
+    let QueryResponse::Day(new) = fixture.run(request).expect("next query") else {
+        panic!("day response")
+    };
+    assert_eq!(new.applications[0].app.display_name, "Renamed application");
+    assert_ne!(old.versions, new.versions);
+}
+
 #[test]
 fn raw_projection_enforces_capture_privacy_even_if_title_is_present_in_storage() {
     let mut fixture = QueryFixture::new(2);
@@ -307,4 +358,202 @@ fn batched_reads_keep_row_id_ties_at_the_same_timestamp() {
         quartz_protocol::ApplicationId(600)
     );
     assert_eq!(day.metrics.expect("metrics").active_ms, 1000);
+}
+
+#[test]
+fn builtin_classification_upgrade_preserves_user_sets_invalidates_cursor_and_retains_inflight_snapshot()
+ {
+    use crate::rules::registry::RegistryShell;
+    use quartz_domain::{
+        capture::UtcInstant,
+        rules::{self, ParseContext, RuleOrigin, RuleSet, registry::RegistryCommand},
+    };
+    use quartz_protocol::{BuiltinCategory, CategoryRef, CategorySource};
+    let mut fixture = QueryFixture::new(1000);
+    diesel::update(applications::table.filter(applications::id.eq(1_i64)))
+        .set(applications::exe_name.eq("code.exe"))
+        .execute(&mut fixture.store.writer)
+        .expect("matching app");
+    let now = UtcInstant::try_from(0).expect("UTC");
+    let mut shell = RegistryShell::open(&mut fixture.store, now).expect("shell");
+    shell.run(&mut fixture.store, now, RegistryCommand::Apply {
+        key: "user.unmatched".parse().expect("user key"), file: "user.toml".into(), text: "format='quartz-rules/1'\n[set]\nkey='user.unmatched'\nkind='classification'\nname='User rules'\nparent='builtin.classification'\n[[rule]]\nid='other'\nlabel='Other'\ncategory='builtin:learning'\nwhen=[{field='app.exe_name',op='equals',value='other.exe'}]".into(), base_version: 0,
+    }).expect("user overlay");
+    let request = fixture.request_timeline();
+    let QueryResponse::Timeline(first) = fixture.run(request.clone()).expect("first page") else {
+        panic!("timeline");
+    };
+    assert!(
+        matches!(&first.segments[0].category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Development))
+    );
+    let QueryRequest::Timeline(mut continuation) = request.clone() else {
+        panic!("timeline request");
+    };
+    continuation.cursor = Some(first.next_cursor.expect("continuation"));
+    let mut inflight = fixture.start(request);
+    let changed =
+        rules::BUILTIN_CLASSIFICATION.replace("builtin:development", "builtin:communication");
+    let set = RuleSet::parse(
+        "builtin.toml",
+        &changed,
+        ParseContext {
+            origin: RuleOrigin::Builtin,
+            references: &shell.core().state().references,
+        },
+    )
+    .expect("upgraded builtin");
+    shell
+        .run(
+            &mut fixture.store,
+            now,
+            RegistryCommand::InstallBuiltin {
+                set: set.clone(),
+                revision: 2,
+            },
+        )
+        .expect("upgrade");
+    assert_eq!(
+        shell.core().state().sets[&"user.unmatched".parse().expect("key")]
+            .versions
+            .len(),
+        1
+    );
+    let hash = shell.snapshots().load().hashes().classification.clone();
+    shell
+        .run(
+            &mut fixture.store,
+            now,
+            RegistryCommand::InstallBuiltin { set, revision: 2 },
+        )
+        .expect("idempotent upgrade");
+    assert_eq!(&hash, &shell.snapshots().load().hashes().classification);
+    assert_eq!(
+        shell.core().state().sets[&"builtin.classification".parse().expect("key")]
+            .versions
+            .len(),
+        2
+    );
+    let old = loop {
+        if let Some(response) = inflight.advance().expect("inflight query") {
+            break response;
+        }
+    };
+    let QueryResponse::Timeline(old) = old else {
+        panic!("timeline");
+    };
+    assert!(
+        matches!(&old.segments[0].category_source, CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@1")
+    );
+    fixture
+        .store
+        .return_query_reader(inflight.finish().expect("finish old snapshot"));
+    assert!(matches!(
+        fixture.run(QueryRequest::Timeline(continuation)),
+        Err(RunQueryError::StaleCursor)
+    ));
+    let QueryResponse::Timeline(new) = fixture.run(fixture.request_timeline()).expect("new query")
+    else {
+        panic!("timeline");
+    };
+    assert!(
+        matches!(&new.segments[0].category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Communication))
+    );
+    assert!(
+        matches!(&new.segments[0].category_source, CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@2")
+    );
+}
+#[test]
+fn missing_or_archived_category_returns_unclassified_without_trying_a_later_rule() {
+    use crate::{rules::registry::RegistryShell, store::schema::categories};
+    use quartz_domain::{capture::UtcInstant, rules::registry::RegistryCommand};
+    let mut fixture = QueryFixture::new(2);
+    diesel::update(applications::table)
+        .set(applications::exe_name.eq("code.exe"))
+        .execute(&mut fixture.store.writer)
+        .expect("matching apps");
+    let now = UtcInstant::try_from(0).expect("UTC");
+    let mut shell = RegistryShell::open(&mut fixture.store, now).expect("rules");
+    shell.run(&mut fixture.store, now, RegistryCommand::Apply { key: "user.first".parse().expect("key"), file: "first.toml".into(), text: "format='quartz-rules/1'\n[set]\nkey='user.first'\nkind='classification'\nname='First'\nparent='builtin.classification'\n[[rule]]\nid='first'\nlabel='First'\ncategory='builtin:learning'\npriority=60\nwhen=[{field='app.exe_name',op='equals',value='code.exe'}]".into(), base_version: 0 }).expect("higher priority rule");
+    for retirement in [CategoryRetirement::Archive, CategoryRetirement::Delete] {
+        match retirement {
+            CategoryRetirement::Archive => {
+                diesel::update(categories::table.filter(categories::builtin_key.eq("learning")))
+                    .set(categories::archived.eq(1))
+                    .execute(&mut fixture.store.writer)
+                    .expect("archive category");
+            }
+            CategoryRetirement::Delete => {
+                diesel::delete(categories::table.filter(categories::builtin_key.eq("learning")))
+                    .execute(&mut fixture.store.writer)
+                    .expect("delete category");
+            }
+        }
+        // Retain the installed rule snapshot after deletion; startup would recreate the missing builtin.
+        let mut reader = fixture.store.take_query_reader();
+        let job = QueryJob::start(
+            &mut reader,
+            fixture.request_timeline(),
+            shell.snapshots().load(),
+        )
+        .expect("query");
+        let completed = job.run_measured().expect("run");
+        let QueryResponse::Timeline(response) = completed.response else {
+            panic!("timeline");
+        };
+        assert_eq!(
+            response.segments[0].category,
+            quartz_protocol::CategoryRef::Unclassified
+        );
+        assert_eq!(
+            response.segments[0].category_source,
+            quartz_protocol::CategorySource::Unclassified
+        );
+        fixture.store.return_query_reader(completed.reader);
+    }
+}
+enum CategoryRetirement {
+    Archive,
+    Delete,
+}
+
+#[test]
+fn user_category_uuid_and_metadata_are_returned_by_the_query() {
+    use crate::{
+        rules::registry::RegistryShell,
+        store::{enums::CategoryTendency, rows::CategoriesRow, schema::categories},
+    };
+    use quartz_domain::{capture::UtcInstant, rules::registry::RegistryCommand};
+    const USER_UUID: &str = "c2c2c2c2-1234-4000-8000-000000000001";
+    let mut fixture = QueryFixture::new(1);
+    diesel::insert_into(categories::table)
+        .values(CategoriesRow {
+            id: None,
+            uuid: USER_UUID.into(),
+            parent_id: None,
+            builtin_key: None,
+            name: Some("Research".into()),
+            color: "cat.2".into(),
+            tendency: CategoryTendency::Focus,
+            sort_order: 10,
+            archived: 0,
+        })
+        .execute(&mut fixture.store.writer)
+        .expect("user category");
+    let now = UtcInstant::try_from(0).expect("UTC");
+    let mut shell = RegistryShell::open(&mut fixture.store, now).expect("rules");
+    shell.run(&mut fixture.store, now, RegistryCommand::Apply { key: "user.research".parse().expect("key"), file: "research.toml".into(), text: format!("format='quartz-rules/1'\n[set]\nkey='user.research'\nkind='classification'\nname='Research'\n[[rule]]\nid='research'\nlabel='Research app'\ncategory='{USER_UUID}'\nwhen=[{{field='app.exe_name',op='equals',value='app-1.exe'}}]"), base_version: 0 }).expect("UUID rule reference");
+    let QueryResponse::Timeline(response) =
+        fixture.run(fixture.request_timeline()).expect("timeline")
+    else {
+        panic!("timeline");
+    };
+    let quartz_protocol::CategoryRef::Classified { category } = &response.segments[0].category
+    else {
+        panic!("user category");
+    };
+    assert_eq!(category.uuid.0, USER_UUID);
+    assert_eq!(category.builtin_key, None);
+    assert_eq!(category.name.as_deref(), Some("Research"));
+    assert_eq!(category.color, "cat.2");
+    assert_eq!(category.tendency, quartz_protocol::CategoryTendency::Focus);
 }

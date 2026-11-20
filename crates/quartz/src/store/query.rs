@@ -5,7 +5,8 @@ use super::{
     enums::{self, IntegerCode},
     query_error::ReadQueryError,
     rows::{
-        AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow, ClockSegmentsRow, IntervalsRow,
+        ApplicationsRow, AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow,
+        ClockSegmentsRow, IntervalsRow,
     },
     schema::{
         applications, availability_intervals, capture_gaps, capture_runs, clock_segments,
@@ -20,6 +21,11 @@ use quartz_domain::{
         FactId, FactSpan, Foreground, ForegroundKind, InputRow, QueryRange,
     },
 };
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
 /// Bounds each SQLite fact scan before the database loop services pending writes.
 pub(crate) const READ_BATCH_ROWS: usize = 256;
 use diesel::{
@@ -35,6 +41,7 @@ impl ReadOnlyStore {
             stage: ReadStage::Clock,
             after_start: i64::MIN,
             after_id: i64::from(i32::MIN),
+            applications: BTreeMap::new(),
         }
     }
 }
@@ -53,6 +60,7 @@ pub(crate) struct ReadSnapshot {
     stage: ReadStage,
     after_start: i64,
     after_id: i64,
+    applications: BTreeMap<ApplicationId, Arc<ApplicationRef>>,
 }
 impl std::fmt::Debug for ReadSnapshot {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -95,13 +103,39 @@ struct ClockDetails {
 #[derive(Debug, diesel::Queryable)]
 struct ForegroundDetails {
     fact: IntervalsRow,
-    app_id: Option<i64>,
-    exe_name: Option<String>,
-    display_name: Option<String>,
-    aumid: Option<String>,
     title: Option<String>,
 }
+
 impl ReadSnapshot {
+    fn read_applications(&mut self, rows: &[ForegroundDetails]) -> Result<(), ReadQueryError> {
+        let missing: BTreeSet<ApplicationId> = rows
+            .iter()
+            .filter(|row| CaptureLevel::from(row.fact.capture_level) != CaptureLevel::Excluded)
+            .filter_map(|row| row.fact.app_id.map(ApplicationId))
+            .filter(|id| !self.applications.contains_key(id))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let rows = applications::table
+            .filter(applications::id.eq_any(missing.iter().map(|id| id.0)))
+            .select(ApplicationsRow::as_select())
+            .load::<ApplicationsRow>(self.connection())?;
+        for row in rows {
+            let id = ApplicationId(row.id.ok_or(ReadQueryError::InvalidFacts)?);
+            self.applications.insert(
+                id,
+                Arc::new(ApplicationRef {
+                    id,
+                    identity_key: row.identity_key,
+                    exe_name: row.exe_name,
+                    display_name: row.display_name,
+                    aumid: row.aumid,
+                }),
+            );
+        }
+        Ok(())
+    }
     pub(super) fn connection(&mut self) -> &mut diesel::SqliteConnection {
         &mut self
             .reader
@@ -187,7 +221,6 @@ impl ReadSnapshot {
             }
             ReadStage::ForegroundClosed | ReadStage::ForegroundOpen => {
                 let mut query = intervals::table
-                    .left_join(applications::table.on(intervals::app_id.eq(applications::id)))
                     .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
                     .into_boxed();
                 query = match self.stage {
@@ -216,15 +249,9 @@ impl ReadSnapshot {
                 let rows = query
                     .filter(intervals::start_utc_ms.lt(range.end))
                     .limit(limit)
-                    .select((
-                        IntervalsRow::as_select(),
-                        applications::id.nullable(),
-                        applications::exe_name.nullable(),
-                        applications::display_name.nullable(),
-                        applications::aumid.nullable(),
-                        titles::text.nullable(),
-                    ))
+                    .select((IntervalsRow::as_select(), titles::text.nullable()))
                     .load::<ForegroundDetails>(self.connection())?;
+                self.read_applications(&rows)?;
                 for details in rows {
                     let row = details.fact;
                     let id = row.id.ok_or(ReadQueryError::InvalidFacts)?;
@@ -237,17 +264,14 @@ impl ReadSnapshot {
                     let app = if level == CaptureLevel::Excluded {
                         None
                     } else {
-                        match details.app_id {
-                            Some(id) => Some(ApplicationRef {
-                                id: ApplicationId(id),
-                                exe_name: details.exe_name,
-                                display_name: details
-                                    .display_name
-                                    .ok_or(ReadQueryError::InvalidFacts)?,
-                                aumid: details.aumid,
-                            }),
-                            None => None,
-                        }
+                        row.app_id
+                            .map(|id| {
+                                self.applications
+                                    .get(&ApplicationId(id))
+                                    .cloned()
+                                    .ok_or(ReadQueryError::InvalidFacts)
+                            })
+                            .transpose()?
                     };
                     let title = if level == CaptureLevel::Full {
                         details.title
@@ -270,6 +294,10 @@ impl ReadSnapshot {
                         level,
                         app,
                         title,
+                        title_id: row
+                            .title_id
+                            .filter(|_| level == CaptureLevel::Full)
+                            .map(quartz_domain::facts::TitleId),
                     }));
                 }
             }

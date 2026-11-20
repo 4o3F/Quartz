@@ -34,17 +34,31 @@ fn window(id: i64, start: i64, end: i64) -> InputRow {
         span: span(id, start, end),
         kind: ForegroundKind::Window,
         level: CaptureLevel::Full,
-        app: Some(ApplicationRef {
-            id: ApplicationId(id),
-            exe_name: Some("editor.exe".into()),
-            display_name: "Editor".into(),
-            aumid: None,
-        }),
+        app: Some(
+            ApplicationRef {
+                id: ApplicationId(id),
+                identity_key: r"exe:c:ixture\editor.exe".into(),
+                exe_name: Some("editor.exe".into()),
+                display_name: "Editor".into(),
+                aumid: None,
+            }
+            .into(),
+        ),
         title: Some("document".into()),
+        title_id: Some(quartz_domain::facts::TitleId(1)),
     })
 }
 fn derive(rows: Vec<InputRow>, range: QueryRange) -> Vec<pipeline::DerivedSegment> {
-    let mut pipeline = Pipeline::new(range);
+    let mut pipeline = Pipeline::new(
+        range,
+        super::classification::Classifier::new(
+            quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+                .expect("empty rules")
+                .snapshots()
+                .load(),
+            Vec::new(),
+        ),
+    );
     for row in rows {
         pipeline.ingest(row).expect("valid input row");
     }
@@ -273,4 +287,337 @@ fn newly_opened_zero_length_clock_and_foreground_do_not_fail_the_query() {
         }
     );
     assert_eq!(segments[0].display.duration_ms, 20);
+}
+
+fn categories() -> Vec<quartz_domain::categories::Category> {
+    use quartz_domain::categories::{BuiltinCategory, Category, CategoryId};
+    BuiltinCategory::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, builtin)| Category {
+            id: CategoryId(i64::try_from(index + 1).expect("category id")),
+            uuid: builtin.uuid(),
+            builtin_key: Some(builtin),
+            name: None,
+            color: builtin.color().into(),
+            tendency: builtin.tendency(),
+        })
+        .collect()
+}
+fn classifier(overlays: &[&str]) -> classification::Classifier {
+    use quartz_domain::rules::{
+        self, ParseContext, ReferenceCatalog, RuleOrigin, RuleSet,
+        registry::{RegistryCommand, RegistryState, RuleRegistry},
+    };
+    let mut references = ReferenceCatalog::default();
+    for builtin in quartz_domain::categories::BuiltinCategory::ALL {
+        references
+            .categories
+            .insert(format!("builtin:{}", builtin.key()), builtin.uuid().0);
+    }
+    let mut registry = RuleRegistry::from_state(RegistryState {
+        references,
+        ..Default::default()
+    })
+    .expect("registry");
+    let set = RuleSet::parse(
+        "builtin.toml",
+        rules::BUILTIN_CLASSIFICATION,
+        ParseContext {
+            origin: RuleOrigin::Builtin,
+            references: &registry.state().references,
+        },
+    )
+    .expect("builtin");
+    let decision = registry
+        .decide(RegistryCommand::InstallBuiltin {
+            set,
+            revision: rules::BUILTIN_CLASSIFICATION_REVISION,
+        })
+        .into_parts();
+    decision.reply.expect("install decision");
+    registry
+        .committed(decision.outcome.expect("install write"))
+        .expect("commit builtin");
+    for text in overlays {
+        let set = RuleSet::parse(
+            "overlay.toml",
+            text,
+            ParseContext {
+                origin: RuleOrigin::User,
+                references: &registry.state().references,
+            },
+        )
+        .expect("overlay");
+        let decision = registry
+            .decide(RegistryCommand::Apply {
+                key: set.header.key.parse().expect("key"),
+                file: "overlay.toml".into(),
+                text: (*text).into(),
+                base_version: 0,
+            })
+            .into_parts();
+        decision.reply.expect("apply overlay");
+        registry
+            .committed(decision.outcome.expect("overlay write"))
+            .expect("commit overlay");
+    }
+    classification::Classifier::new(registry.snapshots().load(), categories())
+}
+fn classified_window(id: i64, start: i64, end: i64, exe: &str) -> InputRow {
+    let mut input = window(id, start, end);
+    if let InputRow::Foreground(row) = &mut input {
+        let app = std::sync::Arc::make_mut(row.app.as_mut().expect("app"));
+        app.exe_name = Some(exe.into());
+        app.identity_key = format!(r"exe:c:\fixture\{exe}");
+    }
+    input
+}
+fn derive_classified(
+    rows: Vec<InputRow>,
+    range: QueryRange,
+    classifier: classification::Classifier,
+) -> Vec<pipeline::DerivedSegment> {
+    let mut pipeline = Pipeline::new(range, classifier);
+    for row in rows {
+        pipeline.ingest(row).expect("row");
+    }
+    pipeline.finish_input();
+    while !pipeline.advance() {}
+    pipeline.into_segments()
+}
+#[test]
+fn classification_uses_application_fields_and_respects_capture_levels_and_child_order() {
+    use quartz_protocol::{BuiltinCategory, CategoryRef, CategorySource};
+    const TITLE_RULE: &str = r"format='quartz-rules/1'
+[set]
+key='user.titles'
+kind='classification'
+name='Titles'
+parent='builtin.classification'
+[[rule]]
+id='read'
+label='Reading title'
+category='builtin:learning'
+priority=60
+when=[{field='title.raw',op='equals',value='document'}]
+";
+    let mut rows = vec![
+        clock(1, 0, 0, 60),
+        classified_window(1, 0, 10, "code.exe"),
+        classified_window(2, 10, 20, "unknown.exe"),
+        classified_window(3, 20, 30, "code.exe"),
+        classified_window(4, 30, 40, "unknown.exe"),
+        classified_window(4, 40, 50, "unknown.exe"),
+        classified_window(5, 50, 60, "code.exe"),
+    ];
+    if let InputRow::Foreground(row) = &mut rows[3] {
+        row.level = CaptureLevel::Excluded;
+    }
+    if let InputRow::Foreground(row) = &mut rows[4] {
+        row.level = CaptureLevel::TitleHidden;
+    }
+    if let InputRow::Foreground(row) = &mut rows[6] {
+        row.level = CaptureLevel::TitleHidden;
+    }
+    let segments = derive_classified(
+        rows.clone(),
+        QueryRange { start: 0, end: 60 },
+        classifier(&[]),
+    );
+    assert!(
+        matches!(&segments[0].display.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Development))
+    );
+    assert!(
+        matches!(&segments[0].display.category_source, CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@1")
+    );
+    assert_eq!(segments[1].display.category, CategoryRef::Unclassified);
+    assert_eq!(segments[2].display.category, CategoryRef::Unclassified);
+    assert_eq!(segments[2].display.activity, Activity::Excluded);
+    let titled = derive_classified(
+        rows,
+        QueryRange { start: 0, end: 60 },
+        classifier(&[TITLE_RULE]),
+    );
+    assert_eq!(
+        titled[3].display.category,
+        CategoryRef::Unclassified,
+        "hidden title cannot match"
+    );
+    assert!(
+        matches!(&titled[4].display.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Learning)),
+        "same app/title ids at full capture have a separate cache entry"
+    );
+    assert!(
+        matches!(&titled[5].display.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Development)),
+        "application rules still apply to TitleHidden"
+    );
+    let mut title_only = window(1, 0, 10);
+    if let InputRow::Foreground(row) = &mut title_only {
+        row.app = None;
+    }
+    let title_only = derive_classified(
+        vec![clock(1, 0, 0, 10), title_only],
+        QueryRange { start: 0, end: 10 },
+        classifier(&[TITLE_RULE]),
+    );
+    assert!(
+        matches!(&title_only[0].display.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Learning)),
+        "a window can match its available title without application metadata"
+    );
+    const CHILD: &str = r"format='quartz-rules/1'
+[set]
+key='user.child'
+kind='classification'
+name='Child'
+parent='builtin.classification'
+[[rule]]
+id='code'
+label='Treat editor as communication'
+category='builtin:communication'
+priority=50
+when=[{field='app.exe_name',op='equals',value='code.exe'}]
+";
+    let child = derive_classified(
+        vec![clock(1, 0, 0, 10), classified_window(1, 0, 10, "code.exe")],
+        QueryRange { start: 0, end: 10 },
+        classifier(&[CHILD]),
+    );
+    assert!(
+        matches!(&child[0].display.category_source, CategorySource::Rule { rule } if rule.as_str() == "user.child/code@1"),
+        "deeper rule wins equal priority"
+    );
+}
+#[test]
+fn classification_preserves_title_dependent_overlays_across_fact_slices() {
+    use quartz_protocol::{BuiltinCategory, CategoryRef, CategorySource};
+    const TITLE_RULE: &str = r"format='quartz-rules/1'
+[set]
+key='user.titles'
+kind='classification'
+name='Titles'
+parent='builtin.classification'
+[[rule]]
+id='read'
+label='Reading title'
+category='builtin:learning'
+priority=60
+when=[{field='title.raw',op='equals',value='document'}]
+";
+    let mut changed_title = classified_window(2, 10, 20, "code.exe");
+    if let InputRow::Foreground(row) = &mut changed_title {
+        std::sync::Arc::make_mut(row.app.as_mut().expect("application")).id = ApplicationId(1);
+        row.title_id = Some(quartz_domain::facts::TitleId(2));
+        row.title = Some("source code".into());
+    }
+    let segments = derive_classified(
+        vec![
+            clock(1, 0, 0, 20),
+            classified_window(1, 0, 10, "code.exe"),
+            changed_title,
+            InputRow::Availability {
+                span: span(3, 2, 4),
+                state: Availability::Idle,
+            },
+        ],
+        QueryRange { start: 0, end: 20 },
+        classifier(&[TITLE_RULE]),
+    );
+    assert_eq!(segments.len(), 4);
+    for segment in &segments[..3] {
+        assert!(matches!(
+            &segment.display.category,
+            CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Learning)
+        ));
+        assert!(matches!(
+            &segment.display.category_source,
+            CategorySource::Rule { rule } if rule.as_str() == "user.titles/read@1"
+        ));
+    }
+    assert!(
+        matches!(
+            &segments[3].display.category_source,
+            CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@1"
+        ),
+        "a new title for the same application must be evaluated against the overlay"
+    );
+}
+
+#[test]
+fn day_tendencies_and_focus_continuity_and_category_projection_use_classification() {
+    let mut rows = vec![
+        clock(1, 0, 0, 110),
+        classified_window(1, 0, 20, "code.exe"),
+        classified_window(2, 20, 40, "winword.exe"),
+        classified_window(3, 40, 50, "vlc.exe"),
+        classified_window(4, 50, 60, "unknown.exe"),
+        classified_window(5, 60, 100, "code.exe"),
+        classified_window(6, 100, 110, "explorer.exe"),
+    ];
+    rows.push(InputRow::Availability {
+        span: span(7, 70, 80),
+        state: Availability::Idle,
+    });
+    let segments = derive_classified(rows, QueryRange { start: 0, end: 110 }, classifier(&[]));
+    let calendar = test_day_calendar();
+    let aggregate = DayAggregation::new(calendar, &segments);
+    assert_eq!(aggregate.metrics.active_ms, 100);
+    assert_eq!(aggregate.metrics.focus_ratio, 0.7);
+    assert_eq!(aggregate.metrics.distract_ratio, 0.1);
+    assert_eq!(aggregate.metrics.unclassified_ms, 10);
+    assert_eq!(
+        aggregate.metrics.longest_focus_ms, 40,
+        "different focus categories stay continuous; idle breaks the later run"
+    );
+    assert_eq!(
+        aggregate.calendar.hours[0]
+            .categories
+            .iter()
+            .map(|bucket| bucket.duration_ms)
+            .sum::<i64>(),
+        100
+    );
+    let split = derive_classified(
+        vec![
+            clock(1, 0, 0, 20),
+            classified_window(1, 0, 10, "code.exe"),
+            classified_window(2, 10, 20, "devenv.exe"),
+        ],
+        QueryRange { start: 0, end: 20 },
+        classifier(&[]),
+    );
+    let mut projection = TimelineProjection::default();
+    for segment in &split {
+        projection.push(segment, quartz_protocol::TimelineDetail::Category, 30);
+    }
+    let merged = projection.into_segments();
+    assert_eq!(
+        merged.len(),
+        1,
+        "category detail merges across apps and matching rules"
+    );
+    assert_eq!(
+        merged[0].category_source,
+        quartz_protocol::CategorySource::Mixed
+    );
+    assert_eq!(merged[0].duration_ms, 20);
+    let mut separated = split;
+    separated[1].display.clock_segment_id = Some(quartz_protocol::ClockSegmentId(2));
+    let aggregate = DayAggregation::new(test_day_calendar(), &separated);
+    assert_eq!(
+        aggregate.metrics.longest_focus_ms, 10,
+        "clock boundary breaks focus continuity"
+    );
+}
+
+fn test_day_calendar() -> DayCalendar {
+    let mut calendar = DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("calendar");
+    let offset = calendar.range.start;
+    calendar.range.start -= offset;
+    calendar.range.end -= offset;
+    for hour in &mut calendar.hours {
+        hour.start_utc_ms -= offset;
+        hour.end_utc_ms -= offset;
+    }
+    calendar
 }

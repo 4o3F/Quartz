@@ -21,10 +21,12 @@ impl TestDatabase {
     pub(crate) fn start() -> Self {
         let mut fixture = QueryFixture::new(4);
         let channel = QueryChannel::new();
-        let snapshots =
-            quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
-                .expect("rules")
-                .snapshots();
+        let snapshots = crate::rules::registry::RegistryShell::open(
+            &mut fixture.store,
+            quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        )
+        .expect("rules")
+        .snapshots();
         let crate::query::versions::VersionChannel {
             mut publisher,
             port: versions,
