@@ -793,6 +793,106 @@ fn checkpoint_confirms_all_open_targets_and_stop_settles_immediately() {
 }
 
 #[test]
+fn maintenance_completes_pending_metadata_without_changing_window_or_interval() {
+    let mut fixture = Fixture::active();
+    let mut provisional = window(2, "same title");
+    if let Foreground::Window { facts, .. } = &mut provisional {
+        facts.metadata_source = MetadataSource::Frame;
+        facts.exe_name = None;
+        facts.display_name = "Provisional name".into();
+        assert_eq!(facts.metadata_source.refresh(), MetadataRefresh::Pending);
+    }
+    let initial = fixture.hook(at(1), provisional.clone());
+    let previous = initial
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            CaptureWrite::ObserveWindow { instance, .. } => Some(instance.clone()),
+            _ => None,
+        })
+        .expect("provisional instance");
+    let maintenance_at = at(0).advance(limits::CHECKPOINT_PERIOD);
+    let pending = fixture.send(maintenance_at, CaptureEvent::Wake);
+    assert!(pending.effects.contains(&CaptureEffect::ReviewForeground));
+    assert!(
+        !pending
+            .effects
+            .contains(&CaptureEffect::FallbackReviewForeground)
+    );
+    if let Foreground::Window { facts, .. } = &mut provisional {
+        facts.metadata_source = MetadataSource::Process;
+        facts.exe_name = Some("app.exe".into());
+        facts.display_name = "Completed name".into();
+    }
+    let upgraded = fixture.review(
+        maintenance_at.advance(Duration::from_millis(1)),
+        provisional,
+    );
+    let completed = upgraded
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            CaptureWrite::ObserveWindow { instance, .. } => Some(instance),
+            _ => None,
+        })
+        .expect("completed instance");
+    assert_eq!(completed.id, previous.id);
+    assert_eq!(completed.generation, previous.generation);
+    assert_eq!(completed.app, previous.app);
+    assert_eq!(completed.exe_name.as_deref(), Some("app.exe"));
+    assert_eq!(completed.display_name, "Completed name");
+    assert!(!upgraded.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::OpenInterval(_) | CaptureWrite::CloseInterval { .. }
+    )));
+    let next = at(0).advance(limits::CHECKPOINT_PERIOD * 2);
+    let settled = fixture.send(next, CaptureEvent::Wake);
+    assert!(
+        settled
+            .effects
+            .contains(&CaptureEffect::FallbackReviewForeground)
+    );
+    assert!(!settled.effects.contains(&CaptureEffect::ReviewForeground));
+    fixture.finish(next.advance(Duration::from_millis(1)));
+}
+
+#[test]
+fn maintenance_uses_fallback_for_settled_metadata() {
+    let mut fixture = Fixture::active();
+    assert_eq!(MetadataSource::Process.refresh(), MetadataRefresh::Settled);
+    let now = at(0).advance(limits::CHECKPOINT_PERIOD);
+    let step = fixture.send(now, CaptureEvent::Wake);
+    assert!(
+        step.effects
+            .contains(&CaptureEffect::FallbackReviewForeground)
+    );
+    assert!(!step.effects.contains(&CaptureEffect::ReviewForeground));
+    fixture.finish(now.advance(Duration::from_millis(1)));
+}
+
+#[test]
+fn maintenance_does_not_retry_unavailable_metadata() {
+    let mut fixture = Fixture::active();
+    let mut unavailable = window(2, "unavailable metadata");
+    if let Foreground::Window { facts, .. } = &mut unavailable {
+        facts.metadata_source = MetadataSource::Unavailable;
+        facts.app = AppIdentity::Unresolved(facts.class.clone());
+        facts.exe_name = None;
+        facts.display_name = facts.class.clone();
+        assert_eq!(facts.metadata_source.refresh(), MetadataRefresh::Settled);
+    }
+    let _ = fixture.hook(at(1), unavailable);
+    let now = at(0).advance(limits::CHECKPOINT_PERIOD);
+    let step = fixture.send(now, CaptureEvent::Wake);
+    assert!(
+        step.effects
+            .contains(&CaptureEffect::FallbackReviewForeground)
+    );
+    assert!(!step.effects.contains(&CaptureEffect::ReviewForeground));
+    fixture.finish(now.advance(Duration::from_millis(1)));
+}
+
+#[test]
 fn checkpoint_cadence_keeps_its_deadline_across_foreground_boundaries() {
     let mut fixture = Fixture::active();
     let period = limits::CHECKPOINT_PERIOD;

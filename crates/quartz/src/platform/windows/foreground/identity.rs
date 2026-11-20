@@ -86,11 +86,6 @@ struct ApplicationMetadata {
     browser: BrowserContext,
 }
 #[derive(Debug)]
-enum FrameDisplayNameSource {
-    Cached,
-    Aumid,
-}
-#[derive(Debug)]
 enum FrameFallbackReason {
     ContentWindowUnavailable,
     ContentProcessUnavailable,
@@ -112,8 +107,7 @@ impl Metadata {
     }
 }
 impl ApplicationMetadata {
-    fn from_frame(aumid: Aumid, known_name: Option<&str>) -> Self {
-        let display_name = known_name.unwrap_or(aumid.as_str()).to_owned();
+    fn from_frame(aumid: Aumid, display_name: String) -> Self {
         Self {
             identity: AppIdentity::Aumid(aumid.into_string()),
             source: MetadataSource::Frame,
@@ -307,13 +301,8 @@ impl Resolver {
     }
     fn frame_application(&mut self, aumid: Aumid) -> ApplicationMetadata {
         let key = AppIdentity::Aumid(aumid.as_str().to_owned()).key();
-        let name = self.names.find(&key);
-        let name_source = match name {
-            Some(_) => FrameDisplayNameSource::Cached,
-            None => FrameDisplayNameSource::Aumid,
-        };
-        tracing::debug!(?name_source, "application identity resolved from frame");
-        ApplicationMetadata::from_frame(aumid, name.map(String::as_str))
+        let display_name = aumid.resolve_display_name(self.names.find(&key).map(String::as_str));
+        ApplicationMetadata::from_frame(aumid, display_name)
     }
     fn process(&mut self, process: ProcessId) -> Option<Metadata> {
         match self.resolve_process(process) {
@@ -462,23 +451,14 @@ mod tests {
     use super::*;
     use crate::core::foreground::EventKind;
     #[test]
-    fn frame_identity_uses_cached_name_or_aumid_without_poisoning_the_name_cache() {
+    fn frame_identity_reuses_cached_display_name_without_process_metadata() {
         let units: Vec<_> = "Package!App".encode_utf16().collect();
         let aumid = Aumid::from_utf16(&units).expect("valid test AUMID");
+        let identity = AppIdentity::Aumid(aumid.as_str().to_owned());
         let mut resolver = Resolver::new();
-        let first = resolver.frame_application(aumid.clone());
-        assert_eq!(first.identity, AppIdentity::Aumid("Package!App".into()));
-        assert_eq!(first.source, MetadataSource::Frame);
-        assert!(first.exe_name.is_none());
-        assert_eq!(first.display_name, "Package!App");
-        let key = first.identity.key();
-        assert!(
-            resolver.names.find(&key).is_none(),
-            "placeholder must not block a later process description"
-        );
-        resolver.names.insert(key, "Settings".into());
+        resolver.names.insert(identity.key(), "Settings".into());
         let cached = resolver.frame_application(aumid);
-        assert_eq!(cached.identity, first.identity);
+        assert_eq!(cached.identity, identity);
         assert_eq!(cached.source, MetadataSource::Frame);
         assert!(cached.exe_name.is_none());
         assert_eq!(cached.display_name, "Settings");

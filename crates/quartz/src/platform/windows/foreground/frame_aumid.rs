@@ -4,14 +4,26 @@ use super::Window;
 use windows::Win32::{
     Storage::{EnhancedStorage::PKEY_AppUserModel_ID, Packaging::Appx},
     System::{
-        Com::StructuredStorage::{self, PROPVARIANT},
+        Com::{
+            self,
+            StructuredStorage::{self, PROPVARIANT},
+        },
         Variant::{VT_BSTR, VT_EMPTY, VT_LPWSTR},
     },
     UI::{
-        Shell::PropertiesSystem::{self, IPropertyStore},
+        Shell::{
+            self, IShellItem,
+            PropertiesSystem::{self, IPropertyStore},
+            SIGDN_NORMALDISPLAY,
+        },
         WindowsAndMessaging::STRSAFE_E_INSUFFICIENT_BUFFER,
     },
 };
+
+use windows::core::{PCWSTR, PWSTR};
+
+/// Shell namespace parsing prefix for a registered application's user-facing name.
+const APPS_FOLDER_PREFIX: &str = "shell:AppsFolder\\";
 
 /// APPLICATION_USER_MODEL_ID_MAX_LENGTH (130 UTF-16 units) plus the NUL terminator.
 pub(super) const AUMID_BUFFER_UNITS: usize = 131;
@@ -62,6 +74,163 @@ impl Aumid {
     }
     pub(super) fn into_string(self) -> String {
         self.0
+    }
+}
+
+#[derive(snafu::Snafu)]
+#[snafu(module)]
+pub(super) enum ReadAppDisplayNameError {
+    #[snafu(display("could not open application Shell item"))]
+    OpenItem { source: windows::core::Error },
+    #[snafu(display("could not read application Shell display name"))]
+    ReadName { source: windows::core::Error },
+    #[snafu(display("application Shell display name pointer is null"))]
+    NullName,
+    #[snafu(display("application Shell display name is empty"))]
+    EmptyName,
+    #[snafu(display("application Shell display name contains invalid UTF-16"))]
+    DecodeText { source: std::string::FromUtf16Error },
+}
+#[derive(Debug)]
+enum ReadAppDisplayNameErrorKind {
+    OpenItem,
+    ReadName,
+    NullName,
+    EmptyName,
+    DecodeText,
+}
+impl ReadAppDisplayNameError {
+    fn kind(&self) -> ReadAppDisplayNameErrorKind {
+        match self {
+            Self::OpenItem { .. } => ReadAppDisplayNameErrorKind::OpenItem,
+            Self::ReadName { .. } => ReadAppDisplayNameErrorKind::ReadName,
+            Self::NullName => ReadAppDisplayNameErrorKind::NullName,
+            Self::EmptyName => ReadAppDisplayNameErrorKind::EmptyName,
+            Self::DecodeText { .. } => ReadAppDisplayNameErrorKind::DecodeText,
+        }
+    }
+    fn code(&self) -> Option<i32> {
+        match self {
+            Self::OpenItem { source } | Self::ReadName { source } => Some(source.code().0),
+            Self::NullName | Self::EmptyName | Self::DecodeText { .. } => None,
+        }
+    }
+}
+impl std::fmt::Debug for ReadAppDisplayNameError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Shell error text can contain a parsing name; diagnostic logs retain only kind and code.
+        output
+            .debug_struct("ReadAppDisplayNameError")
+            .field("kind", &self.kind())
+            .field("code", &self.code())
+            .finish()
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct AppDisplayName(String);
+impl AppDisplayName {
+    fn new(name: String) -> Result<Self, ReadAppDisplayNameError> {
+        if name.is_empty() {
+            Err(ReadAppDisplayNameError::EmptyName)
+        } else {
+            Ok(Self(name))
+        }
+    }
+}
+impl std::fmt::Display for AppDisplayName {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(&self.0)
+    }
+}
+struct ShellName(PWSTR);
+impl ShellName {
+    fn decode(&self) -> Result<AppDisplayName, ReadAppDisplayNameError> {
+        if self.0.is_null() {
+            return Err(ReadAppDisplayNameError::NullName);
+        }
+        // SAFETY: GetDisplayName returned this owned, terminated allocation; the guard keeps it live.
+        let name = unsafe { self.0.to_string() }
+            .map_err(|source| ReadAppDisplayNameError::DecodeText { source })?;
+        AppDisplayName::new(name)
+    }
+}
+impl Drop for ShellName {
+    fn drop(&mut self) {
+        // SAFETY: IShellItem::GetDisplayName transfers a CoTaskMem allocation, including null.
+        unsafe {
+            Com::CoTaskMemFree(Some(
+                self.0.as_ptr().cast::<std::ffi::c_void>().cast_const(),
+            ))
+        };
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameDisplayNameSource {
+    Cached,
+    AppsFolder,
+    Aumid,
+}
+enum FrameDisplayName {
+    Cached(String),
+    AppsFolder(AppDisplayName),
+    Aumid(ReadAppDisplayNameError),
+}
+impl FrameDisplayName {
+    fn select(
+        cached: Option<&str>,
+        shell: impl FnOnce() -> Result<AppDisplayName, ReadAppDisplayNameError>,
+    ) -> Self {
+        match cached {
+            Some(name) => Self::Cached(name.to_owned()),
+            None => match shell() {
+                Ok(name) => Self::AppsFolder(name),
+                Err(error) => Self::Aumid(error),
+            },
+        }
+    }
+    fn source(&self) -> FrameDisplayNameSource {
+        match self {
+            Self::Cached(_) => FrameDisplayNameSource::Cached,
+            Self::AppsFolder(_) => FrameDisplayNameSource::AppsFolder,
+            Self::Aumid(_) => FrameDisplayNameSource::Aumid,
+        }
+    }
+    fn into_name(self, aumid: &Aumid) -> String {
+        match self {
+            Self::Cached(name) => name,
+            Self::AppsFolder(name) => name.0,
+            Self::Aumid(error) => {
+                tracing::debug!(?error, "AppsFolder display name unavailable; using AUMID");
+                aumid.as_str().to_owned()
+            }
+        }
+    }
+}
+impl Aumid {
+    pub(super) fn display_name(&self) -> Result<AppDisplayName, ReadAppDisplayNameError> {
+        let mut parsing_name: Vec<_> = format!("{APPS_FOLDER_PREFIX}{}", self.as_str())
+            .encode_utf16()
+            .collect();
+        parsing_name.push(0);
+        // SAFETY: The parsing name is terminated and the capture worker owns a live COM MTA.
+        // windows-rs releases the item interface before this method returns.
+        let item: IShellItem = unsafe {
+            Shell::SHCreateItemFromParsingName(
+                PCWSTR(parsing_name.as_ptr()),
+                None::<&Com::IBindCtx>,
+            )
+        }
+        .map_err(|source| ReadAppDisplayNameError::OpenItem { source })?;
+        // SAFETY: The live item owns its interface; ShellName releases the returned task allocation.
+        let name = unsafe { item.GetDisplayName(SIGDN_NORMALDISPLAY) }
+            .map(ShellName)
+            .map_err(|source| ReadAppDisplayNameError::ReadName { source })?;
+        name.decode()
+    }
+    pub(super) fn resolve_display_name(&self, cached: Option<&str>) -> String {
+        let selected = FrameDisplayName::select(cached, || self.display_name());
+        tracing::debug!(name_source = ?selected.source(), "application identity resolved from frame");
+        selected.into_name(self)
     }
 }
 
@@ -223,10 +392,48 @@ mod tests {
             if let Some(aumid) = native.frame_aumid().expect("read visible frame property") {
                 assert!(!aumid.as_str().is_empty());
                 found += 1;
-                println!("visible frame hwnd={} property=Present", handle.get());
+                let display_name = aumid.display_name().expect("read AppsFolder display name");
+                println!(
+                    "visible frame hwnd={} property=Present apps_folder_name={}",
+                    handle.get(),
+                    display_name
+                );
             }
         }
         assert!(found > 0, "at least one visible frame must have an AUMID");
+    }
+
+    #[test]
+    fn frame_display_name_prefers_cache_then_apps_folder_then_aumid() {
+        let units: Vec<_> = "Package!App".encode_utf16().collect();
+        let aumid = Aumid::from_utf16(&units).expect("valid test identity");
+        let cached = FrameDisplayName::select(Some("Cached name"), || {
+            panic!("cache hit must not query Shell")
+        });
+        assert_eq!(cached.source(), FrameDisplayNameSource::Cached);
+        assert_eq!(cached.into_name(&aumid), "Cached name");
+        let shell = FrameDisplayName::select(None, || AppDisplayName::new("Shell name".into()));
+        assert_eq!(shell.source(), FrameDisplayNameSource::AppsFolder);
+        assert_eq!(shell.into_name(&aumid), "Shell name");
+        let fallback = FrameDisplayName::select(None, || Err(ReadAppDisplayNameError::EmptyName));
+        assert_eq!(fallback.source(), FrameDisplayNameSource::Aumid);
+        assert_eq!(fallback.into_name(&aumid), aumid.as_str());
+    }
+    #[test]
+    fn empty_shell_name_is_an_explicit_error_and_error_debug_omits_message_text() {
+        assert!(matches!(
+            AppDisplayName::new(String::new()),
+            Err(ReadAppDisplayNameError::EmptyName)
+        ));
+        let error = ReadAppDisplayNameError::OpenItem {
+            source: windows::core::Error::new(
+                windows::Win32::Foundation::E_FAIL,
+                "private parsing name",
+            ),
+        };
+        let diagnostic = format!("{error:?}");
+        assert!(diagnostic.contains("OpenItem"));
+        assert!(!diagnostic.contains("private parsing name"));
     }
 
     #[test]

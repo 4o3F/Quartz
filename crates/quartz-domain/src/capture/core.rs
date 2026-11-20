@@ -10,10 +10,11 @@ use super::{
     AvailabilityEndReason, AvailabilityReason, BatchId, BrowserContext, CaptureEffect,
     CaptureEvent, CaptureGap, CaptureInput, CaptureState, CaptureStep, CaptureWrite, Checkpoint,
     ClockChange, ClockEndReason, Deadline, DeadlineKind, DeadlineScheduler, Foreground, GapReason,
-    IdleRecord, IdleSample, IntervalEndReason, IntervalFact, NoForegroundReason, ObservationId,
-    ObservationSource, OpenInterval, PolicyObservation, PrivacyContext, RowId, RunEndReason, RunId,
-    SchedulerKind, SegmentRange, SessionStatus, StopChange, StopReason, TimeRange, TimedPolicyKind,
-    Timer, Timestamp, WebRowExtension, WindowId, WindowInstances, ids::IdAllocator, limits,
+    IdleRecord, IdleSample, IntervalEndReason, IntervalFact, MetadataRefresh, NoForegroundReason,
+    ObservationId, ObservationSource, OpenInterval, PolicyObservation, PrivacyContext, RowId,
+    RunEndReason, RunId, SchedulerKind, SegmentRange, SessionStatus, StopChange, StopReason,
+    TimeRange, TimedPolicyKind, Timer, Timestamp, WebRowExtension, WindowId, WindowInstances,
+    ids::IdAllocator, limits,
 };
 use crate::rules::registry::{RuleSnapshot, SnapshotEpoch};
 use std::collections::BTreeSet;
@@ -1245,7 +1246,14 @@ impl CaptureCore {
                 }
                 self.checkpoint(at, step);
                 self.clock.maintenance_deadline = at.mono.advance(limits::CHECKPOINT_PERIOD);
-                step.effects.push(CaptureEffect::FallbackReviewForeground);
+                let refresh = match self.phase.interval() {
+                    Some(_) => self.tracker.metadata_refresh(),
+                    None => MetadataRefresh::Settled,
+                };
+                step.effects.push(match refresh {
+                    MetadataRefresh::Pending => CaptureEffect::ReviewForeground,
+                    MetadataRefresh::Settled => CaptureEffect::FallbackReviewForeground,
+                });
                 self.deadlines.register(
                     owner,
                     Deadline::Mono(at.mono.advance(limits::CHECKPOINT_PERIOD)),

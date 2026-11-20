@@ -2,8 +2,9 @@
 
 use super::{
     BrowserContext, CaptureLevel, CapturedFields, Foreground, HookTarget, IntervalFact,
-    MonoInstant, NoForegroundReason, ObservationSource, PrivacyContext, PrivacyMode, Timestamp,
-    TitleActivity, WindowFacts, WindowId, WindowInstance, WindowInstances, limits,
+    MetadataRefresh, MonoInstant, NoForegroundReason, ObservationSource, PrivacyContext,
+    PrivacyMode, Timestamp, TitleActivity, WindowFacts, WindowId, WindowInstance, WindowInstances,
+    limits,
 };
 use crate::rules::registry::RuleSnapshot;
 use std::collections::{BTreeMap, VecDeque};
@@ -189,6 +190,12 @@ impl ForegroundTracker {
                 facts: row.facts.clone(),
                 privacy: row.privacy.clone(),
             }),
+        }
+    }
+    pub(super) fn metadata_refresh(&self) -> MetadataRefresh {
+        match &self.last {
+            LastForeground::Window(row) => row.facts.metadata_source.refresh(),
+            LastForeground::Unobserved | LastForeground::None(_) => MetadataRefresh::Settled,
         }
     }
     pub(super) fn app(&self) -> Option<&super::AppIdentity> {

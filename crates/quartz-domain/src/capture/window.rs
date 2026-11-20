@@ -186,10 +186,29 @@ impl Title {
 pub enum MetadataSource {
     /// Executable and display name were obtained from a process query.
     Process,
-    /// Identity came from a frame property, with cached or placeholder descriptive data.
+    /// Identity came from a frame property; descriptive metadata remains provisional.
     Frame,
     /// Application metadata could not be resolved.
     Unavailable,
+}
+
+/// Whether descriptive application metadata needs a fresh resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataRefresh {
+    /// Metadata is final for this observation, including unavailable metadata.
+    Settled,
+    /// Descriptive application metadata is provisional and may be completed by a fresh resolution.
+    Pending,
+}
+impl MetadataSource {
+    /// Returns whether a maintenance read should request fresh descriptive metadata.
+    #[must_use]
+    pub fn refresh(self) -> MetadataRefresh {
+        match self {
+            Self::Frame => MetadataRefresh::Pending,
+            Self::Process | Self::Unavailable => MetadataRefresh::Settled,
+        }
+    }
 }
 
 /// Identity facts that the shell revalidated after resolving process metadata.
