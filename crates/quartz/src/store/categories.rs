@@ -2,7 +2,7 @@
 
 use super::{
     Store, enums, query::ReadSnapshot, query_error::ReadQueryError, rows::CategoriesRow,
-    schema::categories, versions::TxEffects,
+    schema::categories,
 };
 use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
 use quartz_domain::categories::{
@@ -26,43 +26,36 @@ impl From<diesel::result::Error> for SeedCategoriesError {
 impl Store {
     /// Inserts only absent builtin keys, retaining all existing metadata and archived rows.
     pub(crate) fn seed_categories(&mut self) -> Result<(), SeedCategoriesError> {
-        let mut effects = TxEffects::default();
-        self.writer
-            .immediate_transaction::<_, SeedCategoriesError, _>(|connection| {
-                let mut inserted = 0;
-                for (order, builtin) in BuiltinCategory::ALL.into_iter().enumerate() {
-                    inserted += diesel::insert_into(categories::table)
-                        .values(CategoriesRow {
-                            id: None,
-                            uuid: builtin.uuid().0,
-                            parent_id: None,
-                            builtin_key: Some(builtin.key().into()),
-                            name: None,
-                            color: builtin.color().into(),
-                            tendency: match builtin.tendency() {
-                                CategoryTendency::Focus => enums::CategoryTendency::Focus,
-                                CategoryTendency::Neutral => enums::CategoryTendency::Neutral,
-                                CategoryTendency::Distraction => {
-                                    enums::CategoryTendency::Distraction
-                                }
-                            },
-                            sort_order: i64::try_from(order)
-                                .expect("five builtin categories fit i64"),
-                            archived: 0,
-                        })
-                        .on_conflict(categories::builtin_key)
-                        .do_nothing()
-                        .execute(connection)?;
-                }
-                if inserted > 0 {
-                    effects
-                        .bump_metadata(connection)
-                        .map_err(|source| SeedCategoriesError::Version { source })?;
-                }
-                Ok(())
-            })?;
-        self.pending_effects.merge(effects);
-        Ok(())
+        self.write(|tx| {
+            let mut inserted = 0;
+            for (order, builtin) in BuiltinCategory::ALL.into_iter().enumerate() {
+                inserted += diesel::insert_into(categories::table)
+                    .values(CategoriesRow {
+                        id: None,
+                        uuid: builtin.uuid().0,
+                        parent_id: None,
+                        builtin_key: Some(builtin.key().into()),
+                        name: None,
+                        color: builtin.color().into(),
+                        tendency: match builtin.tendency() {
+                            CategoryTendency::Focus => enums::CategoryTendency::Focus,
+                            CategoryTendency::Neutral => enums::CategoryTendency::Neutral,
+                            CategoryTendency::Distraction => enums::CategoryTendency::Distraction,
+                        },
+                        sort_order: i64::try_from(order).expect("five builtin categories fit i64"),
+                        archived: 0,
+                    })
+                    .on_conflict(categories::builtin_key)
+                    .do_nothing()
+                    .execute(tx.connection)?;
+            }
+            if inserted > 0 {
+                tx.effects
+                    .bump_metadata(tx.connection)
+                    .map_err(|source| SeedCategoriesError::Version { source })?;
+            }
+            Ok(())
+        })
     }
 }
 impl ReadSnapshot {

@@ -1,8 +1,8 @@
 //! Version inputs shared by snapshot cursors and day-topic invalidations.
 
 use super::{RunQueryError, calendar::DayCalendar, input::QueryRange};
-use crate::store::versions::{QuerySettings, StoredVersions, VersionKey};
-use quartz_domain::{capture::limits::UTC_DAY_MS, rules::ContentHash};
+use crate::store::versions::{QuerySettings, StoredVersions, UtcDays, VersionKey};
+use quartz_domain::rules::ContentHash;
 use quartz_protocol::{DayChanged, LocalDate, QueryVersions};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -30,10 +30,9 @@ impl VersionState {
         digest.update(range.start.to_le_bytes());
         digest.update(range.end.to_le_bytes());
         digest.update(self.classification_hash.as_str().as_bytes());
-        let first = range.start.div_euclid(UTC_DAY_MS);
-        let last = (range.end - 1).div_euclid(UTC_DAY_MS);
+        let days = UtcDays::covering(range);
         for (key, version) in &self.days {
-            if (first..=last).contains(&key.day.0) {
+            if days.contains(&key.day) {
                 digest.update(key.source.0.to_le_bytes());
                 digest.update(key.day.0.to_le_bytes());
                 digest.update(version.to_le_bytes());

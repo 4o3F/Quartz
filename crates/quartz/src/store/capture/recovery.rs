@@ -575,25 +575,16 @@ impl crate::store::Store {
         keys: &mut CaptureKeys,
         metadata: &RunMetadata,
     ) -> Result<CaptureStartup, RecoverCaptureError> {
-        keys.begin();
-        let startup = self
-            .writer
-            .immediate_transaction(|connection| {
-                Capture::new(connection, keys, metadata)
-                    .recover()
-                    .map_err(|source| RecoveryTransactionError::Operation { source })
-            })
-            .map_err(|error| match error {
-                RecoveryTransactionError::Operation { source } => source,
-                RecoveryTransactionError::Transaction { source } => {
-                    RecoverCaptureError::Transaction { source }
-                }
-            });
-        keys.finish(if startup.is_ok() {
-            super::KeyTransaction::Commit
-        } else {
-            super::KeyTransaction::Rollback
-        });
-        startup
+        self.capture_write(keys, metadata, |capture| {
+            capture
+                .recover()
+                .map_err(|source| RecoveryTransactionError::Operation { source })
+        })
+        .map_err(|error| match error {
+            RecoveryTransactionError::Operation { source } => source,
+            RecoveryTransactionError::Transaction { source } => {
+                RecoverCaptureError::Transaction { source }
+            }
+        })
     }
 }

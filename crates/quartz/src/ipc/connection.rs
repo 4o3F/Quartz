@@ -1,17 +1,11 @@
 //! Framed protocol sessions over arbitrary asynchronous transport halves.
 use super::{
-    ConnectionSession, PublishedStatus, UiPort, outbox::OutboxTask, registry::RegistryHandle,
+    ConnectionSession, Services, outbox::OutboxTask, registry::RegistryHandle, session::Action,
 };
-use crate::query::dispatch::QueryPort;
 use futures_util::StreamExt;
-use quartz_protocol::{
-    Envelope, ErrorKind, ProtocolError, ResponseOutcome, decode_json, frame_codec,
-};
+use quartz_protocol::{Envelope, ErrorKind, ProtocolError, decode_json, frame_codec};
 use std::{io, time::Duration};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    sync::watch,
-};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::{
     bytes::BytesMut,
     codec::{FramedRead, LengthDelimitedCodec, LengthDelimitedCodecError},
@@ -36,11 +30,9 @@ impl Default for ConnectionTimeouts {
 }
 
 pub(crate) struct Connection {
-    pub queries: QueryPort,
+    pub services: Services,
     pub registry: RegistryHandle,
     pub timeouts: ConnectionTimeouts,
-    pub status: watch::Receiver<PublishedStatus>,
-    pub ui: UiPort,
 }
 impl Connection {
     pub(crate) async fn run<R, W>(
@@ -63,10 +55,12 @@ impl Connection {
                 () = outbox.closed() => return Ok(()),
                 received = self.next_frame(&mut reader, session, hello_deadline) => received,
             };
-            let mut decision = match received {
+            let action = match received {
                 None => break,
                 Some(Ok(payload)) => match decode_json::<Envelope>(&payload) {
-                    Ok(envelope) => session.receive(envelope, &self.status.borrow().status),
+                    Ok(envelope) => {
+                        session.receive(envelope, &self.services.status.borrow().status)
+                    }
                     // Parse diagnostics can contain request body values; only the stable code is sent.
                     Err(_) => session.fail(ErrorKind::BadRequest),
                 },
@@ -87,26 +81,6 @@ impl Connection {
                 }
                 Some(Err(error)) => return Err(error),
             };
-            if let Some(query) = decision.query.take() {
-                let result = self.queries.call(query).await;
-                decision.response.outcome = match result {
-                    Ok(response) => match serde_json::to_value(response) {
-                        Ok(body) => ResponseOutcome::Ok { body },
-                        Err(_) => ResponseOutcome::Err {
-                            error: ProtocolError::new(ErrorKind::Internal),
-                        },
-                    },
-                    Err(error) => ResponseOutcome::Err { error },
-                };
-            }
-            if let Some(command) = decision.command
-                && let Err(error) = (self.ui)(command)
-            {
-                tracing::warn!(%error, "could not queue IPC UI command");
-                decision.response.outcome = ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::Internal),
-                };
-            }
             if registration.is_none()
                 && let Some(role) = session.role()
             {
@@ -116,19 +90,39 @@ impl Connection {
                         .map_err(io::Error::other)?,
                 );
             }
-            if let Some(subscription) = decision.subscription {
-                let id = registration
-                    .as_ref()
-                    .expect("subscription follows authenticated hello")
-                    .id;
-                self.registry
-                    .subscribe(id, subscription, decision.response)
-                    .await
-                    .map_err(io::Error::other)?;
-            } else {
-                outbox
-                    .response(decision.response)
-                    .map_err(io::Error::other)?;
+            let response = match action {
+                Action::Reply(response) => Some(response),
+                Action::Ui { id, command } => Some(match (self.services.ui)(command) {
+                    Ok(()) => Action::success_response(id, quartz_protocol::AcceptedBody),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not queue IPC UI command");
+                        Action::error_response(Some(id), ProtocolError::new(ErrorKind::Internal))
+                    }
+                }),
+                Action::Query { id, request } => {
+                    Some(match self.services.queries.call(request).await {
+                        Ok(response) => Action::success_response(id, response),
+                        Err(error) => Action::error_response(Some(id), error),
+                    })
+                }
+                Action::Subscribe { id, subscription } => {
+                    let connection = registration
+                        .as_ref()
+                        .expect("subscription follows authenticated hello")
+                        .id;
+                    self.registry
+                        .subscribe(
+                            connection,
+                            subscription,
+                            Action::success_response(id, quartz_protocol::SubscribeResponse {}),
+                        )
+                        .await
+                        .map_err(io::Error::other)?;
+                    None
+                }
+            };
+            if let Some(response) = response {
+                outbox.response(response).map_err(io::Error::other)?;
             }
             if session.closing() {
                 return self.finish_closing(writer).await;
@@ -180,7 +174,7 @@ mod tests {
         query::dispatch::test_support::TestDatabase,
     };
     use futures_util::SinkExt;
-    use quartz_protocol::{HelloRole, PROTOCOL_VERSION, RequestId};
+    use quartz_protocol::{HelloRole, PROTOCOL_VERSION, RequestId, ResponseOutcome};
     use std::sync::Arc;
     use tokio::io::split;
     use tokio_util::codec::Framed;
@@ -197,14 +191,17 @@ mod tests {
     }
     fn connection(database: &TestDatabase, status: &StatusPublisher) -> Connection {
         Connection {
-            queries: database.port.clone(),
+            services: Services {
+                queries: database.port.clone(),
+                versions: database.versions.clone(),
+                status: status.subscribe(),
+                ui: Arc::new(|_| Ok(())),
+            },
             registry: RegistryHandle::start(status.subscribe(), database.versions.clone()),
             timeouts: ConnectionTimeouts {
                 hello: HELLO_TIMEOUT,
                 close_flush: TEST_CLOSE_TIMEOUT,
             },
-            status: status.subscribe(),
-            ui: Arc::new(|_| Ok(())),
         }
     }
     #[test]

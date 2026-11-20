@@ -40,6 +40,7 @@ pub(crate) enum RunRegistryCommandError {
 
 #[derive(Debug)]
 pub(crate) struct RegistryResult {
+    #[cfg_attr(not(test), expect(dead_code, reason = "M4 rule editing over IPC"))]
     pub reply: RegistrySuccess,
     pub event: Option<RulesChanged>,
 }
@@ -115,6 +116,7 @@ impl RegistryShell {
     pub(crate) fn snapshots(&self) -> SnapshotCell {
         self.registry.snapshots()
     }
+    #[cfg(test)]
     pub(crate) fn core(&self) -> &RuleRegistry {
         &self.registry
     }
@@ -135,7 +137,7 @@ impl RegistryShell {
         let event = if let Some(outcome) = outcome {
             let now = now.get().as_millisecond();
             store
-                .transaction(|transaction| transaction.execute(&writes, now))
+                .rule_transaction(|transaction| transaction.execute(&writes, now))
                 .context(run_error::PersistSnafu)?;
             Some(
                 self.registry

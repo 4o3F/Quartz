@@ -174,15 +174,18 @@ crates/
 | 模块 | 职责 |
 |---|---|
 | `main` | clap 参数解析与模式分发 |
-| `core::app` | 核心装配、线程启动、关闭顺序 |
-| `platform::windows::{foreground, idle, session, power, tray, process, autostart}` | Win32 采集与系统集成 |
+| `core::app` | 核心装配、线程启动、关闭顺序；`Autostart` 控制重复启动时是否转发打开界面的请求 |
+| `core::foreground` | 前台事件过滤、元数据选择与解析接口 |
+| `core::sources` | 系统采样的时间转换、会话重试与空闲状态处理 |
+| `platform::windows::{foreground, sources, tray, process}` | Win32 前台解析、系统观测源、托盘与进程信息；`sources` 读取空闲、会话与电源状态 |
+| `platform::windows::ipc` | 命名管道创建、对端身份验证与连接生命周期；传递 `ipc::Services` |
 | `persistence` | 数据库线程的写入队列、批量事务、失败缓冲与采集反馈 |
-| `store` | schema 迁移、写入、读取、保留清理；`store::versions` 管理版本行、配置键和事务版本变更 |
+| `store` | schema 迁移、写入、读取、保留清理；`Store::write` 统一写事务，提交后合并版本变更，`store::versions` 管理版本行、UTC 日期范围和配置键 |
 | `rules::registry` | 规则注册表：规则状态的唯一写者，发布不可变规则快照（第 6.2 节） |
 | `query` | 查询调度、纯切片与聚合、版本摘要与分页；`query::runner` 持有分批查询任务并归还只读连接 |
-| `ipc` | 会话、角色权限、订阅和协议客户端；`ipc::connection` 在异步读写流上执行单连接协议循环 |
+| `ipc` | 会话动作、角色权限、订阅和协议客户端；`ipc::Services` 汇集应用服务，`ipc::connection` 在异步读写流上执行会话动作 |
 
-`query` 依赖 `store` 读取事实和版本值，`store` 通过 `quartz-domain` 的事实类型返回数据。`ipc` 依赖 `query` 的调度接口；`platform::windows::ipc` 创建和验证命名管道，并调用 `ipc::connection`。`core::app::CoreRuntime` 打开存储、取得安装标识、构造运行元数据与状态发布器，并启动采集线程、数据库线程和管道服务。`PlatformPorts` 提供时钟、主线程唤醒与界面命令通知、会话标识、安装标识候选值、核心实例标识、前台解析器工厂和管道工厂，以及语言与区域设置。前台解析器工厂在采集线程调用；Windows 实现持有该线程的 COM apartment，并在解析器释放后结束 COM。平台主线程持有托盘、系统观测源和消息循环，通过运行时取得观测入口、关闭端口和命令接收端。日志初始化由运行时提供，数据目录定位和实例锁仍使用 Windows 环境与系统接口。
+`query` 依赖 `store` 读取事实和版本值，`store` 通过 `quartz-domain` 的事实类型返回数据。`ipc` 依赖 `query` 的查询调度与版本发布接口。`core::app` 将查询端口、版本端口、状态接收端和界面命令端口组装为 `ipc::Services`。`platform::windows::ipc` 创建和验证命名管道，只通过 `ipc` 接口传递服务集合、启动订阅注册表并调用 `ipc::connection`。`core::app::CoreRuntime` 打开存储、取得安装标识、构造运行元数据与状态发布器，并启动采集线程、数据库线程和管道服务。`PlatformPorts` 提供时钟、主线程唤醒与界面命令通知、会话标识、安装标识候选值、核心实例标识、前台解析器工厂和管道工厂，以及语言与区域设置。前台解析器工厂在采集线程调用；Windows 实现持有该线程的 COM apartment，并在解析器释放后结束 COM。平台主线程持有托盘、系统观测源和消息循环，通过运行时取得观测入口、关闭端口和命令接收端。日志初始化由运行时提供，数据目录定位和实例锁仍使用 Windows 环境与系统接口。
 
 用户退出时，`CoreRuntime` 依次发送 `ui.shutdown`、限时发送待处理的管道消息并停止管道、请求采集结算、等待采集与数据库线程退出。启动失败和运行时释放也使用同一条关闭路径。`WM_ENDSESSION` 先通过 `ShutdownPort` 在回调内等待最终持久化，消息循环结束后由运行时停止管道并回收已完成的线程。关闭时读取时钟失败会保留错误，并使用采集线程最后一次观测时间结算。
 

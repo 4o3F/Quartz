@@ -91,6 +91,12 @@ impl std::fmt::Debug for Store {
     }
 }
 
+/// Connection and invalidations owned by one immediate write transaction.
+struct WriteTx<'connection> {
+    connection: &'connection mut SqliteConnection,
+    effects: &'connection mut versions::TxEffects,
+}
+
 impl Store {
     #[cfg(test)]
     pub(crate) fn capture<'connection>(
@@ -101,46 +107,69 @@ impl Store {
         capture::Capture::new(&mut self.writer, keys, metadata)
     }
 
+    /// Publishes transaction effects only after SQLite has committed the writes.
+    fn write<T, E>(
+        &mut self,
+        execute: impl FnOnce(&mut WriteTx<'_>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<diesel::result::Error>,
+    {
+        let mut effects = versions::TxEffects::default();
+        let value = self.writer.immediate_transaction(|connection| {
+            execute(&mut WriteTx {
+                connection,
+                effects: &mut effects,
+            })
+        })?;
+        self.pending_effects.merge(effects);
+        Ok(value)
+    }
+
     pub(crate) fn capture_transaction<T>(
         &mut self,
         keys: &mut capture::CaptureKeys,
         metadata: &capture::RunMetadata,
         execute: impl FnOnce(&mut capture::Capture<'_>) -> Result<T, capture::ExecuteCaptureBatchError>,
     ) -> Result<T, capture::ExecuteCaptureBatchError> {
+        self.capture_write(keys, metadata, execute)
+    }
+
+    fn capture_write<T, E>(
+        &mut self,
+        keys: &mut capture::CaptureKeys,
+        metadata: &capture::RunMetadata,
+        execute: impl FnOnce(&mut capture::Capture<'_>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<diesel::result::Error>,
+    {
         keys.begin();
-        let mut effects = versions::TxEffects::default();
-        let result = self.writer.immediate_transaction(|connection| {
-            let mut capture = capture::Capture::new(connection, keys, metadata);
+        let result = self.write(|tx| {
+            let mut capture = capture::Capture::new(tx.connection, keys, metadata);
             let result = execute(&mut capture);
-            effects = capture.effects;
+            tx.effects.merge(capture.effects);
             result
         });
-        match result {
-            Ok(value) => {
-                keys.finish(capture::KeyTransaction::Commit);
-                self.pending_effects.merge(effects);
-                Ok(value)
-            }
-            Err(error) => {
-                keys.finish(capture::KeyTransaction::Rollback);
-                Err(error)
-            }
-        }
+        keys.finish(if result.is_ok() {
+            capture::KeyTransaction::Commit
+        } else {
+            capture::KeyTransaction::Rollback
+        });
+        result
     }
 
     pub(crate) fn rule_sets(&mut self) -> rules::RuleSets<'_> {
         rules::RuleSets::new(&mut self.writer)
     }
 
-    pub(crate) fn transaction<T>(
+    pub(crate) fn rule_transaction<T>(
         &mut self,
         execute: impl FnOnce(
             &mut rules::RuleSetTransaction<'_>,
         ) -> Result<T, rules::ExecuteRuleWritesError>,
     ) -> Result<T, rules::ExecuteRuleWritesError> {
-        self.writer.immediate_transaction(|connection| {
-            execute(&mut rules::RuleSetTransaction::new(connection))
-        })
+        self.write(|tx| execute(&mut rules::RuleSetTransaction::new(tx.connection)))
     }
 
     /// The caller must hold the data-directory lock for this store's lifetime.
@@ -559,11 +588,11 @@ impl Store {
     pub(crate) fn installation_id(&mut self, proposed: &str) -> Result<String, LoadDeviceIdError> {
         use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl};
         use schema::settings;
-        self.writer.immediate_transaction(|connection| {
+        self.write(|tx| {
             if let Some(value) = settings::table
                 .filter(settings::key.eq(versions::DEVICE_ID_KEY))
                 .select(settings::value)
-                .first::<String>(connection)
+                .first::<String>(tx.connection)
                 .optional()
                 .map_err(|source| LoadDeviceIdError::Database { source })?
             {
@@ -577,7 +606,7 @@ impl Store {
                     settings::key.eq(versions::DEVICE_ID_KEY),
                     settings::value.eq(value),
                 ))
-                .execute(connection)
+                .execute(tx.connection)
                 .map_err(|source| LoadDeviceIdError::Database { source })?;
             Ok(proposed.to_owned())
         })

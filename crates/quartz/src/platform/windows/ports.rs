@@ -57,16 +57,9 @@ impl PlatformPorts {
             instance_id: quartz_protocol::InstanceId(format!("{instance_id:?}")),
             foreground: Box::new(foreground::create_resolver),
             pipe: Box::new(|ports: PipePorts| {
-                let config = ipc::PipeServerConfig::current(
-                    ports.shutdown_timeout,
-                    ports.queries,
-                    ports.versions,
-                )?;
-                Ok(Box::new(ipc::PipeServer::start(
-                    config,
-                    ports.status,
-                    ports.ui,
-                )?))
+                let config =
+                    ipc::PipeServerConfig::current(ports.shutdown_timeout, ports.services)?;
+                Ok(Box::new(ipc::PipeServer::start(config)?))
             }),
             language: super::detect_ui_language(),
             locale: match locale::UserLocale::read() {

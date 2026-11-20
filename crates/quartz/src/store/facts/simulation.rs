@@ -37,34 +37,30 @@ impl Store {
     pub(crate) fn use_classification_workload(
         &mut self,
     ) -> Result<(), PrepareClassificationWorkloadError> {
-        let mut effects = TxEffects::default();
-        self.writer
-            .immediate_transaction::<_, PrepareClassificationWorkloadError, _>(|connection| {
-                for mapping in ClassificationApplication::ALL {
-                    let path = format!(r"c:\simulation\{}.exe", mapping.original);
-                    let replacement = format!(r"c:\simulation\{}.exe", mapping.replacement);
-                    let changed = diesel::update(
-                        applications::table
-                            .filter(applications::identity_key.eq(format!("exe:{path}"))),
-                    )
-                    .set((
-                        applications::identity_key.eq(format!("exe:{replacement}")),
-                        applications::exe_name.eq(format!("{}.exe", mapping.replacement)),
-                    ))
-                    .execute(connection)?;
-                    if changed != 1 {
-                        return Err(PrepareClassificationWorkloadError::MissingApplication {
-                            exe_name: format!("{}.exe", mapping.original),
-                        });
-                    }
+        self.write(|tx| {
+            for mapping in ClassificationApplication::ALL {
+                let path = format!(r"c:\simulation\{}.exe", mapping.original);
+                let replacement = format!(r"c:\simulation\{}.exe", mapping.replacement);
+                let changed = diesel::update(
+                    applications::table
+                        .filter(applications::identity_key.eq(format!("exe:{path}"))),
+                )
+                .set((
+                    applications::identity_key.eq(format!("exe:{replacement}")),
+                    applications::exe_name.eq(format!("{}.exe", mapping.replacement)),
+                ))
+                .execute(tx.connection)?;
+                if changed != 1 {
+                    return Err(PrepareClassificationWorkloadError::MissingApplication {
+                        exe_name: format!("{}.exe", mapping.original),
+                    });
                 }
-                effects
-                    .bump_metadata(connection)
-                    .map_err(|source| PrepareClassificationWorkloadError::Version { source })?;
-                Ok(())
-            })?;
-        self.pending_effects.merge(effects);
-        Ok(())
+            }
+            tx.effects
+                .bump_metadata(tx.connection)
+                .map_err(|source| PrepareClassificationWorkloadError::Version { source })?;
+            Ok(())
+        })
     }
 
     /// Migrates a caller-reserved, empty simulation file without production backups or locks.

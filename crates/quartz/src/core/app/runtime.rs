@@ -10,7 +10,7 @@ use crate::{
         sources::{ClockReader, ReadClockError},
     },
     data_directory::DataDirectory,
-    ipc::{PublishedStatus, QueueUiError, StatusPublisher, UiCommand, UiPort},
+    ipc::{QueueUiError, Services, StatusPublisher, UiCommand, UiPort},
     store::{
         self, Store,
         capture::{RunMetadata, WindowsSessionId},
@@ -22,13 +22,10 @@ use std::{error::Error, sync::Arc, time::Duration};
 
 pub(crate) type CallPlatformPortError = Box<dyn Error + Send + Sync>;
 
-/// Transport startup receives only the core's protocol and query ports.
+/// Transport startup receives the shutdown budget and application services.
 pub(crate) struct PipePorts {
     pub shutdown_timeout: Duration,
-    pub queries: crate::query::dispatch::QueryPort,
-    pub versions: crate::query::versions::VersionPort,
-    pub status: tokio::sync::watch::Receiver<PublishedStatus>,
-    pub ui: UiPort,
+    pub services: Services,
 }
 
 pub(crate) trait CorePipe: Send {
@@ -181,10 +178,12 @@ impl CoreRuntime {
         .map_err(|source| StartCoreError::StartWorkers { source })?;
         let pipe_ports = PipePorts {
             shutdown_timeout: SHUTDOWN_TIMEOUT,
-            queries: workers.queries.clone(),
-            versions: workers.versions.clone(),
-            status: status.subscribe(),
-            ui: ui_port,
+            services: Services {
+                queries: workers.queries.clone(),
+                versions: workers.versions.clone(),
+                status: status.subscribe(),
+                ui: ui_port,
+            },
         };
         let mut runtime = Self {
             workers: Some(workers),

@@ -12,6 +12,20 @@ pub(crate) use status::{PublishedStatus, StatusPublisher};
 
 use std::sync::Arc;
 
+/// Application services shared by transport, registry, and connection tasks.
+#[derive(Clone)]
+pub(crate) struct Services {
+    pub queries: crate::query::dispatch::QueryPort,
+    pub versions: crate::query::versions::VersionPort,
+    pub status: tokio::sync::watch::Receiver<PublishedStatus>,
+    pub ui: UiPort,
+}
+impl Services {
+    pub(crate) fn start_registry(&self) -> registry::RegistryHandle {
+        registry::RegistryHandle::start(self.status.clone(), self.versions.clone())
+    }
+}
+
 /// Bounded low-frequency UI command queue between I/O and main threads (01 §6).
 pub(crate) const MAIN_COMMAND_CAPACITY: usize = 64;
 

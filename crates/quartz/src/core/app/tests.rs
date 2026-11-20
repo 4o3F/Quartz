@@ -591,7 +591,7 @@ impl RuntimePortsFixture {
                 match start {
                     StartTestPipe::Succeed => {
                         // Exercise the UI port assembled by the runtime.
-                        (ports.ui)(crate::ipc::UiCommand::Open).expect("queue UI request");
+                        (ports.services.ui)(crate::ipc::UiCommand::Open).expect("queue UI request");
                         Ok(Box::new(TestPipe { log: pipe_log }))
                     }
                     StartTestPipe::Fail => Err(Box::new(std::io::Error::from(

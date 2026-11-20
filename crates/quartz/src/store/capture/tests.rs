@@ -1,5 +1,6 @@
 use super::*;
 use crate::persistence::{CheckpointCollection, Persistence, PersistenceState};
+use crate::store::enums::IntegerCode;
 use crate::store::identifiers::{ColumnName, TableName};
 use crate::store::{
     enums,
@@ -531,7 +532,22 @@ fn recovery_closes_each_row_at_its_confirmation_and_splits_midnight() {
         .set(capture_runs::confirmed_utc_ms.eq(i64::try_from(day + 1000).expect("time")))
         .execute(&mut fixture.store.writer)
         .expect("confirm run");
+    fixture.store.take_committed_versions();
     let opened = Persistence::open(&mut fixture.store, metadata()).expect("recover");
+    let effects = fixture.store.take_committed_versions();
+    assert_eq!(
+        effects
+            .facts
+            .iter()
+            .filter(|fact| fact.key.source.0 == enums::DataSource::Availability.code())
+            .map(|fact| fact.key.day.0)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    let stored = fixture.store.version_state().expect("recovered versions");
+    for fact in effects.facts {
+        assert_eq!(stored.days.get(&fact.key), Some(&fact.version));
+    }
     assert_eq!(opened.startup.next_run, RunId::new(2));
     let masks = availability_intervals::table
         .order(availability_intervals::id)
@@ -1212,8 +1228,22 @@ fn startup_decode_failure_is_classified_as_startup_and_rolls_back_recovery() {
         ))
         .execute(&mut fixture.store.writer)
         .expect("invalid saved deadline");
+    fixture.store.take_committed_versions();
+    let versions_before = fixture
+        .store
+        .version_state()
+        .expect("versions before recovery");
     let error =
         Persistence::open(&mut fixture.store, metadata()).expect_err("invalid startup value");
+    assert!(fixture.store.take_committed_versions().facts.is_empty());
+    assert_eq!(
+        fixture
+            .store
+            .version_state()
+            .expect("versions after rollback")
+            .days,
+        versions_before.days
+    );
     let RecoverCaptureError::Startup {
         source:
             recovery::LoadCaptureStartupError::Decode {

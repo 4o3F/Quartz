@@ -164,12 +164,16 @@ impl ConnectionRegistry {
     async fn run(mut self) {
         let mut publisher = VersionPublisher::Active;
         loop {
-            let previous_count = self.connections.len();
-            self.connections
-                .retain(|_, connection| !connection.outbox.is_closed());
-            if self.connections.len() != previous_count {
-                self.prune_days().await;
-            }
+            let mut removed_days = std::collections::BTreeSet::new();
+            self.connections.retain(|_, connection| {
+                if connection.outbox.is_closed() {
+                    removed_days.extend(connection.days.keys().copied());
+                    false
+                } else {
+                    true
+                }
+            });
+            self.prune_days(removed_days).await;
             tokio::select! {
                 message = self.receiver.recv() => match message { Some(message) => self.receive(message).await, None => return },
                 changed = self.status.changed() => {
@@ -222,8 +226,9 @@ impl ConnectionRegistry {
                 );
             }
             RegistryMessage::Unregister { id } => {
-                self.connections.remove(&id);
-                self.prune_days().await;
+                if let Some(connection) = self.connections.remove(&id) {
+                    self.prune_days(connection.days.into_keys().collect()).await;
+                }
             }
             RegistryMessage::Subscribe {
                 id,
@@ -351,12 +356,21 @@ impl ConnectionRegistry {
         }
         Ok(())
     }
-    async fn prune_days(&self) {
-        let dates = self
+    async fn prune_days(
+        &self,
+        removed_days: std::collections::BTreeSet<quartz_protocol::LocalDate>,
+    ) {
+        if removed_days.is_empty() {
+            return;
+        }
+        let dates: std::collections::BTreeSet<_> = self
             .connections
             .values()
             .flat_map(|connection| connection.days.keys().copied())
             .collect();
+        if removed_days.is_subset(&dates) {
+            return;
+        }
         if let Err(error) = self.versions.set_days(dates).await {
             tracing::warn!(?error, "could not prune day version subscriptions");
         }
@@ -377,6 +391,137 @@ impl ConnectionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Bounds the barrier when a regression waits for an unserviced database command.
+    const TEST_BARRIER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    #[test]
+    fn cli_unregister_and_closed_outbox_cleanup_do_not_request_day_versions() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let status =
+                crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("cli-prune".into()));
+            let mut fixture = crate::store::query::test_support::QueryFixture::new(1);
+            let snapshots =
+                quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+                    .expect("rules")
+                    .snapshots();
+            let channel =
+                crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
+                    .expect("versions");
+            let registry = RegistryHandle::start(status.subscribe(), channel.port);
+            let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
+            let cli = registry
+                .register(Role::Cli, writer.handle.clone())
+                .expect("register cli");
+            assert_eq!(
+                registry.outboxes().await.expect("register barrier").len(),
+                1
+            );
+            drop(cli);
+            let outboxes = tokio::time::timeout(TEST_BARRIER_TIMEOUT, registry.outboxes())
+                .await
+                .expect("unregister must not wait for the database")
+                .expect("unregister barrier");
+            assert!(outboxes.is_empty());
+            assert!(
+                channel.publisher.requests.is_empty(),
+                "CLI unregister must not call set_days"
+            );
+
+            let _cli = registry
+                .register(Role::Cli, writer.handle.clone())
+                .expect("register closed cli");
+            registry.outboxes().await.expect("register barrier");
+            writer.handle.close();
+            registry.outboxes().await.expect("wake cleanup");
+            let outboxes = tokio::time::timeout(TEST_BARRIER_TIMEOUT, registry.outboxes())
+                .await
+                .expect("cleanup must not wait for the database")
+                .expect("cleanup barrier");
+            assert!(outboxes.is_empty());
+            assert!(
+                channel.publisher.requests.is_empty(),
+                "closed CLI cleanup must not call set_days"
+            );
+        });
+    }
+
+    #[test]
+    fn removing_a_shared_day_only_prunes_after_its_last_subscriber_leaves() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(
+                "shared-prune".into(),
+            ));
+            let mut fixture = crate::store::query::test_support::QueryFixture::new(1);
+            let snapshots =
+                quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+                    .expect("rules")
+                    .snapshots();
+            let mut channel =
+                crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
+                    .expect("versions");
+            let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
+            let date = "2026-11-20".parse().expect("date");
+            let day = quartz_protocol::DayChanged {
+                date,
+                versions: quartz_protocol::QueryVersions("test".into()),
+            };
+            let (_sender, receiver) = mpsc::channel(REGISTRY_MAILBOX_CAPACITY);
+            let mut registry = ConnectionRegistry {
+                receiver,
+                status: status.subscribe(),
+                versions: channel.port,
+                connections: BTreeMap::new(),
+            };
+            for id in [ConnectionId(1), ConnectionId(2)] {
+                registry.connections.insert(
+                    id,
+                    Connection {
+                        role: Role::Ui,
+                        state: StateSubscription::Absent,
+                        days: BTreeMap::from([(date, day.clone())]),
+                        outbox: writer.handle.clone(),
+                    },
+                );
+            }
+            tokio::time::timeout(
+                TEST_BARRIER_TIMEOUT,
+                registry.receive(RegistryMessage::Unregister {
+                    id: ConnectionId(1),
+                }),
+            )
+            .await
+            .expect("shared day needs no database request");
+            assert!(channel.publisher.requests.is_empty());
+            let removal = tokio::spawn(async move {
+                registry
+                    .receive(RegistryMessage::Unregister {
+                        id: ConnectionId(2),
+                    })
+                    .await;
+            });
+            tokio::task::yield_now().await;
+            let command = channel
+                .publisher
+                .requests
+                .try_recv()
+                .expect("last subscriber prunes its date");
+            channel.publisher.receive(command);
+            tokio::time::timeout(TEST_BARRIER_TIMEOUT, removal)
+                .await
+                .expect("prune completes")
+                .expect("removal task");
+            assert!(channel.publisher.requests.is_empty());
+        });
+    }
+
     #[test]
     fn registry_registers_and_unregisters_connections() {
         let runtime = tokio::runtime::Builder::new_current_thread()

@@ -5,9 +5,13 @@ use crate::store::{
     enums::DataSource,
     rows::CaptureGapsRow,
     schema::{capture_gaps, settings},
+    versions::BumpVersionError,
 };
 use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl};
-use quartz_domain::capture::{CaptureGap, RunId, SchedulerKind, TimeRange, UtcInstant};
+use quartz_domain::{
+    capture::{CaptureGap, RunId, SchedulerKind, TimeRange, UtcInstant},
+    facts::QueryRange,
+};
 
 impl Capture<'_> {
     pub(super) fn record_gap(
@@ -39,8 +43,20 @@ impl Capture<'_> {
         source: DataSource,
         range: TimeRange,
     ) -> Result<(), ExecuteCaptureBatchError> {
+        let start = i64::try_from(range.start.utc).map_err(BumpVersionError::from)?;
+        let end = i64::try_from(range.end.utc).map_err(BumpVersionError::from)?;
+        range
+            .end
+            .utc
+            .duration_since(range.start.utc)
+            .map_err(BumpVersionError::from)?;
+        range
+            .end
+            .mono
+            .duration_since(range.start.mono)
+            .map_err(BumpVersionError::from)?;
         self.effects
-            .bump_days(self.connection, source, range)
+            .bump_days(self.connection, source, QueryRange { start, end })
             .map_err(ExecuteCaptureBatchError::from)
     }
     pub(super) fn set_deadline(

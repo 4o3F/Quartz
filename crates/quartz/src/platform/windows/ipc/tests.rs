@@ -41,18 +41,18 @@ impl Fixture {
                 .try_send(command)
                 .map_err(|_| crate::ipc::QueueUiError)
         });
-        let server = PipeServer::start(
-            server::PipeServerConfig {
-                shutdown_timeout: crate::core::app::SHUTDOWN_TIMEOUT,
-                owner: ProcessIdentity::current().expect("identity"),
-                name: name.clone(),
-                timeouts,
+        let server = PipeServer::start(server::PipeServerConfig {
+            shutdown_timeout: crate::core::app::SHUTDOWN_TIMEOUT,
+            owner: ProcessIdentity::current().expect("identity"),
+            name: name.clone(),
+            timeouts,
+            services: crate::ipc::Services {
                 queries: query_port.unwrap_or_else(|| database.port.clone()),
                 versions: database.versions.clone(),
+                status: status.subscribe(),
+                ui: port,
             },
-            status.subscribe(),
-            port,
-        )
+        })
         .expect("start test server");
         Self {
             server,
@@ -285,18 +285,18 @@ fn silent_client_does_not_block_another_client_or_shutdown() {
 fn first_instance_refuses_an_occupied_name() {
     let fixture = Fixture::new();
     let port: crate::ipc::UiPort = Arc::new(|_| Ok(()));
-    let result = PipeServer::start(
-        server::PipeServerConfig {
-            shutdown_timeout: crate::core::app::SHUTDOWN_TIMEOUT,
-            owner: ProcessIdentity::current().expect("identity"),
-            name: fixture.name.clone(),
-            timeouts: server::ConnectionTimeouts::default(),
+    let result = PipeServer::start(server::PipeServerConfig {
+        shutdown_timeout: crate::core::app::SHUTDOWN_TIMEOUT,
+        owner: ProcessIdentity::current().expect("identity"),
+        name: fixture.name.clone(),
+        timeouts: server::ConnectionTimeouts::default(),
+        services: crate::ipc::Services {
             queries: fixture.database.port.clone(),
             versions: fixture.database.versions.clone(),
+            status: fixture.status.subscribe(),
+            ui: port,
         },
-        fixture.status.subscribe(),
-        port,
-    );
+    });
     assert!(matches!(
         result,
         Err(StartPipeServerError::NameOccupied { .. })
@@ -762,18 +762,13 @@ fn core_runtime_with_fake_ports_flushes_shutdown_over_test_pipe() {
             instance_id: quartz_protocol::InstanceId("runtime-test-instance-guid".into()),
             foreground: Box::new(|| Ok(Box::new(TestResolver))),
             pipe: Box::new(move |ports| {
-                Ok(Box::new(PipeServer::start(
-                    server::PipeServerConfig {
-                        shutdown_timeout: ports.shutdown_timeout,
-                        owner: ProcessIdentity::current()?,
-                        name: server_name,
-                        timeouts: server::ConnectionTimeouts::default(),
-                        queries: ports.queries,
-                        versions: ports.versions,
-                    },
-                    ports.status,
-                    ports.ui,
-                )?))
+                Ok(Box::new(PipeServer::start(server::PipeServerConfig {
+                    shutdown_timeout: ports.shutdown_timeout,
+                    owner: ProcessIdentity::current()?,
+                    name: server_name,
+                    timeouts: server::ConnectionTimeouts::default(),
+                    services: ports.services,
+                })?))
             }),
             language: quartz_i18n::Language::English,
             locale: None,

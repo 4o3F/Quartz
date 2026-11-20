@@ -209,12 +209,15 @@ impl DatabaseLoop {
         if !self.persistence.is_due(now) {
             return Ok(DrainProgress::Waiting);
         }
+        self.flush_and_publish(now)?;
+        Ok(DrainProgress::Drained)
+    }
+    fn flush_and_publish(&mut self, now: Timestamp) -> Result<(), RunDatabaseLoopError> {
         let checkpoints = self.checkpoint_collection();
         let result = self.persistence.flush(&mut self.store, now, checkpoints);
         Self::ensure_progress(&result)
             .map_err(|source| RunDatabaseLoopError::Stalled { source })?;
-        self.publish(result)?;
-        Ok(DrainProgress::Drained)
+        self.publish(result)
     }
     fn ensure_progress(result: &PersistenceResult) -> Result<(), FlushStalledError> {
         match (result.state(), result.progress) {
@@ -284,11 +287,7 @@ impl DatabaseLoop {
                 let now = self
                     .now()
                     .map_err(|source| RunDatabaseLoopError::Clock { source })?;
-                let checkpoints = self.checkpoint_collection();
-                let result = self.persistence.flush(&mut self.store, now, checkpoints);
-                Self::ensure_progress(&result)
-                    .map_err(|source| RunDatabaseLoopError::Stalled { source })?;
-                self.publish(result)?;
+                self.flush_and_publish(now)?;
             }
         }
         Ok(DatabaseProgress::Continue)

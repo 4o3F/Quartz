@@ -6,7 +6,7 @@ use super::{
     win32_error::Win32ErrorCode,
 };
 pub(crate) use crate::ipc::connection::ConnectionTimeouts;
-use crate::ipc::{ConnectionSession, UiPort, connection::Connection, registry::RegistryHandle};
+use crate::ipc::{ConnectionSession, Services, connection::Connection, registry::RegistryHandle};
 use crossbeam_channel::{Receiver, bounded};
 use snafu::{ResultExt, Snafu};
 use std::{
@@ -19,7 +19,7 @@ use std::{
 use tokio::{
     io::split,
     net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions},
-    sync::{mpsc, oneshot, watch},
+    sync::{mpsc, oneshot},
     task::JoinSet,
 };
 use windows::Win32::{
@@ -61,15 +61,13 @@ pub(crate) struct PipeServerConfig {
     pub(crate) owner: ProcessIdentity,
     pub(crate) name: PipeName,
     pub(crate) timeouts: ConnectionTimeouts,
-    pub(crate) queries: crate::query::dispatch::QueryPort,
-    pub(crate) versions: crate::query::versions::VersionPort,
+    pub(crate) services: Services,
 }
 
 impl PipeServerConfig {
     pub(crate) fn current(
         shutdown_timeout: Duration,
-        queries: crate::query::dispatch::QueryPort,
-        versions: crate::query::versions::VersionPort,
+        services: Services,
     ) -> Result<Self, StartPipeServerError> {
         let owner = ProcessIdentity::current().context(start_pipe_server_error::IdentitySnafu)?;
         Ok(Self {
@@ -77,8 +75,7 @@ impl PipeServerConfig {
             name: owner.pipe_name(),
             owner,
             timeouts: ConnectionTimeouts::default(),
-            queries,
-            versions,
+            services,
         })
     }
 }
@@ -114,11 +111,7 @@ pub(crate) struct PipeServer {
     thread: Option<JoinHandle<()>>,
 }
 impl PipeServer {
-    pub(crate) fn start(
-        config: PipeServerConfig,
-        status: watch::Receiver<crate::ipc::PublishedStatus>,
-        ui: UiPort,
-    ) -> Result<Self, StartPipeServerError> {
+    pub(crate) fn start(config: PipeServerConfig) -> Result<Self, StartPipeServerError> {
         let (stop, stopping) = oneshot::channel();
         let (control, controls) = mpsc::channel(CONTROL_MAILBOX_CAPACITY);
         let (ready, startup) = bounded(LIFECYCLE_CAPACITY);
@@ -129,10 +122,7 @@ impl PipeServer {
                 owner: config.owner,
             }),
             timeouts: config.timeouts,
-            queries: config.queries,
-            versions: config.versions,
-            status,
-            ui,
+            services: config.services,
             stopping,
             controls,
         };
@@ -253,12 +243,9 @@ impl PipeListener {
     }
 }
 struct IoThread {
-    queries: crate::query::dispatch::QueryPort,
-    versions: crate::query::versions::VersionPort,
+    services: Services,
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
-    status: watch::Receiver<crate::ipc::PublishedStatus>,
-    ui: UiPort,
     stopping: oneshot::Receiver<()>,
     controls: mpsc::Receiver<ServerMessage>,
 }
@@ -289,15 +276,13 @@ impl IoThread {
     fn slot(&self, registry: &RegistryHandle) -> Slot {
         Slot {
             registry: registry.clone(),
-            queries: self.queries.clone(),
+            services: self.services.clone(),
             listener: Arc::clone(&self.listener),
             timeouts: self.timeouts,
-            status: self.status.clone(),
-            ui: Arc::clone(&self.ui),
         }
     }
     async fn serve(mut self, pipes: Vec<NamedPipeServer>) {
-        let registry = RegistryHandle::start(self.status.clone(), self.versions.clone());
+        let registry = self.services.start_registry();
         let mut slots = JoinSet::new();
         for pipe in pipes {
             slots.spawn(self.slot(&registry).run(Some(pipe)));
@@ -390,12 +375,10 @@ impl SlotBackoff {
 }
 
 struct Slot {
-    queries: crate::query::dispatch::QueryPort,
+    services: Services,
     registry: RegistryHandle,
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
-    status: watch::Receiver<crate::ipc::PublishedStatus>,
-    ui: UiPort,
 }
 impl Slot {
     async fn run(self, mut initial: Option<NamedPipeServer>) {
@@ -468,11 +451,9 @@ impl Slot {
                 let mut session = ConnectionSession::new(allowed);
                 let (read, write) = split(pipe);
                 if let Err(error) = (Connection {
-                    queries: self.queries.clone(),
+                    services: self.services.clone(),
                     registry: self.registry.clone(),
                     timeouts: self.timeouts,
-                    status: self.status.clone(),
-                    ui: Arc::clone(&self.ui),
                 })
                 .run(read, write, &mut session, hello_deadline)
                 .await
@@ -540,8 +521,13 @@ mod tests {
             _queries: channel.receiver,
             _database: database,
             slot: Slot {
-                registry: RegistryHandle::start(publisher.subscribe(), received),
-                queries: channel.port,
+                registry: RegistryHandle::start(publisher.subscribe(), received.clone()),
+                services: Services {
+                    queries: channel.port,
+                    versions: received,
+                    status: publisher.subscribe(),
+                    ui: Arc::new(|_| Ok(())),
+                },
                 listener: Arc::new(PipeListener {
                     name: PipeName::for_test(suffix),
                     owner: ProcessIdentity::current().expect("test identity"),
@@ -550,8 +536,6 @@ mod tests {
                     hello: ConnectionTimeouts::default().hello,
                     close_flush: TEST_CLOSE_TIMEOUT,
                 },
-                status: publisher.subscribe(),
-                ui: Arc::new(|_| Ok(())),
             },
         }
     }

@@ -1,9 +1,9 @@
 //! Pure connection state and request decisions, independent of named pipes.
 
 use quartz_protocol::{
-    AcceptedBody, CoreStatusRequest, CoreStatusResponse, Envelope, ErrorKind, Hello, HelloResponse,
-    Op, PROTOCOL_VERSION, ProtoRange, ProtocolError, RequestId, Response, ResponseOutcome, Role,
-    Subscribe, SubscribeResponse, UiFirstFrameRequest, UiOpenRequest,
+    CoreStatusRequest, CoreStatusResponse, Envelope, ErrorKind, Hello, HelloResponse, Op,
+    PROTOCOL_VERSION, ProtoRange, ProtocolError, RequestId, Response, ResponseOutcome, Role,
+    Subscribe, UiFirstFrameRequest, UiOpenRequest,
 };
 
 /// Roles permitted by the authenticated executable path.
@@ -37,54 +37,53 @@ pub(crate) struct ConnectionSession {
     allowed: AllowedRoles,
 }
 #[derive(Debug)]
-pub(crate) struct Decision {
-    pub response: Response,
-    pub command: Option<UiCommand>,
-    pub subscription: Option<Subscribe>,
-    pub query: Option<crate::query::QueryRequest>,
+pub(crate) enum Action {
+    Reply(Response),
+    Ui {
+        id: RequestId,
+        command: UiCommand,
+    },
+    Subscribe {
+        id: RequestId,
+        subscription: Subscribe,
+    },
+    Query {
+        id: RequestId,
+        request: crate::query::QueryRequest,
+    },
 }
-impl Decision {
+impl Action {
     fn from_query(
         id: RequestId,
         query: Result<crate::query::QueryRequest, serde_json::Error>,
     ) -> Self {
         match query {
-            Ok(query) => {
-                let mut decision = Self::success(id, serde_json::json!({}));
-                decision.query = Some(query);
-                decision
-            }
+            Ok(request) => Self::Query { id, request },
             Err(_) => Self::error(Some(id), ErrorKind::BadRequest),
         }
     }
 
-    pub(crate) fn error(id: Option<RequestId>, kind: ErrorKind) -> Self {
-        Self {
-            response: Response {
-                id,
-                outcome: ResponseOutcome::Err {
-                    error: ProtocolError::new(kind),
-                },
-            },
-            command: None,
-            subscription: None,
-            query: None,
+    fn error(id: Option<RequestId>, kind: ErrorKind) -> Self {
+        Self::Reply(Self::error_response(id, ProtocolError::new(kind)))
+    }
+    pub(super) fn error_response(id: Option<RequestId>, error: ProtocolError) -> Response {
+        Response {
+            id,
+            outcome: ResponseOutcome::Err { error },
         }
     }
-    pub(crate) fn success(id: RequestId, body: impl serde::Serialize) -> Self {
+    fn success(id: RequestId, body: impl serde::Serialize) -> Self {
+        Self::Reply(Self::success_response(id, body))
+    }
+    pub(super) fn success_response(id: RequestId, body: impl serde::Serialize) -> Response {
         match serde_json::to_value(body) {
-            Ok(body) => Self {
-                response: Response {
-                    id: Some(id),
-                    outcome: ResponseOutcome::Ok { body },
-                },
-                command: None,
-                subscription: None,
-                query: None,
+            Ok(body) => Response {
+                id: Some(id),
+                outcome: ResponseOutcome::Ok { body },
             },
             Err(error) => {
                 tracing::error!(%error, "could not encode IPC response body");
-                Self::error(Some(id), ErrorKind::Internal)
+                Self::error_response(Some(id), ProtocolError::new(ErrorKind::Internal))
             }
         }
     }
@@ -108,11 +107,11 @@ impl ConnectionSession {
     pub(crate) fn closing(&self) -> bool {
         matches!(self.state, State::Closing)
     }
-    pub(crate) fn fail(&mut self, kind: ErrorKind) -> Decision {
+    pub(crate) fn fail(&mut self, kind: ErrorKind) -> Action {
         self.state = State::Closing;
-        Decision::error(None, kind)
+        Action::error(None, kind)
     }
-    pub(crate) fn receive(&mut self, envelope: Envelope, status: &CoreStatusResponse) -> Decision {
+    pub(crate) fn receive(&mut self, envelope: Envelope, status: &CoreStatusResponse) -> Action {
         let Envelope::Request(request) = envelope else {
             return self.fail(ErrorKind::BadRequest);
         };
@@ -121,24 +120,24 @@ impl ConnectionSession {
             State::HelloPending => {
                 self.state = State::Closing;
                 if request.op != Op::Hello {
-                    return Decision::error(Some(id), ErrorKind::HandshakeRequired);
+                    return Action::error(Some(id), ErrorKind::HandshakeRequired);
                 }
                 let Ok(hello) = serde_json::from_value::<Hello>(request.body) else {
-                    return Decision::error(Some(id), ErrorKind::BadRequest);
+                    return Action::error(Some(id), ErrorKind::BadRequest);
                 };
                 let supported = ProtoRange::new(PROTOCOL_VERSION, PROTOCOL_VERSION)
                     .expect("single protocol version is valid");
                 let proto = match supported.negotiate(hello.proto) {
                     Ok(proto) => proto,
-                    Err(error) => return Decision::error(Some(id), error.into()),
+                    Err(error) => return Action::error(Some(id), error.into()),
                 };
                 let role = hello.role.role();
                 // TODO(M5): Authenticate registered host browser streams and enable host runtime.
                 if !self.allowed.permits(role) || role == Role::Host {
-                    return Decision::error(Some(id), ErrorKind::Forbidden);
+                    return Action::error(Some(id), ErrorKind::Forbidden);
                 }
                 self.state = State::Ready(role);
-                Decision::success(
+                Action::success(
                     id,
                     HelloResponse {
                         proto,
@@ -150,45 +149,41 @@ impl ConnectionSession {
             }
             State::Ready(role) => {
                 if request.op == Op::Unknown {
-                    return Decision::error(Some(id), ErrorKind::UnknownOp);
+                    return Action::error(Some(id), ErrorKind::UnknownOp);
                 }
                 if role.authorize(request.op).is_err() {
-                    return Decision::error(Some(id), ErrorKind::Forbidden);
+                    return Action::error(Some(id), ErrorKind::Forbidden);
                 }
                 match request.op {
                     Op::CoreStatus => {
                         if serde_json::from_value::<CoreStatusRequest>(request.body).is_err() {
-                            return Decision::error(Some(id), ErrorKind::BadRequest);
+                            return Action::error(Some(id), ErrorKind::BadRequest);
                         }
-                        Decision::success(id, status)
+                        Action::success(id, status)
                     }
                     Op::UiOpen | Op::UiFirstFrame => {
                         let command = if request.op == Op::UiOpen {
                             if serde_json::from_value::<UiOpenRequest>(request.body).is_err() {
-                                return Decision::error(Some(id), ErrorKind::BadRequest);
+                                return Action::error(Some(id), ErrorKind::BadRequest);
                             }
                             UiCommand::Open
                         } else {
                             if serde_json::from_value::<UiFirstFrameRequest>(request.body).is_err()
                             {
-                                return Decision::error(Some(id), ErrorKind::BadRequest);
+                                return Action::error(Some(id), ErrorKind::BadRequest);
                             }
                             UiCommand::FirstFrame
                         };
-                        let mut decision = Decision::success(id, AcceptedBody);
-                        decision.command = Some(command);
-                        decision
+                        Action::Ui { id, command }
                     }
                     Op::Subscribe => {
                         let Ok(subscription) = serde_json::from_value::<Subscribe>(request.body)
                         else {
-                            return Decision::error(Some(id), ErrorKind::BadRequest);
+                            return Action::error(Some(id), ErrorKind::BadRequest);
                         };
-                        let mut decision = Decision::success(id, SubscribeResponse {});
-                        decision.subscription = Some(subscription);
-                        decision
+                        Action::Subscribe { id, subscription }
                     }
-                    Op::QueryDay | Op::QueryTimeline => Decision::from_query(
+                    Op::QueryDay | Op::QueryTimeline => Action::from_query(
                         id,
                         crate::query::QueryRequest::decode(request.op, request.body),
                     ),
@@ -239,10 +234,10 @@ impl ConnectionSession {
                     | Op::MaintenanceBackup
                     | Op::MaintenanceCompact
                     | Op::PrivacyModeSet
-                    | Op::Unknown => Decision::error(Some(id), ErrorKind::NotImplemented),
+                    | Op::Unknown => Action::error(Some(id), ErrorKind::NotImplemented),
                 }
             }
-            State::Closing => Decision::error(Some(id), ErrorKind::BadRequest),
+            State::Closing => Action::error(Some(id), ErrorKind::BadRequest),
         }
     }
 }
@@ -251,6 +246,14 @@ impl ConnectionSession {
 mod tests {
     use super::*;
     use quartz_protocol::Topic;
+    impl Action {
+        fn reply(self) -> Response {
+            let Self::Reply(response) = self else {
+                panic!("expected reply action")
+            };
+            response
+        }
+    }
     fn request(id: u64, op: Op, body: serde_json::Value) -> Envelope {
         Envelope::Request(quartz_protocol::Request {
             id: RequestId(id),
@@ -271,7 +274,7 @@ mod tests {
                     request(7, Op::CoreStatus, serde_json::json!({})),
                     &status.status
                 )
-                .response
+                .reply()
                 .outcome,
             ResponseOutcome::Err {
                 error: ProtocolError::new(ErrorKind::HandshakeRequired)
@@ -284,25 +287,26 @@ mod tests {
         let response = session.receive(request(1, Op::Hello, hello), &status.status);
         assert!(!session.closing());
         assert!(matches!(
-            response.response.outcome,
+            response.reply().outcome,
             ResponseOutcome::Ok { .. }
         ));
-        assert_eq!(
-            session
-                .receive(
-                    request(2, Op::UiOpen, serde_json::json!({})),
-                    &status.status
-                )
-                .command,
-            Some(UiCommand::Open)
-        );
+        assert!(matches!(
+            session.receive(
+                request(2, Op::UiOpen, serde_json::json!({})),
+                &status.status
+            ),
+            Action::Ui {
+                id: RequestId(2),
+                command: UiCommand::Open
+            }
+        ));
         assert_eq!(
             session
                 .receive(
                     request(3, Op::UiFirstFrame, serde_json::json!({})),
                     &status.status
                 )
-                .response
+                .reply()
                 .outcome,
             ResponseOutcome::Err {
                 error: ProtocolError::new(ErrorKind::Forbidden)
@@ -314,7 +318,7 @@ mod tests {
                     request(4, Op::CoreStatus, serde_json::json!(null)),
                     &status.status
                 )
-                .response
+                .reply()
                 .outcome,
             ResponseOutcome::Err {
                 error: ProtocolError::new(ErrorKind::BadRequest)
@@ -333,7 +337,7 @@ mod tests {
             "epoch":1,"proto":{"min":1,"max":1},"browser":"edge","extension_id":"test"}});
         let decision = session.receive(request(1, Op::Hello, hello), &receiver.borrow().status);
         assert_eq!(
-            decision.response.outcome,
+            decision.reply().outcome,
             ResponseOutcome::Err {
                 error: ProtocolError::new(ErrorKind::Forbidden)
             }
@@ -362,9 +366,8 @@ mod tests {
             serde_json::json!({"topics":null}),
         ] {
             let decision = session.receive(request(2, Op::Subscribe, body), status);
-            assert!(decision.subscription.is_none());
             assert!(matches!(
-                decision.response.outcome,
+                decision.reply().outcome,
                 ResponseOutcome::Err {
                     error: ProtocolError {
                         kind: ErrorKind::BadRequest,
@@ -381,10 +384,12 @@ mod tests {
             ),
             status,
         );
-        assert!(rejected.subscription.is_some());
         assert!(matches!(
-            rejected.response.outcome,
-            ResponseOutcome::Ok { .. }
+            rejected,
+            Action::Subscribe {
+                id: RequestId(3),
+                ..
+            }
         ));
         let accepted = session.receive(
             request(
@@ -394,15 +399,10 @@ mod tests {
             ),
             status,
         );
-        assert_eq!(
-            accepted.subscription.expect("valid subscription").topics,
-            vec![Topic::State, Topic::Control]
-        );
-        assert_eq!(
-            accepted.response.outcome,
-            ResponseOutcome::Ok {
-                body: serde_json::json!({})
-            }
-        );
+        let Action::Subscribe { id, subscription } = accepted else {
+            panic!("expected subscription action")
+        };
+        assert_eq!(id, RequestId(4));
+        assert_eq!(subscription.topics, vec![Topic::State, Topic::Control]);
     }
 }

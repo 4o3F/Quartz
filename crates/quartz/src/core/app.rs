@@ -73,10 +73,7 @@ pub(crate) enum Worker {
 #[derive(Debug)]
 enum DatabaseCommand {
     Drain,
-    #[expect(
-        dead_code,
-        reason = "rule-editing operations connect the registry port to IPC in M4"
-    )]
+    #[expect(dead_code, reason = "M4 rule editing over IPC")]
     Registry {
         command: Box<RegistryCommand>,
         reply: Sender<Result<RegistryResult, RunRegistryCommandError>>,
