@@ -6,7 +6,8 @@ use crate::store::{
 };
 use quartz_domain::rules::registry::{
     CommitRuleDecisionError, CreateRuleRegistryError, DecideRegistryCommandError, DecisionParts,
-    RegistryCommand, RegistrySuccess, RuleRegistry, RuleWarning, RulesChanged, SnapshotCell,
+    RegistryCommand, RegistrySuccess, ResetSnapshotEpochError, RuleRegistry, RuleWarning,
+    RulesChanged, SnapshotCell,
 };
 use quartz_domain::rules::{self, ParseContext, ParseRuleSetError, RuleOrigin, RuleSet};
 use snafu::{ResultExt, Snafu};
@@ -16,12 +17,10 @@ use snafu::{ResultExt, Snafu};
 pub(crate) enum OpenRegistryShellError {
     #[snafu(display("could not read persisted registry state"))]
     Load { source: LoadRulesError },
-    #[snafu(display("could not seed builtin categories"))]
-    Seed {
-        source: crate::store::categories::SeedCategoriesError,
-    },
     #[snafu(display("could not initialize registry core"))]
     Create { source: CreateRuleRegistryError },
+    #[snafu(display("could not finish registry startup"))]
+    FinishStartup { source: ResetSnapshotEpochError },
     #[snafu(display("embedded rules failed validation"))]
     Parse { source: ParseRuleSetError },
     #[snafu(display("could not install embedded rule revision"))]
@@ -45,6 +44,26 @@ pub(crate) struct RegistryResult {
     pub event: Option<RulesChanged>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BuiltinRuleSet<'source> {
+    file: &'source str,
+    source: &'source str,
+    revision: u32,
+}
+
+const BUILTIN_RULE_SETS: &[BuiltinRuleSet<'static>] = &[
+    BuiltinRuleSet {
+        file: "builtin-privacy.toml",
+        source: rules::BUILTIN_PRIVACY,
+        revision: rules::BUILTIN_PRIVACY_REVISION,
+    },
+    BuiltinRuleSet {
+        file: "builtin-classification.toml",
+        source: rules::BUILTIN_CLASSIFICATION,
+        revision: rules::BUILTIN_CLASSIFICATION_REVISION,
+    },
+];
+
 /// Owns effects; command interpretation and publication remain in quartz-domain.
 #[derive(Debug)]
 pub(crate) struct RegistryShell {
@@ -55,64 +74,41 @@ impl RegistryShell {
         store: &mut Store,
         now: quartz_domain::capture::UtcInstant,
     ) -> Result<Self, OpenRegistryShellError> {
-        Self::open_with_builtin(
-            store,
-            now,
-            rules::BUILTIN_PRIVACY,
-            rules::BUILTIN_PRIVACY_REVISION,
-        )
+        Self::open_with_builtins(store, now, BUILTIN_RULE_SETS)
     }
-    fn open_with_builtin(
+    fn open_with_builtins(
         store: &mut Store,
         now: quartz_domain::capture::UtcInstant,
-        source: &str,
-        revision: u32,
+        builtins: &[BuiltinRuleSet<'_>],
     ) -> Result<Self, OpenRegistryShellError> {
-        store.seed_categories().context(open_error::SeedSnafu)?;
         let state = store.rule_sets().load().context(open_error::LoadSnafu)?;
         let registry = RuleRegistry::from_state(state).context(open_error::CreateSnafu)?;
-        let builtin = RuleSet::parse(
-            "builtin-privacy.toml",
-            source,
-            ParseContext {
-                origin: RuleOrigin::Builtin,
-                references: &registry.state().references,
-            },
-        )
-        .context(open_error::ParseSnafu)?;
         let mut shell = Self { registry };
-        shell
-            .run(
-                store,
-                now,
-                RegistryCommand::InstallBuiltin {
-                    set: builtin,
-                    revision,
+        for builtin in builtins {
+            let set = RuleSet::parse(
+                builtin.file,
+                builtin.source,
+                ParseContext {
+                    origin: RuleOrigin::Builtin,
+                    references: &shell.registry.state().references,
                 },
             )
-            .context(open_error::UpgradeSnafu)?;
-        let classification = RuleSet::parse(
-            "builtin-classification.toml",
-            rules::BUILTIN_CLASSIFICATION,
-            ParseContext {
-                origin: RuleOrigin::Builtin,
-                references: &shell.registry.state().references,
-            },
-        )
-        .context(open_error::ParseSnafu)?;
-        shell
-            .run(
-                store,
-                now,
-                RegistryCommand::InstallBuiltin {
-                    set: classification,
-                    revision: rules::BUILTIN_CLASSIFICATION_REVISION,
-                },
-            )
-            .context(open_error::UpgradeSnafu)?;
-        // Startup exposes epoch zero only after embedded upgrades have committed.
-        shell.registry = RuleRegistry::from_state(shell.registry.state().clone())
-            .context(open_error::CreateSnafu)?;
+            .context(open_error::ParseSnafu)?;
+            shell
+                .run(
+                    store,
+                    now,
+                    RegistryCommand::InstallBuiltin {
+                        set,
+                        revision: builtin.revision,
+                    },
+                )
+                .context(open_error::UpgradeSnafu)?;
+        }
+        shell.registry = shell
+            .registry
+            .finish_startup()
+            .context(open_error::FinishStartupSnafu)?;
         shell.log_warnings();
         Ok(shell)
     }
@@ -180,6 +176,28 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn startup_installs_only_the_supplied_builtin_table() {
+        let directory = tempfile::tempdir().expect("isolated rule database");
+        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
+        store.seed_categories().expect("builtin categories");
+        let shell = RegistryShell::open_with_builtins(
+            &mut store,
+            quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+            &BUILTIN_RULE_SETS[1..],
+        )
+        .expect("classification-only table");
+        let classification_key = "builtin.classification"
+            .parse()
+            .expect("classification key");
+        assert_eq!(shell.core().state().sets.len(), 1);
+        assert!(shell.core().state().sets.contains_key(&classification_key));
+        assert_eq!(shell.snapshots().load().epoch().get(), 0);
+        let stored = store.rule_sets().load().expect("persisted builtin table");
+        assert_eq!(stored.sets.len(), 1);
+        assert!(stored.sets.contains_key(&classification_key));
+    }
+
+    #[test]
     fn startup_installs_and_upgrades_builtin_before_publishing_and_keeps_user_overlay() {
         let directory = tempfile::tempdir().expect("isolated rule database");
         let data = DataDirectory::new(directory.path());
@@ -193,10 +211,21 @@ mod tests {
         let old_revision = rules::BUILTIN_PRIVACY_REVISION;
         let next_revision = old_revision.checked_add(1).expect("next builtin revision");
         let mut store = Store::open(&data).expect("store");
+        store.seed_categories().expect("builtin categories");
         let now = quartz_domain::capture::UtcInstant::try_from(0).expect("UTC");
-        let mut shell =
-            RegistryShell::open_with_builtin(&mut store, now, &old_source, old_revision)
-                .expect("initial builtin installation");
+        let mut shell = RegistryShell::open_with_builtins(
+            &mut store,
+            now,
+            &[
+                BuiltinRuleSet {
+                    source: &old_source,
+                    revision: old_revision,
+                    ..BUILTIN_RULE_SETS[0]
+                },
+                BUILTIN_RULE_SETS[1],
+            ],
+        )
+        .expect("initial builtin installation");
         assert_eq!(shell.snapshots().load().epoch().get(), 0);
         let builtin_key = "builtin.privacy".parse().expect("builtin key");
         assert_eq!(shell.core().state().sets[&builtin_key].current.version, 1);
@@ -225,11 +254,16 @@ when=[{field='app.exe_name',op='equals',value='quartz-test.exe'}]
             )
             .expect("persist user overlay");
         drop(shell);
-        let upgraded = RegistryShell::open_with_builtin(
+        let upgraded = RegistryShell::open_with_builtins(
             &mut Store::open(&data).expect("reopen store"),
             now,
-            rules::BUILTIN_PRIVACY,
-            next_revision,
+            &[
+                BuiltinRuleSet {
+                    revision: next_revision,
+                    ..BUILTIN_RULE_SETS[0]
+                },
+                BUILTIN_RULE_SETS[1],
+            ],
         )
         .expect("startup builtin upgrade");
         let snapshot = upgraded.snapshots().load();
@@ -260,11 +294,16 @@ when=[{field='app.exe_name',op='equals',value='quartz-test.exe'}]
             Action::Drop
         );
         drop(upgraded);
-        let reopened = RegistryShell::open_with_builtin(
+        let reopened = RegistryShell::open_with_builtins(
             &mut Store::open(&data).expect("second reopen"),
             now,
-            rules::BUILTIN_PRIVACY,
-            next_revision,
+            &[
+                BuiltinRuleSet {
+                    revision: next_revision,
+                    ..BUILTIN_RULE_SETS[0]
+                },
+                BUILTIN_RULE_SETS[1],
+            ],
         )
         .expect("idempotent startup");
         assert_eq!(reopened.snapshots().load().hashes(), snapshot.hashes());

@@ -6,8 +6,8 @@ mod state;
 
 pub use epoch::SnapshotEpoch;
 pub use snapshot::{
-    BuildRuleSnapshotError, RuleSnapshot, RuleWarning, RulesChanged, SiblingRevision, SnapshotCell,
-    SnapshotHashes,
+    BuildRuleSnapshotError, ResetSnapshotEpochError, RuleSnapshot, RuleWarning, RulesChanged,
+    SiblingRevision, SnapshotCell, SnapshotHashes,
 };
 pub use state::{
     ExpectedRuleVersion, RegistryState, RuleSetDeletion, RuleSetState, RuleSetUpdate,
@@ -374,6 +374,16 @@ impl RuleRegistry {
         Ok(Self {
             state,
             snapshots: SnapshotCell::new(snapshot),
+        })
+    }
+    /// Starts publication at epoch zero using the snapshot compiled during builtin installation.
+    ///
+    /// # Errors
+    /// Rejects startup completion if any snapshot or read handle is still retained.
+    pub fn finish_startup(self) -> Result<Self, ResetSnapshotEpochError> {
+        Ok(Self {
+            state: self.state,
+            snapshots: self.snapshots.into_initial()?,
         })
     }
     /// Borrows all current and retained state without loading any external data.

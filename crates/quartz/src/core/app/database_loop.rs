@@ -427,6 +427,7 @@ mod tests {
             let (_, writes) = bounded(CONTROL_CAPACITY);
             let (feedback, received_feedback) = bounded(CONTROL_CAPACITY);
             let (sender, commands) = bounded(CONTROL_CAPACITY);
+            store.seed_categories().expect("builtin categories");
             let registry = RegistryShell::open(&mut store, UtcInstant::try_from(0).expect("UTC"))
                 .expect("registry");
             let crate::query::versions::VersionChannel {

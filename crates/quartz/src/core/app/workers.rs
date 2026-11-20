@@ -33,6 +33,10 @@ use std::{
 pub(crate) enum StartWorkersError {
     #[snafu(display("could not recover capture"))]
     Recover { source: RecoverCaptureError },
+    #[snafu(display("could not seed builtin categories"))]
+    SeedCategories {
+        source: crate::store::categories::SeedCategoriesError,
+    },
     #[snafu(display("could not open registry"))]
     Registry { source: OpenRegistryShellError },
     #[snafu(display("could not initialize query versions"))]
@@ -180,6 +184,9 @@ impl Startup {
         let rule_time = clock
             .read()
             .map_err(|source| StartWorkersError::Clock { source })?;
+        store
+            .seed_categories()
+            .map_err(|source| StartWorkersError::SeedCategories { source })?;
         let registry = RegistryShell::open(&mut store, rule_time.utc)
             .map_err(|source| StartWorkersError::Registry { source })?;
         let at = clock

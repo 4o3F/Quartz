@@ -205,6 +205,11 @@ pub enum BuildRuleSnapshotError {
     },
 }
 
+/// Startup retained a snapshot or a read handle before publication began.
+#[derive(Debug, Snafu)]
+#[snafu(display("could not reset snapshot epoch while readers are retained"))]
+pub struct ResetSnapshotEpochError;
+
 /// Cloneable read handle. Only this module can publish a replacement.
 #[derive(Debug, Clone)]
 pub struct SnapshotCell(Arc<ArcSwap<RuleSnapshot>>);
@@ -215,6 +220,13 @@ impl SnapshotCell {
     /// Atomically retains one immutable snapshot for a complete work unit.
     pub fn load(&self) -> Arc<RuleSnapshot> {
         self.0.load_full()
+    }
+    pub(super) fn into_initial(self) -> Result<Self, ResetSnapshotEpochError> {
+        let snapshots = Arc::try_unwrap(self.0).map_err(|_| ResetSnapshotEpochError)?;
+        let mut snapshot =
+            Arc::try_unwrap(snapshots.into_inner()).map_err(|_| ResetSnapshotEpochError)?;
+        snapshot.epoch = SnapshotEpoch::initial();
+        Ok(Self::new(snapshot))
     }
     pub(super) fn publish(&self, snapshot: RuleSnapshot) {
         self.0.store(Arc::new(snapshot));

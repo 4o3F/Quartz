@@ -606,3 +606,49 @@ fn editing_an_overlay_still_requires_valid_targets_after_an_upstream_deletion() 
         matches!(decision.reply(), Err(DecideRegistryCommandError::Snapshot { source: BuildRuleSnapshotError::Tree { diagnostics } }) if diagnostics.iter().any(|diagnostic| diagnostic.code == rules::DiagnosticCode::Target))
     );
 }
+
+#[test]
+fn finishing_startup_preserves_compiled_rules_and_restarts_publication_at_zero() {
+    let mut fixture = Fixture::new();
+    fixture
+        .commit(RegistryCommand::InstallBuiltin {
+            set: builtin("Startup"),
+            revision: 1,
+        })
+        .expect("install builtin");
+    let snapshot = fixture.core.snapshots().load();
+    let hashes = snapshot.hashes().clone();
+    assert_eq!(snapshot.epoch().get(), 1);
+    let mut fields = FieldSnapshot::default();
+    fields
+        .text
+        .insert(Field::ExeName, NfcText::new("quartz-test.exe"));
+    let privacy = snapshot.privacy().evaluate(&fields).privacy;
+    drop(snapshot);
+    fixture.core = fixture.core.finish_startup().expect("unpublished snapshot");
+    let snapshot = fixture.core.snapshots().load();
+    assert_eq!(snapshot.epoch().get(), 0);
+    assert_eq!(snapshot.hashes(), &hashes);
+    assert_eq!(snapshot.privacy().evaluate(&fields).privacy, privacy);
+    assert!(snapshot.warnings().is_empty());
+    fixture
+        .commit(apply("user.test", "First publication", 0))
+        .expect("runtime edit");
+    assert_eq!(fixture.core.snapshots().load().epoch().get(), 1);
+}
+
+#[test]
+fn finishing_startup_rejects_retained_read_handles_and_snapshots() {
+    let core = RuleRegistry::from_state(RegistryState::default()).expect("empty registry");
+    let handle = core.snapshots();
+    assert!(
+        core.finish_startup().is_err(),
+        "read handle escaped startup"
+    );
+    assert_eq!(handle.load().epoch().get(), 0);
+
+    let core = RuleRegistry::from_state(RegistryState::default()).expect("empty registry");
+    let snapshot = core.snapshots().load();
+    assert!(core.finish_startup().is_err(), "snapshot escaped startup");
+    assert_eq!(snapshot.epoch().get(), 0);
+}

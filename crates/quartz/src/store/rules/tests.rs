@@ -26,6 +26,7 @@ impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("isolated data directory");
         let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
+        store.seed_categories().expect("builtin categories");
         let shell = RegistryShell::open(&mut store, test_now()).expect("shell");
         Self {
             directory,

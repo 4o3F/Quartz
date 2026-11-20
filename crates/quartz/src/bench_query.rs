@@ -31,6 +31,10 @@ const MILLISECONDS_PER_SECOND: f64 = 1_000.0;
 pub(crate) enum BenchQueryError {
     #[snafu(display("{source}"))]
     Path { source: ValidateSimulationError },
+    #[snafu(display("could not seed builtin categories"))]
+    SeedCategories {
+        source: store::categories::SeedCategoriesError,
+    },
     #[snafu(display("could not open simulation read-only: {source}"))]
     Open { source: store::OpenStoreError },
     #[snafu(display("{source}"))]
@@ -131,6 +135,7 @@ impl<'path> BenchQuery<'path> {
             .copy_simulation(&directory.database())
             .context(OpenSnafu)?;
         let mut store = crate::store::Store::open(&directory).context(OpenSnafu)?;
+        store.seed_categories().context(SeedCategoriesSnafu)?;
         crate::rules::registry::RegistryShell::open(
             &mut store,
             quartz_domain::capture::UtcInstant::try_from(0).expect("benchmark UTC origin"),
@@ -418,6 +423,7 @@ mod tests {
             .copy_simulation(&isolated.database())
             .expect("copy source");
         let mut store = crate::store::Store::open(&isolated).expect("copied store");
+        store.seed_categories().expect("builtin categories");
         let shell = crate::rules::registry::RegistryShell::open(
             &mut store,
             quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),

@@ -16,6 +16,7 @@ use crate::{
         Autostart, CoreRuntime, MainCommand, PlatformPorts, RuntimeExit, StartCoreError,
         StopCoreError, Worker,
     },
+    ipc::{StatusPublisher, UiCommand},
     persistence::PersistenceState,
 };
 use quartz_domain::capture::{CaptureEffect, CaptureState};
@@ -146,6 +147,16 @@ impl CoreExit {
     }
 }
 
+/// Identifies the state transition and its tray-update diagnostic.
+#[derive(Debug, Clone, Copy)]
+enum TrayRefresh {
+    Startup,
+    FirstFrame,
+    Capture,
+    UiExited,
+    UiOpening,
+}
+
 /// Owns child-process tracking while the core runs on the main thread.
 #[derive(Debug)]
 pub(crate) struct CoreProcess {
@@ -209,12 +220,7 @@ impl CoreProcess {
         let ingress = SystemIngress::new(runtime.sender(), runtime.shutdown_port());
         tray.attach_capture(ingress.clone());
         let mut sources = Sources::start(tray.raw_window(), ingress).context(ObserveSystemSnafu)?;
-        if let Err(error) = tray.update(TrayState::from_status(
-            runtime.status.stop_reason(),
-            TrayTooltip::Ready,
-        )) {
-            tracing::error!(?error, "could not update tray state");
-        }
+        self.refresh_tray(&mut tray, &runtime.status, TrayRefresh::Startup);
         tracing::info!(?autostart, "core message loop started");
         let result = self.message_loop(&mut tray, &runtime, &mut sources);
         self.ui = UiState::default();
@@ -258,93 +264,10 @@ impl CoreProcess {
                 }
             }
             while let Ok(command) = runtime.ui_commands.try_recv() {
-                match command {
-                    crate::ipc::UiCommand::Open => self.open_ui(tray, status),
-                    crate::ipc::UiCommand::FirstFrame => {
-                        self.ui.first_frame();
-                        if let Err(error) = tray.update(TrayState::from_status(
-                            status.stop_reason(),
-                            TrayTooltip::Ready,
-                        )) {
-                            tracing::warn!(%error, "could not restore tray after UI first frame");
-                        }
-                    }
-                }
+                self.handle_ui_command(command, tray, status);
             }
             while let Ok(command) = runtime.commands().try_recv() {
-                match command {
-                    MainCommand::CaptureSnapshot { state, foreground } => {
-                        self.capture = Some(state);
-                        status.publish_snapshot(
-                            self.capture.as_ref(),
-                            self.persistence,
-                            foreground,
-                        );
-                    }
-                    MainCommand::Persistence(state) => {
-                        self.persistence = state;
-                        status.publish(self.capture.as_ref(), self.persistence);
-                    }
-                    MainCommand::Fatal(worker) => {
-                        tracing::error!(?worker, "stopping core after worker failure");
-                        return Err(WaitCoreEventsError::WorkerFailed { worker });
-                    }
-                    MainCommand::Effect(effect) => match effect {
-                        CaptureEffect::StateChanged(_) => {
-                            unreachable!("state arrives through CaptureSnapshot")
-                        }
-                        CaptureEffect::ScheduleTimer(timer) => {
-                            sources.timer(timer).context(wait_error::ObserveSnafu)?
-                        }
-                        CaptureEffect::QuerySession => {
-                            sources.query_session().context(wait_error::ObserveSnafu)?
-                        }
-                        CaptureEffect::CheckIdle => {
-                            sources.check_idle().context(wait_error::ObserveSnafu)?
-                        }
-                        CaptureEffect::UntriggeredChange {
-                            previous_window,
-                            reviewed_window,
-                        } => {
-                            tracing::debug!(
-                                previous_hwnd = ?previous_window.map(|window| window.get()),
-                                reviewed_hwnd = ?reviewed_window.map(|window| window.get()),
-                                "foreground review window comparison"
-                            );
-                            self.untriggered_changes = self.untriggered_changes.saturating_add(1);
-                            tracing::info!(
-                                untriggered_changes = self.untriggered_changes,
-                                "foreground fallback review detected an untriggered change"
-                            );
-                        }
-                        CaptureEffect::IdleSampleFailed(error) => {
-                            tracing::warn!(%error, "idle sample was rejected")
-                        }
-                        CaptureEffect::RebindHooks { target } => sources
-                            .foreground(foreground::ForegroundCommand::Rebind { target })
-                            .context(wait_error::ObserveSnafu)?,
-                        CaptureEffect::ReviewForeground => sources
-                            .foreground(foreground::ForegroundCommand::Review)
-                            .context(wait_error::ObserveSnafu)?,
-                        CaptureEffect::FallbackReviewForeground => sources
-                            .foreground(foreground::ForegroundCommand::FallbackReview)
-                            .context(wait_error::ObserveSnafu)?,
-                        CaptureEffect::DiscardQueuedObservations => {
-                            // The capture worker has already discarded the queue before publishing this effect.
-                            tracing::trace!("capture worker discarded queued observations");
-                        }
-                        CaptureEffect::PolicyExpired(kind) => {
-                            // CaptureCore has applied expiration and requested the necessary fresh observations.
-                            tracing::trace!(?kind, "capture policy expired");
-                        }
-                    },
-                }
-                if let Err(error) = tray.update(TrayState::from_status(
-                    status.stop_reason(),
-                    TrayTooltip::Ready,
-                )) {
-                    tracing::error!(%error, "could not update capture tray state");
-                }
+                self.handle_main_command(command, tray, status, sources)?;
             }
             loop {
                 let events = tray.commands();
@@ -352,13 +275,8 @@ impl CoreProcess {
                     break;
                 }
                 for event in events {
-                    match event {
-                        TrayCommand::Exit => return Ok(CoreExit::UserExit),
-                        TrayCommand::EndSession => return Ok(CoreExit::SessionEnded),
-                        TrayCommand::Deadline(at) => {
-                            sources.fired(at).context(wait_error::ObserveSnafu)?
-                        }
-                        TrayCommand::OpenUi => self.open_ui(tray, status),
+                    if let Some(exit) = self.handle_tray_command(event, tray, status, sources)? {
+                        return Ok(exit);
                     }
                 }
                 // Native dispatch can enqueue another batch of semantic commands.
@@ -382,26 +300,141 @@ impl CoreProcess {
                     process.log_exit();
                 }
                 self.ui.exited();
-                if let Err(error) = tray.update(TrayState::from_status(
-                    status.stop_reason(),
-                    TrayTooltip::Ready,
-                )) {
-                    tracing::error!(?error, "could not restore tray tooltip");
-                }
+                self.refresh_tray(tray, status, TrayRefresh::UiExited);
             }
         }
     }
-    fn open_ui(&mut self, tray: &mut Tray, status: &crate::ipc::StatusPublisher) {
+    fn handle_ui_command(&mut self, command: UiCommand, tray: &mut Tray, status: &StatusPublisher) {
+        match command {
+            UiCommand::Open => self.open_ui(tray, status),
+            UiCommand::FirstFrame => {
+                self.ui.first_frame();
+                self.refresh_tray(tray, status, TrayRefresh::FirstFrame);
+            }
+        }
+    }
+    fn handle_main_command(
+        &mut self,
+        command: MainCommand,
+        tray: &mut Tray,
+        status: &StatusPublisher,
+        sources: &mut Sources,
+    ) -> Result<(), WaitCoreEventsError> {
+        match command {
+            MainCommand::CaptureSnapshot { state, foreground } => {
+                self.capture = Some(state);
+                status.publish_snapshot(self.capture.as_ref(), self.persistence, foreground);
+            }
+            MainCommand::Persistence(state) => {
+                self.persistence = state;
+                status.publish(self.capture.as_ref(), self.persistence);
+            }
+            MainCommand::Fatal(worker) => {
+                tracing::error!(?worker, "stopping core after worker failure");
+                return Err(WaitCoreEventsError::WorkerFailed { worker });
+            }
+            MainCommand::Effect(effect) => self.handle_capture_effect(effect, sources)?,
+        }
+        self.refresh_tray(tray, status, TrayRefresh::Capture);
+        Ok(())
+    }
+    fn handle_capture_effect(
+        &mut self,
+        effect: CaptureEffect,
+        sources: &mut Sources,
+    ) -> Result<(), WaitCoreEventsError> {
+        match effect {
+            CaptureEffect::StateChanged(_) => {
+                unreachable!("state arrives through CaptureSnapshot")
+            }
+            CaptureEffect::ScheduleTimer(timer) => {
+                sources.timer(timer).context(wait_error::ObserveSnafu)?
+            }
+            CaptureEffect::QuerySession => {
+                sources.query_session().context(wait_error::ObserveSnafu)?
+            }
+            CaptureEffect::CheckIdle => sources.check_idle().context(wait_error::ObserveSnafu)?,
+            CaptureEffect::UntriggeredChange {
+                previous_window,
+                reviewed_window,
+            } => {
+                tracing::debug!(
+                    previous_hwnd = ?previous_window.map(|window| window.get()),
+                    reviewed_hwnd = ?reviewed_window.map(|window| window.get()),
+                    "foreground review window comparison"
+                );
+                self.untriggered_changes = self.untriggered_changes.saturating_add(1);
+                tracing::info!(
+                    untriggered_changes = self.untriggered_changes,
+                    "foreground fallback review detected an untriggered change"
+                );
+            }
+            CaptureEffect::IdleSampleFailed(error) => {
+                tracing::warn!(%error, "idle sample was rejected")
+            }
+            CaptureEffect::RebindHooks { target } => sources
+                .foreground(foreground::ForegroundCommand::Rebind { target })
+                .context(wait_error::ObserveSnafu)?,
+            CaptureEffect::ReviewForeground => sources
+                .foreground(foreground::ForegroundCommand::Review)
+                .context(wait_error::ObserveSnafu)?,
+            CaptureEffect::FallbackReviewForeground => sources
+                .foreground(foreground::ForegroundCommand::FallbackReview)
+                .context(wait_error::ObserveSnafu)?,
+            CaptureEffect::DiscardQueuedObservations => {
+                // The capture worker has already discarded the queue before publishing this effect.
+                tracing::trace!("capture worker discarded queued observations");
+            }
+            CaptureEffect::PolicyExpired(kind) => {
+                // CaptureCore has applied expiration and requested the necessary fresh observations.
+                tracing::trace!(?kind, "capture policy expired");
+            }
+        }
+        Ok(())
+    }
+    fn handle_tray_command(
+        &mut self,
+        event: TrayCommand,
+        tray: &mut Tray,
+        status: &StatusPublisher,
+        sources: &mut Sources,
+    ) -> Result<Option<CoreExit>, WaitCoreEventsError> {
+        match event {
+            TrayCommand::Exit => return Ok(Some(CoreExit::UserExit)),
+            TrayCommand::EndSession => return Ok(Some(CoreExit::SessionEnded)),
+            TrayCommand::Deadline(at) => sources.fired(at).context(wait_error::ObserveSnafu)?,
+            TrayCommand::OpenUi => self.open_ui(tray, status),
+        }
+        Ok(None)
+    }
+    fn refresh_tray(&self, tray: &mut Tray, status: &StatusPublisher, refresh: TrayRefresh) {
+        let tooltip = match refresh {
+            TrayRefresh::UiOpening => TrayTooltip::Opening,
+            TrayRefresh::Startup
+            | TrayRefresh::FirstFrame
+            | TrayRefresh::Capture
+            | TrayRefresh::UiExited => TrayTooltip::Ready,
+        };
+        if let Err(error) = tray.update(TrayState::from_status(status.stop_reason(), tooltip)) {
+            match refresh {
+                TrayRefresh::Startup => tracing::error!(?error, "could not update tray state"),
+                TrayRefresh::FirstFrame => {
+                    tracing::warn!(%error, "could not restore tray after UI first frame")
+                }
+                TrayRefresh::Capture => {
+                    tracing::error!(%error, "could not update capture tray state")
+                }
+                TrayRefresh::UiExited => tracing::error!(?error, "could not restore tray tooltip"),
+                TrayRefresh::UiOpening => tracing::error!(?error, "could not set opening tooltip"),
+            }
+        }
+    }
+    fn open_ui(&mut self, tray: &mut Tray, status: &StatusPublisher) {
         if let Err(error) = self.ui.open(process::UiProcess::launch) {
             tracing::error!(?error, "could not launch UI");
             return;
         }
-        if let Err(error) = tray.update(TrayState::from_status(
-            status.stop_reason(),
-            TrayTooltip::Opening,
-        )) {
-            tracing::error!(?error, "could not set opening tooltip");
-        }
+        self.refresh_tray(tray, status, TrayRefresh::UiOpening);
     }
 }
 

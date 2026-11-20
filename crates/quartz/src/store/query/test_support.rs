@@ -77,6 +77,7 @@ impl QueryFixture {
                 Ok(())
             })
             .expect("fixture facts");
+        store.seed_categories().expect("builtin categories");
         crate::rules::registry::RegistryShell::open(
             &mut store,
             quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
