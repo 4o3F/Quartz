@@ -2,9 +2,9 @@
 
 use super::{
     AvailabilityEndReason, AvailabilityReason, BatchId, CaptureStep, CaptureWrite, Foreground,
-    ForegroundGeneration, IdleDecision, IdleRecord, IdleStatus, IntervalEndReason, MonoInstant,
-    ObservationId, ObservationSource, OpenAvailability, ReadLastInputError, RowId, RunId,
-    SegmentId, TimeRange, Timestamp, ids::IdAllocator,
+    IdleDecision, IdleRecord, IdleStatus, IntervalEndReason, MonoInstant, ObservationId,
+    ObservationSource, OpenAvailability, ReadLastInputError, RowId, RunId, SegmentId, TimeRange,
+    Timestamp, ids::IdAllocator,
 };
 use crate::rules::registry::RuleSnapshot;
 use std::{
@@ -183,7 +183,6 @@ pub(super) struct DeferredObservation {
     pub observation: ObservationId,
     pub at: Timestamp,
     pub rules: Arc<RuleSnapshot>,
-    pub generation: ForegroundGeneration,
     pub source: ObservationSource,
     pub foreground: Foreground,
 }

@@ -1,16 +1,15 @@
 //! Foreground observation history, privacy evaluation and per-instance title activity.
 
 use super::{
-    BrowserContext, CaptureLevel, CapturedFields, Foreground, ForegroundGeneration, HookTarget,
-    IntervalFact, MonoInstant, NoForegroundReason, ObservationSource, PrivacyContext, PrivacyMode,
-    Timestamp, TitleActivity, WindowFacts, WindowId, WindowInstance, WindowInstances, limits,
+    BrowserContext, CaptureLevel, CapturedFields, Foreground, HookTarget, IntervalFact,
+    MonoInstant, NoForegroundReason, ObservationSource, PrivacyContext, PrivacyMode, Timestamp,
+    TitleActivity, WindowFacts, WindowId, WindowInstance, WindowInstances, limits,
 };
 use crate::rules::registry::RuleSnapshot;
 use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug)]
 pub(super) struct ForegroundReading {
-    pub generation: ForegroundGeneration,
     pub source: ObservationSource,
     pub foreground: Foreground,
     pub at: Timestamp,
@@ -150,45 +149,34 @@ enum LastForeground {
     Window(CachedWindow),
     None(NoForegroundReason),
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessBinding {
+    Unbind,
+    Process(super::ProcessId),
+}
 #[derive(Debug)]
 pub(super) struct ForegroundTracker {
-    generation: ForegroundGeneration,
     last: LastForeground,
+    binding: Option<ProcessBinding>,
     changes: BTreeMap<WindowId, VecDeque<MonoInstant>>,
 }
 impl ForegroundTracker {
     pub(super) fn new() -> Self {
         Self {
-            generation: ForegroundGeneration::new(0),
             last: LastForeground::Unobserved,
+            binding: None,
             changes: BTreeMap::new(),
         }
     }
-    pub(super) fn generation(&self) -> ForegroundGeneration {
-        self.generation
-    }
-    pub(super) fn rebind(
-        &mut self,
-        generation: ForegroundGeneration,
-        foreground: &Foreground,
-    ) -> RebindDecision {
-        let previous = match &self.last {
-            LastForeground::Window(row) => Some(row.facts.process),
-            _ => None,
+    pub(super) fn rebind(&mut self, foreground: &Foreground) -> RebindDecision {
+        let target = HookTarget::from_foreground(foreground);
+        let binding = match target {
+            HookTarget::Process { process, .. } => ProcessBinding::Process(process),
+            HookTarget::Unbind => ProcessBinding::Unbind,
         };
-        let process = match foreground {
-            Foreground::Window { facts, .. } => Some(facts.process),
-            _ => None,
-        };
-        if generation > self.generation
-            || matches!(self.last, LastForeground::Unobserved)
-            || previous != process
-        {
-            self.generation = generation;
-            RebindDecision::Rebind(match process {
-                Some(process) => HookTarget::Process(process),
-                None => HookTarget::Unbind,
-            })
+        if self.binding != Some(binding) {
+            self.binding = Some(binding);
+            RebindDecision::Rebind(target)
         } else {
             RebindDecision::Unchanged
         }
@@ -230,6 +218,7 @@ impl ForegroundTracker {
     }
     pub(super) fn forget(&mut self) {
         self.last = LastForeground::Unobserved;
+        self.binding = None;
     }
     pub(super) fn expire_privacy(&mut self) {
         if let LastForeground::Window(row) = &mut self.last {
@@ -268,8 +257,14 @@ pub(super) enum RebindDecision {
     Unchanged,
     Rebind(HookTarget),
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReviewExpectation {
-    Expected,
-    Unexpected,
+impl HookTarget {
+    pub(super) fn from_foreground(foreground: &Foreground) -> Self {
+        match foreground {
+            Foreground::Window { facts, .. } => Self::Process {
+                window: facts.handle,
+                process: facts.process,
+            },
+            Foreground::None(_) => Self::Unbind,
+        }
+    }
 }

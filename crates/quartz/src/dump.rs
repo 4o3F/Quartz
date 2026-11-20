@@ -354,6 +354,7 @@ mod tests {
                     generation: capture::InstanceGeneration::initial(),
                     class: "TestWindow".into(),
                     app: capture::AppIdentity::Exe(r"c:\test\editor.exe".into()),
+                    metadata_source: capture::MetadataSource::Process,
                     exe_name: Some("editor.exe".into()),
                     display_name: "Editor".into(),
                     first_seen: start,

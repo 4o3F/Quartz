@@ -3,7 +3,7 @@
 采集只产生事实，不做分类。管线如下：
 
 ```text
-系统事件 ──▶ 观测（Observation）──▶ 身份解析 ──▶ 隐私策略（06）──▶ 计时状态机 ──▶ 写入命令
+系统事件或低频复核 ──▶ 读取当前状态并比较 ──▶ 变化观测（Observation）──▶ 身份解析 ──▶ 隐私策略（06）──▶ 计时状态机 ──▶ 写入命令
 ```
 
 ## 1. 前台与标题事件
@@ -12,14 +12,22 @@
 
 | 事件 | 机制 | 处理 |
 |---|---|---|
-| 前台切换 | 全局 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT)` | 记录 HWND 和时间 |
-| 标题变化 | 只对当前前台进程挂 `EVENT_OBJECT_NAMECHANGE`（指定 PID） | 只接受 `hwnd == 当前前台 && idObject == OBJID_WINDOW && idChild == CHILDID_SELF` |
-| 最小化与恢复 | `EVENT_SYSTEM_MINIMIZESTART` / `MINIMIZEEND`（全局，成本很低） | 触发一次前台复核 |
-| 窗口销毁 | 与标题 hook 同一个进程范围内的 `EVENT_OBJECT_DESTROY` | 退休对应窗口实例；当前前台被销毁时复核 |
-| 活动桌面切换 | `EVENT_SYSTEM_DESKTOPSWITCH` | 立即复核可观察桌面与前台；覆盖范围需实测 |
-| 低频复核 | 每 60 秒一次；解锁、恢复、hook 重建、虚拟桌面切换后立即复核 | 比较 `GetForegroundWindow()` 和标题，不一致就按变化处理，并给 `missed_event` 计数加一；与 59 秒确认点相邻时合并唤醒，复核间隔不超过 60 秒 |
+| 前台切换 | 全局 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT)` | 触发读取当前桌面、前台与标题 |
+| 标题变化 | 只对当前前台进程挂 `EVENT_OBJECT_NAMECHANGE`（指定 PID） | 只接受 `hwnd == 当前 GetForegroundWindow() && idObject == OBJID_WINDOW && idChild == CHILDID_SELF`，再读取当前状态 |
+| 最小化与恢复 | `EVENT_SYSTEM_MINIMIZESTART` / `MINIMIZEEND`（全局，成本很低） | 触发读取当前状态 |
+| 窗口销毁 | 与标题 hook 同一个进程范围内的 `EVENT_OBJECT_DESTROY` | 用事件 HWND 退休对应窗口实例，并触发读取当前状态 |
+| 活动桌面切换 | `EVENT_SYSTEM_DESKTOPSWITCH` | 立即读取当前桌面、前台与标题；覆盖范围需实测 |
+| 会话与电源通知 | 第 3 节的会话、睡眠及恢复通知 | 更新停止原因，并触发读取当前状态；停止期间不开前台区间 |
+| 触发后的复核 | 解锁、恢复、hook 重建等触发 | 使用同一读取路径，变化时生成观测，不新增 `untriggered_change` 候选 |
+| 低频复核 | 每 60 秒一次，无触发调度 | 使用同一读取路径，变化观测立即发出；无触发变化先暂存计数候选，按第 2.1 节用后续原生事件时间判定。与 59 秒确认点相邻时合并唤醒，复核间隔不超过 60 秒 |
 
-所有 hook 的注册、重绑、解绑都在主线程消息循环里执行。回调立即用 `GetWindowTextW` 读取标题快照，观测携带 `dwmsEventTime`、接收 UTC 与单调时间、读取时刻、HWND 和前台代次。主线程到采集线程的队列容量为 1,024；满时置过载标志并丢弃新事件，不阻塞消息循环，缺口处理见 01 第 6 节。
+虚拟桌面切换预期通过 `EVENT_SYSTEM_FOREGROUND` 触发读取，由 M1 实机验收（m1.md 第 3 节）核对覆盖；若 `untriggered_changes` 表明覆盖不足，再补充专用事件来源。
+
+所有 hook 的注册、重绑、解绑都在主线程消息循环里执行。事件只表示状态可能变化：每次有效触发都在主线程读取输入桌面是否可观察、`GetForegroundWindow()`，并用 `GetWindowTextW` 读取该前台窗口的标题快照。事件携带的 HWND 只用于标题通知过滤和销毁实例退休，不直接生成前台事实。异步排队的 WinEvent 到达时读取的是当时的当前状态，因此迟到的 Alt-Tab 切换器、任务栏中间窗口或 UAC 对话框通知不会把已结束的激活写成新事实。
+
+事件触发与低频复核共用“读取状态 → 比较 → 发出观测”路径。比较状态包括桌面状态、HWND、标题快照（含可读和截断状态）与显示亲和性；主线程对可观察前台调用 `GetWindowDisplayAffinity` 取得亲和性，查询失败单独记为 `Unavailable`，完整状态与上次读取相同时不发送观测，迟到、乱序和重复通知由此被吸收。每次有效触发都读取当前前台的标题，包括 HWND 已变化的情况。观测边界使用触发回调开始时采样的 UTC 与单调时间；低频复核使用其回调的时钟采样。`dwmsEventTime` 仅作原生事件时间证据，不用于边界或重排；观测另带读取时刻，按主线程读取顺序入队。主线程到采集线程的队列容量为 1,024；满时置过载标志并丢弃新观测，不阻塞消息循环，缺口处理见 01 第 6 节。销毁实例退休和停止原因更新即使没有状态变化也照常处理。
+
+启动、停止后恢复、过载恢复、当前实例退休或身份解析失败后，清除失效的比较基准；首次有效读取重建基准并发送观测，之后再按状态去重。建立基准本身不计为 `untriggered_change`。
 
 跨进程 `GetWindowTextW` 读取系统缓存的窗口标题，不向目标发送 `WM_GETTEXT`，挂起的目标不会阻塞此读取（[Microsoft 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowtextw)）。M1 验证挂起目标与 Quartz 自身窗口的回调耗时。读不到的中间标题标为 `unreadable`，不使用后续标题追溯填充。
 
@@ -27,17 +35,21 @@ Windows 和扩展的标题上限统一为 4,096 个 UTF-16 单元；Windows 含�
 
 ### 1.2 前台切换的处理
 
-1. 主线程在前台变化时递增前台代次，立即取得标题快照。采集线程处理该快照，读取 `GetWindowThreadProcessId` 和窗口类名。
+1. 主线程通过第 1.1 节的统一路径读取当前状态，变化时发送观测。采集线程按读取顺序处理，读取 `GetWindowThreadProcessId` 和窗口类名。
 2. 读取窗口类名并解析应用身份（见第 2 节）。类名读取失败时记录错误种类、清除该 PID 的缓存并请求重新复核，不生成空类名的观测；内容子窗口的类名读取失败也按此处理。解析结束后再次确认这个 HWND 仍属于同一个 PID，防止窗口句柄被回收。
-3. 采集线程发送带前台代次的重绑命令。主线程检查代次后解绑旧 hook、为新前台进程安装标题和销毁 hook，再补读一次标题。旧代次通知和命令丢弃。
-4. 生成观测，交给隐私策略和状态机。启用依赖网页字段的规则时，浏览器标题须经 06 第 5 节的延迟机制后才能输出。
+3. 需要重绑时，采集线程发送目标 HWND 与 PID。主线程确认目标仍为当前前台且 PID 一致后，解绑旧 hook，为当前前台进程安装标题和销毁 hook，再通过统一路径补读状态；不匹配时重新读取当前状态。
+4. 将解析后的观测交给隐私策略和状态机。启用依赖网页字段的规则时，浏览器标题须经 06 第 5 节的延迟机制后才能输出。
 
-前台窗口为空时，生成"无前台"观测并结束当前区间。收到桌面切换事件后，若已离开可观察桌面，记录 `kind = no_foreground`、`no_foreground_reason = unknown_desktop`；返回后复核并恢复。桌面复核在主线程用 `OpenInputDesktop(DESKTOP_READOBJECTS)` 打开输入桌面，并用 `GetUserObjectInformationW(UOI_NAME)` 比较它与 `GetThreadDesktop` 返回的主线程桌面名称；名称不同或任一查询失败都记为 `unknown_desktop`。输入桌面句柄用 RAII 关闭，主线程的借用桌面句柄不关闭。桌面切换通知先使旧代次失效，再请求复核。UAC、Ctrl+Alt+Del 与 Windows 虚拟桌面的通知覆盖分别在 M1 实测。
+统一读取与入队顺序取代用于丢弃陈旧 hook 观测的前台代次、复核期间的事件修订号，以及复核与事件之间的代次或时间先后校验。窗口实例的 `generation`（第 2.2 节）、浏览器关联的有效期、身份解析后的 HWND/PID 复查和过载、积压、采集缺口规则继续保留。
+
+前台窗口为空时，生成"无前台"观测并结束当前区间。收到桌面切换事件后，若已离开可观察桌面，记录 `kind = no_foreground`、`no_foreground_reason = unknown_desktop`；返回后重新读取并恢复。桌面读取在主线程用 `OpenInputDesktop(DESKTOP_READOBJECTS)` 打开输入桌面，并用 `GetUserObjectInformationW(UOI_NAME)` 比较它与 `GetThreadDesktop` 返回的主线程桌面名称；名称不同或任一查询失败都记为 `unknown_desktop`，此时不采集前台标题。输入桌面句柄用 RAII 关闭，主线程的借用桌面句柄不关闭。UAC 与 Ctrl+Alt+Del 的通知覆盖在 M1 实测。
+
+记录以每次读取的 `GetForegroundWindow()` 为准。UAC 返回后，受 Windows 前台锁定机制影响，新提权窗口可能显示在最上方却尚未激活，应按实际焦点和激活状态判断。窗口若只在两次读取之间短暂成为前台、从未被读取到，就不记录；这是接受的采样结果。
 
 ### 1.3 标题变化的处理
 
-- 新标题与当前标题相同时，忽略这次通知（去重）。
-- 不同时，结束当前区间并开始新区间。**不做"稳定 N 毫秒才承认"的去抖**，短暂的标题也是事实。
+- 按第 1.1 节过滤标题通知后，读取当前前台窗口的状态；完整比较状态相同时不发送观测。
+- 同一前台窗口读取到不同标题时，结束当前区间并开始新区间。**不做"稳定 N 毫秒才承认"的去抖**，读取到的短暂标题也是事实。
 - 标题变化很频繁时（播放器进度、终端命令、下载百分比），数据库写入按 03 第 4.2 节合并为事务，展示层按提取后的文档身份合并。原始区间照样保留。
 - 同一窗口实例 10 秒内标题变化超过 50 次时，记为"标题风暴"。每个已观测到的不同标题仍切段，风暴只影响写入批量。采集线程或队列过载时记录 `capture_gaps`，不以最后标题填补缺口。
 
@@ -49,22 +61,23 @@ Windows 和扩展的标题上限统一为 4,096 个 UTF-16 单元；Windows 含�
 |---|---|---|
 | 普通 Win32 | `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` → `QueryFullProcessImageNameW` | `exe:<规范化小写完整路径>` |
 | 打包应用 | 先 `GetApplicationUserModelId`，有 AUMID 时优先使用 | `aumid:<AUMID>` |
-| `ApplicationFrameHost.exe` | 枚举子窗口，找出属于其他进程、可见的 `Windows.UI.Core.CoreWindow`，再按上一行解析 | 内容进程的 AUMID |
+| `ApplicationFrameHost.exe` | 优先解析属于其他进程、可见的 `Windows.UI.Core.CoreWindow`；无内容窗口或内容进程查询失败时，用 `SHGetPropertyStoreForWindow` 读取 frame 的 `PKEY_AppUserModel_ID`；属性缺失或无效才使用 `unresolved` | 内容进程或 frame 的 `aumid:<AUMID>`，否则 `unresolved:<类名>` |
 | 提权或受保护进程 | 有限查询权限通常足够；失败时记录 `unresolved`，保留窗口类名和 PID | `unresolved:<类名>` |
 
 - 显示名优先取 exe 版本信息里的 `FileDescription`，没有时用文件名。显示名在首次发现应用时读取一次，存到 `applications` 表。多语言版本信息的选择与 Windows 显示语言变化后的重新解析见 10 第 5 节。
 - 进程元数据按 `(PID, 进程创建时间)` 缓存，键保留 `GetProcessTimes` 的完整 FILETIME 精度，窗口事实中的创建 UTC 使用毫秒。缓存最多 128 项，按最近使用顺序淘汰；每次查询检查该 PID 的创建时间，移除旧的 PID 生命周期，复核时用缓存的有限查询句柄和 `GetExitCodeProcess` 清理已退出或查询失败的进程，命中项也检查退出状态。清理由观测与已有复核驱动，不增加轮询。HWND 的 PID 复核不一致时清除该 PID 的缓存并重新复核前台。
 - 应用显示名按身份键缓存，最多 256 项，按最近使用顺序淘汰；保留期间只读取一次版本信息，淘汰后再次遇到才重新读取。版本资源单次分配上限为 1 MiB。打包应用也读取内容进程 exe 的 `FileDescription`，语言依次选 Windows 首选显示语言、`en-US`、资源中的第一个翻译，缺失时使用文件名。
-- `ApplicationFrameHost.exe` 的窗口实例保留宿主 HWND、PID 和创建时间，应用身份与显示名来自可见内容子窗口的进程；宿主与内容窗口都在解析后复核 PID。找不到有效内容进程时使用宿主窗口类名构成 `unresolved`。
-- `GetWindowDisplayAffinity` 在采集线程查询：`WDA_EXCLUDEFROMCAPTURE` 和 `WDA_MONITOR` 映射为 `capture_excluded = Present`，`WDA_NONE` 为 `Absent`，失败或未知值为 `Unknown`。Windows 没有本实现可用的通用浏览器无痕系统信号，因此 `private_window` 始终为 `Unknown`；浏览器类名与标题模式仅由 `builtin.privacy` 规则求值。浏览器扩展尚未接入时提供 `BrowserContext::Offline`，涉及缺失网页字段的规则由核心立即按隐私策略降级。
-- `MissedEvent` 在主线程累计为 `missed_events` 诊断计数，仅输出计数，不输出窗口标题或应用名。
+- `ApplicationFrameHost.exe` 的窗口实例保留宿主 HWND、PID 和创建时间；可查询内容进程时，使用其 AUMID、exe 和显示名，宿主与内容窗口都在解析后复核 PID。无内容窗口或内容进程查询失败时，读取 frame AUMID，按进程 AUMID 相同规则校验非空、至多 130 个 UTF-16 单元且编码有效；属性缺失或无效时记录枚举原因的 DEBUG 日志，并使用宿主类名构成 `unresolved`。
+- frame 来源的元数据以 `MetadataSource::Frame` 标记，exe 为空，显示名复用同一应用身份键的名称缓存，未命中时以 AUMID 占位，禁止使用窗口标题。它在窗口实例与应用字典中都保留已有 exe 和显示名，新应用正常插入；后续 `MetadataSource::Process` 可补全或更新。frame 与内容进程的 AUMID 相同时保持同一实例，补全 exe 或显示名不增加 `generation`。
+- 主线程的显示亲和性读数仅用于状态变化比较，采集线程仍独立调用 `GetWindowDisplayAffinity` 供隐私求值：`WDA_EXCLUDEFROMCAPTURE` 和 `WDA_MONITOR` 映射为 `capture_excluded = Present`，`WDA_NONE` 为 `Absent`，失败或未知值为 `Unknown`。Windows 没有本实现可用的通用浏览器无痕系统信号，因此 `private_window` 始终为 `Unknown`；浏览器类名与标题模式仅由 `builtin.privacy` 规则求值。浏览器扩展尚未接入时提供 `BrowserContext::Offline`，涉及缺失网页字段的规则由核心立即按隐私策略降级。
+- `untriggered_change` 表示通知覆盖缺口，在主线程累计为 `untriggered_changes`：仅当无触发调度的 60 秒后备复核发现状态变化，且自上次读取以来未收到任何有效触发时产生候选。变化观测立即发出，候选与读取完成时主线程采样的 `GetTickCount` 暂存；下一条带 `dwmsEventTime` 的原生事件（包括被过滤的标题事件）若按 u32 回绕顺序不晚于读取 tick，则取消候选，否则结算一次。无原生时间的读取与基准重建保留待定项，下一次后备复核先结算仍未决的旧候选再比较新状态；原生时间仅作通知证据，永不作为事实边界。解锁、恢复、hook 重建、桌面切换等触发所致的读取或复核均不新增候选，包括进入与离开 `unknown_desktop`；身份或类名解析失败、重绑目标不匹配、过载恢复、基准重建等内部请求也属于触发读取，均不新增候选。每个覆盖缺口可能使事实边界最多延迟一个复核间隔；日志仅输出计数，不输出窗口标题或应用名。反复出现同一来源时，应补订阅对应事件（如 `EVENT_SYSTEM_SWITCHEND`），再验证覆盖。
 - 图标不在采集路径里提取。界面请求某个应用的图标时，核心才提取，并缓存到 `icons\<app_id>.png`。
 
 ### 2.2 窗口实例
 
 窗口实例是 `(run_id, HWND, PID, 进程创建时间, generation)`。首次看到时分配 `window_instance_id`；进程创建时间读取失败时允许为 NULL。
 
-观察到 `EVENT_OBJECT_DESTROY` 就退休对应实例；同一 HWND 再次出现且之前已退休，或窗口类名与此前不同，则增加 `generation` 并新建实例。销毁 hook 只覆盖当前前台进程；后台进程内同类窗口复用 HWND 仍可能未被识别，这是首版残余风险。
+观察到 `EVENT_OBJECT_DESTROY` 就退休对应实例；同一 HWND 再次出现且之前已退休，或 PID、进程创建时间、窗口类名、应用身份 `AppIdentity` 与此前不同，则增加 `generation` 并新建实例。仅 exe 或显示名补全不改变实例。销毁 hook 只覆盖当前前台进程；后台进程内同类窗口复用 HWND 仍可能未被识别，这是首版残余风险。
 
 - 两个标题完全相同的窗口，HWND 不同，所以是不同的实例。用户决策 4 要求区分同一程序的不同窗口，靠的就是这一层。
 - HWND 只在一次运行内有意义，所以带上 `run_id`。跨运行合并同一个窗口不在范围内。
@@ -173,4 +186,4 @@ M1 的采集验收覆盖以下场景，用"人工操作脚本 + 自动断言"的
 
 - 前台切换时刻误差 P95 < 100 ms；
 - 时长守恒：前台与无前台事实，加停止原因的时间并集共同覆盖运行时间，无重叠、无负时长；过载范围以 `capture_gaps` 填入覆盖检查。idle 作为独立掩码检查。回拨的覆盖按运行与时钟段顺序检查；
-- 低频复核发现的漏检事件（`missed_event`）每小时不超过 1 次。
+- 通知覆盖缺口计数 `untriggered_changes` 每小时增量不超过 1；仅按第 2.1 节的 60 秒后备复核条件计数。

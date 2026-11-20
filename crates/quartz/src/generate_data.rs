@@ -13,7 +13,7 @@ use clap::ValueEnum;
 use quartz_domain::capture::{
     self as capture, AppIdentity, AvailabilityEndReason, AvailabilityReason, CaptureGap,
     CaptureLevel, CaptureWrite, CapturedFields, ClockEndReason, IdleException, IdlePolicy,
-    IdleRecord, InstanceGeneration, IntervalEndReason, IntervalFact, MonoInstant,
+    IdleRecord, InstanceGeneration, IntervalEndReason, IntervalFact, MetadataSource, MonoInstant,
     NoForegroundReason, OpenAvailability, OpenInterval, ProcessId, RowId, RunEndReason, RunId,
     SegmentId, SessionKey, StopReason, TimeRange, Timestamp, Title, WindowHandle, WindowId,
     WindowInstance,
@@ -399,6 +399,7 @@ impl Workload {
                     generation: InstanceGeneration::initial(),
                     class: "SimulationWindow".into(),
                     app: AppIdentity::Exe(format!("c:\\simulation\\{name}.exe")),
+                    metadata_source: MetadataSource::Process,
                     exe_name: Some(format!("{name}.exe")),
                     display_name: (*name).into(),
                     first_seen: start,

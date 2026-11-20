@@ -11,9 +11,9 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, select_biased};
 use quartz_domain::{
     capture::{
         CaptureCore, CaptureEffect, CaptureEvent, CaptureInput, CaptureParts, CaptureState,
-        CaptureStep, CaptureWrite, ClockChange, Deadline, MonoInstant, ObservationSource,
-        PolicyObservation, RunEndReason, RunId, SchedulerKind, SessionStatus, StepCaptureError,
-        StopChange, StopReason, Timestamp,
+        CaptureStep, CaptureWrite, ClockChange, Deadline, MonoInstant, PolicyObservation,
+        RunEndReason, RunId, SchedulerKind, SessionStatus, StepCaptureError, StopChange,
+        StopReason, Timestamp,
     },
     rules::registry::SnapshotCell,
 };
@@ -28,6 +28,11 @@ use std::{
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module)]
 pub(crate) enum RunCaptureLoopError {
+    #[cfg(windows)]
+    #[snafu(display("could not initialize capture worker COM"))]
+    InitializeCom {
+        source: crate::platform::InitializeCaptureComError,
+    },
     #[snafu(display("capture input channel disconnected"))]
     Receive {
         source: crossbeam_channel::RecvError,
@@ -112,6 +117,9 @@ impl CaptureLoop {
         Ok(())
     }
     pub(super) fn run(&mut self) -> Result<(), RunCaptureLoopError> {
+        #[cfg(windows)]
+        let _apartment = crate::platform::CaptureApartment::initialize()
+            .map_err(|source| RunCaptureLoopError::InitializeCom { source })?;
         loop {
             match self.next_work()? {
                 CaptureWork::Shutdown(stop) => return self.shutdown(stop),
@@ -180,12 +188,12 @@ impl CaptureLoop {
                 Observation::Foreground(snapshot) => {
                     let callback_at = snapshot.at.mono;
                     let kind = snapshot.kind;
-                    let source = snapshot.source;
+                    let event_time_ms = snapshot.event_time_ms;
                     match self.foreground.resolve(snapshot) {
                         crate::platform::ForegroundResolution::Event(event) => {
                             self.step(event, Settlement::Deferred)?;
-                            if source == ObservationSource::Hook {
-                                self.trace_callback_latency(callback_at, kind);
+                            if let Some(event_time_ms) = event_time_ms {
+                                self.trace_callback_latency(callback_at, kind, event_time_ms);
                             }
                             Ok(())
                         }
@@ -199,7 +207,12 @@ impl CaptureLoop {
             }
         }
     }
-    fn trace_callback_latency(&self, callback_at: MonoInstant, kind: EventKind) {
+    fn trace_callback_latency(
+        &self,
+        callback_at: MonoInstant,
+        kind: EventKind,
+        event_time_ms: u32,
+    ) {
         if !tracing::enabled!(tracing::Level::DEBUG) {
             return;
         }
@@ -213,6 +226,7 @@ impl CaptureLoop {
         match completed.duration_since(callback_at) {
             Ok(elapsed) => tracing::debug!(
                 ?kind,
+                event_time_ms,
                 callback_to_fact_ms = %elapsed.as_millis(),
                 "foreground callback processed"
             ),
@@ -371,7 +385,6 @@ mod tests {
         for event in [
             CaptureEvent::Session(SessionStatus::Ready(Default::default())),
             CaptureEvent::Foreground {
-                generation: ForegroundGeneration::new(1),
                 source: ObservationSource::Review,
                 foreground: Foreground::None(NoForegroundReason::Empty),
             },
@@ -455,7 +468,6 @@ mod tests {
                 at: at(30),
                 rules: rules.load(),
                 event: CaptureEvent::Foreground {
-                    generation: ForegroundGeneration::new(2),
                     source: ObservationSource::Review,
                     foreground: Foreground::None(NoForegroundReason::Empty),
                 },
@@ -536,7 +548,6 @@ mod tests {
             .send(Observation::Event(ObservedEvent {
                 at: at(1),
                 event: CaptureEvent::Foreground {
-                    generation: ForegroundGeneration::new(1),
                     source: ObservationSource::Review,
                     foreground: Foreground::None(NoForegroundReason::Empty),
                 },

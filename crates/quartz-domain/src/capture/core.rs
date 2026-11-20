@@ -4,17 +4,16 @@ use std::time::Duration;
 
 use super::foreground::{
     EvaluatedForeground, EvaluationContext, ForegroundReading, ForegroundTracker, RebindDecision,
-    Retention, ReviewExpectation,
+    Retention,
 };
 use super::{
     AvailabilityEndReason, AvailabilityReason, BatchId, BrowserContext, CaptureEffect,
     CaptureEvent, CaptureGap, CaptureInput, CaptureState, CaptureStep, CaptureWrite, Checkpoint,
-    ClockChange, ClockEndReason, Deadline, DeadlineKind, DeadlineScheduler, Foreground,
-    ForegroundGeneration, GapReason, IdleRecord, IdleSample, IntervalEndReason, IntervalFact,
-    NoForegroundReason, ObservationId, ObservationSource, OpenInterval, PolicyObservation,
-    PrivacyContext, RowId, RunEndReason, RunId, SchedulerKind, SegmentRange, SessionStatus,
-    StopChange, StopReason, TimeRange, TimedPolicyKind, Timer, Timestamp, WebRowExtension,
-    WindowId, WindowInstances, ids::IdAllocator, limits,
+    ClockChange, ClockEndReason, Deadline, DeadlineKind, DeadlineScheduler, Foreground, GapReason,
+    IdleRecord, IdleSample, IntervalEndReason, IntervalFact, NoForegroundReason, ObservationId,
+    ObservationSource, OpenInterval, PolicyObservation, PrivacyContext, RowId, RunEndReason, RunId,
+    SchedulerKind, SegmentRange, SessionStatus, StopChange, StopReason, TimeRange, TimedPolicyKind,
+    Timer, Timestamp, WebRowExtension, WindowId, WindowInstances, ids::IdAllocator, limits,
 };
 use crate::rules::registry::{RuleSnapshot, SnapshotEpoch};
 use std::collections::BTreeSet;
@@ -140,16 +139,6 @@ impl CaptureCore {
             return Ok(step);
         }
         let CaptureInput { at, rules, event } = input;
-        let stale = match &event {
-            CaptureEvent::Foreground { generation, .. } => *generation < self.tracker.generation(),
-            CaptureEvent::DestroyWindow { generation, .. } => {
-                *generation != self.tracker.generation()
-            }
-            _ => false,
-        };
-        if stale {
-            return Ok(step);
-        }
         self.validate_input(at, &event)?;
         let context = self.prepare_step(at, &rules, &event, &mut step);
         self.dispatch(event, at, &rules, &mut step);
@@ -243,15 +232,22 @@ impl CaptureCore {
     ) {
         match event {
             CaptureEvent::Session(status) => self.session(status, at, step),
-            CaptureEvent::Foreground {
-                generation,
-                source,
-                foreground,
-            } => self.on_foreground(generation, source, foreground, at, rules, step),
+            CaptureEvent::Foreground { source, foreground } => {
+                self.on_foreground(source, foreground, at, rules, step)
+            }
             CaptureEvent::PrivacyContext {
                 observation,
                 browser,
             } => self.on_privacy_context(observation, browser, step),
+            CaptureEvent::UntriggeredChange {
+                previous_window,
+                reviewed_window,
+            } => {
+                step.effects.push(CaptureEffect::UntriggeredChange {
+                    previous_window,
+                    reviewed_window,
+                });
+            }
             CaptureEvent::Destroy(id) => self.destroy(id, at, step),
             CaptureEvent::DestroyWindow { handle, .. } => {
                 if let Some(id) = self.windows.live_id(handle) {
@@ -309,7 +305,6 @@ impl CaptureCore {
     }
     fn on_foreground(
         &mut self,
-        generation: ForegroundGeneration,
         source: ObservationSource,
         mut foreground: Foreground,
         at: Timestamp,
@@ -341,17 +336,14 @@ impl CaptureCore {
                     Deadline::Mono(at.mono.advance(limits::PRIVACY_CONTEXT_WAIT)),
                 );
             }
-            self.rebind(generation, &foreground, step);
+            self.rebind(&foreground, step);
             let observation = self.ids.observation();
-            step.effects.push(CaptureEffect::AwaitBrowserContext {
-                observation,
-                generation,
-            });
+            step.effects
+                .push(CaptureEffect::AwaitBrowserContext { observation });
             self.deferred.push(DeferredObservation {
                 observation,
                 at,
                 rules: Arc::clone(rules),
-                generation,
                 source,
                 foreground,
             });
@@ -360,7 +352,6 @@ impl CaptureCore {
             self.flush_deferred(BrowserResolution::Discard, step);
             self.foreground(
                 ForegroundReading {
-                    generation,
                     source,
                     foreground,
                     at,
@@ -897,15 +888,9 @@ impl CaptureCore {
             step.effects.push(CaptureEffect::ReviewForeground);
         }
     }
-    fn rebind(
-        &mut self,
-        generation: ForegroundGeneration,
-        foreground: &Foreground,
-        step: &mut CaptureStep,
-    ) {
-        if let RebindDecision::Rebind(target) = self.tracker.rebind(generation, foreground) {
-            step.effects
-                .push(CaptureEffect::RebindHooks { generation, target });
+    fn rebind(&mut self, foreground: &Foreground, step: &mut CaptureStep) {
+        if let RebindDecision::Rebind(target) = self.tracker.rebind(foreground) {
+            step.effects.push(CaptureEffect::RebindHooks { target });
         }
     }
 
@@ -915,18 +900,10 @@ impl CaptureCore {
         context: EvaluationContext<'_>,
         step: &mut CaptureStep,
     ) {
-        self.rebind(reading.generation, &reading.foreground, step);
+        self.rebind(&reading.foreground, step);
         if !self.phase.ready() || !self.phase.reasons().is_empty() {
             return;
         }
-        if self.phase.needs_review() && reading.source != ObservationSource::Review {
-            return;
-        }
-        let expected = if self.phase.needs_review() {
-            ReviewExpectation::Expected
-        } else {
-            ReviewExpectation::Unexpected
-        };
         let application = match &reading.foreground {
             Foreground::Window { facts, .. } => Some(&facts.app),
             Foreground::None(_) => None,
@@ -934,20 +911,12 @@ impl CaptureCore {
         if self.tracker.app() != application {
             step.effects.push(CaptureEffect::CheckIdle);
         }
-        self.review_foreground(reading.at, reading.source, step);
+        self.confirm_foreground_read(reading.at, step);
         self.split_foreground(reading.at, step);
         let observed = reading.evaluate(&mut self.windows, context);
-        self.apply_foreground(observed, expected, step);
+        self.apply_foreground(observed, step);
     }
-    fn review_foreground(
-        &mut self,
-        at: Timestamp,
-        source: ObservationSource,
-        step: &mut CaptureStep,
-    ) {
-        if source != ObservationSource::Review {
-            return;
-        }
+    fn confirm_foreground_read(&mut self, at: Timestamp, step: &mut CaptureStep) {
         if at.drifted_from(self.clock.anchor) {
             self.clock_boundary(at, ClockEndReason::Drift, step);
         }
@@ -956,12 +925,7 @@ impl CaptureCore {
         self.flush_waiting(step);
         self.phase.reviewed();
     }
-    fn apply_foreground(
-        &mut self,
-        observed: EvaluatedForeground,
-        expected: ReviewExpectation,
-        step: &mut CaptureStep,
-    ) {
+    fn apply_foreground(&mut self, observed: EvaluatedForeground, step: &mut CaptureStep) {
         let fact = observed.fact();
         let same_window =
             observed.instance().map(|instance| instance.id) == self.tracker.instance();
@@ -980,12 +944,6 @@ impl CaptureCore {
             });
         }
         if !same {
-            if observed.source == ObservationSource::Review
-                && expected == ReviewExpectation::Unexpected
-                && self.tracker.current().is_some()
-            {
-                step.effects.push(CaptureEffect::MissedEvent);
-            }
             let reason = self.foreground_end_reason(&observed);
             if reason == IntervalEndReason::Title
                 && let Some(instance) = observed.instance()
@@ -1078,7 +1036,6 @@ impl CaptureCore {
             let fingerprint = self.tracker.fingerprint();
             self.foreground(
                 ForegroundReading {
-                    generation: self.tracker.generation(),
                     source: ObservationSource::Review,
                     foreground,
                     at,
@@ -1278,9 +1235,17 @@ impl CaptureCore {
                 if at.mono > self.clock.maintenance_deadline.advance(limits::BATCH_WAIT) {
                     self.begin_gap(self.clock.last_at, GapReason::EventOverload, step);
                 }
+                // Unchanged fallback reads emit no observation; the existing maintenance wake
+                // still checks the clock mapping without adding a timer or a foreground sample.
+                if self.phase.ready()
+                    && self.phase.reasons().is_empty()
+                    && at.drifted_from(self.clock.anchor)
+                {
+                    self.clock_boundary(at, ClockEndReason::Drift, step);
+                }
                 self.checkpoint(at, step);
                 self.clock.maintenance_deadline = at.mono.advance(limits::CHECKPOINT_PERIOD);
-                step.effects.push(CaptureEffect::ReviewForeground);
+                step.effects.push(CaptureEffect::FallbackReviewForeground);
                 self.deadlines.register(
                     owner,
                     Deadline::Mono(at.mono.advance(limits::CHECKPOINT_PERIOD)),
@@ -1348,7 +1313,6 @@ impl CaptureCore {
             }
             self.foreground(
                 ForegroundReading {
-                    generation: pending.generation,
                     source: pending.source,
                     foreground: pending.foreground,
                     at: pending.at,

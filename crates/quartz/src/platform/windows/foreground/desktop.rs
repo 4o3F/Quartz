@@ -3,7 +3,7 @@
 use crate::core::foreground::Desktop;
 use windows::{
     Win32::{
-        Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE},
+        Foundation::{ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, HANDLE},
         System::{
             StationsAndDesktops::{
                 self, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, HDESK, UOI_NAME,
@@ -40,6 +40,16 @@ enum ReadDesktopErrorKind {
     Layout,
 }
 impl ReadDesktopError {
+    fn log_level(&self) -> tracing::Level {
+        match self {
+            Self::Open { source }
+                if source.code() == HRESULT::from_win32(ERROR_ACCESS_DENIED.0) =>
+            {
+                tracing::Level::DEBUG
+            }
+            _ => tracing::Level::WARN,
+        }
+    }
     fn kind(&self) -> ReadDesktopErrorKind {
         match self {
             Self::Open { .. } => ReadDesktopErrorKind::Open,
@@ -126,7 +136,11 @@ impl Desktop {
         match Self::query() {
             Ok(desktop) => desktop,
             Err(error) => {
-                tracing::warn!(kind = ?error.kind(), "desktop observation failed");
+                if error.log_level() == tracing::Level::DEBUG {
+                    tracing::debug!(kind = ?error.kind(), "desktop observation failed");
+                } else {
+                    tracing::warn!(kind = ?error.kind(), "desktop observation failed");
+                }
                 Self::Unknown
             }
         }
@@ -136,5 +150,31 @@ impl Desktop {
         let input_name = input.0.name()?;
         let current_name = DesktopHandle::current()?.name()?;
         Ok(Self::compare_names(&input_name, &current_name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::ERROR_INVALID_HANDLE;
+
+    #[test]
+    fn only_input_desktop_access_denial_uses_debug_level() {
+        let denied = windows::core::Error::from_hresult(HRESULT::from_win32(ERROR_ACCESS_DENIED.0));
+        let error = ReadDesktopError::Open {
+            source: denied.clone(),
+        };
+        assert_eq!(error.log_level(), tracing::Level::DEBUG);
+        assert_eq!(
+            ReadDesktopError::Thread { source: denied }.log_level(),
+            tracing::Level::WARN
+        );
+        let invalid =
+            windows::core::Error::from_hresult(HRESULT::from_win32(ERROR_INVALID_HANDLE.0));
+        assert_eq!(
+            ReadDesktopError::Open { source: invalid }.log_level(),
+            tracing::Level::WARN
+        );
+        assert_eq!(ReadDesktopError::Layout.log_level(), tracing::Level::WARN);
     }
 }

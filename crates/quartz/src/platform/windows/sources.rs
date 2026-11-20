@@ -134,10 +134,18 @@ impl SystemIngress {
             .map_err(|source| ObserveSystemError::Deliver { source })
     }
     pub(super) fn message(&self, message: u32, wparam: WPARAM) -> Result<(), ObserveSystemError> {
-        for event in SystemMessage::events(message, wparam) {
-            self.observe(event)?;
+        let at = SystemClock
+            .read()
+            .map_err(|source| ObserveSystemError::Clock { source })?;
+        let events = SystemMessage::events(message, wparam);
+        if events.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        for event in events {
+            self.observe_at(at, event)?;
+        }
+        super::foreground::ForegroundPort::system_notice(at)
+            .map_err(|source| ObserveSystemError::Foreground { source })
     }
 }
 

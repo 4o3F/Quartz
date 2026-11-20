@@ -27,6 +27,7 @@ fn window(handle: u64, title: &str) -> Foreground {
             process_created_utc: Some(utc(0)),
             class: "TestWindow".into(),
             app: AppIdentity::Exe("c:\\app.exe".into()),
+            metadata_source: MetadataSource::Process,
             exe_name: Some("app.exe".into()),
             display_name: "App".into(),
             title: Title::readable(title),
@@ -34,12 +35,8 @@ fn window(handle: u64, title: &str) -> Foreground {
         privacy: PrivacyContext::default(),
     }
 }
-fn reading(generation: u64, source: ObservationSource, foreground: Foreground) -> CaptureEvent {
-    CaptureEvent::Foreground {
-        generation: ForegroundGeneration::new(generation),
-        source,
-        foreground,
-    }
+fn reading(source: ObservationSource, foreground: Foreground) -> CaptureEvent {
+    CaptureEvent::Foreground { source, foreground }
 }
 
 struct Fixture {
@@ -65,7 +62,7 @@ impl Fixture {
             at(0),
             CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
         );
-        let _ = fixture.review(at(0), 1, window(1, "initial"));
+        let _ = fixture.review(at(0), window(1, "initial"));
         fixture
     }
     fn send(&mut self, now: Timestamp, event: CaptureEvent) -> CaptureStep {
@@ -81,17 +78,11 @@ impl Fixture {
         self.writes.extend(step.writes.clone());
         step
     }
-    fn review(&mut self, now: Timestamp, generation: u64, foreground: Foreground) -> CaptureStep {
-        self.send(
-            now,
-            reading(generation, ObservationSource::Review, foreground),
-        )
+    fn review(&mut self, now: Timestamp, foreground: Foreground) -> CaptureStep {
+        self.send(now, reading(ObservationSource::Review, foreground))
     }
-    fn hook(&mut self, now: Timestamp, generation: u64, foreground: Foreground) -> CaptureStep {
-        self.send(
-            now,
-            reading(generation, ObservationSource::Hook, foreground),
-        )
+    fn hook(&mut self, now: Timestamp, foreground: Foreground) -> CaptureStep {
+        self.send(now, reading(ObservationSource::Hook, foreground))
     }
     fn policy(&mut self, text: &str, version: u32) {
         let decision = self.rules.decide(RegistryCommand::Apply {
@@ -146,12 +137,8 @@ use super::test_support::assert_conservation;
 #[test]
 fn rapid_switch_identical_title_windows_and_tab_changes_keep_every_boundary() {
     let mut fixture = Fixture::active();
-    for (time, generation, handle, title) in [
-        (50, 2, 2, "initial"),
-        (100, 3, 1, "initial"),
-        (150, 3, 1, "tab 2"),
-    ] {
-        let step = fixture.hook(at(time), generation, window(handle, title));
+    for (time, handle, title) in [(50, 2, "initial"), (100, 1, "initial"), (150, 1, "tab 2")] {
+        let step = fixture.hook(at(time), window(handle, title));
         let close = step
             .writes
             .iter()
@@ -163,18 +150,51 @@ fn rapid_switch_identical_title_windows_and_tab_changes_keep_every_boundary() {
         );
         assert_eq!(interval_opens(&step).len(), 1);
     }
-    let dedup = fixture.hook(at(160), 3, window(1, "tab 2"));
+    let dedup = fixture.hook(at(160), window(1, "tab 2"));
     assert!(interval_opens(&dedup).is_empty());
-    let stale = fixture.hook(at(100), 2, window(2, "stale"));
-    assert!(stale.writes.is_empty() && stale.effects.is_empty());
     fixture.finish(at(200));
+}
+
+#[test]
+fn process_hooks_rebind_only_when_process_changes_and_keep_window_evidence() {
+    let mut fixture = Fixture::active();
+    let same_process = fixture.hook(at(10), window(2, "other window"));
+    assert!(
+        !same_process
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, CaptureEffect::RebindHooks { .. }))
+    );
+    let mut other = window(3, "other process");
+    if let Foreground::Window { facts, .. } = &mut other {
+        facts.process = ProcessId::new(9);
+    }
+    let changed = fixture.hook(at(20), other);
+    assert!(changed.effects.contains(&CaptureEffect::RebindHooks {
+        target: HookTarget::Process {
+            window: WindowHandle::new(3),
+            process: ProcessId::new(9)
+        },
+    }));
+    let unbound = fixture.hook(at(30), Foreground::None(NoForegroundReason::Empty));
+    assert!(unbound.effects.contains(&CaptureEffect::RebindHooks {
+        target: HookTarget::Unbind
+    }));
+    let repeated = fixture.review(at(40), Foreground::None(NoForegroundReason::Empty));
+    assert!(
+        !repeated
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, CaptureEffect::RebindHooks { .. }))
+    );
+    fixture.finish(at(50));
 }
 
 #[test]
 fn title_frequency_and_storm_change_batch_hint_without_discarding_rows() {
     let mut fixture = Fixture::active();
     for index in 1..=12 {
-        let step = fixture.hook(at(index * 1_000), 1, window(1, &format!("second {index}")));
+        let step = fixture.hook(at(index * 1_000), window(1, &format!("second {index}")));
         assert_eq!(step.title_storm, TitleActivity::Ordinary);
         assert_eq!(interval_opens(&step).len(), 1);
     }
@@ -182,7 +202,6 @@ fn title_frequency_and_storm_change_batch_hint_without_discarding_rows() {
     for index in 1..=60 {
         let step = fixture.hook(
             at(12_000 + index * 100),
-            1,
             window(1, &format!("storm {index}")),
         );
         assert_eq!(interval_opens(&step).len(), 1);
@@ -195,11 +214,7 @@ fn title_frequency_and_storm_change_batch_hint_without_discarding_rows() {
 #[test]
 fn secure_desktop_and_unreadable_titles_remain_explicit_facts() {
     let mut fixture = Fixture::active();
-    let step = fixture.review(
-        at(10),
-        2,
-        Foreground::None(NoForegroundReason::UnknownDesktop),
-    );
+    let step = fixture.review(at(10), Foreground::None(NoForegroundReason::UnknownDesktop));
     assert_eq!(
         interval_opens(&step)[0].fact,
         IntervalFact::NoForeground(NoForegroundReason::UnknownDesktop)
@@ -209,14 +224,14 @@ fn secure_desktop_and_unreadable_titles_remain_explicit_facts() {
         facts.title = Title::unreadable();
         facts.app = AppIdentity::Aumid("Package!App".into());
     }
-    let step = fixture.review(at(20), 3, foreground);
+    let step = fixture.review(at(20), foreground);
     assert_eq!(fields(&step).title_status, TitleStatus::Unreadable);
     assert!(fields(&step).title.is_none());
     fixture.finish(at(30));
 }
 
 #[test]
-fn stop_reason_union_requires_review_and_preserves_overlaps() {
+fn stop_reason_union_requires_fresh_read_and_preserves_overlaps() {
     for reasons in [
         [StopReason::Paused, StopReason::Locked],
         [StopReason::Suspended, StopReason::Disconnected],
@@ -232,14 +247,17 @@ fn stop_reason_union_requires_review_and_preserves_overlaps() {
                 CaptureState::Stopped { reasons: remaining, .. }
                     if remaining == BTreeSet::from([ending[1]])
             ));
-            let ignored = fixture.review(at(35), 2, window(2, "while stopped"));
+            let ignored = fixture.review(at(35), window(2, "while stopped"));
             assert!(interval_opens(&ignored).is_empty());
             let ended = fixture.send(at(40), CaptureEvent::Stop(StopChange::End(ending[1])));
             assert!(interval_opens(&ended).is_empty());
             assert!(ended.effects.contains(&CaptureEffect::ReviewForeground));
-            let ignored = fixture.hook(at(45), 3, window(2, "requires review"));
-            assert!(interval_opens(&ignored).is_empty());
-            let reviewed = fixture.review(at(50), 3, window(2, "reviewed"));
+            let read = fixture.hook(at(45), window(2, "fresh callback read"));
+            assert!(matches!(
+                interval_opens(&read).last().expect("fresh fact").fact,
+                IntervalFact::Window { .. }
+            ));
+            let reviewed = fixture.review(at(50), window(2, "reviewed"));
             assert_eq!(
                 interval_opens(&reviewed).last().expect("fresh fact").start,
                 at(50)
@@ -254,7 +272,7 @@ fn startup_waits_for_session_query_and_registration_retry() {
     for reason in [StopReason::Locked, StopReason::Disconnected] {
         let mut fixture = Fixture::new(at(0));
         let _ = fixture.send(at(1), CaptureEvent::Session(SessionStatus::Unavailable));
-        let early = fixture.review(at(2), 1, window(1, "early"));
+        let early = fixture.review(at(2), window(1, "early"));
         assert!(interval_opens(&early).is_empty());
         assert!(matches!(
             fixture.core.state(),
@@ -276,13 +294,13 @@ fn startup_waits_for_session_query_and_registration_retry() {
             "initial stop covers the run from its start"
         );
         assert!(ready.effects.contains(&CaptureEffect::ReviewForeground));
-        let locked = fixture.review(at(4), 2, window(1, "locked"));
+        let locked = fixture.review(at(4), window(1, "locked"));
         assert!(interval_opens(&locked).is_empty());
         let resumed = fixture.send(at(10), CaptureEvent::Stop(StopChange::End(reason)));
         assert!(interval_opens(&resumed).is_empty());
-        let ignored = fixture.hook(at(10), 3, window(1, "not reviewed"));
-        assert!(interval_opens(&ignored).is_empty());
-        let reviewed = fixture.review(at(11), 3, window(1, "ready"));
+        let read = fixture.hook(at(10), window(1, "fresh callback read"));
+        assert_eq!(interval_opens(&read).len(), 1);
+        let reviewed = fixture.review(at(11), window(1, "ready"));
         assert_eq!(
             interval_opens(&reviewed).last().expect("fresh fact").start,
             at(11)
@@ -292,7 +310,7 @@ fn startup_waits_for_session_query_and_registration_retry() {
 }
 
 #[test]
-fn sleep_resume_preserves_disconnect_across_wall_clock_boundary_until_review() {
+fn sleep_resume_preserves_disconnect_across_wall_clock_boundary_until_fresh_read() {
     let mut fixture = Fixture::active();
     let _ = fixture.send(
         at(10),
@@ -320,16 +338,19 @@ fn sleep_resume_preserves_disconnect_across_wall_clock_boundary_until_review() {
                 && row.segment.get() == 2 && row.start == resume
     )));
     let before_review = resume.advance(Duration::from_millis(10));
-    let blocked = fixture.review(before_review, 2, window(2, "still disconnected"));
+    let blocked = fixture.review(before_review, window(2, "still disconnected"));
     assert!(interval_opens(&blocked).is_empty());
     let _ = fixture.send(
         before_review,
         CaptureEvent::Stop(StopChange::End(StopReason::Disconnected)),
     );
-    let ignored = fixture.hook(before_review, 3, window(2, "not reviewed"));
-    assert!(interval_opens(&ignored).is_empty());
+    let read = fixture.hook(before_review, window(2, "fresh callback read"));
+    assert!(matches!(
+        interval_opens(&read).last().expect("fresh fact").fact,
+        IntervalFact::Window { .. }
+    ));
     let reviewed_at = resume.advance(Duration::from_millis(20));
-    let reviewed = fixture.review(reviewed_at, 3, window(2, "reconnected"));
+    let reviewed = fixture.review(reviewed_at, window(2, "reconnected"));
     assert_eq!(
         interval_opens(&reviewed).last().expect("fresh fact").start,
         reviewed_at
@@ -338,21 +359,11 @@ fn sleep_resume_preserves_disconnect_across_wall_clock_boundary_until_review() {
 }
 
 #[test]
-fn native_destroy_retires_the_live_instance_and_rejects_old_hook_generations() {
+fn native_destroy_retires_the_live_instance_and_reused_handle_gets_new_generation() {
     let mut fixture = Fixture::active();
-    let stale = fixture.send(
-        at(10),
-        CaptureEvent::DestroyWindow {
-            generation: ForegroundGeneration::new(0),
-            handle: WindowHandle::new(1),
-        },
-    );
-    assert!(stale.writes.is_empty());
-    assert!(stale.effects.is_empty());
     let unrelated = fixture.send(
         at(20),
         CaptureEvent::DestroyWindow {
-            generation: ForegroundGeneration::new(1),
             handle: WindowHandle::new(99),
         },
     );
@@ -360,7 +371,6 @@ fn native_destroy_retires_the_live_instance_and_rejects_old_hook_generations() {
     let destroyed = fixture.send(
         at(30),
         CaptureEvent::DestroyWindow {
-            generation: ForegroundGeneration::new(1),
             handle: WindowHandle::new(1),
         },
     );
@@ -371,8 +381,120 @@ fn native_destroy_retires_the_live_instance_and_rejects_old_hook_generations() {
             .iter()
             .any(|write| matches!(write, CaptureWrite::RetireWindow { .. }))
     );
-    let reviewed = fixture.review(at(40), 2, window(1, "reused"));
+    let reviewed = fixture.review(at(40), window(1, "reused"));
     assert!(reviewed.writes.iter().any(|write| matches!(write, CaptureWrite::ObserveWindow { instance, .. } if instance.generation.get() == 1)));
+}
+
+#[test]
+fn untriggered_change_preserves_read_window_evidence_without_changing_facts() {
+    let mut fixture = Fixture::active();
+    let previous_window = Some(WindowHandle::new(1));
+    let reviewed_window = Some(WindowHandle::new(2));
+    let step = fixture.send(
+        at(10),
+        CaptureEvent::UntriggeredChange {
+            previous_window,
+            reviewed_window,
+        },
+    );
+    assert!(step.effects.contains(&CaptureEffect::UntriggeredChange {
+        previous_window,
+        reviewed_window
+    }));
+    assert!(interval_opens(&step).is_empty());
+    fixture.finish(at(20));
+}
+
+#[test]
+fn frame_aumid_metadata_enrichment_keeps_window_instance_generation() {
+    let mut instances = WindowInstances::default();
+    let Foreground::Window { mut facts, .. } = window(1, "private window title") else {
+        panic!("frame fixture")
+    };
+    facts.class = "ApplicationFrameWindow".into();
+    facts.app = AppIdentity::Aumid("SettingsPackage!Settings".into());
+    facts.metadata_source = MetadataSource::Frame;
+    facts.exe_name = None;
+    facts.display_name = "SettingsPackage!Settings".into();
+    let frame = instances.observe(&facts, at(0));
+    facts.metadata_source = MetadataSource::Process;
+    facts.exe_name = Some("systemsettings.exe".into());
+    facts.display_name = "Settings".into();
+    let content = instances.observe(&facts, at(10));
+    assert_eq!(content.id, frame.id);
+    assert_eq!(content.generation, frame.generation);
+    assert_eq!(content.app, frame.app);
+    assert_eq!(content.exe_name, facts.exe_name);
+    assert_eq!(content.display_name, facts.display_name);
+    assert_eq!(content.process, frame.process);
+    assert_eq!(content.process_created_utc, frame.process_created_utc);
+}
+
+#[test]
+fn frame_metadata_preserves_known_process_details_and_allows_process_upgrades() {
+    let mut instances = WindowInstances::default();
+    let Foreground::Window { mut facts, .. } = window(1, "private title") else {
+        panic!("frame fixture")
+    };
+    facts.app = AppIdentity::Aumid("SettingsPackage!Settings".into());
+    facts.exe_name = Some("systemsettings.exe".into());
+    facts.display_name = "设置".into();
+    let process = instances.observe(&facts, at(0));
+    facts.metadata_source = MetadataSource::Frame;
+    facts.exe_name = None;
+    facts.display_name = "SettingsPackage!Settings".into();
+    let frame = instances.observe(&facts, at(10));
+    assert_eq!(frame.id, process.id);
+    assert_eq!(frame.generation, process.generation);
+    assert_eq!(frame.exe_name, process.exe_name);
+    assert_eq!(frame.display_name, process.display_name);
+    assert_eq!(frame.metadata_source, MetadataSource::Frame);
+    facts.metadata_source = MetadataSource::Process;
+    facts.exe_name = Some("updated-settings.exe".into());
+    facts.display_name = "Settings".into();
+    let upgraded = instances.observe(&facts, at(20));
+    assert_eq!(upgraded.id, process.id);
+    assert_eq!(upgraded.exe_name, facts.exe_name);
+    assert_eq!(upgraded.display_name, facts.display_name);
+    assert_eq!(upgraded.metadata_source, MetadataSource::Process);
+}
+
+#[test]
+fn resolved_content_identity_allocates_new_window_generation() {
+    let mut instances = WindowInstances::default();
+    let Foreground::Window { mut facts, .. } = window(1, "Settings") else {
+        panic!("window fixture")
+    };
+    facts.class = "ApplicationFrameWindow".into();
+    facts.app = AppIdentity::Unresolved(facts.class.clone());
+    facts.metadata_source = MetadataSource::Unavailable;
+    facts.exe_name = None;
+    facts.display_name = facts.class.clone();
+    let unresolved = instances.observe(&facts, at(0));
+    assert_eq!(instances.observe(&facts, at(1)).id, unresolved.id);
+
+    facts.app = AppIdentity::Aumid("SettingsPackage!Settings".into());
+    facts.metadata_source = MetadataSource::Process;
+    facts.exe_name = Some("systemsettings.exe".into());
+    facts.display_name = "Settings".into();
+    let resolved = instances.observe(&facts, at(2));
+    assert_ne!(resolved.id, unresolved.id);
+    assert_eq!(
+        resolved.generation,
+        unresolved.generation.next().expect("next generation")
+    );
+    assert_eq!(resolved.app, facts.app);
+    assert_eq!(resolved.exe_name, facts.exe_name);
+    assert_eq!(resolved.display_name, facts.display_name);
+    assert_eq!(resolved.process, unresolved.process);
+    assert_eq!(resolved.process_created_utc, unresolved.process_created_utc);
+    assert_eq!(resolved.handle, unresolved.handle);
+
+    facts.display_name = "Localized Settings".into();
+    let reviewed = instances.observe(&facts, at(3));
+    assert_eq!(reviewed.id, resolved.id);
+    assert_eq!(reviewed.generation, resolved.generation);
+    assert_eq!(reviewed.display_name, facts.display_name);
 }
 
 #[test]
@@ -431,7 +553,6 @@ fn clock_rollback_projects_old_end_and_reopens_stop_masks() {
             utc: utc(-4_800),
             mono: mono(400),
         },
-        2,
         window(2, "after rollback"),
     );
     fixture.finish(Timestamp {
@@ -448,7 +569,6 @@ fn reviews_detect_strictly_greater_than_two_second_drift() {
             utc: utc(2_100),
             mono: mono(100),
         },
-        1,
         window(1, "initial"),
     );
     assert!(
@@ -462,7 +582,6 @@ fn reviews_detect_strictly_greater_than_two_second_drift() {
             utc: utc(2_201),
             mono: mono(200),
         },
-        1,
         window(1, "initial"),
     );
     assert!(drift.writes.iter().any(|write| matches!(
@@ -479,6 +598,36 @@ fn reviews_detect_strictly_greater_than_two_second_drift() {
 }
 
 #[test]
+fn maintenance_detects_clock_drift_without_foreground_observation() {
+    let mut fixture = Fixture::active();
+    let mut now = at(0).advance(limits::CHECKPOINT_PERIOD);
+    now.utc = now
+        .utc
+        .checked_add(Duration::from_secs(3))
+        .expect("test drift");
+    let step = fixture.send(now, CaptureEvent::Wake);
+    assert!(step.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::CloseClockSegment {
+            reason: ClockEndReason::Drift,
+            ..
+        }
+    )));
+    assert!(step.effects.contains(&CaptureEffect::ReviewForeground));
+    assert!(
+        step.effects
+            .contains(&CaptureEffect::FallbackReviewForeground)
+    );
+    assert!(
+        !step
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, CaptureEffect::UntriggeredChange { .. }))
+    );
+    fixture.finish(now.advance(Duration::from_millis(1)));
+}
+
+#[test]
 fn midnight_splits_foreground_session_and_long_stop_rows() {
     let start = Timestamp {
         utc: utc(86_400_000 - 100),
@@ -489,7 +638,7 @@ fn midnight_splits_foreground_session_and_long_stop_rows() {
         start,
         CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
     );
-    let _ = fixture.review(start, 1, window(1, "midnight"));
+    let _ = fixture.review(start, window(1, "midnight"));
     let step = fixture.send(
         start.advance(Duration::from_millis(200)),
         CaptureEvent::Wake,
@@ -517,7 +666,6 @@ fn midnight_splits_foreground_session_and_long_stop_rows() {
     );
     let _ = fixture.review(
         start.advance(Duration::from_millis(3 * 86_400_000_u64 + 1)),
-        2,
         window(1, "back"),
     );
     fixture.finish(start.advance(Duration::from_millis(3 * 86_400_000_u64 + 100)));
@@ -629,7 +777,10 @@ fn checkpoint_confirms_all_open_targets_and_stop_settles_immediately() {
     assert!(point.interval.is_none());
     assert_eq!(point.availability.len(), 2);
     assert_eq!(point.commit_by_mono, mono(60_000));
-    assert!(step.effects.contains(&CaptureEffect::ReviewForeground));
+    assert!(
+        step.effects
+            .contains(&CaptureEffect::FallbackReviewForeground)
+    );
     assert!(
         fixture
             .writes
@@ -653,7 +804,7 @@ fn checkpoint_cadence_keeps_its_deadline_across_foreground_boundaries() {
             .iter()
             .any(|write| matches!(write, CaptureWrite::Checkpoint(_)))
     );
-    let switched = fixture.hook(before, 2, window(2, "just before checkpoint"));
+    let switched = fixture.hook(before, window(2, "just before checkpoint"));
     assert!(switched.writes.iter().any(|write| matches!(write,
         CaptureWrite::Checkpoint(point) if point.at == before
     )));
@@ -664,22 +815,25 @@ fn checkpoint_cadence_keeps_its_deadline_across_foreground_boundaries() {
             CaptureWrite::Checkpoint(point)
                 if point.at == now && point.commit_by_mono == now.advance(limits::BATCH_WAIT).mono
         )));
-        assert!(step.effects.contains(&CaptureEffect::ReviewForeground));
+        assert!(
+            step.effects
+                .contains(&CaptureEffect::FallbackReviewForeground)
+        );
         assert!(
             step.effects
                 .contains(&CaptureEffect::ScheduleTimer(Timer::Arm(
                     now.advance(period).mono
                 )))
         );
-        let _ = fixture.review(now, 2, window(2, "just before checkpoint"));
+        let _ = fixture.review(now, window(2, "just before checkpoint"));
     }
     fixture.finish(at(0).advance(period * 2 + Duration::from_millis(1)));
 }
 
 #[test]
-fn overload_gap_waits_for_review_and_splits_at_clock_boundary() {
+fn overload_gap_waits_for_fresh_read_and_splits_at_clock_boundary() {
     let mut fixture = Fixture::active();
-    let _ = fixture.hook(at(10), 1, window(1, "trusted"));
+    let _ = fixture.hook(at(10), window(1, "trusted"));
     let overload = fixture.send(at(20), CaptureEvent::EventOverload);
     assert!(
         overload
@@ -699,7 +853,6 @@ fn overload_gap_waits_for_review_and_splits_at_clock_boundary() {
             if gap.reason == GapReason::EventOverload
                 && gap.range == TimeRange { start: at(10), end: at(20) }
     )));
-    let _ = fixture.hook(at(25), 2, window(2, "untrusted"));
     let changed = fixture.send(
         Timestamp {
             utc: utc(-100),
@@ -717,7 +870,6 @@ fn overload_gap_waits_for_review_and_splits_at_clock_boundary() {
             utc: utc(-90),
             mono: mono(40),
         },
-        3,
         window(2, "recovered"),
     );
     assert!(recovered.writes.iter().any(|write| matches!(
@@ -745,7 +897,7 @@ fn overload_and_stop_union_do_not_double_count_coverage() {
         at(30),
         CaptureEvent::Stop(StopChange::End(StopReason::Locked)),
     );
-    let _ = fixture.review(at(40), 2, window(1, "restored"));
+    let _ = fixture.review(at(40), window(1, "restored"));
     fixture.finish(at(50));
 }
 
@@ -760,7 +912,7 @@ fn truncation_precedes_privacy_and_dropped_titles_never_leave_core() {
         0,
     );
     let beyond = format!("{}secret", "a".repeat(4_096));
-    let step = fixture.hook(at(10), 2, window(1, &beyond));
+    let step = fixture.hook(at(10), window(1, &beyond));
     assert_eq!(fields(&step).level, CaptureLevel::Full);
     assert_eq!(fields(&step).title_status, TitleStatus::Truncated);
     assert_eq!(
@@ -772,7 +924,7 @@ fn truncation_precedes_privacy_and_dropped_titles_never_leave_core() {
             .count(),
         4_096
     );
-    let step = fixture.hook(at(20), 2, window(1, "private secret title"));
+    let step = fixture.hook(at(20), window(1, "private secret title"));
     assert_eq!(fields(&step).level, CaptureLevel::TitleHidden);
     assert!(fields(&step).title.is_none());
     assert_eq!(
@@ -784,7 +936,7 @@ fn truncation_precedes_privacy_and_dropped_titles_never_leave_core() {
         Some(PrivacyLabel::Text("Sensitive".into()))
     );
     assert!(!format!("{step:?}").contains("private secret title"));
-    let changed = fixture.hook(at(30), 2, window(1, "another secret title"));
+    let changed = fixture.hook(at(30), window(1, "another secret title"));
     assert_eq!(interval_opens(&changed).len(), 1);
     assert!(!format!("{changed:?}").contains("another secret title"));
     assert_eq!(
@@ -808,7 +960,7 @@ fn excluded_fields_system_signals_and_policy_boundaries_are_sanitized() {
         ),
         0,
     );
-    let step = fixture.hook(at(10), 2, window(1, "excluded secret"));
+    let step = fixture.hook(at(10), window(1, "excluded secret"));
     assert_eq!(fields(&step).level, CaptureLevel::Excluded);
     assert!(
         !step
@@ -830,7 +982,7 @@ fn excluded_fields_system_signals_and_policy_boundaries_are_sanitized() {
     if let Foreground::Window { privacy, .. } = &mut foreground {
         privacy.capture_excluded = SystemSignal::Present;
     }
-    let step = fixture.hook(at(10), 2, foreground);
+    let step = fixture.hook(at(10), foreground);
     assert_eq!(fields(&step).title_status, TitleStatus::Redacted);
     assert!(!format!("{step:?}").contains("display secret"));
     fixture.finish(at(20));
@@ -850,7 +1002,7 @@ fn browser_privacy_wait_has_no_output_title_and_timeout_discards_it() {
     if let Foreground::Window { privacy, .. } = &mut foreground {
         privacy.browser = BrowserContext::Pending;
     }
-    let pending = fixture.hook(at(10), 2, foreground);
+    let pending = fixture.hook(at(10), foreground);
     assert!(!format!("{pending:?}").contains("bank secret"));
     assert!(matches!(
         fixture.core.state(),
@@ -876,7 +1028,7 @@ fn browser_context_evaluates_delayed_titles_and_domain_only_drops_windows_title(
     if let Foreground::Window { privacy, .. } = &mut foreground {
         privacy.browser = BrowserContext::Pending;
     }
-    let _ = fixture.hook(at(10), 2, foreground.clone());
+    let _ = fixture.hook(at(10), foreground.clone());
     let mut web = FieldSnapshot {
         domain: Some(crate::domain_name::DomainName::parse("bank.example").expect("domain")),
         ..FieldSnapshot::default()
@@ -886,7 +1038,7 @@ fn browser_context_evaluates_delayed_titles_and_domain_only_drops_windows_title(
     if let Foreground::Window { privacy, .. } = &mut foreground {
         privacy.browser = BrowserContext::Ready(web);
     }
-    let ready = fixture.hook(at(20), 2, foreground);
+    let ready = fixture.hook(at(20), foreground);
     assert_eq!(fields(&ready).web, crate::rules::WebAction::DomainOnly);
     assert!(!format!("{ready:?}").contains("bank secret"));
     fixture.finish(at(30));
@@ -1043,7 +1195,6 @@ fn seeded_event_sequences_conserve_duration_per_run_and_clock_segment() {
     for _case in 0..16 {
         let mut fixture = Fixture::active();
         let mut now = at(0);
-        let mut generation = 1;
         for _ in 0..300 {
             seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
             now = now.advance(Duration::from_millis(1 + ((seed >> 32) % 200)));
@@ -1074,18 +1225,12 @@ fn seeded_event_sequences_conserve_duration_per_run_and_clock_segment() {
                     let _ = fixture.send(now, CaptureEvent::Wake);
                 }
                 5 => {
-                    generation += 1;
-                    let _ = fixture.review(
-                        now,
-                        generation,
-                        Foreground::None(NoForegroundReason::UnknownDesktop),
-                    );
+                    let _ =
+                        fixture.review(now, Foreground::None(NoForegroundReason::UnknownDesktop));
                 }
                 _ => {
-                    generation += 1;
                     let _ = fixture.review(
                         now,
-                        generation,
                         window((seed >> 8) % 3 + 1, &format!("title {}", seed % 7)),
                     );
                 }
@@ -1099,7 +1244,7 @@ fn seeded_event_sequences_conserve_duration_per_run_and_clock_segment() {
 fn failed_buffer_repair_and_core_tail_gap_conserve_persisted_duration() {
     let mut fixture = Fixture::active();
     let mut persisted = fixture.writes.clone();
-    let lost = fixture.hook(at(10), 2, window(2, "lost private fact"));
+    let lost = fixture.hook(at(10), window(2, "lost private fact"));
     let CaptureParts { batch, .. } = lost.into_parts(RunId::new(1));
     let mut backlog = WriteBacklog::new();
     backlog.failed(BacklogFailure::Database);
@@ -1123,7 +1268,7 @@ fn failed_buffer_repair_and_core_tail_gap_conserve_persisted_duration() {
     persisted.extend(reset.writes);
     persisted.extend(
         fixture
-            .review(at(600_020), 3, window(1, "after recovery"))
+            .review(at(600_020), window(1, "after recovery"))
             .writes,
     );
     persisted.extend(fixture.send(at(600_030), CaptureEvent::Shutdown).writes);
@@ -1173,7 +1318,6 @@ fn clock_boundary_batch_loss_preserves_segments_and_identity_free_gaps() {
         fixture
             .review(
                 now.advance(Duration::from_millis(10)),
-                2,
                 window(1, "restored"),
             )
             .writes,
@@ -1222,7 +1366,6 @@ fn discarded_batch_feedback_allows_later_commits_without_database_row_ids() {
             at: at(2),
             rules: Arc::clone(&rules),
             event: reading(
-                1,
                 ObservationSource::Review,
                 window(1, "first reviewed window"),
             ),
@@ -1297,7 +1440,7 @@ fn privacy_relaxation_does_not_restore_cached_dropped_title_and_expiry_splits_no
     if let Foreground::Window { privacy, .. } = &mut foreground {
         privacy.mode = PrivacyMode::Private;
     }
-    let _ = fixture.hook(at(10), 2, foreground);
+    let _ = fixture.hook(at(10), foreground);
     let _ = fixture.send(
         at(20),
         CaptureEvent::SetTimedState(TimedState {
@@ -1331,7 +1474,7 @@ fn suspend_resume_uses_wall_time_for_midnight_masks_and_unbiased_time_for_foregr
         start,
         CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
     );
-    let _ = fixture.review(start, 1, window(1, "before sleep"));
+    let _ = fixture.review(start, window(1, "before sleep"));
     let _ = fixture.send(
         start.advance(Duration::from_millis(10)),
         CaptureEvent::Stop(StopChange::Begin(StopReason::Suspended)),
@@ -1354,7 +1497,6 @@ fn suspend_resume_uses_wall_time_for_midnight_masks_and_unbiased_time_for_foregr
     assert!(step.writes.iter().any(|write| matches!(write, CaptureWrite::OpenClockSegment { segment, at } if segment.get() == 2 && *at == resume)));
     let _ = fixture.review(
         resume.advance(Duration::from_millis(1)),
-        2,
         window(1, "after sleep"),
     );
     fixture.finish(resume.advance(Duration::from_millis(10)));
@@ -1470,9 +1612,12 @@ fn policy_change_during_resume_wait_does_not_reopen_cached_window() {
             .iter()
             .all(|row| matches!(row.fact, IntervalFact::NoForeground(_)))
     );
-    let ignored = fixture.hook(at(40), 2, window(2, "still waiting"));
-    assert!(interval_opens(&ignored).is_empty());
-    let _ = fixture.review(at(50), 2, window(2, "reviewed"));
+    let read = fixture.hook(at(40), window(2, "fresh callback read"));
+    assert!(matches!(
+        interval_opens(&read).last().expect("fresh fact").fact,
+        IntervalFact::Window { .. }
+    ));
+    let _ = fixture.review(at(50), window(2, "reviewed"));
     fixture.finish(at(60));
 }
 
@@ -1487,7 +1632,7 @@ fn overload_across_midnight_ends_at_trusted_time_without_fabricated_foreground()
         start,
         CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
     );
-    let _ = fixture.review(start, 1, window(1, "trusted"));
+    let _ = fixture.review(start, window(1, "trusted"));
     let overloaded = fixture.send(
         start.advance(Duration::from_millis(200)),
         CaptureEvent::EventOverload,
@@ -1500,7 +1645,6 @@ fn overload_across_midnight_ends_at_trusted_time_without_fabricated_foreground()
     );
     let _ = fixture.review(
         start.advance(Duration::from_millis(300)),
-        2,
         window(1, "restored"),
     );
     fixture.finish(start.advance(Duration::from_millis(400)));
@@ -1562,12 +1706,12 @@ fn overdue_maintenance_marks_unknown_range_instead_of_confirming_an_unreviewed_w
             ..
         } if point.mono == mono(0)
     )));
-    let _ = fixture.review(at(60_010), 2, window(1, "fresh after stall"));
+    let _ = fixture.review(at(60_010), window(1, "fresh after stall"));
     fixture.finish(at(60_020));
 }
 
 #[test]
-fn no_interval_is_emitted_until_session_and_fresh_foreground_review_both_arrive() {
+fn no_interval_is_emitted_until_session_and_fresh_foreground_read_both_arrive() {
     let mut fixture = Fixture::new(at(0));
     let ready = fixture.send(
         at(0),
@@ -1589,9 +1733,9 @@ fn no_interval_is_emitted_until_session_and_fresh_foreground_review_both_arrive(
         CaptureEvent::Stop(StopChange::End(StopReason::Locked)),
     );
     assert!(interval_opens(&resumed).is_empty());
-    let hook = fixture.hook(at(40), 2, window(1, "not reviewed"));
-    assert!(interval_opens(&hook).is_empty());
-    let reviewed = fixture.review(at(50), 2, window(1, "reviewed"));
+    let hook = fixture.hook(at(40), window(1, "fresh callback read"));
+    assert!(!interval_opens(&hook).is_empty());
+    let reviewed = fixture.review(at(50), window(1, "reviewed"));
     assert!(!interval_opens(&reviewed).is_empty());
     fixture.finish(at(60));
 }
@@ -1614,8 +1758,8 @@ fn browser_context_authorizes_only_its_correlated_snapshot_and_late_replies_cann
         }
         foreground
     };
-    let first = fixture.hook(at(10), 2, pending("secret older page"));
-    let second = fixture.hook(at(20), 2, pending("allowed current page"));
+    let first = fixture.hook(at(10), pending("secret older page"));
+    let second = fixture.hook(at(20), pending("allowed current page"));
     let observation = |step: &CaptureStep| {
         step.effects
             .iter()
@@ -1655,7 +1799,7 @@ fn browser_context_authorizes_only_its_correlated_snapshot_and_late_replies_cann
 #[test]
 fn invalid_capture_inputs_leave_every_core_component_unchanged() {
     let mut fixture = Fixture::active();
-    let _ = fixture.hook(at(10), 1, window(1, "known state"));
+    let _ = fixture.hook(at(10), window(1, "known state"));
     let cases = [
         CaptureInput {
             at: at(9),

@@ -45,6 +45,9 @@ struct ChildEnumeration {
 #[derive(Clone, Copy)]
 pub(super) struct Window(HWND);
 impl Window {
+    pub(super) fn raw(self) -> HWND {
+        self.0
+    }
     pub(super) fn from_native(window: HWND) -> Self {
         Self(window)
     }

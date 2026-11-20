@@ -3,7 +3,8 @@ use crate::store::identifiers::{ColumnName, TableName};
 use crate::store::{
     enums,
     rows::{
-        AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow, ClockSegmentsRow, IntervalsRow,
+        ApplicationsRow, AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow,
+        ClockSegmentsRow, IntervalsRow, WindowInstancesRow,
     },
     schema::{
         applications, availability_intervals, capture_gaps, capture_runs, clock_segments,
@@ -139,7 +140,6 @@ impl Fixture {
 }
 fn foreground(handle: u64, title: &str) -> CaptureEvent {
     CaptureEvent::Foreground {
-        generation: ForegroundGeneration::new(handle),
         source: ObservationSource::Review,
         foreground: Foreground::Window {
             facts: Box::new(WindowFacts {
@@ -148,6 +148,7 @@ fn foreground(handle: u64, title: &str) -> CaptureEvent {
                 process_created_utc: Some(at(0).utc),
                 class: "TestClass".into(),
                 app: AppIdentity::Exe("c:\\app.exe".into()),
+                metadata_source: MetadataSource::Process,
                 exe_name: Some("app.exe".into()),
                 display_name: "App".into(),
                 title: Title::readable(title),
@@ -155,6 +156,251 @@ fn foreground(handle: u64, title: &str) -> CaptureEvent {
             privacy: PrivacyContext::default(),
         },
     }
+}
+
+#[test]
+fn review_persists_resolved_content_in_new_window_generation() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.persist(
+        at(0),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    let CaptureEvent::Foreground {
+        foreground: Foreground::Window { mut facts, privacy },
+        ..
+    } = foreground(1, "Settings")
+    else {
+        panic!("window fixture")
+    };
+    facts.class = "ApplicationFrameWindow".into();
+    facts.app = AppIdentity::Unresolved(facts.class.clone());
+    facts.metadata_source = MetadataSource::Unavailable;
+    facts.exe_name = None;
+    facts.display_name = facts.class.clone();
+    fixture.persist(
+        at(0),
+        CaptureEvent::Foreground {
+            source: ObservationSource::Review,
+            foreground: Foreground::Window {
+                facts: facts.clone(),
+                privacy: privacy.clone(),
+            },
+        },
+    );
+    facts.app = AppIdentity::Aumid("SettingsPackage!Settings".into());
+    facts.metadata_source = MetadataSource::Process;
+    facts.exe_name = Some("systemsettings.exe".into());
+    facts.display_name = "Settings".into();
+    for time in [100, 200] {
+        fixture.persist(
+            at(time),
+            CaptureEvent::Foreground {
+                source: ObservationSource::Review,
+                foreground: Foreground::Window {
+                    facts: facts.clone(),
+                    privacy: privacy.clone(),
+                },
+            },
+        );
+    }
+    let instances = window_instances::table
+        .order(window_instances::generation)
+        .select(WindowInstancesRow::as_select())
+        .load(&mut fixture.store._writer)
+        .expect("persisted window instances");
+    assert_eq!(instances.len(), 2, "content identity needs a new instance");
+    let unresolved = &instances[0];
+    let resolved = &instances[1];
+    assert_eq!(unresolved.generation, 0);
+    assert_eq!(resolved.generation, 1);
+    assert_eq!(resolved.hwnd, unresolved.hwnd);
+    assert_eq!(resolved.pid, unresolved.pid);
+    assert_eq!(
+        resolved.process_created_utc_ms,
+        unresolved.process_created_utc_ms
+    );
+    assert_ne!(resolved.app_id, unresolved.app_id);
+    assert_eq!(unresolved.last_seen_utc_ms, 0);
+    assert_eq!(resolved.first_seen_utc_ms, 100);
+    assert_eq!(resolved.last_seen_utc_ms, 200);
+    let app = applications::table
+        .filter(applications::id.eq(resolved.app_id))
+        .select(ApplicationsRow::as_select())
+        .first(&mut fixture.store._writer)
+        .expect("resolved content application");
+    assert_eq!(app.identity_key, facts.app.key());
+    assert_eq!(app.exe_name, facts.exe_name);
+    assert_eq!(app.display_name, facts.display_name);
+    let intervals = fixture.intervals();
+    assert_eq!(intervals.len(), 2);
+    assert_eq!(intervals[0].window_instance_id, unresolved.id);
+    assert_eq!(intervals[0].app_id, Some(unresolved.app_id));
+    assert_eq!(intervals[1].window_instance_id, resolved.id);
+    assert_eq!(intervals[1].app_id, Some(resolved.app_id));
+}
+
+#[test]
+fn frame_aumid_metadata_enrichment_updates_app_without_new_persisted_instance() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.persist(
+        at(0),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    let CaptureEvent::Foreground {
+        foreground: Foreground::Window { mut facts, privacy },
+        ..
+    } = foreground(1, "private window title")
+    else {
+        panic!("frame fixture")
+    };
+    facts.class = "ApplicationFrameWindow".into();
+    facts.app = AppIdentity::Aumid("SettingsPackage!Settings".into());
+    facts.metadata_source = MetadataSource::Frame;
+    facts.exe_name = None;
+    facts.display_name = "SettingsPackage!Settings".into();
+    fixture.persist(
+        at(0),
+        CaptureEvent::Foreground {
+            source: ObservationSource::Review,
+            foreground: Foreground::Window {
+                facts: facts.clone(),
+                privacy: privacy.clone(),
+            },
+        },
+    );
+    facts.metadata_source = MetadataSource::Process;
+    facts.exe_name = Some("systemsettings.exe".into());
+    facts.display_name = "Settings".into();
+    fixture.persist(
+        at(10),
+        CaptureEvent::Foreground {
+            source: ObservationSource::Review,
+            foreground: Foreground::Window {
+                facts: facts.clone(),
+                privacy,
+            },
+        },
+    );
+    let instances = window_instances::table
+        .select(WindowInstancesRow::as_select())
+        .load(&mut fixture.store._writer)
+        .expect("persisted frame instance");
+    assert_eq!(
+        instances.len(),
+        1,
+        "metadata enrichment must preserve the instance"
+    );
+    let instance = &instances[0];
+    assert_eq!(instance.generation, 0);
+    let app = applications::table
+        .filter(applications::id.eq(instance.app_id))
+        .select(ApplicationsRow::as_select())
+        .first(&mut fixture.store._writer)
+        .expect("enriched application");
+    assert_eq!(app.identity_key, facts.app.key());
+    assert_eq!(app.exe_name, facts.exe_name);
+    assert_eq!(app.display_name, facts.display_name);
+    let intervals = fixture.intervals();
+    assert_eq!(intervals.len(), 1);
+    assert_eq!(intervals[0].window_instance_id, instance.id);
+    assert_eq!(intervals[0].app_id, Some(instance.app_id));
+}
+
+#[test]
+fn frame_observations_preserve_stored_metadata_across_new_window_instances() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.persist(
+        at(0),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    let CaptureEvent::Foreground {
+        foreground: Foreground::Window { mut facts, privacy },
+        ..
+    } = foreground(1, "private title")
+    else {
+        panic!("frame fixture")
+    };
+    facts.app = AppIdentity::Aumid("SettingsPackage!Settings".into());
+    facts.exe_name = Some("systemsettings.exe".into());
+    facts.display_name = "设置".into();
+    fixture.persist(
+        at(0),
+        CaptureEvent::Foreground {
+            source: ObservationSource::Review,
+            foreground: Foreground::Window {
+                facts: facts.clone(),
+                privacy: privacy.clone(),
+            },
+        },
+    );
+    let process = applications::table
+        .filter(applications::identity_key.eq(facts.app.key()))
+        .select(ApplicationsRow::as_select())
+        .first(&mut fixture.store._writer)
+        .expect("stored process application");
+    facts.handle = WindowHandle::new(2);
+    facts.metadata_source = MetadataSource::Frame;
+    facts.exe_name = None;
+    facts.display_name = "SettingsPackage!Settings".into();
+    fixture.persist(
+        at(10),
+        CaptureEvent::Foreground {
+            source: ObservationSource::Review,
+            foreground: Foreground::Window {
+                facts: facts.clone(),
+                privacy: privacy.clone(),
+            },
+        },
+    );
+    let preserved = applications::table
+        .filter(applications::identity_key.eq(facts.app.key()))
+        .select(ApplicationsRow::as_select())
+        .first(&mut fixture.store._writer)
+        .expect("application after frame observation");
+    assert_eq!(preserved.id, process.id);
+    assert_eq!(preserved.exe_name, process.exe_name);
+    assert_eq!(preserved.display_name, process.display_name);
+    facts.handle = WindowHandle::new(3);
+    facts.app = AppIdentity::Aumid("NewPackage!App".into());
+    facts.display_name = "NewPackage!App".into();
+    fixture.persist(
+        at(20),
+        CaptureEvent::Foreground {
+            source: ObservationSource::Review,
+            foreground: Foreground::Window {
+                facts: facts.clone(),
+                privacy: privacy.clone(),
+            },
+        },
+    );
+    let placeholder = applications::table
+        .filter(applications::identity_key.eq(facts.app.key()))
+        .select(ApplicationsRow::as_select())
+        .first(&mut fixture.store._writer)
+        .expect("new frame-only application");
+    assert!(placeholder.exe_name.is_none());
+    assert_eq!(placeholder.display_name, facts.display_name);
+    facts.metadata_source = MetadataSource::Process;
+    facts.exe_name = Some("new-app.exe".into());
+    facts.display_name = "New application".into();
+    fixture.persist(
+        at(30),
+        CaptureEvent::Foreground {
+            source: ObservationSource::Review,
+            foreground: Foreground::Window {
+                facts: facts.clone(),
+                privacy,
+            },
+        },
+    );
+    let upgraded = applications::table
+        .filter(applications::identity_key.eq(facts.app.key()))
+        .select(ApplicationsRow::as_select())
+        .first(&mut fixture.store._writer)
+        .expect("process-enriched application");
+    assert_eq!(upgraded.id, placeholder.id);
+    assert_eq!(upgraded.exe_name, facts.exe_name);
+    assert_eq!(upgraded.display_name, facts.display_name);
 }
 
 #[test]
@@ -1287,7 +1533,6 @@ fn real_threads_recover_gate_checkpoint_report_failure_and_flush_shutdown() {
     runtime.observe(CaptureEvent::Session(SessionStatus::Unavailable));
     runtime.wait(|command| matches!(command, MainCommand::Effect(CaptureEffect::QuerySession)));
     runtime.observe(CaptureEvent::Foreground {
-        generation: ForegroundGeneration::new(1),
         source: ObservationSource::Review,
         foreground: Foreground::None(NoForegroundReason::Empty),
     });
@@ -1305,7 +1550,6 @@ fn real_threads_recover_gate_checkpoint_report_failure_and_flush_shutdown() {
     assert_eq!(before, 0, "session readiness gates foreground rows");
     runtime.wait(|command| matches!(command, MainCommand::Effect(CaptureEffect::CheckIdle)));
     runtime.observe(CaptureEvent::Foreground {
-        generation: ForegroundGeneration::new(2),
         source: ObservationSource::Review,
         foreground: Foreground::None(NoForegroundReason::Empty),
     });
@@ -1382,7 +1626,6 @@ fn real_threads_translate_channel_overload_into_a_durable_gap() {
         )
     });
     runtime.observe(CaptureEvent::Foreground {
-        generation: ForegroundGeneration::new(1),
         source: ObservationSource::Review,
         foreground: Foreground::None(NoForegroundReason::Empty),
     });
@@ -1399,7 +1642,6 @@ fn real_threads_translate_channel_overload_into_a_durable_gap() {
         )
     });
     runtime.observe(CaptureEvent::Foreground {
-        generation: ForegroundGeneration::new(2),
         source: ObservationSource::Review,
         foreground: Foreground::None(NoForegroundReason::Empty),
     });

@@ -7,8 +7,17 @@ use crate::store::{
     schema::{applications, window_instances},
 };
 use diesel::NullableExpressionMethods;
-use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl};
-use quartz_domain::capture::{AppIdentity, RunId, Timestamp, WindowId, WindowInstance};
+use diesel::prelude::{AsChangeset, ExpressionMethods, QueryDsl, RunQueryDsl};
+use quartz_domain::capture::{
+    AppIdentity, MetadataSource, RunId, Timestamp, WindowId, WindowInstance,
+};
+
+#[derive(AsChangeset)]
+#[diesel(table_name = applications, treat_none_as_null = true)]
+struct ApplicationMetadataUpdate<'metadata> {
+    display_name: &'metadata str,
+    exe_name: Option<&'metadata str>,
+}
 
 impl Capture<'_> {
     pub(super) fn observe_window(
@@ -88,16 +97,25 @@ impl Capture<'_> {
         at: Timestamp,
     ) -> Result<DbRowId, ExecuteCaptureBatchError> {
         let row = ApplicationsRow::observed(instance, at)?;
-        diesel::insert_into(applications::table)
+        let insert = diesel::insert_into(applications::table)
             .values(&row)
-            .on_conflict(applications::identity_key)
-            .do_update()
-            .set((
-                applications::display_name.eq(&row.display_name),
-                applications::exe_name.eq(&row.exe_name),
-            ))
-            .returning(applications::id.assume_not_null())
-            .get_result(self.connection)
+            .on_conflict(applications::identity_key);
+        let result = match instance.metadata_source {
+            MetadataSource::Process => insert
+                .do_update()
+                .set(ApplicationMetadataUpdate {
+                    display_name: &row.display_name,
+                    exe_name: row.exe_name.as_deref(),
+                })
+                .returning(applications::id.assume_not_null())
+                .get_result(self.connection),
+            MetadataSource::Frame | MetadataSource::Unavailable => insert
+                .do_update()
+                .set(applications::identity_key.eq(&row.identity_key))
+                .returning(applications::id.assume_not_null())
+                .get_result(self.connection),
+        };
+        result
             .map(DbRowId::new)
             .map_err(ExecuteCaptureBatchError::from)
     }

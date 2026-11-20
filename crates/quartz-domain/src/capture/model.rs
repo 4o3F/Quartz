@@ -1,10 +1,10 @@
 //! Value inputs, transactional write descriptions and sanitized shell effects.
 
 use super::{
-    BatchId, BrowserContext, CapturedFields, Deadline, ForegroundGeneration, IdleException,
-    IdleRecord, IdleSample, MonoInstant, ObservationId, PrivacyContext, ProcessId,
-    ReadLastInputError, RowId, RunId, SchedulerKind, SegmentId, SessionKey, TimeRange, Timestamp,
-    UtcInstant, WindowFacts, WindowId, WindowInstance, WriteBatch,
+    BatchId, BrowserContext, CapturedFields, Deadline, IdleException, IdleRecord, IdleSample,
+    MonoInstant, ObservationId, PrivacyContext, ProcessId, ReadLastInputError, RowId, RunId,
+    SchedulerKind, SegmentId, SessionKey, TimeRange, Timestamp, UtcInstant, WindowFacts,
+    WindowHandle, WindowId, WindowInstance, WriteBatch,
 };
 use crate::rules::registry::RuleSnapshot;
 use std::{collections::BTreeSet, sync::Arc};
@@ -68,7 +68,7 @@ pub enum Foreground {
     /// No observable foreground is available.
     None(NoForegroundReason),
 }
-/// Whether a reading came from a hook or a fresh system review.
+/// Origin for latency evidence and metadata maintenance; both variants read current state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservationSource {
     /// An event-triggered window or title snapshot.
@@ -407,13 +407,9 @@ pub enum CaptureEffect {
     AwaitBrowserContext {
         /// Correlation key of exactly one withheld foreground snapshot.
         observation: ObservationId,
-        /// Foreground hook generation associated with this reading.
-        generation: ForegroundGeneration,
     },
-    /// Main thread must check this generation before replacing hooks.
+    /// Main thread must check the target HWND and PID before replacing hooks.
     RebindHooks {
-        /// Foreground hook generation associated with this reading.
-        generation: ForegroundGeneration,
         /// Typed process binding or explicit hook removal.
         target: HookTarget,
     },
@@ -421,6 +417,8 @@ pub enum CaptureEffect {
     QuerySession,
     /// Request a current foreground and title snapshot.
     ReviewForeground,
+    /// Request the periodic fallback read without invalidating its comparison baseline.
+    FallbackReviewForeground,
     /// Discard queued hook events made untrustworthy by main-queue overload.
     DiscardQueuedObservations,
     /// Arm exactly one timer, or cancel it when empty.
@@ -431,8 +429,13 @@ pub enum CaptureEffect {
     PolicyExpired(super::TimedPolicyKind),
     /// Sanitized current state for subscriptions and tray rendering.
     StateChanged(CaptureState),
-    /// Review detected a missed foreground/title notification.
-    MissedEvent,
+    /// The fallback review found a change without an intervening trigger.
+    UntriggeredChange {
+        /// Previously tracked native window, absent for a non-window foreground.
+        previous_window: Option<WindowHandle>,
+        /// Window supplied by the review, absent for a non-window foreground.
+        reviewed_window: Option<WindowHandle>,
+    },
     /// Idle input was invalid; retain the prior mask and retry.
     IdleSampleFailed(ReadLastInputError),
 }
@@ -451,14 +454,19 @@ pub struct CaptureInput {
 pub enum CaptureEvent {
     /// Startup/retry session result; must precede opening any interval.
     Session(SessionStatus),
-    /// Foreground-generation-tagged resolved observation.
+    /// Resolved current-state observation, delivered in main-thread read order.
     Foreground {
-        /// Foreground hook generation associated with this reading.
-        generation: ForegroundGeneration,
         /// Origin of this foreground snapshot.
         source: ObservationSource,
         /// Resolved foreground facts for this work unit.
         foreground: Foreground,
+    },
+    /// A notification coverage gap reported by the main-thread comparison core.
+    UntriggeredChange {
+        /// Window at the previous read.
+        previous_window: Option<WindowHandle>,
+        /// Window at the fallback read.
+        reviewed_window: Option<WindowHandle>,
     },
     /// Context for one withheld snapshot; late replies cannot recover discarded titles.
     PrivacyContext {
@@ -471,8 +479,6 @@ pub enum CaptureEvent {
     Destroy(WindowId),
     /// Native destroy notification from the currently bound process hook.
     DestroyWindow {
-        /// Generation checked before retiring the native handle.
-        generation: ForegroundGeneration,
         /// Native handle whose live instance should be retired.
         handle: super::WindowHandle,
     },
@@ -596,7 +602,12 @@ pub struct CaptureParts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookTarget {
     /// Bind to the foreground process.
-    Process(ProcessId),
+    Process {
+        /// Native window expected to remain foreground.
+        window: WindowHandle,
+        /// Process owning that native window.
+        process: ProcessId,
+    },
     /// Remove the previous process hooks.
     Unbind,
 }

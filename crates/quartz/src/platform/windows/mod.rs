@@ -203,7 +203,7 @@ pub(crate) struct CoreProcess {
     ui: UiState<process::UiProcess>,
     capture: Option<CaptureState>,
     persistence: PersistenceState,
-    missed_events: u64,
+    untriggered_changes: u64,
 }
 impl CoreProcess {
     pub(crate) fn new() -> Self {
@@ -211,7 +211,7 @@ impl CoreProcess {
             ui: UiState::None,
             capture: None,
             persistence: PersistenceState::Ready,
-            missed_events: 0,
+            untriggered_changes: 0,
         }
     }
     /// Runs the Windows core on the calling main thread and reports startup failures.
@@ -365,24 +365,32 @@ impl CoreProcess {
                         CaptureEffect::CheckIdle => {
                             sources.check_idle().context(wait_error::ObserveSnafu)?
                         }
-                        CaptureEffect::MissedEvent => {
-                            self.missed_events = self.missed_events.saturating_add(1);
+                        CaptureEffect::UntriggeredChange {
+                            previous_window,
+                            reviewed_window,
+                        } => {
+                            tracing::debug!(
+                                previous_hwnd = ?previous_window.map(|window| window.get()),
+                                reviewed_hwnd = ?reviewed_window.map(|window| window.get()),
+                                "foreground review window comparison"
+                            );
+                            self.untriggered_changes = self.untriggered_changes.saturating_add(1);
                             tracing::info!(
-                                missed_events = self.missed_events,
-                                "foreground review detected a missed event"
+                                untriggered_changes = self.untriggered_changes,
+                                "foreground fallback review detected an untriggered change"
                             );
                         }
                         CaptureEffect::IdleSampleFailed(error) => {
                             tracing::warn!(%error, "idle sample was rejected")
                         }
-                        CaptureEffect::RebindHooks { generation, target } => sources
-                            .foreground(foreground::ForegroundCommand::Rebind {
-                                generation,
-                                target,
-                            })
+                        CaptureEffect::RebindHooks { target } => sources
+                            .foreground(foreground::ForegroundCommand::Rebind { target })
                             .context(wait_error::ObserveSnafu)?,
                         CaptureEffect::ReviewForeground => sources
                             .foreground(foreground::ForegroundCommand::Review)
+                            .context(wait_error::ObserveSnafu)?,
+                        CaptureEffect::FallbackReviewForeground => sources
+                            .foreground(foreground::ForegroundCommand::FallbackReview)
                             .context(wait_error::ObserveSnafu)?,
                         CaptureEffect::DiscardQueuedObservations => {
                             // The capture worker has already discarded the queue before publishing this effect.

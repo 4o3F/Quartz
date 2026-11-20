@@ -33,23 +33,7 @@ impl ProcessId {
         self.0
     }
 }
-/// Foreground hook generation, independently of window-instance reuse generations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ForegroundGeneration(u64);
-impl ForegroundGeneration {
-    /// Constructs an opaque platform value supplied by the shell.
-    #[must_use]
-    pub fn new(value: u64) -> Self {
-        Self(value)
-    }
-    /// Returns the value for the platform or persistence adapter.
-    #[must_use]
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
-
-/// HWND reuse sequence within one capture run, independent of foreground hook generations.
+/// HWND reuse sequence within one capture run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InstanceGeneration(u64);
 
@@ -197,6 +181,17 @@ impl Title {
     }
 }
 
+/// Origin of application identity and metadata supplied by an observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataSource {
+    /// Executable and display name were obtained from a process query.
+    Process,
+    /// Identity came from a frame property, with cached or placeholder descriptive data.
+    Frame,
+    /// Application metadata could not be resolved.
+    Unavailable,
+}
+
 /// Identity facts that the shell revalidated after resolving process metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowFacts {
@@ -210,6 +205,8 @@ pub struct WindowFacts {
     pub class: String,
     /// Resolved application identity.
     pub app: AppIdentity,
+    /// Source of this observation's application metadata.
+    pub metadata_source: MetadataSource,
     /// Lowercase executable filename used by rules.
     pub exe_name: Option<String>,
     /// Resolved application display name.
@@ -235,6 +232,8 @@ pub struct WindowInstance {
     pub class: String,
     /// Application dictionary identity.
     pub app: AppIdentity,
+    /// Source of the latest observation, used to decide application dictionary updates.
+    pub metadata_source: MetadataSource,
     /// Executable filename.
     pub exe_name: Option<String>,
     /// Application display name.
@@ -268,15 +267,18 @@ impl WindowInstances {
                 && old.instance.process == facts.process
                 && old.instance.process_created_utc == facts.process_created_utc
                 && old.instance.class == facts.class
+                && old.instance.app == facts.app
         });
         if same {
             let entry = self
                 .entries
                 .get_mut(&facts.handle)
                 .expect("matching entry exists");
-            entry.instance.app = facts.app.clone();
-            entry.instance.exe_name = facts.exe_name.clone();
-            entry.instance.display_name = facts.display_name.clone();
+            if facts.metadata_source == MetadataSource::Process {
+                entry.instance.exe_name = facts.exe_name.clone();
+                entry.instance.display_name = facts.display_name.clone();
+            }
+            entry.instance.metadata_source = facts.metadata_source;
             return entry.instance.clone();
         }
         let generation = match old {
@@ -295,6 +297,7 @@ impl WindowInstances {
             generation,
             class: facts.class.clone(),
             app: facts.app.clone(),
+            metadata_source: facts.metadata_source,
             exe_name: facts.exe_name.clone(),
             display_name: facts.display_name.clone(),
             first_seen: at,

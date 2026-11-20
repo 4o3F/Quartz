@@ -489,8 +489,8 @@ mod tests {
     fn committed_checkpoint_latency_uses_the_injected_post_flush_clock() {
         use quartz_domain::{
             capture::{
-                CaptureCore, CaptureEvent, CaptureInput, Foreground, ForegroundGeneration,
-                NoForegroundReason, ObservationSource, RunId,
+                CaptureCore, CaptureEvent, CaptureInput, Foreground, NoForegroundReason,
+                ObservationSource, RunId,
             },
             rules::registry::{RegistryState, RuleRegistry},
         };
@@ -511,7 +511,6 @@ mod tests {
                     Default::default(),
                 )),
                 CaptureEvent::Foreground {
-                    generation: ForegroundGeneration::new(1),
                     source: ObservationSource::Review,
                     foreground: Foreground::None(NoForegroundReason::Empty),
                 },

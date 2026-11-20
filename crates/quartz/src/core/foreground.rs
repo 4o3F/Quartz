@@ -1,8 +1,6 @@
 //! Platform-independent foreground filtering and metadata selection.
 
-use quartz_domain::capture::{
-    ForegroundGeneration, ProcessId, SystemSignal, Title, WindowHandle, limits,
-};
+use quartz_domain::capture::{HookTarget, ProcessId, SystemSignal, Title, WindowHandle, limits};
 use std::collections::VecDeque;
 
 /// Bounded process metadata retention, capture 02 §2.1.
@@ -41,7 +39,7 @@ pub(crate) enum EventDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RebindDecision {
     Accept,
-    Stale,
+    ReadCurrent,
 }
 impl NativeEvent {
     pub(crate) fn accepts(self, foreground: WindowHandle) -> EventDecision {
@@ -58,40 +56,146 @@ impl NativeEvent {
         }
     }
 }
-#[derive(Debug)]
-pub(crate) struct ForegroundTarget {
-    window: WindowHandle,
-    generation: ForegroundGeneration,
+/// Why the main thread reads current state; only the existing fallback timer can count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadCause {
+    Trigger,
+    Fallback,
 }
-impl ForegroundTarget {
-    pub(crate) fn new() -> Self {
-        Self {
-            window: WindowHandle::new(0),
-            generation: ForegroundGeneration::new(0),
-        }
+/// Completed read evidence; the fallback tick shares dwmsEventTime's time base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadSample {
+    Trigger,
+    Fallback { read_tick: u32 },
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CurrentForeground {
+    pub desktop: Desktop,
+    pub window: WindowHandle,
+    pub title: Title,
+    pub affinity: DisplayAffinity,
+}
+impl CurrentForeground {
+    pub(crate) fn observable_window(&self) -> Option<WindowHandle> {
+        (self.desktop == Desktop::Observable && self.window.get() != 0).then_some(self.window)
     }
-    pub(crate) fn window(&self) -> WindowHandle {
-        self.window
-    }
-    pub(crate) fn generation(&self) -> ForegroundGeneration {
-        self.generation
-    }
-    pub(crate) fn accepts_rebind(&self, generation: ForegroundGeneration) -> RebindDecision {
-        if self.generation == generation {
+    pub(crate) fn accepts_rebind(&self, target: HookTarget, owner: ProcessId) -> RebindDecision {
+        let matches = match target {
+            HookTarget::Process { window, process } => {
+                self.desktop == Desktop::Observable && self.window == window && owner == process
+            }
+            HookTarget::Unbind => self.observable_window().is_none(),
+        };
+        if matches {
             RebindDecision::Accept
         } else {
-            RebindDecision::Stale
+            RebindDecision::ReadCurrent
         }
     }
-    pub(crate) fn observe(&mut self, event: NativeEvent) {
-        if event.kind == EventKind::Foreground || self.window != event.window {
-            self.generation = ForegroundGeneration::new(
-                self.generation
-                    .get()
-                    .checked_add(1)
-                    .expect("foreground generation exhausted"),
-            );
-            self.window = event.window;
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CoverageChange {
+    pub previous_window: Option<WindowHandle>,
+    pub reviewed_window: Option<WindowHandle>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadDecision {
+    Unchanged,
+    Changed,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReadOutcome {
+    pub decision: ReadDecision,
+    pub untriggered: Option<CoverageChange>,
+}
+/// Half a wrapping u32 millisecond cycle; ordering evidence is valid within this range.
+const NATIVE_TICK_HALF_RANGE: u32 = 1 << (u32::BITS - 1);
+#[derive(Debug)]
+struct PendingChange {
+    change: CoverageChange,
+    read_tick: u32,
+}
+#[derive(Debug, Default)]
+enum TriggerHistory {
+    #[default]
+    None,
+    Received,
+}
+/// Sans-IO baseline and notification coverage decisions, capture 02 §1–§2.
+#[derive(Debug, Default)]
+pub(crate) struct ForegroundReads {
+    baseline: Option<CurrentForeground>,
+    triggers: TriggerHistory,
+    // Shutdown may discard this unresolved diagnostic; its observation was already emitted.
+    pending: Option<PendingChange>,
+}
+impl ForegroundReads {
+    pub(crate) fn trigger(&mut self) {
+        self.triggers = TriggerHistory::Received;
+    }
+    pub(crate) fn invalidate(&mut self) {
+        self.baseline = None;
+        self.trigger();
+    }
+    pub(crate) fn failed_read(&mut self, cause: ReadCause) {
+        if cause == ReadCause::Trigger {
+            self.trigger();
+        }
+    }
+    pub(crate) fn accept_delivery<E>(&mut self, result: Result<(), E>) -> Result<(), E> {
+        result.inspect_err(|_| self.invalidate())
+    }
+    pub(crate) fn retire(&mut self, window: WindowHandle) {
+        if self
+            .baseline
+            .as_ref()
+            .is_some_and(|state| state.window == window)
+        {
+            self.invalidate();
+        }
+    }
+    pub(crate) fn native_event(&mut self, event_time_ms: u32) -> Option<CoverageChange> {
+        let pending = self.pending.take()?;
+        if pending.read_tick.wrapping_sub(event_time_ms) < NATIVE_TICK_HALF_RANGE {
+            None
+        } else {
+            Some(pending.change)
+        }
+    }
+    pub(crate) fn observe(
+        &mut self,
+        sample: ReadSample,
+        current: &CurrentForeground,
+    ) -> ReadOutcome {
+        let untriggered = match sample {
+            ReadSample::Fallback { .. } => self.pending.take().map(|pending| pending.change),
+            ReadSample::Trigger => {
+                self.trigger();
+                None
+            }
+        };
+        let decision = if self.baseline.as_ref() == Some(current) {
+            ReadDecision::Unchanged
+        } else {
+            if let ReadSample::Fallback { read_tick } = sample
+                && matches!(self.triggers, TriggerHistory::None)
+                && let Some(previous) = &self.baseline
+            {
+                self.pending = Some(PendingChange {
+                    change: CoverageChange {
+                        previous_window: previous.observable_window(),
+                        reviewed_window: current.observable_window(),
+                    },
+                    read_tick,
+                });
+            }
+            self.baseline = Some(current.clone());
+            ReadDecision::Changed
+        };
+        self.triggers = TriggerHistory::None;
+        ReadOutcome {
+            decision,
+            untriggered,
         }
     }
 }
@@ -150,7 +254,7 @@ impl ChildWindow {
         })
     }
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisplayAffinity {
     None,
     Monitor,
@@ -278,8 +382,7 @@ impl<V> BoundedCache<ProcessKey, V> {
 pub(crate) struct Snapshot {
     pub at: quartz_domain::capture::Timestamp,
     pub read_at: quartz_domain::capture::Timestamp,
-    pub event_time_ms: u32,
-    pub generation: quartz_domain::capture::ForegroundGeneration,
+    pub event_time_ms: Option<u32>,
     pub source: quartz_domain::capture::ObservationSource,
     pub kind: EventKind,
     pub window: WindowHandle,
@@ -306,6 +409,7 @@ impl Desktop {
 mod tests {
     use super::*;
     use quartz_domain::capture::{AppIdentity, TitleStatus};
+    const TEST_READ_TICK: u32 = 1_000;
     #[test]
     fn filters_only_foreground_window_title_and_window_destroys() {
         let foreground = WindowHandle::new(1);
@@ -348,27 +452,594 @@ mod tests {
             EventDecision::Ignore
         );
     }
+    fn current(handle: u64, text: &str) -> CurrentForeground {
+        CurrentForeground {
+            desktop: Desktop::Observable,
+            window: WindowHandle::new(handle),
+            title: Title::readable(text),
+            affinity: DisplayAffinity::None,
+        }
+    }
     #[test]
-    fn reviews_preserve_generation_and_stale_rebinds_are_rejected() {
-        let mut target = ForegroundTarget::new();
-        let mut event = NativeEvent {
-            kind: EventKind::Review,
-            window: WindowHandle::new(1),
+    fn late_switcher_event_after_target_is_absorbed_without_observation_or_count() {
+        let mut reads = ForegroundReads::default();
+        let target = current(7, "target");
+        assert_eq!(
+            reads.observe(ReadSample::Trigger, &target),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+        let late = NativeEvent {
+            kind: EventKind::Foreground,
+            window: WindowHandle::new(9),
             object: WINDOW_OBJECT,
             child: SELF_CHILD,
         };
-        target.observe(event);
-        let first = target.generation();
-        assert_eq!(target.window(), event.window);
-        target.observe(event);
-        assert_eq!(target.accepts_rebind(first), RebindDecision::Accept);
-        event.kind = EventKind::Foreground;
-        target.observe(event);
-        assert_eq!(target.accepts_rebind(first), RebindDecision::Stale);
+        assert_eq!(late.accepts(target.window), EventDecision::Accept);
         assert_eq!(
-            target.accepts_rebind(target.generation()),
+            reads.observe(ReadSample::Trigger, &target),
+            ReadOutcome {
+                decision: ReadDecision::Unchanged,
+                untriggered: None
+            }
+        );
+        assert_eq!(
+            reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK
+                },
+                &target
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Unchanged,
+                untriggered: None
+            }
+        );
+    }
+    #[test]
+    fn duplicate_triggers_and_fallback_reads_do_not_emit_observations() {
+        let mut reads = ForegroundReads::default();
+        let state = current(1, "same");
+        let _ = reads.observe(ReadSample::Trigger, &state);
+        for cause in [
+            ReadSample::Trigger,
+            ReadSample::Trigger,
+            ReadSample::Fallback {
+                read_tick: TEST_READ_TICK,
+            },
+        ] {
+            assert_eq!(
+                reads.observe(cause, &state),
+                ReadOutcome {
+                    decision: ReadDecision::Unchanged,
+                    untriggered: None
+                }
+            );
+        }
+    }
+    #[test]
+    fn out_of_order_title_event_for_nonforeground_window_is_filtered() {
+        let state = current(7, "target");
+        let event = NativeEvent {
+            kind: EventKind::Title,
+            window: WindowHandle::new(3),
+            object: WINDOW_OBJECT,
+            child: SELF_CHILD,
+        };
+        assert_eq!(event.accepts(state.window), EventDecision::Ignore);
+    }
+    #[test]
+    fn current_window_retirement_rebuilds_baseline_even_when_state_matches() {
+        let mut reads = ForegroundReads::default();
+        let state = current(7, "same");
+        let _ = reads.observe(ReadSample::Trigger, &state);
+        reads.retire(WindowHandle::new(9));
+        assert_eq!(
+            reads.observe(ReadSample::Trigger, &state),
+            ReadOutcome {
+                decision: ReadDecision::Unchanged,
+                untriggered: None
+            }
+        );
+        reads.retire(state.window);
+        assert_eq!(
+            reads.observe(ReadSample::Trigger, &state),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+    }
+    struct PendingFixture {
+        reads: ForegroundReads,
+        target: CurrentForeground,
+        change: CoverageChange,
+    }
+    impl PendingFixture {
+        fn new(read_tick: u32) -> Self {
+            let mut reads = ForegroundReads::default();
+            let previous = current(1, "previous");
+            let target = current(2, "target");
+            let _ = reads.observe(ReadSample::Trigger, &previous);
+            // The changed observation is available immediately; the count is deferred.
+            assert_eq!(
+                reads.observe(ReadSample::Fallback { read_tick }, &target),
+                ReadOutcome {
+                    decision: ReadDecision::Changed,
+                    untriggered: None
+                }
+            );
+            Self {
+                reads,
+                change: CoverageChange {
+                    previous_window: Some(previous.window),
+                    reviewed_window: Some(target.window),
+                },
+                target,
+            }
+        }
+    }
+    #[test]
+    fn in_flight_native_event_cancels_pending_count_before_unchanged_read() {
+        for event_time in [TEST_READ_TICK - 20, TEST_READ_TICK] {
+            let mut fixture = PendingFixture::new(TEST_READ_TICK);
+            assert!(fixture.reads.native_event(event_time).is_none());
+            assert_eq!(
+                fixture.reads.observe(ReadSample::Trigger, &fixture.target),
+                ReadOutcome {
+                    decision: ReadDecision::Unchanged,
+                    untriggered: None
+                }
+            );
+            assert!(
+                fixture
+                    .reads
+                    .observe(
+                        ReadSample::Fallback {
+                            read_tick: TEST_READ_TICK + 60_000
+                        },
+                        &fixture.target
+                    )
+                    .untriggered
+                    .is_none()
+            );
+        }
+    }
+    #[test]
+    fn first_native_event_after_fallback_tick_counts_pending_change_once() {
+        let mut fixture = PendingFixture::new(TEST_READ_TICK);
+        assert_eq!(
+            fixture.reads.native_event(TEST_READ_TICK + 1),
+            Some(fixture.change)
+        );
+        assert!(fixture.reads.native_event(TEST_READ_TICK + 2).is_none());
+        assert_eq!(
+            fixture.reads.observe(ReadSample::Trigger, &fixture.target),
+            ReadOutcome {
+                decision: ReadDecision::Unchanged,
+                untriggered: None
+            }
+        );
+    }
+    #[test]
+    fn pending_native_event_ordering_handles_tick_wrap_and_half_range() {
+        let mut before_wrap = PendingFixture::new(3);
+        assert!(before_wrap.reads.native_event(u32::MAX - 2).is_none());
+        let mut after_wrap = PendingFixture::new(u32::MAX - 2);
+        assert_eq!(after_wrap.reads.native_event(3), Some(after_wrap.change));
+        let mut half_range = PendingFixture::new(TEST_READ_TICK);
+        assert_eq!(
+            half_range
+                .reads
+                .native_event(TEST_READ_TICK.wrapping_add(NATIVE_TICK_HALF_RANGE)),
+            Some(half_range.change)
+        );
+    }
+    #[test]
+    fn requested_reads_and_baseline_invalidation_leave_pending_change_untouched() {
+        let mut fixture = PendingFixture::new(TEST_READ_TICK);
+        assert!(
+            fixture
+                .reads
+                .observe(ReadSample::Trigger, &fixture.target)
+                .untriggered
+                .is_none()
+        );
+        let requested = current(3, "requested");
+        assert!(
+            fixture
+                .reads
+                .observe(ReadSample::Trigger, &requested)
+                .untriggered
+                .is_none()
+        );
+        fixture.reads.invalidate();
+        assert_eq!(
+            fixture.reads.observe(ReadSample::Trigger, &requested),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+        assert_eq!(
+            fixture.reads.native_event(TEST_READ_TICK + 1),
+            Some(fixture.change)
+        );
+    }
+    #[test]
+    fn filtered_title_event_still_resolves_pending_change() {
+        for event_time in [TEST_READ_TICK, TEST_READ_TICK + 1] {
+            let mut fixture = PendingFixture::new(TEST_READ_TICK);
+            let event = NativeEvent {
+                kind: EventKind::Title,
+                window: WindowHandle::new(99),
+                object: WINDOW_OBJECT,
+                child: SELF_CHILD,
+            };
+            let resolved = fixture.reads.native_event(event_time);
+            assert_eq!(event.accepts(fixture.target.window), EventDecision::Ignore);
+            let expected = if event_time == TEST_READ_TICK {
+                None
+            } else {
+                Some(fixture.change)
+            };
+            assert_eq!(resolved, expected);
+            assert!(
+                fixture
+                    .reads
+                    .observe(
+                        ReadSample::Fallback {
+                            read_tick: TEST_READ_TICK + 60_000
+                        },
+                        &fixture.target
+                    )
+                    .untriggered
+                    .is_none()
+            );
+        }
+    }
+    #[test]
+    fn next_fallback_settles_old_change_before_pending_its_new_change() {
+        let mut fixture = PendingFixture::new(TEST_READ_TICK);
+        let next = current(3, "next");
+        assert_eq!(
+            fixture.reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK + 60_000
+                },
+                &next
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: Some(fixture.change)
+            }
+        );
+        assert_eq!(
+            fixture.reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK + 120_000
+                },
+                &next
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Unchanged,
+                untriggered: Some(CoverageChange {
+                    previous_window: Some(fixture.target.window),
+                    reviewed_window: Some(next.window),
+                })
+            }
+        );
+    }
+    #[test]
+    fn fallback_change_stays_pending_until_next_fallback_with_window_evidence() {
+        let mut fixture = PendingFixture::new(TEST_READ_TICK);
+        assert_eq!(
+            fixture.reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK + 60_000
+                },
+                &fixture.target
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Unchanged,
+                untriggered: Some(fixture.change)
+            }
+        );
+        assert_eq!(
+            fixture.reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK + 120_000
+                },
+                &fixture.target
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Unchanged,
+                untriggered: None
+            }
+        );
+    }
+
+    #[test]
+    fn fallback_after_received_trigger_never_counts() {
+        let mut reads = ForegroundReads::default();
+        let _ = reads.observe(ReadSample::Trigger, &current(1, "previous"));
+        reads.trigger();
+        assert_eq!(
+            reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK
+                },
+                &current(2, "target")
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+    }
+    #[test]
+    fn desktop_switch_in_and_out_is_triggered_and_never_counts() {
+        let mut reads = ForegroundReads::default();
+        let previous = current(1, "previous");
+        let _ = reads.observe(ReadSample::Trigger, &previous);
+        let unknown = CurrentForeground {
+            desktop: Desktop::Unknown,
+            window: WindowHandle::new(0),
+            title: Title::unreadable(),
+            affinity: DisplayAffinity::Unavailable,
+        };
+        for state in [&unknown, &previous] {
+            assert_eq!(
+                reads.observe(ReadSample::Trigger, state),
+                ReadOutcome {
+                    decision: ReadDecision::Changed,
+                    untriggered: None
+                }
+            );
+        }
+    }
+    #[test]
+    fn initial_and_invalidated_baselines_never_count_even_on_fallback() {
+        let mut reads = ForegroundReads::default();
+        let state = current(1, "previous");
+        assert_eq!(
+            reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK
+                },
+                &state
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+        for cause in [
+            ReadSample::Trigger,
+            ReadSample::Fallback {
+                read_tick: TEST_READ_TICK,
+            },
+        ] {
+            reads.invalidate();
+            assert_eq!(
+                reads.observe(cause, &state),
+                ReadOutcome {
+                    decision: ReadDecision::Changed,
+                    untriggered: None
+                }
+            );
+        }
+    }
+    #[test]
+    fn rebind_mismatch_reads_current_state_instead_of_requested_window() {
+        let mut reads = ForegroundReads::default();
+        let previous = current(1, "previous");
+        let target = current(2, "target");
+        let _ = reads.observe(ReadSample::Trigger, &previous);
+        let requested = HookTarget::Process {
+            window: previous.window,
+            process: ProcessId::new(7),
+        };
+        assert_eq!(
+            target.accepts_rebind(requested, ProcessId::new(8)),
+            RebindDecision::ReadCurrent
+        );
+        assert_eq!(
+            reads.observe(ReadSample::Trigger, &target),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+        let binding = HookTarget::Process {
+            window: target.window,
+            process: ProcessId::new(8),
+        };
+        assert_eq!(
+            target.accepts_rebind(binding, ProcessId::new(7)),
+            RebindDecision::ReadCurrent
+        );
+        assert_eq!(
+            target.accepts_rebind(binding, ProcessId::new(8)),
             RebindDecision::Accept
         );
+        assert_eq!(
+            target.accepts_rebind(HookTarget::Unbind, ProcessId::new(8)),
+            RebindDecision::ReadCurrent
+        );
+    }
+    #[test]
+    fn failed_trigger_read_preserves_evidence_until_next_completed_read() {
+        let mut reads = ForegroundReads::default();
+        let _ = reads.observe(ReadSample::Trigger, &current(1, "previous"));
+        reads.failed_read(ReadCause::Trigger);
+        assert_eq!(
+            reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK
+                },
+                &current(2, "target")
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+        reads.failed_read(ReadCause::Fallback);
+        let next = current(3, "next");
+        assert_eq!(
+            reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK + 60_000
+                },
+                &next
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+        assert!(
+            reads
+                .observe(
+                    ReadSample::Fallback {
+                        read_tick: TEST_READ_TICK + 120_000
+                    },
+                    &next
+                )
+                .untriggered
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn delivery_failure_invalidates_baseline_and_success_preserves_it() {
+        let mut reads = ForegroundReads::default();
+        let _ = reads.observe(ReadSample::Trigger, &current(1, "previous"));
+        reads
+            .accept_delivery(Ok::<(), std::io::Error>(()))
+            .expect("delivered");
+        let target = current(2, "target");
+        let _ = reads.observe(
+            ReadSample::Fallback {
+                read_tick: TEST_READ_TICK,
+            },
+            &target,
+        );
+        reads
+            .accept_delivery(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+            .expect_err("disconnected delivery");
+        // Invalidation rebuilds the baseline while preserving the older pending diagnostic.
+        assert_eq!(
+            reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK + 60_000
+                },
+                &target
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: Some(CoverageChange {
+                    previous_window: Some(WindowHandle::new(1)),
+                    reviewed_window: Some(target.window),
+                })
+            }
+        );
+        assert!(reads.native_event(TEST_READ_TICK + 60_001).is_none());
+    }
+
+    #[test]
+    fn display_affinity_changes_emit_and_count_only_untriggered_fallbacks() {
+        let mut reads = ForegroundReads::default();
+        let mut state = current(1, "same");
+        let _ = reads.observe(ReadSample::Trigger, &state);
+        state.affinity = DisplayAffinity::Exclude;
+        assert_eq!(
+            reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK
+                },
+                &state
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+        assert_eq!(
+            reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK + 60_000
+                },
+                &state
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Unchanged,
+                untriggered: Some(CoverageChange {
+                    previous_window: Some(state.window),
+                    reviewed_window: Some(state.window),
+                })
+            }
+        );
+        state.affinity = DisplayAffinity::Unavailable;
+        assert_eq!(
+            reads.observe(ReadSample::Trigger, &state),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+        state.affinity = DisplayAffinity::None;
+        reads.trigger();
+        assert_eq!(
+            reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK + 120_000
+                },
+                &state
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+        reads.invalidate();
+        state.affinity = DisplayAffinity::Monitor;
+        assert_eq!(
+            reads.observe(
+                ReadSample::Fallback {
+                    read_tick: TEST_READ_TICK + 180_000
+                },
+                &state
+            ),
+            ReadOutcome {
+                decision: ReadDecision::Changed,
+                untriggered: None
+            }
+        );
+    }
+
+    #[test]
+    fn baseline_compares_title_status_as_well_as_text() {
+        let mut reads = ForegroundReads::default();
+        let mut state = current(1, "same");
+        let _ = reads.observe(ReadSample::Trigger, &state);
+        for title in [
+            Title::truncated("same"),
+            Title::unreadable(),
+            Title::readable(""),
+        ] {
+            state.title = title;
+            assert_eq!(
+                reads.observe(ReadSample::Trigger, &state),
+                ReadOutcome {
+                    decision: ReadDecision::Changed,
+                    untriggered: None
+                }
+            );
+        }
     }
     #[test]
     fn titles_preserve_failure_empty_and_surrogate_boundaries() {
@@ -436,6 +1107,43 @@ mod tests {
                 .expect("content")
                 .window,
             WindowHandle::new(3)
+        );
+    }
+    #[test]
+    fn selects_content_from_settings_frame_topology() {
+        let host = ProcessId::new(1);
+        let content = WindowHandle::new(2);
+        let children = [
+            ChildWindow {
+                window: WindowHandle::new(1),
+                process: host,
+                class: "ApplicationFrameTitleBarWindow".into(),
+                visibility: Visibility::Visible,
+            },
+            ChildWindow {
+                window: content,
+                process: ProcessId::new(2),
+                class: "Windows.UI.Core.CoreWindow".into(),
+                visibility: Visibility::Visible,
+            },
+            ChildWindow {
+                window: WindowHandle::new(3),
+                process: host,
+                class: "ApplicationFrameTitleBarWindow".into(),
+                visibility: Visibility::Hidden,
+            },
+            ChildWindow {
+                window: WindowHandle::new(4),
+                process: host,
+                class: "ApplicationFrameInputSinkWindow".into(),
+                visibility: Visibility::Visible,
+            },
+        ];
+        assert_eq!(
+            ChildWindow::content(&children, host)
+                .expect("Settings content among frame controls")
+                .window,
+            content
         );
     }
     #[test]

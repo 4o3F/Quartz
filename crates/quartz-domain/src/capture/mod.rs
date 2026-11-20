@@ -37,8 +37,8 @@ pub use recovery::{ConfirmedAvailability, ConfirmedInterval, ConfirmedSegment, R
 pub use time::{AdvanceTimeError, MonoInstant, TimeRange, Timestamp, UtcInstant};
 pub use timed::{TimedPolicy, TimedPolicyKind, TimedState};
 pub use window::{
-    AppIdentity, ForegroundGeneration, InstanceGeneration, ProcessId, Title, TitleStatus,
-    WindowFacts, WindowHandle, WindowInstance, WindowInstances,
+    AppIdentity, InstanceGeneration, MetadataSource, ProcessId, Title, TitleStatus, WindowFacts,
+    WindowHandle, WindowInstance, WindowInstances,
 };
 
 pub use model::{

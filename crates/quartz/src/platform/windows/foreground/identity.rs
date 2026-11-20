@@ -1,13 +1,14 @@
 //! Slow identity and privacy queries, called exclusively by the capture worker.
 
+use super::frame_aumid::{AUMID_BUFFER_UNITS, Aumid, DecodeAumidError, HostedIdentity};
 use super::{Window, version};
 use crate::core::{
     app::ObservedEvent,
-    foreground::{self, BoundedCache, CacheRetention, Desktop, EventKind, ProcessKey, Snapshot},
+    foreground::{self, BoundedCache, CacheRetention, Desktop, ProcessKey, Snapshot},
 };
 use quartz_domain::capture::{
-    AppIdentity, BrowserContext, CaptureEvent, Foreground, NoForegroundReason, ObservationSource,
-    PrivacyContext, ProcessId, SystemSignal, UtcInstant, WindowFacts,
+    AppIdentity, BrowserContext, CaptureEvent, Foreground, MetadataSource, NoForegroundReason,
+    ObservationSource, PrivacyContext, ProcessId, SystemSignal, UtcInstant, WindowFacts,
 };
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows::{
@@ -23,6 +24,8 @@ use windows::{
 
 /// Maximum extended Windows path buffer including terminator, capture 02 §2.1.
 const IMAGE_PATH_UNITS: usize = 32_768;
+/// Host executable whose content app is identified through a child CoreWindow (02 §2.1).
+const APPLICATION_FRAME_HOST_EXE: &str = "applicationframehost.exe";
 /// FILETIME units and Unix epoch offset, capture 02 §2.1 creation-time identity.
 const TICKS_PER_MILLISECOND: u64 = 10_000;
 const UNIX_EPOCH_TICKS: i128 = 116_444_736_000_000_000;
@@ -40,8 +43,8 @@ enum ResolveProcessError {
     DecodeText { source: std::string::FromUtf16Error },
     #[snafu(display("could not query application user model identity ({code})"))]
     Aumid { code: u32 },
-    #[snafu(display("application user model identity is empty or missing a terminator"))]
-    InvalidAumid,
+    #[snafu(display("could not decode process application user model identity"))]
+    DecodeAumid { source: DecodeAumidError },
     #[snafu(display("process creation time exceeds the supported calendar"))]
     CreationTime,
 }
@@ -52,7 +55,7 @@ enum ResolveProcessErrorKind {
     Image,
     DecodeText,
     Aumid,
-    InvalidAumid,
+    DecodeAumid,
     CreationTime,
 }
 impl ResolveProcessError {
@@ -63,7 +66,7 @@ impl ResolveProcessError {
             Self::Image { .. } => ResolveProcessErrorKind::Image,
             Self::DecodeText { .. } => ResolveProcessErrorKind::DecodeText,
             Self::Aumid { .. } => ResolveProcessErrorKind::Aumid,
-            Self::InvalidAumid => ResolveProcessErrorKind::InvalidAumid,
+            Self::DecodeAumid { .. } => ResolveProcessErrorKind::DecodeAumid,
             Self::CreationTime => ResolveProcessErrorKind::CreationTime,
         }
     }
@@ -74,6 +77,60 @@ struct Metadata {
     exe_name: String,
     display_name: String,
     created: UtcInstant,
+}
+struct ApplicationMetadata {
+    identity: AppIdentity,
+    source: MetadataSource,
+    exe_name: Option<String>,
+    display_name: String,
+    browser: BrowserContext,
+}
+#[derive(Debug)]
+enum FrameDisplayNameSource {
+    Cached,
+    Aumid,
+}
+#[derive(Debug)]
+enum FrameFallbackReason {
+    ContentWindowUnavailable,
+    ContentProcessUnavailable,
+}
+impl Metadata {
+    fn into_application(self) -> ApplicationMetadata {
+        let browser = match self.exe_name.as_str() {
+            "msedge.exe" | "chrome.exe" | "firefox.exe" | "brave.exe" | "vivaldi.exe"
+            | "opera.exe" => BrowserContext::Offline,
+            _ => BrowserContext::NotBrowser,
+        };
+        ApplicationMetadata {
+            identity: self.identity,
+            source: MetadataSource::Process,
+            exe_name: Some(self.exe_name),
+            display_name: self.display_name,
+            browser,
+        }
+    }
+}
+impl ApplicationMetadata {
+    fn from_frame(aumid: Aumid, known_name: Option<&str>) -> Self {
+        let display_name = known_name.unwrap_or(aumid.as_str()).to_owned();
+        Self {
+            identity: AppIdentity::Aumid(aumid.into_string()),
+            source: MetadataSource::Frame,
+            exe_name: None,
+            display_name,
+            browser: BrowserContext::NotBrowser,
+        }
+    }
+    fn unresolved(class: &str) -> Self {
+        Self {
+            identity: AppIdentity::Unresolved(class.to_owned()),
+            source: MetadataSource::Unavailable,
+            exe_name: None,
+            display_name: class.to_owned(),
+            browser: PrivacyContext::default().browser,
+        }
+    }
 }
 struct ProcessMetadata {
     handle: ProcessHandle,
@@ -138,27 +195,14 @@ impl Resolver {
             at,
             read_at: _read_at,
             event_time_ms: _event_time_ms,
-            generation,
             source,
-            kind,
+            kind: _kind,
             window,
             title,
             desktop,
         } = snapshot;
-        if kind == EventKind::Review {
-            return Resolution::Review;
-        }
         if source == ObservationSource::Review {
             self.processes.retain(|_, entry| entry.retention());
-        }
-        if kind == EventKind::Destroy {
-            return Resolution::Event(ObservedEvent {
-                at,
-                event: CaptureEvent::DestroyWindow {
-                    generation,
-                    handle: window,
-                },
-            });
         }
         let foreground = if matches!(desktop, Desktop::Unknown) {
             Foreground::None(NoForegroundReason::UnknownDesktop)
@@ -178,7 +222,7 @@ impl Resolver {
             };
             let root = self.process(owner);
             let metadata = match root.as_ref() {
-                Some(root) if root.exe_name == "applicationframehost.exe" => {
+                Some(root) if root.exe_name == APPLICATION_FRAME_HOST_EXE => {
                     let children = match native.children() {
                         Ok(children) => children,
                         Err(error) => {
@@ -188,43 +232,58 @@ impl Resolver {
                             return Resolution::Review;
                         }
                     };
-                    if let Some(child) = foreground::ChildWindow::content(&children, owner) {
-                        let metadata = self.process(child.process);
-                        if Window::from_handle(child.window).process() != child.process {
-                            self.processes.evict_process(child.process);
-                            return Resolution::Review;
+                    let content = foreground::ChildWindow::content(&children, owner);
+                    let content_metadata = match content {
+                        Some(child) => {
+                            let metadata = self.process(child.process);
+                            if Window::from_handle(child.window).process() != child.process {
+                                self.processes.evict_process(child.process);
+                                return Resolution::Review;
+                            }
+                            metadata
                         }
-                        metadata
+                        None => {
+                            tracing::debug!(
+                                child_count = children.len(),
+                                "application frame content window unavailable"
+                            );
+                            None
+                        }
+                    };
+                    let frame = if content_metadata.is_some() {
+                        Ok(None)
                     } else {
-                        None
+                        let reason = match content {
+                            Some(_) => FrameFallbackReason::ContentProcessUnavailable,
+                            None => FrameFallbackReason::ContentWindowUnavailable,
+                        };
+                        tracing::debug!(?reason, "application frame identity fallback");
+                        native.frame_aumid()
+                    };
+                    match HostedIdentity::from_evidence(content_metadata, frame) {
+                        HostedIdentity::Content(metadata) => metadata.into_application(),
+                        HostedIdentity::Frame(aumid) => self.frame_application(aumid),
+                        HostedIdentity::Unresolved(reason) => {
+                            tracing::debug!(?reason, "application frame AUMID unavailable");
+                            ApplicationMetadata::unresolved(&class)
+                        }
                     }
                 }
-                Some(_) | None => root.clone(),
+                Some(_) | None => root
+                    .clone()
+                    .map(Metadata::into_application)
+                    .unwrap_or_else(|| ApplicationMetadata::unresolved(&class)),
             };
             if native.process() != owner || owner.get() == 0 {
                 self.processes.evict_process(owner);
                 return Resolution::Review;
             }
             let created = root.as_ref().map(|root| root.created);
-            let mut privacy = PrivacyContext {
+            let privacy = PrivacyContext {
                 capture_excluded: native.display_affinity().signal(),
                 private_window: SystemSignal::Unknown,
+                browser: metadata.browser,
                 ..PrivacyContext::default()
-            };
-            let (app, exe_name, display_name) = match metadata {
-                Some(metadata) => {
-                    privacy.browser = match metadata.exe_name.as_str() {
-                        "msedge.exe" | "chrome.exe" | "firefox.exe" | "brave.exe"
-                        | "vivaldi.exe" | "opera.exe" => BrowserContext::Offline,
-                        _other_executable => BrowserContext::NotBrowser,
-                    };
-                    (
-                        metadata.identity,
-                        Some(metadata.exe_name),
-                        metadata.display_name,
-                    )
-                }
-                None => (AppIdentity::Unresolved(class.clone()), None, class.clone()),
             };
             Foreground::Window {
                 facts: Box::new(WindowFacts {
@@ -232,9 +291,10 @@ impl Resolver {
                     process: owner,
                     process_created_utc: created,
                     class,
-                    app,
-                    exe_name,
-                    display_name,
+                    app: metadata.identity,
+                    metadata_source: metadata.source,
+                    exe_name: metadata.exe_name,
+                    display_name: metadata.display_name,
                     title,
                 }),
                 privacy,
@@ -242,12 +302,18 @@ impl Resolver {
         };
         Resolution::Event(ObservedEvent {
             at,
-            event: CaptureEvent::Foreground {
-                generation,
-                source,
-                foreground,
-            },
+            event: CaptureEvent::Foreground { source, foreground },
         })
+    }
+    fn frame_application(&mut self, aumid: Aumid) -> ApplicationMetadata {
+        let key = AppIdentity::Aumid(aumid.as_str().to_owned()).key();
+        let name = self.names.find(&key);
+        let name_source = match name {
+            Some(_) => FrameDisplayNameSource::Cached,
+            None => FrameDisplayNameSource::Aumid,
+        };
+        tracing::debug!(?name_source, "application identity resolved from frame");
+        ApplicationMetadata::from_frame(aumid, name.map(String::as_str))
     }
     fn process(&mut self, process: ProcessId) -> Option<Metadata> {
         match self.resolve_process(process) {
@@ -369,7 +435,7 @@ impl ProcessHandle {
         }
         if code != ERROR_INSUFFICIENT_BUFFER
             || length == 0
-            || length > Appx::APPLICATION_USER_MODEL_ID_MAX_LENGTH
+            || usize::try_from(length).expect("native AUMID length fits usize") > AUMID_BUFFER_UNITS
         {
             return Err(ResolveProcessError::Aumid { code: code.0 });
         }
@@ -385,22 +451,38 @@ impl ProcessHandle {
         if code != ERROR_SUCCESS {
             return Err(ResolveProcessError::Aumid { code: code.0 });
         }
-        let terminator = buffer
-            .iter()
-            .position(|unit| *unit == 0)
-            .ok_or(ResolveProcessError::InvalidAumid)?;
-        if terminator == 0 {
-            return Err(ResolveProcessError::InvalidAumid);
-        }
-        String::from_utf16(&buffer[..terminator])
-            .map(Some)
-            .map_err(|source| ResolveProcessError::DecodeText { source })
+        Aumid::from_terminated(&buffer)
+            .map(|aumid| Some(aumid.into_string()))
+            .map_err(|source| ResolveProcessError::DecodeAumid { source })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::foreground::EventKind;
+    #[test]
+    fn frame_identity_uses_cached_name_or_aumid_without_poisoning_the_name_cache() {
+        let units: Vec<_> = "Package!App".encode_utf16().collect();
+        let aumid = Aumid::from_utf16(&units).expect("valid test AUMID");
+        let mut resolver = Resolver::new();
+        let first = resolver.frame_application(aumid.clone());
+        assert_eq!(first.identity, AppIdentity::Aumid("Package!App".into()));
+        assert_eq!(first.source, MetadataSource::Frame);
+        assert!(first.exe_name.is_none());
+        assert_eq!(first.display_name, "Package!App");
+        let key = first.identity.key();
+        assert!(
+            resolver.names.find(&key).is_none(),
+            "placeholder must not block a later process description"
+        );
+        resolver.names.insert(key, "Settings".into());
+        let cached = resolver.frame_application(aumid);
+        assert_eq!(cached.identity, first.identity);
+        assert_eq!(cached.source, MetadataSource::Frame);
+        assert!(cached.exe_name.is_none());
+        assert_eq!(cached.display_name, "Settings");
+    }
     #[test]
     fn failed_class_query_requests_review_without_rule_evaluation() {
         use quartz_domain::capture::{MonoInstant, Timestamp, Title, WindowHandle};
@@ -411,8 +493,7 @@ mod tests {
         let snapshot = Snapshot {
             at,
             read_at: at,
-            event_time_ms: 0,
-            generation: quartz_domain::capture::ForegroundGeneration::new(1),
+            event_time_ms: None,
             source: ObservationSource::Review,
             kind: EventKind::Foreground,
             window: WindowHandle::new(u64::try_from(usize::MAX).expect("native HWND fits u64")),

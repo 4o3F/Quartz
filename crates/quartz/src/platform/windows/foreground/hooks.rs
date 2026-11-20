@@ -2,18 +2,20 @@
 
 use super::Window;
 use crate::core::{
-    app::{CaptureSender, ObserveCaptureError},
+    app::{CaptureSender, ObserveCaptureError, ObservedEvent},
     foreground::{
-        Desktop, EventDecision, EventKind, ForegroundTarget, NativeEvent, RebindDecision,
-        SELF_CHILD, Snapshot, TITLE_BUFFER_UNITS, TitleRead, WINDOW_OBJECT,
+        CoverageChange, CurrentForeground, Desktop, DisplayAffinity, EventDecision, EventKind,
+        ForegroundReads, NativeEvent, ReadCause, ReadDecision, ReadSample, RebindDecision,
+        Snapshot, TITLE_BUFFER_UNITS, TitleRead,
     },
     sources::{ClockReader, ReadClockError},
 };
 use crate::platform::windows::sources::SystemClock;
-use quartz_domain::capture::{ForegroundGeneration, HookTarget, ObservationSource};
+use quartz_domain::capture::{CaptureEvent, HookTarget, ObservationSource, Timestamp, Title};
 use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 use windows::Win32::{
     Foundation::{self, ERROR_SUCCESS, HWND},
+    System::SystemInformation::GetTickCount,
     UI::{
         Accessibility::{self, HWINEVENTHOOK},
         WindowsAndMessaging::{
@@ -90,67 +92,104 @@ impl Drop for Hook {
 }
 #[derive(Debug, Clone, Copy)]
 pub(in crate::platform::windows) enum ForegroundCommand {
+    /// Internal requests rebuild the baseline and never count notification gaps.
     Review,
+    FallbackReview,
     Rebind {
-        generation: ForegroundGeneration,
         target: HookTarget,
     },
 }
 enum ProcessHooks {
     Unbound,
-    Bound {
-        generation: ForegroundGeneration,
-        hooks: [Hook; PROCESS_EVENT_COUNT],
-    },
+    Bound { _hooks: [Hook; PROCESS_EVENT_COUNT] },
 }
 impl ProcessHooks {
-    fn install(
-        generation: ForegroundGeneration,
-        target: HookTarget,
-    ) -> Result<Self, ObserveForegroundError> {
+    fn install(target: HookTarget) -> Result<Self, ObserveForegroundError> {
         match target {
             HookTarget::Unbind => Ok(Self::Unbound),
-            HookTarget::Process(process) => Ok(Self::Bound {
-                generation,
-                hooks: [
+            HookTarget::Process { process, .. } => Ok(Self::Bound {
+                _hooks: [
                     Hook::install(EVENT_OBJECT_NAMECHANGE, process.get())?,
                     Hook::install(EVENT_OBJECT_DESTROY, process.get())?,
                 ],
             }),
         }
     }
-    fn accepts(&self, hook: HWINEVENTHOOK, current: ForegroundGeneration) -> EventDecision {
-        match self {
-            Self::Unbound => EventDecision::Ignore,
-            Self::Bound { generation, hooks } => {
-                if *generation == current && hooks.iter().any(|owned| owned.0 == hook) {
-                    EventDecision::Accept
-                } else {
-                    EventDecision::Ignore
-                }
-            }
-        }
-    }
-}
-enum RebindOutcome {
-    Applied(ProcessHooks),
-    Stale(Result<ProcessHooks, ObserveForegroundError>),
 }
 struct CallbackState {
     sender: CaptureSender,
-    foreground: ForegroundTarget,
+    reads: ForegroundReads,
     process_hooks: ProcessHooks,
-    desktop: Desktop,
 }
 thread_local! {
-    // SAFETY: Only ForegroundPort on the main thread installs this state. OUTOFCONTEXT
-    // callbacks run on that same thread. No borrow survives any reentrant Win32 call.
+    // Only the installing main thread accesses this state; no borrow spans a native read.
     static CALLBACK: RefCell<Option<CallbackState>> = const { RefCell::new(None) };
 }
-
+#[derive(Debug, Clone, Copy)]
+enum ReadTrigger {
+    Native {
+        event: NativeEvent,
+        event_time_ms: u32,
+    },
+    Requested(ReadCause),
+    Rebind(HookTarget),
+}
+impl ReadTrigger {
+    fn cause(self) -> ReadCause {
+        match self {
+            Self::Requested(cause) => cause,
+            Self::Native { .. } | Self::Rebind(_) => ReadCause::Trigger,
+        }
+    }
+    fn native(self) -> Option<NativeEvent> {
+        match self {
+            Self::Native { event, .. } => Some(event),
+            Self::Requested(_) | Self::Rebind(_) => None,
+        }
+    }
+    fn event_time_ms(self) -> Option<u32> {
+        match self {
+            Self::Native { event_time_ms, .. } => Some(event_time_ms),
+            Self::Requested(_) | Self::Rebind(_) => None,
+        }
+    }
+    fn source(self) -> ObservationSource {
+        match self {
+            Self::Native { .. } => ObservationSource::Hook,
+            Self::Requested(_) | Self::Rebind(_) => ObservationSource::Review,
+        }
+    }
+    fn kind(self) -> EventKind {
+        match self {
+            Self::Native { event, .. } => event.kind,
+            Self::Requested(_) | Self::Rebind(_) => EventKind::Review,
+        }
+    }
+    fn rebind(self) -> Option<HookTarget> {
+        match self {
+            Self::Rebind(target) => Some(target),
+            Self::Native { .. } | Self::Requested(_) => None,
+        }
+    }
+}
+struct ReadIngress {
+    sender: CaptureSender,
+    untriggered: Option<CoverageChange>,
+}
+struct ReadRequest {
+    at: Timestamp,
+    trigger: ReadTrigger,
+}
+impl ReadRequest {
+    fn requested(at: Timestamp, cause: ReadCause) -> Self {
+        Self {
+            at,
+            trigger: ReadTrigger::Requested(cause),
+        }
+    }
+}
 pub(in crate::platform::windows) struct ForegroundPort {
     global: Vec<Hook>,
-    // Prevent hook ownership from moving to another thread.
     main_thread: PhantomData<Rc<()>>,
 }
 impl ForegroundPort {
@@ -161,16 +200,15 @@ impl ForegroundPort {
             global: Vec::new(),
             main_thread: PhantomData,
         };
-        CALLBACK.with(|state| {
+        CALLBACK.with(|slot| {
             assert!(
-                state.borrow().is_none(),
+                slot.borrow().is_none(),
                 "one foreground port per main thread"
             );
-            *state.borrow_mut() = Some(CallbackState {
+            *slot.borrow_mut() = Some(CallbackState {
                 sender,
-                foreground: ForegroundTarget::new(),
+                reads: ForegroundReads::default(),
                 process_hooks: ProcessHooks::Unbound,
-                desktop: Desktop::Observable,
             });
         });
         for event in [
@@ -187,111 +225,194 @@ impl ForegroundPort {
         &mut self,
         command: ForegroundCommand,
     ) -> Result<(), ObserveForegroundError> {
-        match command {
-            ForegroundCommand::Review => self.review(),
-            ForegroundCommand::Rebind { generation, target } => {
-                // Registration can dispatch native callbacks; publish the prepared set only after
-                // checking the generation again. Old and rejected sets are unhooked outside the borrow.
-                let prepared = ProcessHooks::install(generation, target);
-                let outcome = CALLBACK.with(|slot| {
-                    let mut slot = slot.borrow_mut();
-                    let state = slot
-                        .as_mut()
-                        .expect("live ForegroundPort owns callback state");
-                    match state.foreground.accepts_rebind(generation) {
-                        RebindDecision::Stale => Ok(RebindOutcome::Stale(prepared)),
-                        RebindDecision::Accept => prepared.map(|hooks| {
-                            RebindOutcome::Applied(std::mem::replace(
-                                &mut state.process_hooks,
-                                hooks,
-                            ))
-                        }),
-                    }
-                })?;
-                match outcome {
-                    RebindOutcome::Stale(prepared) => {
-                        drop(prepared);
-                        Ok(())
-                    }
-                    RebindOutcome::Applied(retired) => {
-                        drop(retired);
-                        self.review()
-                    }
+        let at = Self::clock()?;
+        let trigger = match command {
+            ForegroundCommand::Review => {
+                Self::invalidate();
+                ReadTrigger::Requested(ReadCause::Trigger)
+            }
+            ForegroundCommand::FallbackReview => ReadTrigger::Requested(ReadCause::Fallback),
+            ForegroundCommand::Rebind { target } => ReadTrigger::Rebind(target),
+        };
+        let request = ReadRequest { at, trigger };
+        Self::read_current(request)
+    }
+    pub(in crate::platform::windows) fn system_notice(
+        at: Timestamp,
+    ) -> Result<(), ObserveForegroundError> {
+        Self::invalidate();
+        Self::read_current(ReadRequest::requested(at, ReadCause::Trigger))
+    }
+    fn clock() -> Result<Timestamp, ObserveForegroundError> {
+        SystemClock
+            .read()
+            .map_err(|source| ObserveForegroundError::Clock { source })
+    }
+    fn invalidate() {
+        CALLBACK.with(|slot| {
+            if let Some(state) = slot.borrow_mut().as_mut() {
+                state.reads.invalidate();
+            }
+        });
+    }
+    fn deliver(result: Result<(), ObserveCaptureError>) -> Result<(), ObserveForegroundError> {
+        CALLBACK
+            .with(|slot| match slot.borrow_mut().as_mut() {
+                Some(state) => state.reads.accept_delivery(result),
+                None => result,
+            })
+            .map_err(|source| ObserveForegroundError::Deliver { source })
+    }
+    fn report_untriggered(
+        sender: &CaptureSender,
+        at: Timestamp,
+        change: Option<CoverageChange>,
+    ) -> Result<(), ObserveForegroundError> {
+        if let Some(change) = change {
+            Self::deliver(sender.observe(ObservedEvent {
+                at,
+                event: CaptureEvent::UntriggeredChange {
+                    previous_window: change.previous_window,
+                    reviewed_window: change.reviewed_window,
+                },
+            }))?;
+        }
+        Ok(())
+    }
+    fn read_current(request: ReadRequest) -> Result<(), ObserveForegroundError> {
+        let cause = request.trigger.cause();
+        let ingress = CALLBACK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let state = slot.as_mut()?;
+            // Settle notification evidence before filtering a title event or reading native state.
+            let untriggered = request
+                .trigger
+                .event_time_ms()
+                .and_then(|event_time_ms| state.reads.native_event(event_time_ms));
+            Some(ReadIngress {
+                sender: state.sender.clone(),
+                untriggered,
+            })
+        });
+        let Some(ingress) = ingress else {
+            return Ok(());
+        };
+        let sender = ingress.sender;
+        Self::report_untriggered(&sender, request.at, ingress.untriggered)?;
+        // SAFETY: This only returns an opaque handle; event HWNDs never select the sampled window.
+        let window = Window::from_native(unsafe { WindowsAndMessaging::GetForegroundWindow() });
+        if let Some(native) = request.trigger.native()
+            && native.accepts(window.handle()) == EventDecision::Ignore
+        {
+            return Ok(());
+        }
+        let desktop = Desktop::observe();
+        let current = CurrentForeground {
+            desktop,
+            window: window.handle(),
+            title: if desktop == Desktop::Observable && window.handle().get() != 0 {
+                window.title()
+            } else {
+                Title::unreadable()
+            },
+            affinity: if desktop == Desktop::Observable && window.handle().get() != 0 {
+                window.display_affinity()
+            } else {
+                DisplayAffinity::Unavailable
+            },
+        };
+        let read_at = Self::clock().inspect_err(|_| {
+            CALLBACK.with(|slot| {
+                if let Some(state) = slot.borrow_mut().as_mut() {
+                    state.reads.failed_read(cause);
+                }
+            });
+        })?;
+        let sample = match cause {
+            ReadCause::Trigger => ReadSample::Trigger,
+            ReadCause::Fallback => ReadSample::Fallback {
+                // SAFETY: GetTickCount has no inputs and shares dwmsEventTime's wrapping time base.
+                read_tick: unsafe { GetTickCount() },
+            },
+        };
+        if let Some(native) = request.trigger.native()
+            && native.kind == EventKind::Destroy
+        {
+            CALLBACK.with(|slot| {
+                if let Some(state) = slot.borrow_mut().as_mut() {
+                    state.reads.retire(native.window);
+                }
+            });
+            Self::deliver(sender.observe(ObservedEvent {
+                at: request.at,
+                event: CaptureEvent::DestroyWindow {
+                    handle: native.window,
+                },
+            }))?;
+        }
+        let outcome = CALLBACK.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("live foreground port")
+                .reads
+                .observe(sample, &current)
+        });
+        let event_decision = match outcome.decision {
+            ReadDecision::Unchanged => EventDecision::Ignore,
+            ReadDecision::Changed => EventDecision::Accept,
+        };
+        tracing::debug!(sampled_hwnd = current.window.get(), ?desktop,
+            ?cause, decision = ?event_decision, "foreground review sampled");
+        let rebind = request
+            .trigger
+            .rebind()
+            .map(|target| current.accepts_rebind(target, window.process()));
+        Self::report_untriggered(&sender, request.at, outcome.untriggered)?;
+        if outcome.decision == ReadDecision::Changed {
+            Self::deliver(sender.foreground(Snapshot {
+                at: request.at,
+                read_at,
+                event_time_ms: request.trigger.event_time_ms(),
+                source: request.trigger.source(),
+                kind: request.trigger.kind(),
+                window: current.window,
+                title: current.title,
+                desktop,
+            }))?;
+        }
+        if let Some(target) = request.trigger.rebind() {
+            match rebind.expect("rebind request checked against current state") {
+                RebindDecision::Accept => {
+                    let prepared = ProcessHooks::install(target)?;
+                    let retired = CALLBACK.with(|slot| {
+                        std::mem::replace(
+                            &mut slot
+                                .borrow_mut()
+                                .as_mut()
+                                .expect("live foreground port")
+                                .process_hooks,
+                            prepared,
+                        )
+                    });
+                    drop(retired);
+                    // Close the registration gap through the same comparison path.
+                    Self::read_current(ReadRequest::requested(Self::clock()?, ReadCause::Trigger))?;
+                }
+                RebindDecision::ReadCurrent => {
+                    tracing::debug!("foreground rebind target changed; current state sampled");
                 }
             }
-        }
-    }
-    fn review(&self) -> Result<(), ObserveForegroundError> {
-        let desktop = Desktop::observe();
-        // SAFETY: Returns an opaque foreground handle without dereferencing it.
-        let window = unsafe { WindowsAndMessaging::GetForegroundWindow() };
-        let state = CALLBACK.with(|state| {
-            let mut state = state.borrow_mut();
-            let state = state.as_mut()?;
-            state.foreground.observe(NativeEvent {
-                kind: EventKind::Review,
-                window: Window::from_native(window).handle(),
-                object: WINDOW_OBJECT,
-                child: SELF_CHILD,
-            });
-            state.desktop = desktop;
-            Some(state.submission())
-        });
-        if let Some(state) = state {
-            state.submit(
-                window,
-                EventKind::Foreground,
-                ObservationSource::Review,
-                0,
-                desktop,
-            )?;
         }
         Ok(())
     }
 }
-impl Drop for ForegroundPort {
-    fn drop(&mut self) {
-        let state = CALLBACK.with(|state| state.borrow_mut().take());
-        drop(state);
-        self.global.clear();
-    }
-}
-struct CallbackSubmission {
-    submission: Submission,
-    kind: EventKind,
-}
-struct Submission {
-    sender: CaptureSender,
-    generation: ForegroundGeneration,
-    desktop: Desktop,
-}
-impl CallbackState {
-    fn submission(&self) -> Submission {
-        Submission {
-            sender: self.sender.clone(),
-            generation: self.foreground.generation(),
-            desktop: self.desktop,
-        }
-    }
-}
-impl Submission {
-    fn submit(
-        &self,
-        window: HWND,
-        kind: EventKind,
-        source: ObservationSource,
-        event_time_ms: u32,
-        desktop: Desktop,
-    ) -> Result<(), ObserveForegroundError> {
-        let at = SystemClock
-            .read()
-            .map_err(|source| ObserveForegroundError::Clock { source })?;
+impl Window {
+    fn title(self) -> Title {
         let mut buffer = [0u16; TITLE_BUFFER_UNITS];
-        // SAFETY: The buffer is writable and sized to 4,097 UTF-16 units (02 §1.1).
-        // Clearing last error distinguishes an empty title from an unsuccessful read.
+        // SAFETY: The buffer is writable for the full cap; last error distinguishes empty from failed.
         let read = unsafe {
             Foundation::SetLastError(ERROR_SUCCESS);
-            let copied = WindowsAndMessaging::GetWindowTextW(window, &mut buffer);
+            let copied = WindowsAndMessaging::GetWindowTextW(self.raw(), &mut buffer);
             if copied == 0 && Foundation::GetLastError() != ERROR_SUCCESS {
                 TitleRead::Failed
             } else {
@@ -301,26 +422,18 @@ impl Submission {
                 }
             }
         };
-        let read_at = SystemClock
-            .read()
-            .map_err(|source| ObserveForegroundError::Clock { source })?;
-        self.sender
-            .foreground(Snapshot {
-                at,
-                read_at,
-                event_time_ms,
-                generation: self.generation,
-                source,
-                kind,
-                window: Window::from_native(window).handle(),
-                title: read.snapshot(&buffer),
-                desktop,
-            })
-            .map_err(|source| ObserveForegroundError::Deliver { source })
+        read.snapshot(&buffer)
+    }
+}
+impl Drop for ForegroundPort {
+    fn drop(&mut self) {
+        let state = CALLBACK.with(|slot| slot.borrow_mut().take());
+        drop(state);
+        self.global.clear();
     }
 }
 unsafe extern "system" fn callback(
-    hook: HWINEVENTHOOK,
+    _hook: HWINEVENTHOOK,
     event: u32,
     window: HWND,
     object: i32,
@@ -328,86 +441,82 @@ unsafe extern "system" fn callback(
     _thread: u32,
     event_time_ms: u32,
 ) {
+    let at = match ForegroundPort::clock() {
+        Ok(at) => at,
+        Err(_) => {
+            CALLBACK.with(|slot| {
+                if let Some(state) = slot.borrow().as_ref() {
+                    state.sender.mark_overloaded();
+                }
+            });
+            return;
+        }
+    };
     let Ok(event) = WinEvent::try_from(event) else {
         return;
     };
     let kind = event.kind();
-    let current = if kind == EventKind::Title {
-        // SAFETY: The API returns an opaque handle and does not access Rust memory.
-        let foreground = unsafe { WindowsAndMessaging::GetForegroundWindow() };
-        Some(Window::from_native(foreground).handle())
-    } else {
-        None
-    };
-    let state = CALLBACK.with(|state| {
-        let mut state = state.borrow_mut();
-        let state = state.as_mut()?;
-        match kind {
-            EventKind::Title | EventKind::Destroy => match state
-                .process_hooks
-                .accepts(hook, state.foreground.generation())
-            {
-                EventDecision::Ignore => return None,
-                EventDecision::Accept => {}
-            },
-            EventKind::Foreground | EventKind::Review => {}
-        }
-        let foreground = match current {
-            Some(window) => window,
-            None => state.foreground.window(),
-        };
-        match (NativeEvent {
-            kind,
-            window: Window::from_native(window).handle(),
-            object,
-            child,
-        })
-        .accepts(foreground)
-        {
-            EventDecision::Ignore => return None,
-            EventDecision::Accept => {}
-        }
-        if event == WinEvent::DesktopSwitch {
-            state.desktop = Desktop::Unknown;
-            state.foreground.observe(NativeEvent {
-                kind: EventKind::Foreground,
-                window: state.foreground.window(),
-                object: WINDOW_OBJECT,
-                child: SELF_CHILD,
-            });
-        }
-        if kind == EventKind::Foreground {
-            state.foreground.observe(NativeEvent {
+    let request = ReadRequest {
+        at,
+        trigger: ReadTrigger::Native {
+            event: NativeEvent {
                 kind,
                 window: Window::from_native(window).handle(),
                 object,
                 child,
-            });
-        }
-        let kind = if kind == EventKind::Title && foreground != state.foreground.window() {
-            EventKind::Review
-        } else {
-            kind
+            },
+            event_time_ms,
+        },
+    };
+    if ForegroundPort::read_current(request).is_err() {
+        CALLBACK.with(|slot| {
+            if let Some(state) = slot.borrow().as_ref() {
+                state.sender.mark_overloaded();
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::foreground::{SELF_CHILD, WINDOW_OBJECT};
+    use quartz_domain::capture::WindowHandle;
+
+    #[test]
+    fn read_trigger_derives_origin_kind_and_optional_native_event_time() {
+        let event = NativeEvent {
+            kind: EventKind::Title,
+            window: WindowHandle::new(1),
+            object: WINDOW_OBJECT,
+            child: SELF_CHILD,
         };
-        Some(CallbackSubmission {
-            submission: state.submission(),
-            kind,
-        })
-    });
-    if let Some(callback) = state {
-        let state = callback.submission;
-        // Callback failures must not unwind across the system ABI or perform logging I/O.
-        if state
-            .submit(
-                window,
-                callback.kind,
-                ObservationSource::Hook,
-                event_time_ms,
-                state.desktop,
-            )
-            .is_err()
-        {
-            state.sender.mark_overloaded();
+        // A real wrapping native tick can be zero; it remains present.
+        let native = ReadTrigger::Native {
+            event,
+            event_time_ms: 0,
+        };
+        assert_eq!(native.source(), ObservationSource::Hook);
+        assert_eq!(native.kind(), EventKind::Title);
+        assert_eq!(native.cause(), ReadCause::Trigger);
+        assert_eq!(native.event_time_ms(), Some(0));
+        assert!(native.rebind().is_none());
+        for cause in [ReadCause::Trigger, ReadCause::Fallback] {
+            let requested = ReadTrigger::Requested(cause);
+            assert_eq!(requested.source(), ObservationSource::Review);
+            assert_eq!(requested.kind(), EventKind::Review);
+            assert_eq!(requested.cause(), cause);
+            assert_eq!(requested.event_time_ms(), None);
+            assert!(requested.native().is_none());
+            assert!(requested.rebind().is_none());
         }
+        let target = HookTarget::Unbind;
+        let rebind = ReadTrigger::Rebind(target);
+        assert_eq!(rebind.source(), ObservationSource::Review);
+        assert_eq!(rebind.kind(), EventKind::Review);
+        assert_eq!(rebind.cause(), ReadCause::Trigger);
+        assert_eq!(rebind.event_time_ms(), None);
+        assert!(rebind.native().is_none());
+        assert_eq!(rebind.rebind(), Some(target));
     }
 }
