@@ -72,7 +72,7 @@ trait Detector {
 
 | ID | 信号 | 预设 | 说明 |
 |---|---|---|---|
-| `builtin.browser_private` | 浏览器 exe + 类名 + 标题模式 | private_window，标签“无痕窗口” | M1 验证用户在用的 Edge、Chrome、Firefox 与界面语言 |
+| `builtin.browser_private` | 浏览器已接入扩展时以扩展关联为准（第 3.4 节）；未接入时用浏览器 exe + 类名 + 标题模式 | private_window，标签“无痕窗口” | M1 已验证 Edge 157、Firefox 160 可由标题识别，Chrome 157 不能（09 H5） |
 | `builtin.credential_ui` | consent.exe、CredentialUIBroker.exe、LogonUI.exe 与凭据窗口 | title_hidden | 应用与窗口模式使用规则数据 |
 | `builtin.password_manager` | KeePass、KeePassXC、1Password、Bitwarden 等 exe 名 | title_hidden | 名单使用规则数据 |
 | `builtin.capture_excluded` | `WDA_EXCLUDEFROMCAPTURE` 或 `WDA_MONITOR` | title_hidden | 查询失败记 unknown，由其他规则继续求值 |
@@ -121,9 +121,14 @@ verified = true
 
 用户可以用子规则集停用或覆盖内置隐私规则（规则格式文档 1.1 节），导入时单独警告；`builtin.capture_excluded` 这类基于系统信号的识别器是代码，不在规则集中，只能在设置中开关。
 
-### 3.4 识别不可靠时
+### 3.4 浏览器窗口以扩展为准
 
-M1 若无法从类名或标题识别某浏览器的无痕窗口，设置页标为“无法识别无痕窗口”，启用该浏览器全部窗口 `title_hidden` 的保守规则。该规则保持网页动作不变，普通窗口仍可在唯一关联后得到网站细分；无痕窗口没有扩展输入，保持 ambiguous。M5 再验证扩展关联覆盖。
+浏览器窗口是否无痕以扩展为准，标题模式只在该浏览器未接入扩展时兜底。扩展 manifest 设 `incognito: "not_allowed"`（05 第 1.1 节），无痕窗口没有扩展输入，因此“扩展能确认的才是普通窗口”。
+
+- 浏览器有已连接的扩展 stream 时：前台为该浏览器窗口的观测按 02 的浏览器上下文等待（`PRIVACY_CONTEXT_WAIT`）暂扣，与扩展唯一关联（05 第 3.3 节）的窗口按普通窗口处理，标题与网页按字段动作保留；未关联、ambiguous 或等待超时的窗口一律 `title_hidden`，不按标题模式判断是否无痕。之后取得唯一关联时以 `policy_changed` 切段恢复标题；关联失效时同样切段隐藏。
+- 浏览器没有已连接的扩展 stream 时（未安装、未连接、断线或 M5 之前）：使用 `builtin.browser_private` 的标题模式。设置页对该浏览器显示“未接入扩展，无痕识别依赖标题”；标题模式无法识别的浏览器（M1 实测 Chrome 157）在接入扩展前无痕标题会被记录，这是已知缺口。
+
+该规则只收紧隐私：扩展报告与标题模式任一判定为无痕即按无痕处理。M5 测量 linked 覆盖率；覆盖不足时普通窗口标题被隐藏的比例同步记录。
 
 ## 4. 用户规则
 

@@ -28,7 +28,7 @@
 
 - 前台和标题 hook、窗口与应用身份解析、空闲检测、会话和电源通知、时钟段（02）。
 - schema v1（diesel 迁移）、`store` 访问层、批量写入、确认点、崩溃恢复（03 第 2–4 节）；迁移启动流程、`VACUUM INTO` 备份、`restore-backup` 命令，以及 schema.rs 漂移检查与 `migrations.lock` 校验（03 第 8 节）。
-- 隐私策略框架、字段动作、`builtin.browser_private`、`builtin.credential_ui`、`builtin.password_manager` 与用户规则求值（06）。M1 验证用户在用的 Edge、Chrome、Firefox 无痕模式与语言样本；无法可靠识别时启用 06 第 3.4 节的保守规则。规则集基础设施在 M1 完成：`quartz-rules/1` 解析与校验、规则集树解析（rule / override / disable、冲突检测）、版本存储、生效规则哈希、内置规则集 `builtin.privacy` 及其升级流程（03 第 8.5 节）。用户隐私规则先通过规则文件编辑，`quartz rules check` 在 M1 提供；界面在 M4 提供。
+- 隐私策略框架、字段动作、`builtin.browser_private`、`builtin.credential_ui`、`builtin.password_manager` 与用户规则求值（06）。M1 验证用户在用的 Edge、Chrome、Firefox 无痕模式与语言样本；标题无法识别的浏览器记为已知缺口，M5 起以扩展关联为准（06 第 3.4 节）。规则集基础设施在 M1 完成：`quartz-rules/1` 解析与校验、规则集树解析（rule / override / disable、冲突检测）、版本存储、生效规则哈希、内置规则集 `builtin.privacy` 及其升级流程（03 第 8.5 节）。用户隐私规则先通过规则文件编辑，`quartz rules check` 在 M1 提供；界面在 M4 提供。
 - `quartz dump --date <YYYY-MM-DD> [--format text|json]`：M1 经数据目录直接只读打开生产数据库，不取得核心实例锁，在一个 WAL 快照中读取本地日历日相交的运行、时钟段、前台与无前台事实、可用状态、采集缺口及限时策略。默认文本每行一条，按开始 UTC 毫秒、类型和主键排序，包含本地起止时间、UTC 毫秒、时长、结束原因及已存储字段；开放行显示 `open (confirmed …)`。字符串使用 JSON 转义；`--format json` 每行一个对象，字段包含 `kind`、`id`、`start_utc_ms`、`end_utc_ms`、`confirmed_utc_ms`、`duration_ms`、`end_reason` 和相应事实字段，以及 `start_local`、`end_local`、`confirmed_local`。端点保留完整存储范围，标题仅在数据库有对应文本时出现。
 - 规则匹配的文本比较（NFC、NFKC 与大小写折叠、IDN 转换）及多语言测试用例（10 第 4.1、7 节）；内置识别规则按语言列出变体，验证 zh-CN 与 en 浏览器样本（10 第 4.2 节）。
 - `quartz gen-data --db <新文件> [--profile light|typical|heavy] [--seed N] [--days N]`：默认一年，复现 03 第 4.6 节的三档前台与标题参数，包含高频标题和长标题。网页行待采集写入器支持后生成，当前输出跳过说明及目标切片数。`quartz bench-query --db <模拟库> [--runs N]`：默认每种范围 100 次，M1 先跑前台、可用状态和缺口的事实范围读取。
@@ -102,7 +102,7 @@
 - Chrome/Edge 扩展、Firefox 扩展（05 第 1 节）。
 - `quartz-host.exe` 的 Native Messaging 转发与注册（05 第 2 节），设置页的浏览器分组。
 - 核心的上下文关联、求交、回执与去重（05 第 3 节）。
-- 扩充 M1 的 `builtin.browser_private` 样本库与关联验证（06 第 3.2–3.4 节）。
+- 浏览器隐私以扩展为准：有已连接 stream 时未关联窗口隐藏标题、关联后切段恢复，未接入时由 `builtin.browser_private` 标题模式兜底；扩充样本库与关联验证（06 第 3.2–3.4 节）。
 - browser.policy、purge 确认、gap 与连续 ack，扩展 alarm 重连、开放网页行恢复。
 - 将关联后的开放网页行加入 capture 的统一确认点目标与崩溃恢复输入；与前台、可用状态、运行和时钟段在同一事务中结算。
 
@@ -162,7 +162,7 @@
 | H2 | 事件触发当前状态读取，加 60 秒后备复核，通知覆盖缺口 `untriggered_changes` 每小时 ≤ 1；只计 60 秒后备复核在无触发时发现的变化（02 第 2.1 节） | M1-E2b 已测：约 30 分钟真实切换（含虚拟桌面、跨显示器、UAC、锁屏）计数为 0，切换误差 P95 7–12 ms；一小时连续轮待测。[测量记录](../measurements.md) | 定位反复出现的来源，补订阅对应事件（如 `EVENT_SYSTEM_SWITCHEND`）并重新验收；保持 60 秒后备间隔与计数口径 |
 | H3 | GPUI 能在不开窗的情况下完成 D3D 初始化，因此悬停预热有效 | M3 | 预热时开一个不可见的窗口；或放弃预热，只保留托盘摘要 |
 | H4 | 仅凭 profile、扩展焦点和标题匹配，就能可靠关联浏览器多窗口 | M5 | 保持 ambiguous；如需 UI Automation 等信号，另立原型评估权限、成本与影响 |
-| H5 | 用户在用的浏览器无痕窗口可以从类名或标题识别 | M1-E2b 已测：Edge 157、Firefox 160 的 zh-CN 与 en-US 无痕窗口可由标题识别；Chrome 157 无痕标题与普通窗口相同，无法识别，记为已知缺口（未启用保守规则）。[测量记录](../measurements.md)；M5 扩充样本 | 提供"该浏览器所有窗口隐藏标题"一键规则（06 第 3.4 节） |
+| H5 | 用户在用的浏览器无痕窗口可以从类名或标题识别 | M1-E2b 已测：Edge 157、Firefox 160 的 zh-CN 与 en-US 无痕窗口可由标题识别；Chrome 157 无痕标题与普通窗口相同，无法识别，记为已知缺口（未启用保守规则）。[测量记录](../measurements.md)；M5 扩充样本 | M5 起以扩展关联为准，未关联窗口隐藏标题；未接入扩展的浏览器由标题模式兜底并在设置页提示（06 第 3.4 节） |
 | H6 | 已决定使用独立 console 子系统 `quartz-host.exe` 承接浏览器 stdio | M0 已由设计解决 | — |
 | H7 | 验证常见应用窗口的显示亲和性查询覆盖、错误码与成本 | M1 | 查询失败记 unknown，其他识别器与用户规则继续求值 |
 | H8 | 一年数据下，内存缓存就能满足查询性能 | M4 | 加持久日缓存表 |

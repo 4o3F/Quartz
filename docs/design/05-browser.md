@@ -15,7 +15,7 @@
 - Chrome、Edge 使用同一份 MV3 service worker 代码；Firefox 使用单独的 manifest 与 event page。
 - 项目最低版本为 Chrome/Edge 120、Firefox 128。Chrome 120 起支持 30 秒 alarm，Firefox 128 已支持 alarms 与 event page；最低版本安装与唤醒在 M5 实测（[Chrome 生命周期](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)、[Firefox alarms](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/alarms)、[Firefox 后台页](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json/background)）。
 - 权限：`tabs`、`nativeMessaging`、`storage`、`alarms`。不申请 `<all_urls>`，不注入内容脚本。
-- manifest 设 `incognito: "not_allowed"`。Windows 层的无痕窗口由 M1 交付的 `builtin.browser_private` 处理，见 06 第 3 节。
+- manifest 设 `incognito: "not_allowed"`，扩展不进入无痕窗口。浏览器接入扩展后，无痕判断以扩展关联为准：未关联的浏览器窗口隐藏标题；未接入时由 `builtin.browser_private` 的标题模式兜底，见 06 第 3.4 节。
 - Chrome/Edge 的 manifest 带 `key` 固定扩展 ID；Firefox 用 `browser_specific_settings.gecko.id` 固定 ID。
 
 ### 1.2 握手与上报
@@ -163,7 +163,7 @@ Chrome/Edge 共用 `dev.4o3f.quartz.chrome.json`，Firefox 使用 `dev.4o3f.quar
 
 浏览器窗口 ID 不是 HWND，service worker 的 `--parent-window` 也不能提供可靠对应。首版只在内存中用前台窗口标题和活动标签标题进行匹配，再按隐私动作丢弃字段。
 
-每个前台时间片最多一个已确认候选。即使只有一个 stream 报告聚焦，也须验证其活动标签标题与前台窗口标题匹配：去掉已知浏览器后缀后相等或互为前缀。零个或多个匹配都保持 `ambiguous`，不计网站时长，时间轴显示“浏览器（无法确定标签）”。扩展未安装或未连接时仍记录允许保留的前台事实。
+每个前台时间片最多一个已确认候选。即使只有一个 stream 报告聚焦，也须验证其活动标签标题与前台窗口标题匹配：去掉已知浏览器后缀后相等或互为前缀。零个或多个匹配都保持 `ambiguous`，不计网站时长，时间轴显示“浏览器（无法确定标签）”。该浏览器有已连接 stream 时，ambiguous 与未关联窗口的前台事实按 06 第 3.4 节隐藏标题；扩展未安装或未连接时仍记录允许保留的前台事实，无痕识别由标题模式兜底。
 
 关联仅在当前已读取的前台状态与 stream 连接范围内有效；前台或标题变化、标签变化、失焦、最小化、断线、gap、epoch 变化和策略变化都使旧关联失效，必须重新确认。持久重放缺少标题时无法确认，保留 ambiguous。
 
