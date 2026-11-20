@@ -11,8 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+jiff = { workspace = true, default-features = false }
 serde.workspace = true
-snafu.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+snafu.workspace = true

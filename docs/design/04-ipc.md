@@ -41,6 +41,24 @@ u32 小端，JSON 字节长度 | UTF-8 JSON
 - 创建类操作由客户端在实体中提供 `uuid`。annotations、分类和各类规则用数据库唯一约束去重，重试遇到已有 UUID 时返回已有实体。批量创建时每个实体独立带 UUID；删除不存在的实体也返回成功。更新按实体 UUID 设置最终值，重试保持相同结果。
 - 错误码是稳定的字符串枚举，定义在 `quartz-protocol`。核心只发送代码与结构化字段，`quartz-ui` 按代码本地化并呈现；host 与 UI 均不得按错误文本分支。信封中的 `msg` 若存在，仅为日志诊断文字。
 - 未知字段一律忽略，以便向前兼容。
+- `id: null` 只用于无法取得请求 ID 的连接级错误：帧超限返回 `frame_too_large`，JSON 无法解码返回 `bad_request`。成功响应和已知请求 ID 的错误响应必须带原请求 ID。
+- 客户端将无法识别的错误码解码为 `Unknown`。核心不发送 `Unknown`。
+
+| code | 含义 | 结构化字段 |
+|---|---|---|
+| `bad_request` | 信封或操作参数不符合格式 | 无 |
+| `unknown_op` | 不认识请求操作名 | 无 |
+| `handshake_required` | 连接首帧不是 `hello` | 无 |
+| `frame_too_large` | 帧的 JSON 字节长度超过 256 KiB | 无 |
+| `proto_mismatch` | 客户端与核心支持的协议版本没有交集 | `supported: {min, max}`，核心支持的协议范围 |
+| `forbidden` | 当前角色没有该操作的权限 | 无 |
+| `invalid_range` | 请求的日期或时间范围无效 | 无 |
+| `stale_cursor` | 查询输入版本变化，须重新分页 | 无 |
+| `rule_set_stale` | 提交的规则集基础版本已过期 | `current_version`，当前规则集版本号（u64） |
+| `core_offline` | host 无法连接核心 | 无 |
+| `internal` | 核心处理请求时发生内部错误 | 无 |
+
+结构化字段与 `code` 同级，放在 `err` 对象中。
 
 M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>` 交给 UI，核心随后返回失败退出码。当前稳定代码为 `newer_database`、`migration_failed`、`other_session`、`core_start_failed`。备份路径通过独立、可重复的 `--backup-path <路径>` 参数传递；`migration_failed` 必须带其迁移前备份路径。共享的 `CoreError` 使用 `code` 和 `backup_paths` 字段，后续管道沿用这些代码与字段。
 
