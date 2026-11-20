@@ -4,10 +4,10 @@ use crate::core::foreground::{ChildWindow, DisplayAffinity, Visibility};
 use quartz_domain::capture::{ProcessId, WindowHandle};
 use windows::{
     Win32::{
-        Foundation::{HWND, LPARAM},
+        Foundation::{ERROR_INVALID_WINDOW_HANDLE, HWND, LPARAM},
         UI::WindowsAndMessaging,
     },
-    core::BOOL,
+    core::{BOOL, HRESULT},
 };
 
 /// Window classes are limited to 256 characters by RegisterClassExW, capture 02 §2.1.
@@ -30,6 +30,16 @@ pub(super) enum ReadWindowClassErrorKind {
     Decode,
 }
 impl ReadWindowClassError {
+    pub(super) fn log_level(&self) -> tracing::Level {
+        match self {
+            Self::Query { source }
+                if source.code() == HRESULT::from_win32(ERROR_INVALID_WINDOW_HANDLE.0) =>
+            {
+                tracing::Level::DEBUG
+            }
+            _ => tracing::Level::WARN,
+        }
+    }
     pub(super) fn kind(&self) -> ReadWindowClassErrorKind {
         match self {
             Self::Query { .. } => ReadWindowClassErrorKind::Query,
@@ -147,6 +157,38 @@ unsafe extern "system" fn enumerate_child(window: HWND, parameter: LPARAM) -> BO
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE};
+
+    #[test]
+    fn only_invalid_window_handle_class_queries_use_debug_level() {
+        let invalid_window =
+            windows::core::Error::from_hresult(HRESULT::from_win32(ERROR_INVALID_WINDOW_HANDLE.0));
+        assert_eq!(
+            ReadWindowClassError::Query {
+                source: invalid_window,
+            }
+            .log_level(),
+            tracing::Level::DEBUG
+        );
+        for code in [ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE] {
+            let source = windows::core::Error::from_hresult(HRESULT::from_win32(code.0));
+            assert_eq!(
+                ReadWindowClassError::Query { source }.log_level(),
+                tracing::Level::WARN
+            );
+        }
+        let count = u8::try_from(u16::MAX).expect_err("out-of-range count");
+        assert_eq!(
+            ReadWindowClassError::Count { source: count }.log_level(),
+            tracing::Level::WARN
+        );
+        let decode = String::from_utf16(&[0xD800]).expect_err("unpaired surrogate");
+        assert_eq!(
+            ReadWindowClassError::Decode { source: decode }.log_level(),
+            tracing::Level::WARN
+        );
+    }
+
     #[test]
     fn invalid_window_class_is_an_error_instead_of_empty_rule_input() {
         let result = Window::from_native(HWND::default()).class();

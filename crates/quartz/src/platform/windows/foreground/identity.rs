@@ -208,7 +208,11 @@ impl Resolver {
             let class = match native.class() {
                 Ok(class) => class,
                 Err(error) => {
-                    tracing::warn!(kind = ?error.kind(), "window class unavailable; requesting foreground review");
+                    if error.log_level() == tracing::Level::DEBUG {
+                        tracing::debug!(kind = ?error.kind(), "window class unavailable; requesting foreground review");
+                    } else {
+                        tracing::warn!(kind = ?error.kind(), "window class unavailable; requesting foreground review");
+                    }
                     self.failures = self.failures.saturating_add(1);
                     self.processes.evict_process(owner);
                     return Resolution::Review;
@@ -220,7 +224,11 @@ impl Resolver {
                     let children = match native.children() {
                         Ok(children) => children,
                         Err(error) => {
-                            tracing::warn!(kind = ?error.kind(), "child window class unavailable; requesting foreground review");
+                            if error.log_level() == tracing::Level::DEBUG {
+                                tracing::debug!(kind = ?error.kind(), "child window class unavailable; requesting foreground review");
+                            } else {
+                                tracing::warn!(kind = ?error.kind(), "child window class unavailable; requesting foreground review");
+                            }
                             self.failures = self.failures.saturating_add(1);
                             self.processes.evict_process(owner);
                             return Resolution::Review;
