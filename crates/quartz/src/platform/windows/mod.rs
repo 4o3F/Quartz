@@ -11,13 +11,13 @@ mod sources;
 mod tray;
 
 use crate::{
-    capture::PersistenceState,
     core::{
         app::{
             JoinWorkersError, MainCommand, RequestShutdownError, StartWorkersError, Worker, Workers,
         },
         sources::ClockReader,
     },
+    persistence::PersistenceState,
 };
 use quartz_domain::capture::{CaptureEffect, CaptureState, RunEndReason};
 use quartz_protocol::{CoreError, CoreErrorCode};
@@ -249,8 +249,8 @@ impl CoreProcess {
         {
             AcquireInstance::SameSession => {
                 if matches!(autostart, crate::Autostart::Disabled)
-                    && let Err(error) = crate::ipc::client::CoreClient::connect()
-                        .and_then(|mut client| client.open_ui())
+                    && let Err(error) =
+                        ipc::CoreClient::connect().and_then(|mut client| client.open_ui())
                 {
                     tracing::warn!(%error, "could not forward open request to existing core within timeout");
                 }
@@ -343,9 +343,12 @@ impl CoreProcess {
         });
         let workers =
             Workers::start(store, metadata, sources::clock(), wake).context(StartWorkersSnafu)?;
-        let pipe =
-            ipc::PipeServerConfig::current(workers.queries.clone(), workers.versions.clone())
-                .and_then(|config| ipc::PipeServer::start(config, status.subscribe(), ui_port));
+        let pipe = ipc::PipeServerConfig::current(
+            crate::core::app::SHUTDOWN_TIMEOUT,
+            workers.queries.clone(),
+            workers.versions.clone(),
+        )
+        .and_then(|config| ipc::PipeServer::start(config, status.subscribe(), ui_port));
         let pipe = match pipe {
             Ok(pipe) => pipe,
             Err(source) => {

@@ -78,3 +78,45 @@ impl PipeClient {
         self.pipe
     }
 }
+
+pub(crate) type CoreClient = crate::ipc::client::CoreClient<NamedPipeClient>;
+impl CoreClient {
+    pub(crate) fn connect() -> Result<Self, crate::ipc::client::CallCoreError> {
+        Self::open(
+            async {
+                PipeClient::connect()
+                    .await
+                    .map(PipeClient::into_inner)
+                    .map_err(crate::ipc::client::CallCoreError::connect)
+            },
+            Some(quartz_protocol::HelloRole::Cli),
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn connect_named(
+        name: &PipeName,
+        role: quartz_protocol::HelloRole,
+    ) -> Result<Self, crate::ipc::client::CallCoreError> {
+        Self::open(
+            async {
+                PipeClient::open_named(name)
+                    .await
+                    .map(PipeClient::into_inner)
+                    .map_err(crate::ipc::client::CallCoreError::connect)
+            },
+            Some(role),
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn open_named(name: &PipeName) -> Result<Self, crate::ipc::client::CallCoreError> {
+        Self::open(
+            async {
+                PipeClient::open_named(name)
+                    .await
+                    .map(PipeClient::into_inner)
+                    .map_err(crate::ipc::client::CallCoreError::connect)
+            },
+            None,
+        )
+    }
+}

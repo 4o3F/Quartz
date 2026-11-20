@@ -21,8 +21,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// Closed rows are split at UTC midnight (data model 03 §5.1).
-pub(crate) const UTC_DAY_MS: i64 = 86_400_000;
+use quartz_domain::capture::limits::UTC_DAY_MS;
 /// SQLite's guaranteed minimum bind limit, data model 03 §4.5.
 const SQLITE_BIND_LIMIT: usize = 999;
 /// Ten tables receive generated capture data or expose the M5 web-row placeholder (03 §2).
@@ -873,11 +872,7 @@ impl CaptureGapsRow {
 impl Store {
     /// Closes the reader first so the final WAL writer can checkpoint the simulation file.
     pub(crate) fn finish_simulation(self) {
-        let Self {
-            _writer: writer,
-            _reader: reader,
-            ..
-        } = self;
+        let Self { writer, reader, .. } = self;
         drop(reader);
         drop(writer);
     }
@@ -897,10 +892,9 @@ impl Store {
         )
         .context(super::LoadMigrationsSnafu)?;
         Ok(Self {
-            _writer: writer,
-            _reader: Some(ReadOnlyStore::connect(path)?),
-            pending_versions: BTreeMap::new(),
-            pending_metadata_version: None,
+            writer,
+            reader: Some(ReadOnlyStore::connect(path)?),
+            pending_effects: super::versions::TxEffects::default(),
         })
     }
 }

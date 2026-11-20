@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::query::calendar::DayCalendar;
+use crate::store::schema::{data_day_versions, settings};
+use crate::store::versions::{UtcDay, VersionKey, VersionSource};
 use crate::store::{
     enums::{
         ApplicationKind, AvailabilityEndReason, ClockEndReason, DataSource, IntervalEndReason,
@@ -11,7 +13,7 @@ use crate::store::{
 };
 use crate::{
     data_directory::DataDirectory,
-    query::{QueryJob, QueryRequest, QueryResponse},
+    query::{QueryJob, QueryRequest, QueryResponse, RunQueryError},
 };
 use diesel::OptionalExtension;
 use quartz_protocol::{
@@ -36,7 +38,7 @@ impl QueryFixture {
             DayCalendar::new(FIXTURE_DATE.parse().expect("fixture date"), 0).expect("fixture day");
         let start = calendar.range.start;
         store
-            ._writer
+            .writer
             .immediate_transaction::<_, diesel::result::Error, _>(|connection| {
                 diesel::insert_into(capture_runs::table)
                     .values(CaptureRunsRow {
@@ -174,7 +176,7 @@ impl QueryFixture {
         self.count += 1;
         let id = self.count;
         self.store
-            ._writer
+            .writer
             .immediate_transaction::<_, diesel::result::Error, _>(|connection| {
                 Self::insert_fact(connection, self.start, id)
             })
@@ -193,9 +195,9 @@ impl QueryFixture {
             .do_update()
             .set(data_day_versions::version.eq(data_day_versions::version + 1_i64))
             .returning(data_day_versions::version)
-            .get_result(&mut self.store._writer)
+            .get_result(&mut self.store.writer)
             .expect("bump fact version");
-        self.store.pending_versions.insert(
+        self.store.pending_effects.days.insert(
             VersionKey {
                 source: VersionSource(DataSource::Intervals.code()),
                 day: UtcDay(day),
@@ -207,7 +209,7 @@ impl QueryFixture {
         let old: i64 = settings::table
             .filter(settings::key.eq("metadata_version"))
             .select(settings::value)
-            .first::<String>(&mut self.store._writer)
+            .first::<String>(&mut self.store.writer)
             .optional()
             .expect("metadata query")
             .map(|value| value.parse().expect("version integer"))
@@ -221,9 +223,9 @@ impl QueryFixture {
             .on_conflict(settings::key)
             .do_update()
             .set(settings::value.eq(value.to_string()))
-            .execute(&mut self.store._writer)
+            .execute(&mut self.store.writer)
             .expect("metadata update");
-        self.store.pending_metadata_version = Some(value);
+        self.store.pending_effects.metadata = Some(value);
     }
     pub(crate) fn mask_idle(&mut self, start: i64, end: i64) {
         diesel::insert_into(availability_intervals::table)
@@ -245,7 +247,7 @@ impl QueryFixture {
                 exception: None,
                 policy_version: 1,
             })
-            .execute(&mut self.store._writer)
+            .execute(&mut self.store.writer)
             .expect("idle mask");
     }
     pub(crate) fn open_last_fact(&mut self, confirmed_ms: i64) {
@@ -257,7 +259,7 @@ impl QueryFixture {
                 intervals::confirmed_mono_ms.eq(Some(confirmed_ms)),
                 intervals::duration_ms.eq(None::<i64>),
             ))
-            .execute(&mut self.store._writer)
+            .execute(&mut self.store.writer)
             .expect("open confirmed row");
     }
     pub(crate) fn collapse_foreground_times(&mut self) {
@@ -268,13 +270,13 @@ impl QueryFixture {
                 intervals::start_mono_ms.eq(0_i64),
                 intervals::end_mono_ms.eq(Some(FACT_MS)),
             ))
-            .execute(&mut self.store._writer)
+            .execute(&mut self.store.writer)
             .expect("same timestamp foreground facts");
     }
     pub(crate) fn redact_titles(&mut self, level: enums::CaptureLevel) {
         diesel::update(intervals::table)
             .set(intervals::capture_level.eq(level))
-            .execute(&mut self.store._writer)
+            .execute(&mut self.store.writer)
             .expect("fixture capture level");
     }
 }

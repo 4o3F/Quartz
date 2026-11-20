@@ -1,5 +1,5 @@
 use super::*;
-use crate::query::{QueryJob, QueryRequest, QueryResponse};
+use crate::query::{QueryJob, QueryRequest, QueryResponse, RunQueryError};
 use quartz_protocol::{Activity, ErrorKind, QUERY_PAGE_BYTES, QueryCursor};
 use test_support::QueryFixture;
 

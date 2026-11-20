@@ -1,10 +1,5 @@
 //! Asynchronous core requests and a current-thread blocking facade for CLI callers.
 
-#[cfg(test)]
-pub(crate) use crate::platform::windows::ipc::CONNECT_TIMEOUT;
-#[cfg(test)]
-use crate::platform::windows::ipc::PipeName;
-use crate::platform::windows::ipc::{OpenCorePipeError, PipeClient};
 use futures_util::{SinkExt, StreamExt};
 use quartz_protocol::{
     AcceptedBody, ClientVersion, CoreStatusRequest, CoreStatusResponse, Envelope, ErrorKind, Hello,
@@ -14,7 +9,7 @@ use quartz_protocol::{
 use snafu::{ResultExt, Snafu};
 use std::{io, time::Duration};
 use tokio::{
-    net::windows::named_pipe::NamedPipeClient,
+    io::{AsyncRead, AsyncWrite},
     runtime::{Builder, Runtime},
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -30,7 +25,9 @@ pub(crate) enum CallCoreError {
     #[snafu(display("could not build core client runtime"))]
     Runtime { source: io::Error },
     #[snafu(display("{source}"))]
-    Connect { source: OpenCorePipeError },
+    Connect {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[snafu(display("core negotiated an unexpected protocol version: {received:?}"))]
     HandshakeVersion { received: ProtoVersion },
     #[snafu(display("core rejected the request: {}", kind.code()))]
@@ -57,6 +54,12 @@ pub(crate) enum CallCoreError {
 }
 
 impl CallCoreError {
+    pub(crate) fn connect(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Connect {
+            source: Box::new(source),
+        }
+    }
+
     fn decode(source: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Decode {
             source: Box::new(source),
@@ -71,31 +74,14 @@ impl CallCoreError {
 
 /// Core protocol client that can run on the M3 UI background runtime.
 #[derive(Debug)]
-pub(crate) struct AsyncCoreClient {
-    framed: Framed<NamedPipeClient, LengthDelimitedCodec>,
+pub(crate) struct AsyncCoreClient<T> {
+    framed: Framed<T, LengthDelimitedCodec>,
     next_id: RequestId,
 }
-impl AsyncCoreClient {
-    pub(crate) async fn connect(role: HelloRole) -> Result<Self, CallCoreError> {
-        Self::from_pipe(
-            PipeClient::connect()
-                .await
-                .context(call_core_error::ConnectSnafu)?,
-        )
-        .handshake(role)
-        .await
-    }
-    #[cfg(test)]
-    async fn open_named(name: &PipeName) -> Result<Self, CallCoreError> {
-        Ok(Self::from_pipe(
-            PipeClient::open_named(name)
-                .await
-                .context(call_core_error::ConnectSnafu)?,
-        ))
-    }
-    fn from_pipe(pipe: PipeClient) -> Self {
+impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
+    pub(crate) fn new(transport: T) -> Self {
         Self {
-            framed: Framed::new(pipe.into_inner(), frame_codec()),
+            framed: Framed::new(transport, frame_codec()),
             next_id: RequestId(1),
         }
     }
@@ -169,12 +155,12 @@ impl AsyncCoreClient {
 
 /// Owns one async client and its caller-thread runtime for a CLI invocation.
 #[derive(Debug)]
-pub(crate) struct CoreClient {
+pub(crate) struct CoreClient<T> {
     // Close the client before dropping the runtime that registered its pipe.
-    client: AsyncCoreClient,
+    client: AsyncCoreClient<T>,
     runtime: Runtime,
 }
-impl CoreClient {
+impl<T: AsyncRead + AsyncWrite + Unpin> CoreClient<T> {
     fn runtime() -> Result<Runtime, CallCoreError> {
         Builder::new_current_thread()
             .enable_io()
@@ -183,9 +169,18 @@ impl CoreClient {
             .build()
             .context(call_core_error::RuntimeSnafu)
     }
-    pub(crate) fn connect() -> Result<Self, CallCoreError> {
+    pub(crate) fn open(
+        connect: impl std::future::Future<Output = Result<T, CallCoreError>>,
+        role: Option<HelloRole>,
+    ) -> Result<Self, CallCoreError> {
         let runtime = Self::runtime()?;
-        let client = runtime.block_on(AsyncCoreClient::connect(HelloRole::Cli))?;
+        let client = runtime.block_on(async {
+            let client = AsyncCoreClient::new(connect.await?);
+            match role {
+                Some(role) => client.handshake(role).await,
+                None => Ok(client),
+            }
+        })?;
         Ok(Self { client, runtime })
     }
     pub(crate) fn status(&mut self) -> Result<CoreStatusResponse, CallCoreError> {
@@ -193,23 +188,6 @@ impl CoreClient {
     }
     pub(crate) fn open_ui(&mut self) -> Result<AcceptedBody, CallCoreError> {
         self.runtime.block_on(self.client.open_ui())
-    }
-    #[cfg(test)]
-    pub(crate) fn connect_named(name: &PipeName, role: HelloRole) -> Result<Self, CallCoreError> {
-        let runtime = Self::runtime()?;
-        let client = runtime.block_on(async {
-            AsyncCoreClient::open_named(name)
-                .await?
-                .handshake(role)
-                .await
-        })?;
-        Ok(Self { client, runtime })
-    }
-    #[cfg(test)]
-    pub(crate) fn open_named(name: &PipeName) -> Result<Self, CallCoreError> {
-        let runtime = Self::runtime()?;
-        let client = runtime.block_on(AsyncCoreClient::open_named(name))?;
-        Ok(Self { client, runtime })
     }
     #[cfg(test)]
     pub(crate) fn request(
@@ -238,8 +216,10 @@ impl CoreClient {
             .context(call_core_error::IoSnafu)
     }
 }
-pub(crate) fn print_status() -> Result<(), CallCoreError> {
-    let status = CoreClient::connect()?.status()?;
+pub(crate) fn print_status<T: AsyncRead + AsyncWrite + Unpin>(
+    mut client: CoreClient<T>,
+) -> Result<(), CallCoreError> {
+    let status = client.status()?;
     println!("{}", StatusReport { status: &status });
     Ok(())
 }
@@ -278,59 +258,40 @@ mod tests {
     use super::*;
     use quartz_protocol::{DecodeJsonError, EncodeFrameError};
     struct ConnectedClient {
-        _server: crate::platform::windows::ipc::PipeServer,
-        client: CoreClient,
-        _queries: crossbeam_channel::Receiver<crate::query::dispatch::QueryCommand>,
-        _versions: tokio::sync::watch::Sender<crate::query::versions::VersionState>,
+        client: CoreClient<tokio::io::DuplexStream>,
+        _peer: tokio::io::DuplexStream,
     }
     impl ConnectedClient {
         fn new() -> Self {
-            use crate::platform::windows::ipc::{PipeServer, ProcessIdentity};
-            let suffix = windows::core::GUID::new().expect("unique test pipe");
-            let name = PipeName::for_test(suffix);
-            let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(format!(
-                "{suffix:?}"
-            )));
-            let queries = crate::query::dispatch::QueryChannel::new();
-            let (versions, received) =
-                tokio::sync::watch::channel(crate::query::versions::VersionState::empty());
-            let server = PipeServer::start(
-                crate::platform::windows::ipc::PipeServerConfig {
-                    owner: ProcessIdentity::current().expect("identity"),
-                    name: name.clone(),
-                    timeouts: crate::platform::windows::ipc::ConnectionTimeouts::default(),
-                    queries: queries.port,
-                    versions: received,
-                },
-                status.subscribe(),
-                std::sync::Arc::new(|_| Ok(())),
-            )
-            .expect("test server");
+            let runtime = CoreClient::<tokio::io::DuplexStream>::runtime().expect("test runtime");
+            const TEST_BUFFER_BYTES: usize = 4096;
+            let (stream, peer) = tokio::io::duplex(TEST_BUFFER_BYTES);
+            let mut client = AsyncCoreClient::new(stream);
+            client.next_id = RequestId(2);
             Self {
-                _server: server,
-                _queries: queries.receiver,
-                _versions: versions,
-                client: CoreClient::connect_named(&name, HelloRole::Cli).expect("test client"),
+                client: CoreClient { client, runtime },
+                _peer: peer,
             }
         }
     }
-    fn inject(client: &mut CoreClient, payload: &[u8]) {
+    fn inject(fixture: &mut ConnectedClient, payload: &[u8]) {
         use tokio_util::{bytes::BytesMut, codec::Encoder};
         let mut wire = BytesMut::new();
         frame_codec()
             .encode(payload, &mut wire)
             .expect("test frame");
-        client
+        use tokio::io::AsyncWriteExt;
+        fixture
             .client
-            .framed
-            .read_buffer_mut()
-            .extend_from_slice(&wire);
+            .runtime
+            .block_on(fixture._peer.write_all(&wire))
+            .expect("inject framed response");
     }
     #[test]
     fn malformed_response_keeps_the_decoder_source() {
         use std::error::Error;
         let mut fixture = ConnectedClient::new();
-        inject(&mut fixture.client, b"{garbage");
+        inject(&mut fixture, b"{garbage");
         let error = fixture.client.status().expect_err("invalid envelope");
         assert!(matches!(error, CallCoreError::Decode { .. }));
         assert!(
@@ -347,7 +308,7 @@ mod tests {
         let mut fixture = ConnectedClient::new();
         let id = fixture.client.client.next_id;
         inject(
-            &mut fixture.client,
+            &mut fixture,
             &encode_json(&serde_json::json!({"t":"res","id":id,"ok":true,"body":null}))
                 .expect("response"),
         );
@@ -365,7 +326,7 @@ mod tests {
     fn mismatched_response_id_is_rejected() {
         let mut fixture = ConnectedClient::new();
         inject(
-            &mut fixture.client,
+            &mut fixture,
             &encode_json(&serde_json::json!({"t":"res","id":99,"ok":true,"body":{}}))
                 .expect("response"),
         );

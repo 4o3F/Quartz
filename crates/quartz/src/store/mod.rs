@@ -11,6 +11,7 @@ mod raw;
 mod rows;
 pub(crate) mod rules;
 mod schema;
+pub(crate) mod versions;
 
 use crate::data_directory::DataDirectory;
 use diesel::{Connection, SqliteConnection, migration::MigrationSource};
@@ -63,10 +64,9 @@ pub(crate) enum OpenStoreError {
 
 /// Owns both connections on the database thread.
 pub(crate) struct Store {
-    _writer: SqliteConnection,
-    _reader: Option<ReadOnlyStore>,
-    pending_versions: std::collections::BTreeMap<crate::query::versions::VersionKey, i64>,
-    pending_metadata_version: Option<i64>,
+    writer: SqliteConnection,
+    reader: Option<ReadOnlyStore>,
+    pending_effects: versions::TxEffects,
 }
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -81,7 +81,7 @@ impl Store {
         keys: &'connection mut capture::CaptureKeys,
         metadata: &'connection capture::RunMetadata,
     ) -> capture::Capture<'connection> {
-        capture::Capture::new(&mut self._writer, keys, metadata)
+        capture::Capture::new(&mut self.writer, keys, metadata)
     }
 
     pub(crate) fn capture_transaction<T>(
@@ -90,28 +90,29 @@ impl Store {
         metadata: &capture::RunMetadata,
         execute: impl FnOnce(&mut capture::Capture<'_>) -> Result<T, capture::ExecuteCaptureBatchError>,
     ) -> Result<T, capture::ExecuteCaptureBatchError> {
-        let mut staged = keys.clone();
-        staged.changed_versions.clear();
-        staged.metadata_version = None;
-        let result = self._writer.immediate_transaction(|connection| {
-            execute(&mut capture::Capture::new(
-                connection,
-                &mut staged,
-                metadata,
-            ))
-        })?;
-        for changed in staged.changed_versions.drain(..) {
-            self.pending_versions.insert(changed.key, changed.version);
+        keys.begin();
+        let mut effects = versions::TxEffects::default();
+        let result = self.writer.immediate_transaction(|connection| {
+            let mut capture = capture::Capture::new(connection, keys, metadata);
+            let result = execute(&mut capture);
+            effects = capture.effects;
+            result
+        });
+        match result {
+            Ok(value) => {
+                keys.finish(capture::KeyTransaction::Commit);
+                self.pending_effects.merge(effects);
+                Ok(value)
+            }
+            Err(error) => {
+                keys.finish(capture::KeyTransaction::Rollback);
+                Err(error)
+            }
         }
-        if let Some(version) = staged.metadata_version.take() {
-            self.pending_metadata_version = Some(version);
-        }
-        *keys = staged;
-        Ok(result)
     }
 
     pub(crate) fn rule_sets(&mut self) -> rules::RuleSets<'_> {
-        rules::RuleSets::new(&mut self._writer)
+        rules::RuleSets::new(&mut self.writer)
     }
 
     pub(crate) fn transaction<T>(
@@ -120,7 +121,7 @@ impl Store {
             &mut rules::RuleSetTransaction<'_>,
         ) -> Result<T, rules::ExecuteRuleWritesError>,
     ) -> Result<T, rules::ExecuteRuleWritesError> {
-        self._writer.immediate_transaction(|connection| {
+        self.writer.immediate_transaction(|connection| {
             execute(&mut rules::RuleSetTransaction::new(connection))
         })
     }
@@ -183,10 +184,9 @@ impl Store {
         }
         let reader = ReadOnlyStore::connect(&path)?;
         Ok(Self {
-            _writer: writer,
-            _reader: Some(reader),
-            pending_versions: std::collections::BTreeMap::new(),
-            pending_metadata_version: None,
+            writer,
+            reader: Some(reader),
+            pending_effects: versions::TxEffects::default(),
         })
     }
 }
@@ -536,15 +536,15 @@ impl Store {
     /// Bound SQLite lock waits by the remaining worker shutdown budget.
     pub(crate) fn limit_write_wait(&mut self, remaining: std::time::Duration) {
         const NORMAL_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
-        self._writer
+        self.writer
             .set_busy_timeout(remaining.min(NORMAL_LOCK_WAIT));
     }
     pub(crate) fn installation_id(&mut self, proposed: &str) -> Result<String, LoadDeviceIdError> {
         use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl};
         use schema::settings;
-        self._writer.immediate_transaction(|connection| {
+        self.writer.immediate_transaction(|connection| {
             if let Some(value) = settings::table
-                .filter(settings::key.eq("device_id"))
+                .filter(settings::key.eq(versions::DEVICE_ID_KEY))
                 .select(settings::value)
                 .first::<String>(connection)
                 .optional()
@@ -556,7 +556,10 @@ impl Store {
             let value = serde_json::to_string(proposed)
                 .map_err(|source| LoadDeviceIdError::Decode { source })?;
             diesel::insert_into(settings::table)
-                .values((settings::key.eq("device_id"), settings::value.eq(value)))
+                .values((
+                    settings::key.eq(versions::DEVICE_ID_KEY),
+                    settings::value.eq(value),
+                ))
                 .execute(connection)
                 .map_err(|source| LoadDeviceIdError::Database { source })?;
             Ok(proposed.to_owned())

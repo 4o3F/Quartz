@@ -3,8 +3,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod bench_query;
-#[cfg(any(windows, test))]
-mod capture;
 #[cfg(windows)]
 mod commands;
 #[cfg(any(windows, test))]
@@ -15,6 +13,8 @@ mod generate_data;
 #[cfg(windows)]
 mod ipc;
 mod logging;
+#[cfg(any(windows, test))]
+mod persistence;
 mod platform;
 mod query;
 mod rules;
@@ -220,7 +220,12 @@ impl CliCommand {
         use snafu::ResultExt as _;
         let command = match self {
             #[cfg(windows)]
-            Self::Status => return ipc::client::print_status().context(StatusSnafu),
+            Self::Status => {
+                return ipc::client::print_status(
+                    platform::windows::ipc::CoreClient::connect().context(StatusSnafu)?,
+                )
+                .context(StatusSnafu);
+            }
             Self::Dump { date, format } => {
                 return dump::DumpDay::new(&date, format).run().context(DumpSnafu);
             }

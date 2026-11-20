@@ -31,4 +31,6 @@ pub const WRITE_QUEUE_CAPACITY: usize = 4_096;
 /// Browser privacy-context wait, privacy 06 §5.
 pub const PRIVACY_CONTEXT_WAIT: Duration = Duration::from_secs(2);
 /// UTC storage-day length, capture 02 §4.2.
-pub const UTC_DAY: Duration = Duration::from_secs(86_400);
+pub const UTC_DAY: Duration = Duration::from_millis(UTC_DAY_MS.unsigned_abs());
+/// Millisecond representation of the UTC fact-splitting limit.
+pub const UTC_DAY_MS: i64 = 86_400_000;

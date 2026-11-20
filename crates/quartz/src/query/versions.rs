@@ -1,25 +1,12 @@
 //! Version inputs shared by snapshot cursors and day-topic invalidations.
 
 use super::{RunQueryError, calendar::DayCalendar, input::QueryRange};
-use crate::store::{facts::UTC_DAY_MS, query::QuerySettings};
+use crate::store::versions::{QuerySettings, StoredVersions, VersionKey};
+use quartz_domain::capture::limits::UTC_DAY_MS;
 use quartz_protocol::{DayChanged, LocalDate, QueryVersions};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct UtcDay(pub i64);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct VersionSource(pub i32);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct VersionKey {
-    pub source: VersionSource,
-    pub day: UtcDay,
-}
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FactVersion {
-    pub key: VersionKey,
-    pub version: i64,
-}
 #[derive(Debug, Clone)]
 pub(crate) struct VersionState {
     pub days: BTreeMap<VersionKey, i64>,
@@ -27,15 +14,11 @@ pub(crate) struct VersionState {
     pub classification_hash: String,
 }
 impl VersionState {
-    #[cfg(test)]
-    pub(crate) fn empty() -> Self {
+    pub(crate) fn from_stored(stored: StoredVersions, classification_hash: String) -> Self {
         Self {
-            days: BTreeMap::new(),
-            settings: QuerySettings {
-                day_start_offset_min: super::calendar::DEFAULT_DAY_START_OFFSET_MIN,
-                metadata_version: 0,
-            },
-            classification_hash: String::new(),
+            days: stored.days,
+            settings: stored.settings,
+            classification_hash,
         }
     }
 
@@ -66,3 +49,8 @@ impl VersionState {
         })
     }
 }
+
+#[cfg(any(windows, test))]
+mod publisher;
+#[cfg(any(windows, test))]
+pub(crate) use publisher::{VersionChannel, VersionCommand, VersionPort, VersionPublisher};

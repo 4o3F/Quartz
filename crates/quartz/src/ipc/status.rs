@@ -4,7 +4,7 @@ use quartz_domain::capture::{CaptureState, SessionReadiness, StopReason as Captu
 use quartz_protocol::{CoreStatusResponse, CoreVersion, DatabaseState, InstanceId, StopReason};
 use tokio::sync::watch;
 
-use crate::capture::PersistenceState;
+use crate::persistence::PersistenceState;
 use quartz_domain::capture::{AppIdentity, IntervalFact, OpenInterval};
 use quartz_protocol::{ForegroundState, LocaleSettings, StateSnapshot, UiLanguage};
 

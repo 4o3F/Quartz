@@ -5,15 +5,9 @@ use super::{
     CheckPeerError, CreatePipeSecurityError, PipeName, ProcessIdentity, security::PipeSecurity,
     win32_error::Win32ErrorCode,
 };
-use crate::{
-    core::app::SHUTDOWN_TIMEOUT,
-    ipc::{ConnectionSession, UiPort, outbox::OutboxTask, registry::RegistryHandle},
-};
+pub(crate) use crate::ipc::connection::ConnectionTimeouts;
+use crate::ipc::{ConnectionSession, UiPort, connection::Connection, registry::RegistryHandle};
 use crossbeam_channel::{Receiver, bounded};
-use futures_util::StreamExt;
-use quartz_protocol::{
-    Envelope, ErrorKind, ProtocolError, ResponseOutcome, decode_json, frame_codec,
-};
 use snafu::{ResultExt, Snafu};
 use std::{
     io,
@@ -23,14 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncRead, split},
+    io::split,
     net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions},
     sync::{mpsc, oneshot, watch},
     task::JoinSet,
-};
-use tokio_util::{
-    bytes::BytesMut,
-    codec::{FramedRead, LengthDelimitedCodec, LengthDelimitedCodecError},
 };
 use windows::Win32::{
     Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE},
@@ -61,43 +51,29 @@ pub(crate) struct OutboxMetric {
     pub(crate) queued: usize,
     pub(crate) peak: usize,
 }
-/// Bound the final error response and close grace period (04 §2 error-and-close).
-const CLOSE_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
-/// Require a complete first hello frame within five seconds (04 §4).
-const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Start retrying an unavailable pipe slot without affecting capture (04 §1).
 const SLOT_RETRY_INITIAL: Duration = Duration::from_millis(25);
 /// Cap exponential slot recovery delays while other slots keep serving (04 §1).
 const SLOT_RETRY_MAX: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ConnectionTimeouts {
-    pub(crate) hello: Duration,
-    pub(crate) close_flush: Duration,
-}
-impl Default for ConnectionTimeouts {
-    fn default() -> Self {
-        Self {
-            hello: HELLO_TIMEOUT,
-            close_flush: CLOSE_FLUSH_TIMEOUT,
-        }
-    }
-}
 pub(crate) struct PipeServerConfig {
+    pub(crate) shutdown_timeout: Duration,
     pub(crate) owner: ProcessIdentity,
     pub(crate) name: PipeName,
     pub(crate) timeouts: ConnectionTimeouts,
     pub(crate) queries: crate::query::dispatch::QueryPort,
-    pub(crate) versions: watch::Receiver<crate::query::versions::VersionState>,
+    pub(crate) versions: crate::query::versions::VersionPort,
 }
 
 impl PipeServerConfig {
     pub(crate) fn current(
+        shutdown_timeout: Duration,
         queries: crate::query::dispatch::QueryPort,
-        versions: watch::Receiver<crate::query::versions::VersionState>,
+        versions: crate::query::versions::VersionPort,
     ) -> Result<Self, StartPipeServerError> {
         let owner = ProcessIdentity::current().context(start_pipe_server_error::IdentitySnafu)?;
         Ok(Self {
+            shutdown_timeout,
             name: owner.pipe_name(),
             owner,
             timeouts: ConnectionTimeouts::default(),
@@ -131,6 +107,7 @@ pub(crate) enum StopPipeServerError {
 }
 #[derive(Debug)]
 pub(crate) struct PipeServer {
+    shutdown_timeout: Duration,
     control: mpsc::Sender<ServerMessage>,
     stop: Option<oneshot::Sender<()>>,
     completed: Receiver<()>,
@@ -173,12 +150,13 @@ impl PipeServer {
             })
             .context(start_pipe_server_error::IoSnafu)?;
         let server = Self {
+            shutdown_timeout: config.shutdown_timeout,
             control,
             stop: Some(stop),
             completed,
             thread: Some(thread),
         };
-        match startup.recv_timeout(SHUTDOWN_TIMEOUT) {
+        match startup.recv_timeout(config.shutdown_timeout) {
             Ok(Ok(())) => Ok(server),
             Ok(Err(error)) => Err(error),
             Err(_) => Err(StartPipeServerError::Startup),
@@ -196,7 +174,7 @@ impl PipeServer {
             .try_send(ServerMessage::Inspect { reply })
             .expect("queue metric request");
         received
-            .recv_timeout(SHUTDOWN_TIMEOUT)
+            .recv_timeout(self.shutdown_timeout)
             .expect("outbox metrics")
     }
     pub(crate) fn shutdown(mut self) -> Result<(), StopPipeServerError> {
@@ -211,7 +189,7 @@ impl PipeServer {
         if self.thread.is_none() {
             return Ok(());
         }
-        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        let deadline = Instant::now() + self.shutdown_timeout;
         match self.completed.recv_deadline(deadline) {
             Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {}
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -276,7 +254,7 @@ impl PipeListener {
 }
 struct IoThread {
     queries: crate::query::dispatch::QueryPort,
-    versions: watch::Receiver<crate::query::versions::VersionState>,
+    versions: crate::query::versions::VersionPort,
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
     status: watch::Receiver<crate::ipc::PublishedStatus>,
@@ -488,136 +466,23 @@ impl Slot {
         match peer {
             Ok(allowed) => {
                 let mut session = ConnectionSession::new(allowed);
-                if let Err(error) = self.connection(pipe, &mut session, hello_deadline).await {
+                let (read, write) = split(pipe);
+                if let Err(error) = (Connection {
+                    queries: self.queries.clone(),
+                    registry: self.registry.clone(),
+                    timeouts: self.timeouts,
+                    status: self.status.clone(),
+                    ui: Arc::clone(&self.ui),
+                })
+                .run(read, write, &mut session, hello_deadline)
+                .await
+                {
                     tracing::debug!(pid, %error, "pipe connection closed");
                 }
             }
             Err(error) => tracing::warn!(pid, %error, "rejected pipe client"),
         }
         Ok(())
-    }
-    async fn connection(
-        &self,
-        pipe: NamedPipeServer,
-        session: &mut ConnectionSession,
-        hello_deadline: tokio::time::Instant,
-    ) -> io::Result<()> {
-        let (read, write) = split(pipe);
-        let mut reader = FramedRead::new(read, frame_codec());
-        let writer = OutboxTask::spawn(write);
-        let outbox = writer.handle.clone();
-        let mut registration = None;
-        loop {
-            let received = tokio::select! {
-                () = outbox.closed() => return Ok(()),
-                received = self.next_frame(&mut reader, session, hello_deadline) => received,
-            };
-            let mut decision = match received {
-                None => break,
-                Some(Ok(payload)) => match decode_json::<Envelope>(&payload) {
-                    Ok(envelope) => session.receive(envelope, &self.status.borrow().status),
-                    // Parse diagnostics can contain request body values; only the stable code is sent.
-                    Err(_) => session.fail(ErrorKind::BadRequest),
-                },
-                Some(Err(error))
-                    if error
-                        .get_ref()
-                        .and_then(|source| source.downcast_ref::<LengthDelimitedCodecError>())
-                        .is_some() =>
-                {
-                    session.fail(ErrorKind::FrameTooLarge)
-                }
-                Some(Err(error))
-                    if error.kind() == io::ErrorKind::Other && !reader.read_buffer().is_empty() =>
-                {
-                    // tokio-util 0.7.20 codec/decoder.rs::decode_eof uses Other for a buffered EOF tail.
-                    tracing::debug!(%error, "dropped half frame at pipe EOF");
-                    break;
-                }
-                Some(Err(error)) => return Err(error),
-            };
-            if let Some(query) = decision.query.take() {
-                let result = self.queries.call(query).await;
-                decision.response.outcome = match result {
-                    Ok(response) => match serde_json::to_value(response) {
-                        Ok(body) => ResponseOutcome::Ok { body },
-                        Err(_) => ResponseOutcome::Err {
-                            error: ProtocolError::new(ErrorKind::Internal),
-                        },
-                    },
-                    Err(error) => ResponseOutcome::Err { error },
-                };
-            }
-            if let Some(command) = decision.command
-                && let Err(error) = (self.ui)(command)
-            {
-                tracing::warn!(%error, "could not queue IPC UI command");
-                decision.response.outcome = ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::Internal),
-                };
-            }
-            if registration.is_none()
-                && let Some(role) = session.role()
-            {
-                registration = Some(
-                    self.registry
-                        .register(role, outbox.clone())
-                        .map_err(io::Error::other)?,
-                );
-            }
-            if let Some(subscription) = decision.subscription {
-                let id = registration
-                    .as_ref()
-                    .expect("subscription follows authenticated hello")
-                    .id;
-                self.registry
-                    .subscribe(id, subscription, decision.response)
-                    .await
-                    .map_err(io::Error::other)?;
-            } else {
-                outbox
-                    .response(decision.response)
-                    .map_err(io::Error::other)?;
-            }
-            if session.closing() {
-                return self.finish_closing(writer).await;
-            }
-        }
-        drop(writer);
-        Ok(())
-    }
-    async fn next_frame<R: AsyncRead + Unpin>(
-        &self,
-        reader: &mut FramedRead<R, LengthDelimitedCodec>,
-        session: &ConnectionSession,
-        hello_deadline: tokio::time::Instant,
-    ) -> Option<io::Result<BytesMut>> {
-        if session.hello_pending() {
-            match tokio::time::timeout_at(hello_deadline, reader.next()).await {
-                Ok(received) => received,
-                Err(error) => {
-                    tracing::debug!(%error, "pipe hello deadline expired; closing connection");
-                    None
-                }
-            }
-        } else {
-            reader.next().await
-        }
-    }
-    async fn finish_closing(&self, writer: OutboxTask) -> io::Result<()> {
-        let deadline = tokio::time::Instant::now() + self.timeouts.close_flush;
-        let outcome = tokio::time::timeout(self.timeouts.close_flush, writer.finish()).await;
-        match outcome {
-            Ok(result) => {
-                // Allow the final response to be read before DisconnectNamedPipe discards unread bytes.
-                tokio::time::sleep_until(deadline).await;
-                result
-            }
-            Err(error) => {
-                tracing::debug!(%error, "pipe final response deadline expired; closing connection");
-                Ok(())
-            }
-        }
     }
 }
 
@@ -663,16 +528,17 @@ mod tests {
     struct TestSlot {
         slot: Slot,
         _queries: crossbeam_channel::Receiver<crate::query::dispatch::QueryCommand>,
-        _versions: watch::Sender<crate::query::versions::VersionState>,
+        _database: crate::query::dispatch::test_support::TestDatabase,
     }
     fn slot() -> TestSlot {
         let suffix = windows::core::GUID::new().expect("test pipe suffix");
         let publisher = StatusPublisher::new(quartz_protocol::InstanceId(format!("{suffix:?}")));
         let channel = crate::query::dispatch::QueryChannel::new();
-        let (versions, received) = watch::channel(crate::query::versions::VersionState::empty());
+        let database = crate::query::dispatch::test_support::TestDatabase::start();
+        let received = database.versions.clone();
         TestSlot {
             _queries: channel.receiver,
-            _versions: versions,
+            _database: database,
             slot: Slot {
                 registry: RegistryHandle::start(publisher.subscribe(), received),
                 queries: channel.port,
@@ -681,7 +547,7 @@ mod tests {
                     owner: ProcessIdentity::current().expect("test identity"),
                 }),
                 timeouts: ConnectionTimeouts {
-                    hello: HELLO_TIMEOUT,
+                    hello: ConnectionTimeouts::default().hello,
                     close_flush: TEST_CLOSE_TIMEOUT,
                 },
                 status: publisher.subscribe(),
@@ -695,34 +561,6 @@ mod tests {
             .enable_time()
             .build()
             .expect("test runtime")
-    }
-
-    #[test]
-    fn final_response_timeout_aborts_a_stalled_writer() {
-        runtime().block_on(async {
-            let (write, _read) = tokio::io::duplex(1);
-            let writer = OutboxTask::spawn(write);
-            writer
-                .handle
-                .response(quartz_protocol::Response {
-                    id: Some(quartz_protocol::RequestId(1)),
-                    outcome: ResponseOutcome::Ok {
-                        body: serde_json::json!({}),
-                    },
-                })
-                .expect("queue final response");
-            let outbox = writer.handle.clone();
-            slot()
-                .slot
-                .finish_closing(writer)
-                .await
-                .expect("bounded close");
-            tokio::task::yield_now().await;
-            assert!(
-                outbox.is_closed(),
-                "timed-out writer must release its pipe reference"
-            );
-        });
     }
 
     #[test]

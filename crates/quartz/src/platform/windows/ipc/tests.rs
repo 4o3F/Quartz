@@ -1,10 +1,7 @@
 //! Real in-process pipe tests use random names and never start the production core.
 
 use super::*;
-use crate::ipc::{
-    StatusPublisher, UiCommand,
-    client::{CallCoreError, CoreClient},
-};
+use crate::ipc::{StatusPublisher, UiCommand, client::CallCoreError};
 use crossbeam_channel::{Receiver, bounded};
 use quartz_protocol::{
     CoreStatusResponse, Envelope, ErrorKind, HelloRole, MAX_FRAME_LEN, Op, PROTOCOL_VERSION,
@@ -45,6 +42,7 @@ impl Fixture {
         });
         let server = PipeServer::start(
             server::PipeServerConfig {
+                shutdown_timeout: crate::core::app::SHUTDOWN_TIMEOUT,
                 owner: ProcessIdentity::current().expect("identity"),
                 name: name.clone(),
                 timeouts,
@@ -138,7 +136,7 @@ fn handshake_status_and_ui_open_delivery() {
     assert_eq!(
         fixture
             .commands
-            .recv_timeout(crate::ipc::client::CONNECT_TIMEOUT)
+            .recv_timeout(CONNECT_TIMEOUT)
             .expect("main command"),
         UiCommand::Open
     );
@@ -151,7 +149,7 @@ fn handshake_status_and_ui_open_delivery() {
     assert_eq!(
         fixture
             .commands
-            .recv_timeout(crate::ipc::client::CONNECT_TIMEOUT)
+            .recv_timeout(CONNECT_TIMEOUT)
             .expect("first frame command"),
         UiCommand::FirstFrame
     );
@@ -269,9 +267,7 @@ fn eight_clients_hold_all_slots_and_disconnect_releases_one() {
     let mut clients: Vec<_> = (0..8).map(|_| fixture.cli()).collect();
     assert!(matches!(
         CoreClient::open_named(&fixture.name),
-        Err(CallCoreError::Connect {
-            source: OpenCorePipeError::Busy { .. }
-        })
+        Err(CallCoreError::Connect { source }) if matches!(source.downcast_ref::<OpenCorePipeError>(), Some(OpenCorePipeError::Busy { .. }))
     ));
     drop(clients.pop());
     assert!(fixture.cli().status().is_ok());
@@ -290,6 +286,7 @@ fn first_instance_refuses_an_occupied_name() {
     let port: crate::ipc::UiPort = Arc::new(|_| Ok(()));
     let result = PipeServer::start(
         server::PipeServerConfig {
+            shutdown_timeout: crate::core::app::SHUTDOWN_TIMEOUT,
             owner: ProcessIdentity::current().expect("identity"),
             name: fixture.name.clone(),
             timeouts: server::ConnectionTimeouts::default(),
@@ -321,9 +318,7 @@ fn missing_pipe_is_a_typed_core_not_running_error() {
     let name = PipeName::for_test(suffix);
     assert!(matches!(
         CoreClient::open_named(&name),
-        Err(CallCoreError::Connect {
-            source: OpenCorePipeError::CoreNotRunning { .. }
-        })
+        Err(CallCoreError::Connect { source }) if matches!(source.downcast_ref::<OpenCorePipeError>(), Some(OpenCorePipeError::CoreNotRunning { .. }))
     ));
 }
 
@@ -406,9 +401,9 @@ fn state_event(client: &mut CoreClient) -> quartz_protocol::StateSnapshot {
 }
 fn publish_change(publisher: &StatusPublisher, change: u64) {
     let persistence = if change.is_multiple_of(2) {
-        crate::capture::PersistenceState::Ready
+        crate::persistence::PersistenceState::Ready
     } else {
-        crate::capture::PersistenceState::Failed { commands: 1 }
+        crate::persistence::PersistenceState::Failed { commands: 1 }
     };
     publisher.publish(None, persistence);
 }
@@ -439,7 +434,7 @@ fn publish_large_foreground(publisher: &StatusPublisher, change: u64) {
     };
     let tracking = CaptureState::Tracking(row.fact.clone());
     publisher.publish_interval(Some(row));
-    publisher.publish(Some(&tracking), crate::capture::PersistenceState::Ready);
+    publisher.publish(Some(&tracking), crate::persistence::PersistenceState::Ready);
 }
 
 #[test]
@@ -565,7 +560,7 @@ fn flooding_unread_responses_closes_only_the_slow_connection() {
         }
     });
     started
-        .recv_timeout(crate::ipc::client::CONNECT_TIMEOUT)
+        .recv_timeout(CONNECT_TIMEOUT)
         .expect("flood started");
     let mut cli = fixture.cli();
     let start = std::time::Instant::now();
@@ -720,9 +715,12 @@ fn day_subscription_pushes_latest_committed_version_after_throttle() {
     let expected = fixture
         .database
         .versions
+        .updates
         .borrow()
-        .day(first.date)
-        .expect("latest committed version");
+        .days
+        .get(&first.date)
+        .expect("latest committed version")
+        .clone();
     assert_eq!(changed, expected);
     assert_ne!(first.versions, changed.versions);
 }

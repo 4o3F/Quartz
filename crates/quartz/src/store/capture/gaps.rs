@@ -4,10 +4,10 @@ use super::{Capture, CaptureColumn, ExecuteCaptureBatchError};
 use crate::store::{
     enums::DataSource,
     rows::CaptureGapsRow,
-    schema::{capture_gaps, data_day_versions, settings},
+    schema::{capture_gaps, settings},
 };
 use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl};
-use quartz_domain::capture::{CaptureGap, RunId, SchedulerKind, TimeRange, UtcInstant, limits};
+use quartz_domain::capture::{CaptureGap, RunId, SchedulerKind, TimeRange, UtcInstant};
 
 impl Capture<'_> {
     pub(super) fn record_gap(
@@ -39,37 +39,7 @@ impl Capture<'_> {
         source: DataSource,
         range: TimeRange,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        let day_ms = CaptureColumn::new(data_day_versions::utc_date).duration(limits::UTC_DAY)?;
-        let context = CaptureColumn::new(data_day_versions::utc_date);
-        let start = context.utc(range.start.utc)?;
-        let end = context.utc(range.end.utc)?;
-        context.range(range.start, range.end)?;
-        let last = if end > start { end - 1 } else { end };
-        for day in start.div_euclid(day_ms)..=last.div_euclid(day_ms) {
-            let version = diesel::insert_into(data_day_versions::table)
-                .values((
-                    data_day_versions::source.eq(source),
-                    data_day_versions::utc_date.eq(day),
-                    data_day_versions::version.eq(1_i64),
-                ))
-                .on_conflict((data_day_versions::source, data_day_versions::utc_date))
-                .do_update()
-                .set(data_day_versions::version.eq(data_day_versions::version + 1_i64))
-                .returning(data_day_versions::version)
-                .get_result(self.connection)?;
-            self.keys
-                .changed_versions
-                .push(crate::query::versions::FactVersion {
-                    key: crate::query::versions::VersionKey {
-                        source: crate::query::versions::VersionSource(
-                            super::super::enums::IntegerCode::code(source),
-                        ),
-                        day: crate::query::versions::UtcDay(day),
-                    },
-                    version,
-                });
-        }
-        Ok(())
+        self.effects.bump_days(self.connection, source, range)
     }
     pub(super) fn set_deadline(
         &mut self,
@@ -98,10 +68,10 @@ impl Capture<'_> {
     }
     pub(super) fn deadline_key(owner: SchedulerKind) -> &'static str {
         match owner {
-            SchedulerKind::Maintenance => "capture.deadline.maintenance",
-            SchedulerKind::Idle => "capture.deadline.idle",
-            SchedulerKind::PrivacyContext => "capture.deadline.privacy_context",
-            SchedulerKind::Midnight => "capture.deadline.midnight",
+            SchedulerKind::Maintenance => crate::store::versions::MAINTENANCE_DEADLINE_KEY,
+            SchedulerKind::Idle => crate::store::versions::IDLE_DEADLINE_KEY,
+            SchedulerKind::PrivacyContext => crate::store::versions::PRIVACY_CONTEXT_DEADLINE_KEY,
+            SchedulerKind::Midnight => crate::store::versions::MIDNIGHT_DEADLINE_KEY,
         }
     }
 }

@@ -1,74 +1,33 @@
 //! Bounded typed snapshot reads for the query pipeline; Diesel stays in storage.
 
-use super::facts::UTC_DAY_MS;
 use super::{
     ReadOnlyStore, Store,
     enums::{self, IntegerCode},
+    query_error::ReadQueryError,
     rows::{
-        AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow, ClockSegmentsRow,
-        DataDayVersionsRow, IntervalsRow, SettingsRow,
+        AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow, ClockSegmentsRow, IntervalsRow,
     },
     schema::{
         applications, availability_intervals, capture_gaps, capture_runs, clock_segments,
-        data_day_versions, intervals, settings, titles,
+        intervals, titles,
+    },
+    versions::QuerySettings,
+};
+use quartz_domain::{
+    capture::{GapReason, StopReason, limits::UTC_DAY_MS},
+    facts::{
+        ApplicationId, ApplicationRef, Availability, CaptureLevel, ClockSegment, ClockSegmentId,
+        FactId, FactSpan, Foreground, ForegroundKind, InputRow, QueryRange,
     },
 };
-use crate::query::versions::{UtcDay, VersionKey, VersionSource, VersionState};
-use crate::query::{
-    RunQueryError,
-    calendar::{DEFAULT_DAY_START_OFFSET_MIN, MAX_DAY_START_OFFSET_MIN},
-    input::{
-        Availability, CaptureLevel, ClockSegment, FactId, FactSpan, Foreground, ForegroundKind,
-        InputRow, QueryRange,
-    },
-    pipeline::QUERY_BATCH_ROWS,
-};
+/// Bounds each SQLite fact scan before the database loop services pending writes.
+pub(crate) const READ_BATCH_ROWS: usize = 256;
 use diesel::{
     BoolExpressionMethods, ExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
     RunQueryDsl, SelectableHelper,
     connection::{AnsiTransactionManager, TransactionManager},
 };
-use quartz_protocol::{
-    ApplicationId, ApplicationRef, ClockSegmentId, QueryGapReason, QueryStopReason, QueryVersions,
-};
-
-#[derive(Debug, Clone)]
-pub(crate) struct QuerySettings {
-    pub day_start_offset_min: i64,
-    pub metadata_version: i64,
-}
-
 impl ReadOnlyStore {
-    pub(crate) fn query_settings(&mut self) -> Result<QuerySettings, RunQueryError> {
-        let rows = settings::table
-            .filter(settings::key.eq_any(["day.start_offset_min", "metadata_version"]))
-            .select((settings::key, settings::value))
-            .load::<SettingsRow>(&mut self.connection)?;
-        let mut offset = DEFAULT_DAY_START_OFFSET_MIN;
-        let mut metadata = 0;
-        for row in rows {
-            match row.key.as_str() {
-                "day.start_offset_min" => {
-                    offset = serde_json::from_str(&row.value)
-                        .map_err(|_| RunQueryError::InvalidSettings)?
-                }
-                "metadata_version" => {
-                    metadata = serde_json::from_str(&row.value)
-                        .map_err(|_| RunQueryError::InvalidSettings)?
-                }
-                _ => unreachable!("settings selected by explicit key list"),
-            }
-        }
-        if !(DEFAULT_DAY_START_OFFSET_MIN..=MAX_DAY_START_OFFSET_MIN).contains(&offset)
-            || metadata < 0
-        {
-            return Err(RunQueryError::InvalidSettings);
-        }
-        Ok(QuerySettings {
-            day_start_offset_min: offset,
-            metadata_version: metadata,
-        })
-    }
     pub(crate) fn snapshot(self) -> ReadSnapshot {
         ReadSnapshot {
             reader: Some(self),
@@ -80,41 +39,11 @@ impl ReadOnlyStore {
     }
 }
 impl Store {
-    #[cfg(any(windows, test))]
-    pub(crate) fn version_state(
-        &mut self,
-        classification_hash: &str,
-    ) -> Result<VersionState, RunQueryError> {
-        let settings = self
-            ._reader
-            .as_mut()
-            .ok_or(RunQueryError::InvalidFacts)?
-            .query_settings()?;
-        let rows = data_day_versions::table
-            .select(DataDayVersionsRow::as_select())
-            .load::<DataDayVersionsRow>(&mut self._writer)?;
-        Ok(VersionState {
-            days: rows
-                .into_iter()
-                .map(|row| {
-                    (
-                        VersionKey {
-                            source: VersionSource(row.source.code()),
-                            day: UtcDay(row.utc_date),
-                        },
-                        row.version,
-                    )
-                })
-                .collect(),
-            settings,
-            classification_hash: classification_hash.to_owned(),
-        })
-    }
     pub(crate) fn take_query_reader(&mut self) -> Option<ReadOnlyStore> {
-        self._reader.take()
+        self.reader.take()
     }
     pub(crate) fn return_query_reader(&mut self, reader: ReadOnlyStore) {
-        self._reader = Some(reader);
+        self.reader = Some(reader);
     }
 }
 /// Owns the read transaction across DB-loop turns, rolling it back on every exit path.
@@ -173,50 +102,20 @@ struct ForegroundDetails {
     title: Option<String>,
 }
 impl ReadSnapshot {
-    fn connection(&mut self) -> &mut diesel::SqliteConnection {
+    pub(super) fn connection(&mut self) -> &mut diesel::SqliteConnection {
         &mut self
             .reader
             .as_mut()
             .expect("live snapshot reader")
             .connection
     }
-    pub(crate) fn settings(&mut self) -> Result<QuerySettings, RunQueryError> {
+    pub(crate) fn settings(&mut self) -> Result<QuerySettings, ReadQueryError> {
         self.reader
             .as_mut()
             .expect("live snapshot reader")
             .query_settings()
     }
-    pub(crate) fn versions(
-        &mut self,
-        range: QueryRange,
-        settings: &QuerySettings,
-        classification_hash: &str,
-    ) -> Result<QueryVersions, RunQueryError> {
-        let rows = data_day_versions::table
-            .filter(data_day_versions::utc_date.ge(range.start.div_euclid(UTC_DAY_MS)))
-            .filter(data_day_versions::utc_date.le((range.end - 1).div_euclid(UTC_DAY_MS)))
-            .order((data_day_versions::source, data_day_versions::utc_date))
-            .select(DataDayVersionsRow::as_select())
-            .load::<DataDayVersionsRow>(self.connection())?;
-        Ok(VersionState {
-            days: rows
-                .into_iter()
-                .map(|row| {
-                    (
-                        VersionKey {
-                            source: VersionSource(row.source.code()),
-                            day: UtcDay(row.utc_date),
-                        },
-                        row.version,
-                    )
-                })
-                .collect(),
-            settings: settings.clone(),
-            classification_hash: classification_hash.to_owned(),
-        }
-        .digest(range))
-    }
-    pub(crate) fn begin(&mut self) -> Result<(), RunQueryError> {
+    pub(crate) fn begin(&mut self) -> Result<(), ReadQueryError> {
         AnsiTransactionManager::begin_transaction(self.connection())?;
         self.transaction = SnapshotTransaction::Started;
         // This SELECT pins the WAL snapshot before settings, versions, or facts are read.
@@ -226,7 +125,7 @@ impl ReadSnapshot {
             .load::<Option<i64>>(self.connection())?;
         Ok(())
     }
-    pub(crate) fn finish(mut self) -> Result<ReadOnlyStore, RunQueryError> {
+    pub(crate) fn finish(mut self) -> Result<ReadOnlyStore, ReadQueryError> {
         if self.transaction == SnapshotTransaction::Started {
             AnsiTransactionManager::rollback_transaction(self.connection())?;
             self.transaction = SnapshotTransaction::Pending;
@@ -236,12 +135,12 @@ impl ReadSnapshot {
             .take()
             .expect("finished snapshot returns reader"))
     }
-    /// Every SQL fact scan returns at most QUERY_BATCH_ROWS rows before yielding to writes.
+    /// Every SQL fact scan returns at most READ_BATCH_ROWS rows before yielding to writes.
     pub(crate) fn read_batch(
         &mut self,
         range: QueryRange,
-    ) -> Result<Option<Vec<InputRow>>, RunQueryError> {
-        let limit = i64::try_from(QUERY_BATCH_ROWS).expect("batch limit fits i64");
+    ) -> Result<Option<Vec<InputRow>>, ReadQueryError> {
+        let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
         let after_start = self.after_start;
         let after_id = self.after_id;
         let mut result = Vec::new();
@@ -274,7 +173,7 @@ impl ReadSnapshot {
                     let run_end =
                         Self::endpoint(details.run.ended_utc_ms, details.run.confirmed_utc_ms)?;
                     self.after_start = row.start_utc_ms;
-                    self.after_id = row.id.ok_or(RunQueryError::InvalidFacts)?;
+                    self.after_id = row.id.ok_or(ReadQueryError::InvalidFacts)?;
                     result.push(InputRow::Clock(ClockSegment {
                         id: ClockSegmentId(self.after_id),
                         start_utc_ms: row.start_utc_ms,
@@ -328,7 +227,7 @@ impl ReadSnapshot {
                     .load::<ForegroundDetails>(self.connection())?;
                 for details in rows {
                     let row = details.fact;
-                    let id = row.id.ok_or(RunQueryError::InvalidFacts)?;
+                    let id = row.id.ok_or(ReadQueryError::InvalidFacts)?;
                     self.after_start = row.start_utc_ms;
                     self.after_id = match self.stage {
                         ReadStage::ForegroundOpen => row.run_id,
@@ -344,7 +243,7 @@ impl ReadSnapshot {
                                 exe_name: details.exe_name,
                                 display_name: details
                                     .display_name
-                                    .ok_or(RunQueryError::InvalidFacts)?,
+                                    .ok_or(ReadQueryError::InvalidFacts)?,
                                 aumid: details.aumid,
                             }),
                             None => None,
@@ -401,7 +300,7 @@ impl ReadSnapshot {
                             availability_intervals::run_id.gt(after_start).or(
                                 availability_intervals::run_id.eq(after_start).and(
                                     availability_intervals::reason.gt(i32::try_from(after_id)
-                                        .map_err(|_| RunQueryError::InvalidFacts)?),
+                                        .map_err(|_| ReadQueryError::InvalidFacts)?),
                                 ),
                             ),
                         )
@@ -417,7 +316,7 @@ impl ReadSnapshot {
                     .select(AvailabilityIntervalsRow::as_select())
                     .load::<AvailabilityIntervalsRow>(self.connection())?;
                 for row in rows {
-                    let id = row.id.ok_or(RunQueryError::InvalidFacts)?;
+                    let id = row.id.ok_or(ReadQueryError::InvalidFacts)?;
                     match self.stage {
                         ReadStage::AvailabilityOpen => {
                             self.after_start = row.run_id;
@@ -431,16 +330,16 @@ impl ReadSnapshot {
                     let state = match row.reason {
                         enums::AvailabilityReason::Idle => Availability::Idle,
                         enums::AvailabilityReason::Locked => {
-                            Availability::Stopped(QueryStopReason::Locked)
+                            Availability::Stopped(StopReason::Locked)
                         }
                         enums::AvailabilityReason::Disconnected => {
-                            Availability::Stopped(QueryStopReason::Disconnected)
+                            Availability::Stopped(StopReason::Disconnected)
                         }
                         enums::AvailabilityReason::Suspended => {
-                            Availability::Stopped(QueryStopReason::Suspended)
+                            Availability::Stopped(StopReason::Suspended)
                         }
                         enums::AvailabilityReason::Paused => {
-                            Availability::Stopped(QueryStopReason::Paused)
+                            Availability::Stopped(StopReason::Paused)
                         }
                     };
                     result.push(InputRow::Availability {
@@ -473,7 +372,7 @@ impl ReadSnapshot {
                     .load::<CaptureGapsRow>(self.connection())?;
                 for row in rows {
                     self.after_start = row.start_utc_ms;
-                    self.after_id = row.id.ok_or(RunQueryError::InvalidFacts)?;
+                    self.after_id = row.id.ok_or(ReadQueryError::InvalidFacts)?;
                     result.push(InputRow::Gap {
                         span: FactSpan {
                             id: FactId(self.after_id),
@@ -484,18 +383,16 @@ impl ReadSnapshot {
                             end_mono_ms: row.end_mono_ms,
                         },
                         reason: match row.reason {
-                            enums::GapReason::EventOverload => QueryGapReason::EventOverload,
-                            enums::GapReason::WriteQueueOverload => {
-                                QueryGapReason::WriteQueueOverload
-                            }
-                            enums::GapReason::DatabaseError => QueryGapReason::DatabaseError,
+                            enums::GapReason::EventOverload => GapReason::EventOverload,
+                            enums::GapReason::WriteQueueOverload => GapReason::WriteQueueOverload,
+                            enums::GapReason::DatabaseError => GapReason::DatabaseError,
                         },
                     });
                 }
             }
             ReadStage::Done => return Ok(None),
         }
-        if result.len() < QUERY_BATCH_ROWS {
+        if result.len() < READ_BATCH_ROWS {
             self.stage = match self.stage {
                 ReadStage::Clock => ReadStage::ForegroundClosed,
                 ReadStage::ForegroundClosed => ReadStage::ForegroundOpen,
@@ -509,32 +406,11 @@ impl ReadSnapshot {
         }
         Ok(Some(result))
     }
-    fn endpoint(end: Option<i64>, confirmed: Option<i64>) -> Result<i64, RunQueryError> {
+    fn endpoint(end: Option<i64>, confirmed: Option<i64>) -> Result<i64, ReadQueryError> {
         match (end, confirmed) {
             (Some(end), None) => Ok(end),
             (None, Some(confirmed)) => Ok(confirmed),
-            _ => Err(RunQueryError::InvalidFacts),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct CommittedVersions {
-    pub facts: Vec<crate::query::versions::FactVersion>,
-    pub metadata_version: Option<i64>,
-}
-impl Store {
-    #[cfg(any(windows, test))]
-    pub(crate) fn take_committed_versions(&mut self) -> CommittedVersions {
-        CommittedVersions {
-            facts: std::mem::take(&mut self.pending_versions)
-                .into_iter()
-                .map(|entry| crate::query::versions::FactVersion {
-                    key: entry.0,
-                    version: entry.1,
-                })
-                .collect(),
-            metadata_version: self.pending_metadata_version.take(),
+            _ => Err(ReadQueryError::InvalidFacts),
         }
     }
 }

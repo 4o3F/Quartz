@@ -5,16 +5,16 @@ use super::{
     SHUTDOWN_TIMEOUT, Shutdown, ShutdownPort, WORKER_COUNT, Worker, WorkerFailure, WorkerGuard,
 };
 use super::{capture_loop::CaptureLoop, database_loop::DatabaseLoop};
-use crate::{capture::OpenedPersistence, store::capture::CaptureStartup};
 use crate::{
-    capture::Persistence,
     core::sources::{ClockReader, ReadClockError},
+    persistence::Persistence,
     rules::registry::{OpenRegistryShellError, RegistryShell},
     store::{
         Store,
         capture::{RecoverCaptureError, RunMetadata},
     },
 };
+use crate::{persistence::OpenedPersistence, store::capture::CaptureStartup};
 use crossbeam_channel::{Receiver, Sender, bounded, select_biased};
 use quartz_domain::capture::{
     CaptureCore, CaptureStep, RunEndReason, StartCaptureError, StartedCapture, Timestamp, limits,
@@ -68,7 +68,7 @@ pub(crate) struct Workers {
     pub sender: CaptureSender,
     pub commands: Receiver<MainCommand>,
     pub queries: crate::query::dispatch::QueryPort,
-    pub versions: tokio::sync::watch::Receiver<crate::query::versions::VersionState>,
+    pub versions: crate::query::versions::VersionPort,
     shutdown: Sender<Shutdown>,
     finished: Receiver<()>,
     completed: Receiver<Result<(), WorkerFailure>>,
@@ -100,7 +100,7 @@ impl WorkerChannels {
             observations: Channel::bounded(limits::MAIN_QUEUE_CAPACITY),
             database: Channel::bounded(CONTROL_CAPACITY),
             feedback: Channel::bounded(limits::WRITE_QUEUE_CAPACITY),
-            main: Channel::bounded(limits::MAIN_QUEUE_CAPACITY),
+            main: Channel::bounded(super::MAIN_NOTIFICATION_CAPACITY),
             shutdown: Channel::bounded(CONTROL_CAPACITY),
             completed: Channel::bounded(WORKER_COUNT),
             finished: Channel::bounded(WORKER_COUNT),
@@ -153,6 +153,7 @@ impl WorkerChannels {
     }
 }
 struct Startup {
+    store: Store,
     persistence: Persistence,
     startup: CaptureStartup,
     registry: RegistryShell,
@@ -171,15 +172,19 @@ impl Startup {
             startup,
         } = Persistence::open(&mut store, metadata)
             .map_err(|source| StartWorkersError::Recover { source })?;
-        let registry =
-            RegistryShell::open(store).map_err(|source| StartWorkersError::Registry { source })?;
         tracing::debug!(previous_segment = ?startup.last_segment, "capture recovery completed");
+        let rule_time = clock
+            .read()
+            .map_err(|source| StartWorkersError::Clock { source })?;
+        let registry = RegistryShell::open(&mut store, rule_time.utc)
+            .map_err(|source| StartWorkersError::Registry { source })?;
         let at = clock
             .read()
             .map_err(|source| StartWorkersError::Clock { source })?;
         let started = CaptureCore::start(startup.next_run, at)
             .map_err(|source| StartWorkersError::Capture { source })?;
         Ok(Self {
+            store,
             persistence,
             startup,
             registry,
@@ -209,25 +214,20 @@ impl Workers {
             wake,
         };
         let Startup {
+            mut store,
             persistence,
             startup,
-            mut registry,
+            registry,
             started,
             at,
             clock,
         } = startup;
         let queries = crate::query::dispatch::QueryChannel::new();
-        let hash = registry
-            .snapshots()
-            .load()
-            .hashes()
-            .classification
-            .to_string();
-        let version_state = registry
-            .store_mut()
-            .version_state(&hash)
+        let crate::query::versions::VersionChannel {
+            publisher: versions,
+            port: version_updates,
+        } = crate::query::versions::VersionPublisher::open(&mut store, registry.snapshots())
             .map_err(|source| StartWorkersError::Query { source })?;
-        let (versions, version_updates) = tokio::sync::watch::channel(version_state);
         let capture = CaptureLoop {
             #[cfg(windows)]
             foreground: crate::platform::ForegroundResolver::new(),
@@ -245,6 +245,8 @@ impl Workers {
             clock: Arc::clone(&clock),
         };
         let database = DatabaseLoop {
+            store,
+            runner: Default::default(),
             persistence,
             registry,
             queries: queries.receiver,

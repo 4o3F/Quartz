@@ -166,6 +166,7 @@ impl Capture<'_> {
         let context = RowContext::new(row.id);
         let id = context.required(row.id, capture_runs::id)?;
         let run = RunId::new(context.unsigned(id, capture_runs::id)?);
+        self.keys.record(run);
         self.keys.runs.insert(run, RunKeys::default());
         let confirmed = self.load_run_confirmation(&row)?;
         let segments = self.load_open_segments(run, DbRowId::new(id))?;
@@ -572,6 +573,7 @@ impl Capture<'_> {
             let run_id = run.run;
             self.execute_writes(run.run, &run.settle())
                 .context(recover_capture_error::ExecuteSnafu)?;
+            self.keys.record(run_id);
             self.keys.runs.remove(&run_id);
         }
         self.load_startup()
@@ -584,11 +586,11 @@ impl crate::store::Store {
         keys: &mut CaptureKeys,
         metadata: &RunMetadata,
     ) -> Result<CaptureStartup, RecoverCaptureError> {
-        let mut staged = keys.clone();
+        keys.begin();
         let startup = self
-            ._writer
+            .writer
             .immediate_transaction(|connection| {
-                Capture::new(connection, &mut staged, metadata)
+                Capture::new(connection, keys, metadata)
                     .recover()
                     .map_err(|source| RecoveryTransactionError::Operation { source })
             })
@@ -597,8 +599,12 @@ impl crate::store::Store {
                 RecoveryTransactionError::Transaction { source } => {
                     RecoverCaptureError::Transaction { source }
                 }
-            })?;
-        *keys = staged;
-        Ok(startup)
+            });
+        keys.finish(if startup.is_ok() {
+            super::KeyTransaction::Commit
+        } else {
+            super::KeyTransaction::Rollback
+        });
+        startup
     }
 }

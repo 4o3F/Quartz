@@ -20,14 +20,18 @@ fn source(key: &str, label: &str) -> String {
 struct Fixture {
     directory: tempfile::TempDir,
     shell: RegistryShell,
+    store: Store,
 }
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("isolated data directory");
-        let shell =
-            RegistryShell::open(Store::open(&DataDirectory::new(directory.path())).expect("store"))
-                .expect("shell");
-        Self { directory, shell }
+        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
+        let shell = RegistryShell::open(&mut store, test_now()).expect("shell");
+        Self {
+            directory,
+            shell,
+            store,
+        }
     }
     fn apply(
         &mut self,
@@ -35,12 +39,16 @@ impl Fixture {
         label: &str,
         base_version: u32,
     ) -> Result<crate::rules::registry::RegistryResult, RunRegistryCommandError> {
-        self.shell.run(RegistryCommand::Apply {
-            key: key.parse().expect("key"),
-            file: "test.toml".into(),
-            text: source(key, label),
-            base_version,
-        })
+        self.shell.run(
+            &mut self.store,
+            test_now(),
+            RegistryCommand::Apply {
+                key: key.parse().expect("key"),
+                file: "test.toml".into(),
+                text: source(key, label),
+                base_version,
+            },
+        )
     }
     fn connection(&self) -> SqliteConnection {
         SqliteConnection::establish(
@@ -84,7 +92,11 @@ fn batch_failure_rolls_back_all_writes_and_never_acknowledges_the_core() {
         .collect();
     let error = fixture
         .shell
-        .run(RegistryCommand::Reorder { siblings })
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::Reorder { siblings },
+        )
         .expect_err("last write fails");
     assert!(matches!(error, RunRegistryCommandError::Persist { .. }));
     assert_eq!(fixture.version_count(), count);
@@ -141,7 +153,8 @@ fn successful_transaction_publishes_once_and_startup_rebuild_matches() {
     );
     drop(fixture.shell);
     let reopened = RegistryShell::open(
-        Store::open(&DataDirectory::new(fixture.directory.path())).expect("reopen store"),
+        &mut Store::open(&DataDirectory::new(fixture.directory.path())).expect("reopen store"),
+        test_now(),
     )
     .expect("restart");
     assert_eq!(reopened.snapshots().load().hashes(), published.hashes());
@@ -168,12 +181,16 @@ fn stale_and_invalid_commands_do_not_start_a_write_or_change_the_snapshot() {
     ));
     let bad = fixture
         .shell
-        .run(RegistryCommand::Apply {
-            key: "user.test".parse().expect("key"),
-            file: "bad.toml".into(),
-            text: "[set".into(),
-            base_version: 1,
-        })
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::Apply {
+                key: "user.test".parse().expect("key"),
+                file: "bad.toml".into(),
+                text: "[set".into(),
+                base_version: 1,
+            },
+        )
         .expect_err("invalid source");
     assert!(matches!(
         bad,
@@ -199,10 +216,14 @@ fn deletion_retains_relational_history_and_restoring_clears_the_null_marker() {
         .clone();
     let reply = fixture
         .shell
-        .run(RegistryCommand::Delete {
-            key: "user.test".parse().expect("key"),
-            base_version: 1,
-        })
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::Delete {
+                key: "user.test".parse().expect("key"),
+                base_version: 1,
+            },
+        )
         .expect("delete");
     assert_eq!(reply.event.expect("publication").epoch.get(), 2);
     let state = fixture.persisted();
@@ -269,36 +290,52 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
     .expect("builtin");
     fixture
         .shell
-        .run(RegistryCommand::InstallBuiltin {
-            set: set.clone(),
-            revision: 1,
-        })
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::InstallBuiltin {
+                set: set.clone(),
+                revision: 1,
+            },
+        )
         .expect("install");
     let overlay = "format='quartz-rules/1'\n[set]\nkey='user.overlay'\nkind='privacy'\nname='Overlay'\nparent='builtin.test'\n[[override]]\ntarget='builtin.test/one'\nlabel='User replacement'\npreset='excluded'\nwhen=[{field='app.exe_name',op='equals',value='quartz-test.exe'}]\n";
     fixture
         .shell
-        .run(RegistryCommand::Apply {
-            key: "user.overlay".parse().expect("key"),
-            file: "overlay.toml".into(),
-            text: overlay.into(),
-            base_version: 0,
-        })
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::Apply {
+                key: "user.overlay".parse().expect("key"),
+                file: "overlay.toml".into(),
+                text: overlay.into(),
+                base_version: 0,
+            },
+        )
         .expect("overlay");
     fixture
         .shell
-        .run(RegistryCommand::Toggle {
-            key: "builtin.test".parse().expect("key"),
-            base_version: 1,
-            enabled: Enablement::Disabled,
-        })
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::Toggle {
+                key: "builtin.test".parse().expect("key"),
+                base_version: 1,
+                enabled: Enablement::Disabled,
+            },
+        )
         .expect("metadata");
     set.content.rule[0].label = Some("Changed".into());
     let result = fixture
         .shell
-        .run(RegistryCommand::InstallBuiltin {
-            set: set.clone(),
-            revision: 2,
-        })
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::InstallBuiltin {
+                set: set.clone(),
+                revision: 2,
+            },
+        )
         .expect("upstream upgrade");
     assert_eq!(
         result.reply.versions[&"builtin.test".parse().expect("key")],
@@ -341,7 +378,11 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
     assert_eq!(stored.builtin, Some(2));
     let same = fixture
         .shell
-        .run(RegistryCommand::InstallBuiltin { set, revision: 2 })
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::InstallBuiltin { set, revision: 2 },
+        )
         .expect("idempotent install");
     assert!(same.event.is_none());
     assert_eq!(same.reply.epoch, result.reply.epoch);
@@ -382,10 +423,14 @@ fn offline_state_loading_changes_no_database_bytes_and_contains_deleted_history(
     fixture.apply("user.test", "Original", 0).expect("original");
     fixture
         .shell
-        .run(RegistryCommand::Delete {
-            key: "user.test".parse().expect("key"),
-            base_version: 1,
-        })
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::Delete {
+                key: "user.test".parse().expect("key"),
+                base_version: 1,
+            },
+        )
         .expect("delete");
     drop(fixture.shell);
     let database = fixture.directory.path().join("quartz.db");
@@ -443,18 +488,22 @@ fn startup_rebuild_degrades_uncompilable_user_or_builtin_sets_without_sql_decisi
             .execute(&mut connection)
             .expect("older accepted pattern");
         drop(connection);
-        let mut shell =
-            RegistryShell::open(Store::open(&directory).expect("store")).expect("degraded startup");
+        let mut store = Store::open(&directory).expect("store");
+        let mut shell = RegistryShell::open(&mut store, test_now()).expect("degraded startup");
         assert!(
             matches!(shell.snapshots().load().warnings(), [RuleWarning::Compilation { key: warning_key, .. }] if warning_key.as_str() == key)
         );
         shell
-            .run(RegistryCommand::Apply {
-                key: "user.healthy".parse().expect("key"),
-                file: "healthy.toml".into(),
-                text: source("user.healthy", "Edited"),
-                base_version: 1,
-            })
+            .run(
+                &mut store,
+                test_now(),
+                RegistryCommand::Apply {
+                    key: "user.healthy".parse().expect("key"),
+                    file: "healthy.toml".into(),
+                    text: source("user.healthy", "Edited"),
+                    base_version: 1,
+                },
+            )
             .expect("healthy edits remain possible");
         assert_eq!(shell.snapshots().load().epoch().get(), 1);
     }
@@ -482,4 +531,8 @@ fn loading_rules_rejects_missing_version_history_with_the_set_key() {
     assert!(
         matches!(error, LoadRulesError::MissingVersionHistory { set } if set.as_str() == "user.missing_history")
     );
+}
+
+fn test_now() -> quartz_domain::capture::UtcInstant {
+    quartz_domain::capture::UtcInstant::try_from(0).expect("UTC")
 }

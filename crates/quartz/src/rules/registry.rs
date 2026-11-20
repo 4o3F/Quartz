@@ -44,19 +44,23 @@ pub(crate) struct RegistryResult {
 /// Owns effects; command interpretation and publication remain in quartz-domain.
 #[derive(Debug)]
 pub(crate) struct RegistryShell {
-    store: Store,
     registry: RuleRegistry,
 }
 impl RegistryShell {
-    pub(crate) fn open(store: Store) -> Result<Self, OpenRegistryShellError> {
+    pub(crate) fn open(
+        store: &mut Store,
+        now: quartz_domain::capture::UtcInstant,
+    ) -> Result<Self, OpenRegistryShellError> {
         Self::open_with_builtin(
             store,
+            now,
             rules::BUILTIN_PRIVACY,
             rules::BUILTIN_PRIVACY_REVISION,
         )
     }
     fn open_with_builtin(
-        mut store: Store,
+        store: &mut Store,
+        now: quartz_domain::capture::UtcInstant,
         source: &str,
         revision: u32,
     ) -> Result<Self, OpenRegistryShellError> {
@@ -71,12 +75,16 @@ impl RegistryShell {
             },
         )
         .context(open_error::ParseSnafu)?;
-        let mut shell = Self { store, registry };
+        let mut shell = Self { registry };
         shell
-            .run(RegistryCommand::InstallBuiltin {
-                set: builtin,
-                revision,
-            })
+            .run(
+                store,
+                now,
+                RegistryCommand::InstallBuiltin {
+                    set: builtin,
+                    revision,
+                },
+            )
             .context(open_error::UpgradeSnafu)?;
         // Startup exposes epoch zero only after embedded upgrades have committed.
         shell.registry = RuleRegistry::from_state(shell.registry.state().clone())
@@ -87,15 +95,14 @@ impl RegistryShell {
     pub(crate) fn snapshots(&self) -> SnapshotCell {
         self.registry.snapshots()
     }
-    pub(crate) fn store_mut(&mut self) -> &mut Store {
-        &mut self.store
-    }
     pub(crate) fn core(&self) -> &RuleRegistry {
         &self.registry
     }
 
     pub(crate) fn run(
         &mut self,
+        store: &mut Store,
+        now: quartz_domain::capture::UtcInstant,
         command: RegistryCommand,
     ) -> Result<RegistryResult, RunRegistryCommandError> {
         let decision = self.registry.decide(command);
@@ -106,8 +113,8 @@ impl RegistryShell {
         } = decision.into_parts();
         let reply = reply.context(run_error::DecideSnafu)?;
         let event = if let Some(outcome) = outcome {
-            let now = jiff::Timestamp::now().as_millisecond();
-            self.store
+            let now = now.get().as_millisecond();
+            store
                 .transaction(|transaction| transaction.execute(&writes, now))
                 .context(run_error::PersistSnafu)?;
             Some(
@@ -161,20 +168,22 @@ mod tests {
         );
         let old_revision = rules::BUILTIN_PRIVACY_REVISION;
         let next_revision = old_revision.checked_add(1).expect("next builtin revision");
-        let mut shell = RegistryShell::open_with_builtin(
-            Store::open(&data).expect("store"),
-            &old_source,
-            old_revision,
-        )
-        .expect("initial builtin installation");
+        let mut store = Store::open(&data).expect("store");
+        let now = quartz_domain::capture::UtcInstant::try_from(0).expect("UTC");
+        let mut shell =
+            RegistryShell::open_with_builtin(&mut store, now, &old_source, old_revision)
+                .expect("initial builtin installation");
         assert_eq!(shell.snapshots().load().epoch().get(), 0);
         let builtin_key = "builtin.privacy".parse().expect("builtin key");
         assert_eq!(shell.core().state().sets[&builtin_key].current.version, 1);
         shell
-            .run(RegistryCommand::Apply {
-                key: "user.overlay".parse().expect("overlay key"),
-                file: "overlay.toml".into(),
-                text: r"format='quartz-rules/1'
+            .run(
+                &mut store,
+                now,
+                RegistryCommand::Apply {
+                    key: "user.overlay".parse().expect("overlay key"),
+                    file: "overlay.toml".into(),
+                    text: r"format='quartz-rules/1'
 [set]
 key='user.overlay'
 kind='privacy'
@@ -186,13 +195,15 @@ label='User replacement'
 preset='excluded'
 when=[{field='app.exe_name',op='equals',value='quartz-test.exe'}]
 "
-                .into(),
-                base_version: 0,
-            })
+                    .into(),
+                    base_version: 0,
+                },
+            )
             .expect("persist user overlay");
         drop(shell);
         let upgraded = RegistryShell::open_with_builtin(
-            Store::open(&data).expect("reopen store"),
+            &mut Store::open(&data).expect("reopen store"),
+            now,
             rules::BUILTIN_PRIVACY,
             next_revision,
         )
@@ -226,7 +237,8 @@ when=[{field='app.exe_name',op='equals',value='quartz-test.exe'}]
         );
         drop(upgraded);
         let reopened = RegistryShell::open_with_builtin(
-            Store::open(&data).expect("second reopen"),
+            &mut Store::open(&data).expect("second reopen"),
+            now,
             rules::BUILTIN_PRIVACY,
             next_revision,
         )

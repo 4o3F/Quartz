@@ -156,7 +156,7 @@ impl std::fmt::Display for CaptureTimeValue {
     }
 }
 impl CaptureColumn {
-    pub(super) fn new<C: SchemaColumn>(column: C) -> Self {
+    pub(in crate::store) fn new<C: SchemaColumn>(column: C) -> Self {
         Self {
             table: C::TABLE,
             column: ColumnName::of(column),
@@ -180,7 +180,10 @@ impl CaptureColumn {
                 source,
             })
     }
-    pub(super) fn utc(self, value: domain::UtcInstant) -> Result<i64, ExecuteCaptureBatchError> {
+    pub(in crate::store) fn utc(
+        self,
+        value: domain::UtcInstant,
+    ) -> Result<i64, ExecuteCaptureBatchError> {
         i64::try_from(value).map_err(|source| ExecuteCaptureBatchError::Time {
             field: self,
             value: CaptureTimeValue::Utc(value.get()),
@@ -194,7 +197,7 @@ impl CaptureColumn {
             source,
         })
     }
-    pub(super) fn range(
+    pub(in crate::store) fn range(
         self,
         start: Timestamp,
         end: Timestamp,

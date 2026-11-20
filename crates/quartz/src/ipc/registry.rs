@@ -53,7 +53,7 @@ pub(crate) struct QueueRegistryError;
 impl RegistryHandle {
     pub(crate) fn start(
         status: watch::Receiver<PublishedStatus>,
-        versions: watch::Receiver<crate::query::versions::VersionState>,
+        versions: crate::query::versions::VersionPort,
     ) -> Self {
         let (mailbox, receiver) = mpsc::channel(REGISTRY_MAILBOX_CAPACITY);
         let handle = Self {
@@ -157,22 +157,26 @@ struct Connection {
 struct ConnectionRegistry {
     receiver: mpsc::Receiver<RegistryMessage>,
     status: watch::Receiver<PublishedStatus>,
-    versions: watch::Receiver<crate::query::versions::VersionState>,
+    versions: crate::query::versions::VersionPort,
     connections: BTreeMap<ConnectionId, Connection>,
 }
 impl ConnectionRegistry {
     async fn run(mut self) {
         let mut publisher = VersionPublisher::Active;
         loop {
+            let previous_count = self.connections.len();
             self.connections
                 .retain(|_, connection| !connection.outbox.is_closed());
+            if self.connections.len() != previous_count {
+                self.prune_days().await;
+            }
             tokio::select! {
-                message = self.receiver.recv() => match message { Some(message) => self.receive(message), None => return },
+                message = self.receiver.recv() => match message { Some(message) => self.receive(message).await, None => return },
                 changed = self.status.changed() => {
                     if let Err(error) = changed { tracing::debug!(%error, "main status publisher stopped"); return; }
                     self.publish_state();
                 }
-                changed = self.versions.changed(), if publisher == VersionPublisher::Active => {
+                changed = self.versions.updates.changed(), if publisher == VersionPublisher::Active => {
                     match changed {
                         Ok(()) => self.update_days(),
                         Err(error) => {
@@ -185,26 +189,26 @@ impl ConnectionRegistry {
         }
     }
     fn update_days(&mut self) {
-        // Release the publisher lock before resolving subscribed dates.
-        let state = self.versions.borrow().clone();
+        // Copy only the subscribed-date digests before delivering to connection outboxes.
+        let state = self.versions.updates.borrow().clone();
         for connection in self.connections.values_mut() {
             for (date, latest) in &mut connection.days {
-                match state.day(*date) {
-                    Ok(changed) => {
+                match state.days.get(date) {
+                    Some(changed) => {
                         if changed.versions != latest.versions {
                             connection.outbox.day(changed.clone());
-                            *latest = changed;
+                            *latest = changed.clone();
                         }
                     }
-                    Err(error) => {
-                        tracing::error!(%error, "could not update day subscription");
+                    None => {
+                        tracing::error!(%date, "subscribed day missing from version publication");
                         connection.outbox.close();
                     }
                 }
             }
         }
     }
-    fn receive(&mut self, message: RegistryMessage) {
+    async fn receive(&mut self, message: RegistryMessage) {
         match message {
             RegistryMessage::Register { id, role, outbox } => {
                 self.connections.insert(
@@ -219,6 +223,7 @@ impl ConnectionRegistry {
             }
             RegistryMessage::Unregister { id } => {
                 self.connections.remove(&id);
+                self.prune_days().await;
             }
             RegistryMessage::Subscribe {
                 id,
@@ -226,7 +231,7 @@ impl ConnectionRegistry {
                 response,
                 reply,
             } => {
-                let result = self.subscribe(id, subscription, response);
+                let result = self.subscribe(id, subscription, response).await;
                 if reply.send(result).is_err() {
                     tracing::debug!("subscriber left before registry acknowledgement");
                 }
@@ -279,43 +284,59 @@ impl ConnectionRegistry {
             }
         }
     }
-    fn subscribe(
+    async fn subscribe(
         &mut self,
         id: ConnectionId,
         subscription: Subscribe,
         response: Response,
     ) -> Result<(), QueueFrameError> {
-        let mut prepared_days = BTreeMap::new();
-        for topic in &subscription.topics {
-            if let Topic::Day(date) = topic {
-                let result = self
-                    .versions
-                    .borrow()
-                    .day(*date)
-                    .map_err(|error| error.kind());
-                match result {
-                    Ok(changed) => {
-                        prepared_days.insert(*date, changed);
-                    }
-                    Err(kind) => {
-                        let connection =
-                            self.connections.get(&id).ok_or(QueueFrameError::Closed)?;
-                        return connection.outbox.response(Response {
-                            id: response.id,
-                            outcome: quartz_protocol::ResponseOutcome::Err {
-                                error: quartz_protocol::ProtocolError::new(kind),
-                            },
-                        });
-                    }
+        let mut dates: std::collections::BTreeSet<_> = self
+            .connections
+            .values()
+            .flat_map(|connection| connection.days.keys().copied())
+            .collect();
+        dates.extend(subscription.topics.iter().filter_map(|topic| match topic {
+            Topic::Day(date) => Some(*date),
+            _ => None,
+        }));
+        let needs_days = dates
+            .iter()
+            .any(|date| !self.versions.updates.borrow().days.contains_key(date));
+        let prepared = if needs_days {
+            match self.versions.set_days(dates).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let connection = self.connections.get(&id).ok_or(QueueFrameError::Closed)?;
+                    return connection.outbox.response(Response {
+                        id: response.id,
+                        outcome: quartz_protocol::ResponseOutcome::Err { error },
+                    });
                 }
             }
-        }
+        } else {
+            self.versions.updates.borrow().clone()
+        };
+        let prepared_days = subscription
+            .topics
+            .iter()
+            .filter_map(|topic| match topic {
+                Topic::Day(date) => Some(*date),
+                _ => None,
+            })
+            .map(|date| {
+                prepared
+                    .days
+                    .get(&date)
+                    .cloned()
+                    .ok_or(QueueFrameError::Closed)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let connection = self
             .connections
             .get_mut(&id)
             .ok_or(QueueFrameError::Closed)?;
         connection.outbox.response(response)?;
-        for changed in prepared_days.into_values() {
+        for changed in prepared_days {
             let date = changed.date;
             if let std::collections::btree_map::Entry::Vacant(entry) = connection.days.entry(date) {
                 connection.outbox.day(changed.clone());
@@ -329,6 +350,16 @@ impl ConnectionRegistry {
             connection.outbox.state(self.status.borrow().snapshot());
         }
         Ok(())
+    }
+    async fn prune_days(&self) {
+        let dates = self
+            .connections
+            .values()
+            .flat_map(|connection| connection.days.keys().copied())
+            .collect();
+        if let Err(error) = self.versions.set_days(dates).await {
+            tracing::warn!(?error, "could not prune day version subscriptions");
+        }
     }
     fn publish_state(&self) {
         let mut snapshot = None;
@@ -355,8 +386,8 @@ mod tests {
         runtime.block_on(async {
             let publisher =
                 crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("registry".into()));
-            let (_versions, versions) =
-                watch::channel(crate::query::versions::VersionState::empty());
+            let database = crate::query::dispatch::test_support::TestDatabase::start();
+            let versions = database.versions.clone();
             let registry = RegistryHandle::start(publisher.subscribe(), versions);
             let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
             let registration = registry

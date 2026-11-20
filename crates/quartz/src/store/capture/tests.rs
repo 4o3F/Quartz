@@ -1,26 +1,22 @@
 use super::*;
+use crate::persistence::{CheckpointCollection, Persistence, PersistenceState};
 use crate::store::identifiers::{ColumnName, TableName};
 use crate::store::{
     enums,
     rows::{
         ApplicationsRow, AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow,
-        ClockSegmentsRow, IntervalsRow, WindowInstancesRow,
+        ClockSegmentsRow, WindowInstancesRow,
     },
     schema::{
         applications, availability_intervals, capture_gaps, capture_runs, clock_segments,
         data_day_versions, intervals, titles, window_instances,
     },
 };
-use crate::{
-    capture::{CheckpointCollection, Persistence, PersistenceState},
-    data_directory::DataDirectory,
-    store::Store,
-};
 use diesel::prelude::*;
 use domain::*;
 use quartz_domain::capture as domain;
 use quartz_domain::rules::registry::{RegistryState, RuleRegistry};
-use std::{collections::BTreeSet, sync::Arc};
+use std::collections::BTreeSet;
 
 #[test]
 fn integer_decode_errors_keep_typed_width_schema_context_and_display() {
@@ -53,123 +49,7 @@ fn integer_decode_errors_keep_typed_width_schema_context_and_display() {
     );
 }
 
-fn at(ms: u64) -> Timestamp {
-    Timestamp {
-        utc: UtcInstant::try_from(i64::try_from(ms).expect("test milliseconds")).expect("UTC"),
-        mono: MonoInstant::from_millis(ms),
-    }
-}
-fn metadata() -> RunMetadata {
-    RunMetadata {
-        device_id: "test-device".into(),
-        win_session_id: WindowsSessionId::new(7),
-        app_version: "test".into(),
-    }
-}
-struct Fixture {
-    _directory: tempfile::TempDir,
-    store: Store,
-    shell: Persistence,
-    core: CaptureCore,
-    rules: Arc<quartz_domain::rules::registry::RuleSnapshot>,
-}
-impl Fixture {
-    fn new(start: Timestamp) -> Self {
-        let directory = tempfile::tempdir().expect("temp database");
-        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("open database");
-        let opened = Persistence::open(&mut store, metadata()).expect("initial recovery");
-        assert_eq!(opened.startup.next_run, RunId::new(1));
-        let mut shell = opened.persistence;
-        let StartedCapture { core, step } = CaptureCore::start(RunId::new(1), start).expect("core");
-        let result = shell.accept(step.into_parts(RunId::new(1)), start);
-        assert!(result.feedback.is_empty());
-        let initial = shell.flush(&mut store, start, CheckpointCollection::Skip);
-        assert!(initial.failure().is_none());
-        let rules = RuleRegistry::from_state(RegistryState::default())
-            .expect("rules")
-            .snapshots()
-            .load();
-        let mut fixture = Self {
-            _directory: directory,
-            store,
-            shell,
-            core,
-            rules,
-        };
-        for feedback in initial.feedback {
-            let _ = fixture.step(start, feedback);
-        }
-        fixture
-    }
-    fn step(&mut self, now: Timestamp, event: CaptureEvent) -> CaptureParts {
-        self.core
-            .step(CaptureInput {
-                at: now,
-                rules: self.rules.clone(),
-                event,
-            })
-            .expect("scripted event")
-            .into_parts(RunId::new(1))
-    }
-    fn persist(&mut self, now: Timestamp, event: CaptureEvent) {
-        let parts = self.step(now, event);
-        let accepted = self.shell.accept(parts, now);
-        assert!(accepted.feedback.is_empty());
-        let result = self
-            .shell
-            .flush(&mut self.store, now, CheckpointCollection::Skip);
-        assert!(result.failure().is_none(), "{:?}", result.failure());
-        for feedback in result.feedback {
-            let _ = self.step(now, feedback);
-        }
-    }
-    fn ready(&mut self, now: Timestamp) {
-        self.persist(
-            now,
-            CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
-        );
-        self.persist(now, foreground(1, "first"));
-    }
-    fn recovered_foreground(&mut self) -> IntervalFact {
-        let mut keys = CaptureKeys::default();
-        let metadata = metadata();
-        let mut runs = self
-            .store
-            .capture(&mut keys, &metadata)
-            .load_recoverable()
-            .expect("load persisted intervals");
-        assert_eq!(runs.len(), 1, "one recoverable run");
-        let mut run = runs.pop().expect("recoverable run");
-        assert_eq!(run.intervals.len(), 1, "one open foreground interval");
-        run.intervals.pop().expect("open interval").row.fact
-    }
-    fn intervals(&mut self) -> Vec<IntervalsRow> {
-        intervals::table
-            .order(intervals::id)
-            .select(IntervalsRow::as_select())
-            .load(&mut self.store._writer)
-            .expect("interval rows")
-    }
-}
-fn foreground(handle: u64, title: &str) -> CaptureEvent {
-    CaptureEvent::Foreground {
-        source: ObservationSource::Review,
-        foreground: Foreground::Window {
-            facts: Box::new(WindowFacts {
-                handle: WindowHandle::new(handle),
-                process: ProcessId::new(7),
-                process_created_utc: Some(at(0).utc),
-                class: "TestClass".into(),
-                app: AppIdentity::Exe("c:\\app.exe".into()),
-                metadata_source: MetadataSource::Process,
-                exe_name: Some("app.exe".into()),
-                display_name: "App".into(),
-                title: Title::readable(title),
-            }),
-            privacy: PrivacyContext::default(),
-        },
-    }
-}
+use super::test_support::*;
 
 #[test]
 fn review_persists_resolved_content_in_new_window_generation() {
@@ -219,7 +99,7 @@ fn review_persists_resolved_content_in_new_window_generation() {
     let instances = window_instances::table
         .order(window_instances::generation)
         .select(WindowInstancesRow::as_select())
-        .load(&mut fixture.store._writer)
+        .load(&mut fixture.store.writer)
         .expect("persisted window instances");
     assert_eq!(instances.len(), 2, "content identity needs a new instance");
     let unresolved = &instances[0];
@@ -239,7 +119,7 @@ fn review_persists_resolved_content_in_new_window_generation() {
     let app = applications::table
         .filter(applications::id.eq(resolved.app_id))
         .select(ApplicationsRow::as_select())
-        .first(&mut fixture.store._writer)
+        .first(&mut fixture.store.writer)
         .expect("resolved content application");
     assert_eq!(app.identity_key, facts.app.key());
     assert_eq!(app.exe_name, facts.exe_name);
@@ -297,7 +177,7 @@ fn frame_aumid_metadata_enrichment_updates_app_without_new_persisted_instance() 
     );
     let instances = window_instances::table
         .select(WindowInstancesRow::as_select())
-        .load(&mut fixture.store._writer)
+        .load(&mut fixture.store.writer)
         .expect("persisted frame instance");
     assert_eq!(
         instances.len(),
@@ -309,7 +189,7 @@ fn frame_aumid_metadata_enrichment_updates_app_without_new_persisted_instance() 
     let app = applications::table
         .filter(applications::id.eq(instance.app_id))
         .select(ApplicationsRow::as_select())
-        .first(&mut fixture.store._writer)
+        .first(&mut fixture.store.writer)
         .expect("enriched application");
     assert_eq!(app.identity_key, facts.app.key());
     assert_eq!(app.exe_name, facts.exe_name);
@@ -356,7 +236,7 @@ fn frame_observations_preserve_stored_metadata_across_new_window_instances() {
     let process = applications::table
         .filter(applications::identity_key.eq(facts.app.key()))
         .select(ApplicationsRow::as_select())
-        .first(&mut fixture.store._writer)
+        .first(&mut fixture.store.writer)
         .expect("stored process application");
     facts.handle = WindowHandle::new(2);
     facts.metadata_source = MetadataSource::Frame;
@@ -375,7 +255,7 @@ fn frame_observations_preserve_stored_metadata_across_new_window_instances() {
     let preserved = applications::table
         .filter(applications::identity_key.eq(facts.app.key()))
         .select(ApplicationsRow::as_select())
-        .first(&mut fixture.store._writer)
+        .first(&mut fixture.store.writer)
         .expect("application after frame observation");
     assert_eq!(preserved.id, process.id);
     assert_eq!(preserved.exe_name, process.exe_name);
@@ -396,7 +276,7 @@ fn frame_observations_preserve_stored_metadata_across_new_window_instances() {
     let placeholder = applications::table
         .filter(applications::identity_key.eq(facts.app.key()))
         .select(ApplicationsRow::as_select())
-        .first(&mut fixture.store._writer)
+        .first(&mut fixture.store.writer)
         .expect("new frame-only application");
     assert!(placeholder.exe_name.is_none());
     assert_eq!(placeholder.display_name, facts.display_name);
@@ -416,7 +296,7 @@ fn frame_observations_preserve_stored_metadata_across_new_window_instances() {
     let upgraded = applications::table
         .filter(applications::identity_key.eq(facts.app.key()))
         .select(ApplicationsRow::as_select())
-        .first(&mut fixture.store._writer)
+        .first(&mut fixture.store.writer)
         .expect("process-enriched application");
     assert_eq!(upgraded.id, placeholder.id);
     assert_eq!(upgraded.exe_name, facts.exe_name);
@@ -470,14 +350,14 @@ fn real_core_script_round_trips_and_conserves_persisted_duration() {
     assert_eq!(
         applications::table
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("apps"),
         1
     );
     assert_eq!(
         window_instances::table
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("windows"),
         2
     );
@@ -485,7 +365,7 @@ fn real_core_script_round_trips_and_conserves_persisted_duration() {
         window_instances::table
             .filter(window_instances::retired_utc_ms.is_not_null())
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("retired")
             >= 1
     );
@@ -496,7 +376,7 @@ fn real_core_script_round_trips_and_conserves_persisted_duration() {
     let segments = clock_segments::table
         .order(clock_segments::id)
         .select(ClockSegmentsRow::as_select())
-        .load::<ClockSegmentsRow>(&mut fixture.store._writer)
+        .load::<ClockSegmentsRow>(&mut fixture.store.writer)
         .expect("segments");
     for segment in segments {
         let key =
@@ -531,7 +411,7 @@ fn real_core_script_round_trips_and_conserves_persisted_duration() {
         let availability = availability_intervals::table
             .filter(availability_intervals::clock_segment_id.eq(segment.id.expect("id")))
             .select(AvailabilityIntervalsRow::as_select())
-            .load::<AvailabilityIntervalsRow>(&mut fixture.store._writer)
+            .load::<AvailabilityIntervalsRow>(&mut fixture.store.writer)
             .expect("availability");
         for row in availability {
             let id = RowId::from_persisted(
@@ -557,7 +437,7 @@ fn real_core_script_round_trips_and_conserves_persisted_duration() {
         let gaps = capture_gaps::table
             .filter(capture_gaps::clock_segment_id.eq(segment.id.expect("id")))
             .select(CaptureGapsRow::as_select())
-            .load::<CaptureGapsRow>(&mut fixture.store._writer)
+            .load::<CaptureGapsRow>(&mut fixture.store.writer)
             .expect("gaps");
         for row in gaps {
             persisted.push(CaptureWrite::RecordGap(CaptureGap {
@@ -615,7 +495,7 @@ fn failed_switch_rolls_back_close_open_dictionaries_and_key_mapping() {
     assert_eq!(
         titles::table
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("title count"),
         1
     );
@@ -638,25 +518,25 @@ fn recovery_closes_each_row_at_its_confirmation_and_splits_midnight() {
             availability_intervals::confirmed_utc_ms.eq(i64::try_from(day + 1000).expect("time")),
             availability_intervals::confirmed_mono_ms.eq(i64::try_from(day + 1000).expect("time")),
         ))
-        .execute(&mut fixture.store._writer)
+        .execute(&mut fixture.store.writer)
         .expect("confirm availability");
     diesel::update(clock_segments::table)
         .set((
             clock_segments::confirmed_utc_ms.eq(i64::try_from(day + 1000).expect("time")),
             clock_segments::confirmed_mono_ms.eq(i64::try_from(day + 1000).expect("time")),
         ))
-        .execute(&mut fixture.store._writer)
+        .execute(&mut fixture.store.writer)
         .expect("confirm segment");
     diesel::update(capture_runs::table)
         .set(capture_runs::confirmed_utc_ms.eq(i64::try_from(day + 1000).expect("time")))
-        .execute(&mut fixture.store._writer)
+        .execute(&mut fixture.store.writer)
         .expect("confirm run");
     let opened = Persistence::open(&mut fixture.store, metadata()).expect("recover");
     assert_eq!(opened.startup.next_run, RunId::new(2));
     let masks = availability_intervals::table
         .order(availability_intervals::id)
         .select(AvailabilityIntervalsRow::as_select())
-        .load::<AvailabilityIntervalsRow>(&mut fixture.store._writer)
+        .load::<AvailabilityIntervalsRow>(&mut fixture.store.writer)
         .expect("masks");
     assert_eq!(masks.len(), 2);
     assert_eq!(
@@ -674,14 +554,14 @@ fn recovery_closes_each_row_at_its_confirmation_and_splits_midnight() {
     );
     let run = capture_runs::table
         .select(CaptureRunsRow::as_select())
-        .first::<CaptureRunsRow>(&mut fixture.store._writer)
+        .first::<CaptureRunsRow>(&mut fixture.store.writer)
         .expect("run");
     assert_eq!(run.end_reason, Some(enums::RunEndReason::CrashRecovered));
     assert!(run.confirmed_utc_ms.is_none());
     let versions = data_day_versions::table
         .filter(data_day_versions::source.eq(enums::DataSource::Availability))
         .select(data_day_versions::utc_date)
-        .load::<i64>(&mut fixture.store._writer)
+        .load::<i64>(&mut fixture.store.writer)
         .expect("versions");
     assert_eq!(versions, vec![0, 1]);
 }
@@ -752,7 +632,7 @@ fn recovery_restores_allowed_application_identities_and_omits_excluded_ones() {
             );
             diesel::update(applications::table)
                 .set(applications::display_name.eq("Friendly name"))
-                .execute(&mut fixture.store._writer)
+                .execute(&mut fixture.store.writer)
                 .expect("rename display metadata");
             let IntervalFact::Window {
                 app,
@@ -796,7 +676,7 @@ fn recovery_rejects_missing_application_reference_in_an_allowed_interval() {
     let row_id = fixture.intervals()[0].id.expect("interval id");
     diesel::update(intervals::table)
         .set(intervals::app_id.eq(None::<i64>))
-        .execute(&mut fixture.store._writer)
+        .execute(&mut fixture.store.writer)
         .expect("remove required application reference");
     let mut keys = CaptureKeys::default();
     let metadata = metadata();
@@ -882,7 +762,7 @@ fn checkpoint_is_atomic_and_advances_every_open_row() {
     assert_eq!(
         availability_intervals::table
             .select(availability_intervals::confirmed_mono_ms)
-            .first::<Option<i64>>(&mut fixture.store._writer)
+            .first::<Option<i64>>(&mut fixture.store.writer)
             .expect("idle confirmation"),
         Some(10)
     );
@@ -896,21 +776,21 @@ fn checkpoint_is_atomic_and_advances_every_open_row() {
     assert_eq!(
         availability_intervals::table
             .select(availability_intervals::confirmed_mono_ms)
-            .first::<Option<i64>>(&mut fixture.store._writer)
+            .first::<Option<i64>>(&mut fixture.store.writer)
             .expect("idle confirmation"),
         Some(100)
     );
     assert_eq!(
         capture_runs::table
             .select(capture_runs::confirmed_utc_ms)
-            .first::<Option<i64>>(&mut fixture.store._writer)
+            .first::<Option<i64>>(&mut fixture.store.writer)
             .expect("run confirmation"),
         Some(100)
     );
     assert_eq!(
         clock_segments::table
             .select(clock_segments::confirmed_mono_ms)
-            .first::<Option<i64>>(&mut fixture.store._writer)
+            .first::<Option<i64>>(&mut fixture.store.writer)
             .expect("segment confirmation"),
         Some(100)
     );
@@ -961,7 +841,7 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
     fixture.ready(at(0));
     let parts = fixture.step(at(100), foreground(2, "queued private title"));
     let _ = fixture.shell.accept(parts, at(100));
-    crate::store::raw::ConnectionSql::new(&mut fixture.store._writer)
+    crate::store::raw::ConnectionSql::new(&mut fixture.store.writer)
         .configure_reader()
         .expect("read only");
     let failed = fixture
@@ -998,7 +878,7 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
     }
     let parts = fixture.step(overdue, foreground(2, "recovered title"));
     let _ = fixture.shell.accept(parts, overdue);
-    crate::store::raw::ConnectionSql::new(&mut fixture.store._writer)
+    crate::store::raw::ConnectionSql::new(&mut fixture.store.writer)
         .resume_writes()
         .expect("writable");
     let recovered = fixture
@@ -1006,7 +886,7 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
         .flush(&mut fixture.store, overdue, CheckpointCollection::Skip);
     assert!(recovered.failure().is_none(), "{:?}", recovered.failure());
     assert!(
-        matches!(recovered.progress, crate::capture::FlushProgress::Committed { commands } if commands > 0)
+        matches!(recovered.progress, crate::persistence::FlushProgress::Committed { commands } if commands > 0)
     );
     assert!(matches!(
         recovered.state(),
@@ -1015,7 +895,7 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
     assert_eq!(
         capture_gaps::table
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("repair precedes fresh facts"),
         1
     );
@@ -1030,7 +910,7 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
         titles::table
             .filter(titles::text.eq("recovered title"))
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("recovery title is still pending"),
         0
     );
@@ -1039,13 +919,13 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
         .flush(&mut fixture.store, overdue, CheckpointCollection::Skip);
     assert!(facts.failure().is_none(), "{:?}", facts.failure());
     assert!(
-        matches!(facts.progress, crate::capture::FlushProgress::Committed { commands } if commands > 0)
+        matches!(facts.progress, crate::persistence::FlushProgress::Committed { commands } if commands > 0)
     );
     assert_eq!(facts.state(), PersistenceState::Ready);
     let gaps = capture_gaps::table
         .order(capture_gaps::id)
         .select(CaptureGapsRow::as_select())
-        .load::<CaptureGapsRow>(&mut fixture.store._writer)
+        .load::<CaptureGapsRow>(&mut fixture.store.writer)
         .expect("loss rows");
     assert_eq!(gaps.len(), 2);
     assert_eq!(gaps[0].reason, enums::GapReason::DatabaseError);
@@ -1072,7 +952,7 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
     assert_eq!(
         titles::table
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("dictionary"),
         2
     );
@@ -1080,7 +960,7 @@ fn database_failure_retains_batches_then_writes_loss_before_new_facts() {
         titles::table
             .filter(titles::text.eq("queued private title"))
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("lost title absent"),
         0
     );
@@ -1142,7 +1022,7 @@ fn availability_bulk_split_preserves_idle_evidence_and_exception() {
     let rows = availability_intervals::table
         .order(availability_intervals::start_utc_ms)
         .select(AvailabilityIntervalsRow::as_select())
-        .load::<AvailabilityIntervalsRow>(&mut fixture.store._writer)
+        .load::<AvailabilityIntervalsRow>(&mut fixture.store.writer)
         .expect("pieces");
     assert_eq!(rows.len(), 101);
     assert!(rows.iter().all(|row| row.last_input_utc_ms == Some(0)
@@ -1190,7 +1070,7 @@ fn queue_capacity_discards_whole_batch_and_persists_identity_free_gap() {
     assert!(result.failure().is_none(), "{:?}", result.failure());
     let gaps = capture_gaps::table
         .select(CaptureGapsRow::as_select())
-        .load::<CaptureGapsRow>(&mut fixture.store._writer)
+        .load::<CaptureGapsRow>(&mut fixture.store.writer)
         .expect("gaps");
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].reason, enums::GapReason::WriteQueueOverload);
@@ -1201,7 +1081,7 @@ fn queue_capacity_discards_whole_batch_and_persists_identity_free_gap() {
         data_day_versions::table
             .filter(data_day_versions::source.eq(enums::DataSource::Gaps))
             .select(data_day_versions::version)
-            .first::<i64>(&mut fixture.store._writer)
+            .first::<i64>(&mut fixture.store.writer)
             .expect("gap version"),
         1
     );
@@ -1303,7 +1183,7 @@ fn crash_recovery_preserves_open_foreground_and_idle_confirmations() {
     assert!(rows[0].confirmed_utc_ms.is_none() && rows[0].confirmed_mono_ms.is_none());
     let idle = availability_intervals::table
         .select(AvailabilityIntervalsRow::as_select())
-        .first::<AvailabilityIntervalsRow>(&mut fixture.store._writer)
+        .first::<AvailabilityIntervalsRow>(&mut fixture.store.writer)
         .expect("idle row");
     assert_eq!(
         idle.end_reason,
@@ -1316,7 +1196,7 @@ fn crash_recovery_preserves_open_foreground_and_idle_confirmations() {
     assert!(idle.confirmed_utc_ms.is_none() && idle.confirmed_mono_ms.is_none());
     let segment = clock_segments::table
         .select(ClockSegmentsRow::as_select())
-        .first::<ClockSegmentsRow>(&mut fixture.store._writer)
+        .first::<ClockSegmentsRow>(&mut fixture.store.writer)
         .expect("closed segment");
     assert_eq!(
         segment.end_reason,
@@ -1431,7 +1311,7 @@ fn recovery_decode_error_identifies_the_table_column_row_and_value() {
     let row_id = fixture.intervals()[0].id.expect("interval id");
     diesel::update(intervals::table)
         .set(intervals::start_mono_ms.eq(-7_i64))
-        .execute(&mut fixture.store._writer)
+        .execute(&mut fixture.store.writer)
         .expect("inject invalid monotonic value");
     let error =
         Persistence::open(&mut fixture.store, metadata()).expect_err("invalid persisted time");
@@ -1460,7 +1340,7 @@ fn startup_decode_failure_is_classified_as_startup_and_rolls_back_recovery() {
             crate::store::schema::settings::key.eq(key),
             crate::store::schema::settings::value.eq("invalid"),
         ))
-        .execute(&mut fixture.store._writer)
+        .execute(&mut fixture.store.writer)
         .expect("invalid saved deadline");
     let error =
         Persistence::open(&mut fixture.store, metadata()).expect_err("invalid startup value");
@@ -1551,369 +1431,9 @@ fn windows_session_identifier_preserves_the_entire_u32_range() {
     let stored = capture_runs::table
         .filter(capture_runs::id.eq(2_i64))
         .select(capture_runs::win_session_id)
-        .first::<i64>(&mut fixture.store._writer)
+        .first::<i64>(&mut fixture.store.writer)
         .expect("session column");
     assert_eq!(stored, i64::from(u32::MAX));
-}
-
-/// Real worker threads use this clock while scripted sources advance capture time.
-struct RuntimeClock {
-    origin: std::time::Instant,
-    offset: std::sync::atomic::AtomicU64,
-}
-impl RuntimeClock {
-    fn new() -> Self {
-        Self {
-            origin: std::time::Instant::now(),
-            offset: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-    fn advance(&self, millis: u64) {
-        self.offset
-            .fetch_add(millis, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-impl crate::core::sources::ClockReader for RuntimeClock {
-    fn read(&self) -> Result<Timestamp, crate::core::sources::ReadClockError> {
-        let elapsed = u64::try_from(self.origin.elapsed().as_millis()).expect("test duration");
-        Ok(at(
-            elapsed + self.offset.load(std::sync::atomic::Ordering::SeqCst)
-        ))
-    }
-}
-struct RuntimeFixture {
-    directory: tempfile::TempDir,
-    workers: crate::core::app::Workers,
-    clock: Arc<RuntimeClock>,
-}
-impl RuntimeFixture {
-    fn recovered() -> Self {
-        // Leave a real open run behind, as a process crash would.
-        let old = Fixture::new(at(0));
-        let Fixture {
-            _directory: directory,
-            store,
-            ..
-        } = old;
-        drop(store);
-        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("reopen");
-        assert_eq!(
-            store.installation_id("runtime-device").expect("device ID"),
-            "runtime-device"
-        );
-        assert_eq!(
-            store
-                .installation_id("ignored-proposal")
-                .expect("stable ID"),
-            "runtime-device"
-        );
-        let clock = Arc::new(RuntimeClock::new());
-        let workers =
-            crate::core::app::Workers::start(store, metadata(), clock.clone(), Arc::new(|| {}))
-                .expect("workers");
-        Self {
-            directory,
-            workers,
-            clock,
-        }
-    }
-    fn observe(&self, event: CaptureEvent) {
-        use crate::core::sources::ClockReader;
-        self.workers
-            .sender
-            .observe(crate::core::app::ObservedEvent {
-                at: self.clock.read().expect("clock"),
-                event,
-            })
-            .expect("observation");
-    }
-    fn wait(&self, predicate: impl Fn(&crate::core::app::MainCommand) -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let command = self
-                .workers
-                .commands
-                .recv_deadline(deadline)
-                .expect("worker response before deadline");
-            if let crate::core::app::MainCommand::Fatal(worker) = command {
-                panic!("{worker} worker failed");
-            }
-            if predicate(&command) {
-                return;
-            }
-        }
-    }
-    fn reader(&self) -> SqliteConnection {
-        SqliteConnection::establish(
-            self.directory
-                .path()
-                .join("quartz.db")
-                .to_str()
-                .expect("path"),
-        )
-        .expect("inspection connection")
-    }
-    fn shutdown(self) -> tempfile::TempDir {
-        use crate::core::sources::ClockReader;
-        self.workers
-            .request_shutdown(self.clock.read().expect("clock"), RunEndReason::UserExit)
-            .expect("shutdown");
-        self.workers.join().expect("joined and flushed");
-        self.directory
-    }
-}
-
-#[test]
-fn real_threads_recover_gate_checkpoint_report_failure_and_flush_shutdown() {
-    use crate::core::app::MainCommand;
-    use diesel::connection::SimpleConnection;
-    let runtime = RuntimeFixture::recovered();
-    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
-    let mut reader = runtime.reader();
-    let recovered = capture_runs::table
-        .filter(capture_runs::id.eq(1))
-        .select(CaptureRunsRow::as_select())
-        .first::<CaptureRunsRow>(&mut reader)
-        .expect("recovered run");
-    assert_eq!(
-        recovered.end_reason,
-        Some(enums::RunEndReason::CrashRecovered)
-    );
-    runtime.observe(CaptureEvent::Session(SessionStatus::Unavailable));
-    runtime.wait(|command| matches!(command, MainCommand::Effect(CaptureEffect::QuerySession)));
-    runtime.observe(CaptureEvent::Foreground {
-        source: ObservationSource::Review,
-        foreground: Foreground::None(NoForegroundReason::Empty),
-    });
-    runtime.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
-    runtime.wait(|command| {
-        matches!(
-            command,
-            MainCommand::Effect(CaptureEffect::ReviewForeground)
-        )
-    });
-    let before = intervals::table
-        .count()
-        .get_result::<i64>(&mut reader)
-        .expect("gating query");
-    assert_eq!(before, 0, "session readiness gates foreground rows");
-    runtime.wait(|command| matches!(command, MainCommand::Effect(CaptureEffect::CheckIdle)));
-    runtime.observe(CaptureEvent::Foreground {
-        source: ObservationSource::Review,
-        foreground: Foreground::None(NoForegroundReason::Empty),
-    });
-    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
-    let confirmed_before = capture_runs::table
-        .filter(capture_runs::id.eq(2))
-        .select(capture_runs::confirmed_utc_ms)
-        .first::<Option<i64>>(&mut reader)
-        .expect("initial confirmation")
-        .expect("open run");
-    runtime.clock.advance(59_000);
-    runtime.observe(CaptureEvent::Wake);
-    runtime.wait(|command| {
-        matches!(
-            command,
-            MainCommand::Persistence(PersistenceState::Buffered { .. })
-        )
-    });
-    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
-    let confirmed_after = capture_runs::table
-        .filter(capture_runs::id.eq(2))
-        .select(capture_runs::confirmed_utc_ms)
-        .first::<Option<i64>>(&mut reader)
-        .expect("deadline confirmation")
-        .expect("open run");
-    assert!(
-        confirmed_after >= confirmed_before + 59_000,
-        "DB timeout flushes the checkpoint"
-    );
-    reader.batch_execute("CREATE TRIGGER fail_runtime_write BEFORE UPDATE ON capture_runs BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;").expect("inject failure");
-    runtime.observe(CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)));
-    runtime.wait(|command| {
-        matches!(
-            command,
-            MainCommand::Persistence(PersistenceState::Failed { .. })
-        )
-    });
-    reader
-        .batch_execute("DROP TRIGGER fail_runtime_write;")
-        .expect("restore database");
-    runtime.observe(CaptureEvent::Stop(StopChange::End(StopReason::Locked)));
-    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
-    let directory = runtime.shutdown();
-    let mut reader =
-        SqliteConnection::establish(directory.path().join("quartz.db").to_str().expect("path"))
-            .expect("final reader");
-    let run = capture_runs::table
-        .filter(capture_runs::id.eq(2))
-        .select(CaptureRunsRow::as_select())
-        .first::<CaptureRunsRow>(&mut reader)
-        .expect("closed run");
-    assert_eq!(run.end_reason, Some(enums::RunEndReason::UserExit));
-    assert!(run.ended_utc_ms.is_some());
-    assert_eq!(run.confirmed_utc_ms, None);
-    assert_eq!(
-        clock_segments::table
-            .filter(clock_segments::end_utc_ms.is_null())
-            .count()
-            .get_result::<i64>(&mut reader)
-            .expect("closed clocks"),
-        0
-    );
-}
-
-#[test]
-fn real_threads_translate_channel_overload_into_a_durable_gap() {
-    use crate::core::app::MainCommand;
-    let runtime = RuntimeFixture::recovered();
-    runtime.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
-    runtime.wait(|command| {
-        matches!(
-            command,
-            MainCommand::Effect(CaptureEffect::ReviewForeground)
-        )
-    });
-    runtime.observe(CaptureEvent::Foreground {
-        source: ObservationSource::Review,
-        foreground: Foreground::None(NoForegroundReason::Empty),
-    });
-    // Main output is deliberately left undrained, bounding capture progress before flooding input.
-    for _ in 0..10_000 {
-        runtime.observe(CaptureEvent::Wake);
-    }
-    runtime.wait(|command| {
-        matches!(
-            command,
-            MainCommand::CaptureSnapshot {
-                state: CaptureState::Gap(GapReason::EventOverload),
-                ..
-            }
-        )
-    });
-    runtime.observe(CaptureEvent::Foreground {
-        source: ObservationSource::Review,
-        foreground: Foreground::None(NoForegroundReason::Empty),
-    });
-    use crate::core::sources::ClockReader;
-    runtime
-        .workers
-        .shutdown_port()
-        .close(runtime.clock.read().expect("clock"))
-        .expect("synchronous session settlement");
-    runtime.workers.join().expect("join settled workers");
-    let directory = runtime.directory;
-    let mut reader =
-        SqliteConnection::establish(directory.path().join("quartz.db").to_str().expect("path"))
-            .expect("gap reader");
-    assert!(
-        capture_gaps::table
-            .filter(capture_gaps::reason.eq(enums::GapReason::EventOverload))
-            .count()
-            .get_result::<i64>(&mut reader)
-            .expect("overload gaps")
-            > 0
-    );
-}
-
-impl RuntimeFixture {
-    fn restart_keep_timing(until: u64) -> Self {
-        let mut old = Fixture::new(at(0));
-        old.persist(
-            at(0),
-            CaptureEvent::SetTimedState(TimedState {
-                policy: TimedPolicy::KeepTiming,
-                started: at(0).utc,
-                until: at(until).utc,
-            }),
-        );
-        let Fixture {
-            _directory: directory,
-            store,
-            ..
-        } = old;
-        drop(store);
-        let store =
-            Store::open(&DataDirectory::new(directory.path())).expect("reopen timed settings");
-        let clock = Arc::new(RuntimeClock::new());
-        clock.advance(200_000);
-        let workers =
-            crate::core::app::Workers::start(store, metadata(), clock.clone(), Arc::new(|| {}))
-                .expect("restart workers");
-        Self {
-            directory,
-            workers,
-            clock,
-        }
-    }
-    fn sample_idle_then_lock(&self) {
-        use crate::core::app::MainCommand;
-        self.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
-        self.observe(CaptureEvent::Idle(idle_sample(200_000)));
-        self.observe(CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)));
-        self.wait(|command| matches!(command, MainCommand::CaptureSnapshot { state: CaptureState::Stopped { reasons, .. }, .. } if reasons.contains(&StopReason::Locked)));
-        self.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
-    }
-}
-fn idle_sample(tick_ms: u64) -> IdleSample {
-    IdleSample {
-        tick: std::time::Duration::from_millis(tick_ms),
-        last_input: LastInput::Tick(0),
-        policy: IdlePolicy::default(),
-        exceptions: Vec::new(),
-    }
-}
-
-#[test]
-fn restart_with_unexpired_keep_timing_suppresses_idle_and_keeps_original_grant() {
-    use crate::core::app::MainCommand;
-    let runtime = RuntimeFixture::restart_keep_timing(260_000);
-    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
-    runtime.sample_idle_then_lock();
-    let mut reader = runtime.reader();
-    assert_eq!(
-        availability_intervals::table
-            .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
-            .count()
-            .get_result::<i64>(&mut reader)
-            .expect("idle rows"),
-        0
-    );
-    let state = crate::store::schema::timed_policies::table
-        .find(enums::TimedPolicyKind::KeepTiming)
-        .select(crate::store::rows::TimedPoliciesRow::as_select())
-        .first::<crate::store::rows::TimedPoliciesRow>(&mut reader)
-        .expect("persisted grant");
-    assert_eq!(state.started_utc_ms, 0);
-    assert_eq!(state.until_utc_ms, 260_000);
-    runtime.shutdown();
-}
-
-#[test]
-fn restart_clears_keep_timing_that_expired_while_core_was_down() {
-    use crate::core::app::MainCommand;
-    use crate::store::schema::timed_policies;
-    let runtime = RuntimeFixture::restart_keep_timing(100_000);
-    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
-    let mut reader = runtime.reader();
-    assert_eq!(
-        timed_policies::table
-            .filter(timed_policies::kind.eq(enums::TimedPolicyKind::KeepTiming))
-            .count()
-            .get_result::<i64>(&mut reader)
-            .expect("expired policy removed"),
-        0
-    );
-    runtime.sample_idle_then_lock();
-    assert_eq!(
-        availability_intervals::table
-            .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
-            .count()
-            .get_result::<i64>(&mut reader)
-            .expect("idle mask resumes"),
-        1
-    );
-    runtime.shutdown();
 }
 
 #[test]
@@ -1939,7 +1459,7 @@ fn timed_application_and_audible_grants_follow_foreground_scope_and_two_hour_cap
         availability_intervals::table
             .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("foreground exemptions"),
         0
     );
@@ -1957,7 +1477,7 @@ fn timed_application_and_audible_grants_follow_foreground_scope_and_two_hour_cap
         availability_intervals::table
             .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("other application becomes idle"),
         1
     );
@@ -2008,7 +1528,7 @@ fn policy_clear_and_capture_boundary_rollback_in_one_transaction() {
         timed_policies::table
             .filter(timed_policies::kind.eq(enums::TimedPolicyKind::KeepTiming))
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("policy row rolled back"),
         1
     );
@@ -2060,7 +1580,7 @@ fn running_keep_timing_expiration_clears_policy_with_capture_boundary() {
         timed_policies::table
             .filter(timed_policies::kind.eq(enums::TimedPolicyKind::KeepTiming))
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("cleared policy"),
         0
     );
@@ -2080,7 +1600,7 @@ fn restored_audible_deadline_waits_for_fresh_foreground_evidence() {
     let idle = availability_intervals::table
         .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
         .select(AvailabilityIntervalsRow::as_select())
-        .first::<AvailabilityIntervalsRow>(&mut fixture.store._writer)
+        .first::<AvailabilityIntervalsRow>(&mut fixture.store.writer)
         .expect("old browser evidence is not reused");
     assert!(idle.end_utc_ms.is_none());
     fixture.persist(
@@ -2095,7 +1615,7 @@ fn restored_audible_deadline_waits_for_fresh_foreground_evidence() {
     let retained = availability_intervals::table
         .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
         .select(AvailabilityIntervalsRow::as_select())
-        .first::<AvailabilityIntervalsRow>(&mut fixture.store._writer)
+        .first::<AvailabilityIntervalsRow>(&mut fixture.store.writer)
         .expect("changing the deadline does not refresh browser evidence");
     assert!(retained.end_utc_ms.is_none());
     fixture.persist(at(200_004), CaptureEvent::SetTimedState(state));
@@ -2104,7 +1624,7 @@ fn restored_audible_deadline_waits_for_fresh_foreground_evidence() {
     let idle = availability_intervals::table
         .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Idle))
         .select(AvailabilityIntervalsRow::as_select())
-        .first::<AvailabilityIntervalsRow>(&mut fixture.store._writer)
+        .first::<AvailabilityIntervalsRow>(&mut fixture.store.writer)
         .expect("fresh audible evidence");
     assert_eq!(idle.end_reason, Some(enums::AvailabilityEndReason::Resumed));
     assert_eq!(idle.exception, Some(enums::IdleException::Audible));
@@ -2203,7 +1723,7 @@ fn restored_privacy_value_applies_until_expiration_and_clears_atomically() {
         timed_policies::table
             .filter(timed_policies::kind.eq(enums::TimedPolicyKind::Privacy))
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("expired privacy settings"),
         0
     );
@@ -2232,7 +1752,7 @@ fn restored_pause_remains_stopped_until_its_policy_deadline() {
         timed_policies::table
             .filter(timed_policies::kind.eq(enums::TimedPolicyKind::Pause))
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("expired pause settings"),
         0
     );
@@ -2254,88 +1774,22 @@ fn policy_scope_upserts_applications_and_restores_identity_after_display_rename(
         applications::table
             .filter(applications::identity_key.eq(app.key()))
             .count()
-            .get_result::<i64>(&mut fixture.store._writer)
+            .get_result::<i64>(&mut fixture.store.writer)
             .expect("one application"),
         1
     );
     let scope = timed_policies::table
         .find(enums::TimedPolicyKind::AppExemption)
         .select(timed_policies::application_id)
-        .first::<Option<i64>>(&mut fixture.store._writer)
+        .first::<Option<i64>>(&mut fixture.store.writer)
         .expect("application scope")
         .expect("scoped policy");
     diesel::update(applications::table.filter(applications::id.eq(scope)))
         .set(applications::display_name.eq("Friendly name"))
-        .execute(&mut fixture.store._writer)
+        .execute(&mut fixture.store.writer)
         .expect("rename display metadata");
     let opened = Persistence::open(&mut fixture.store, metadata()).expect("restore scoped policy");
     assert_eq!(opened.startup.policies, vec![state]);
-}
-
-#[test]
-fn large_query_yields_to_capture_commits_before_the_one_second_limit() {
-    use crate::core::{
-        app::{MainCommand, Workers},
-        sources::ClockReader,
-    };
-    use std::time::{Duration, Instant};
-    const QUERY_FACTS: i64 = 20_000;
-    const COMMIT_LIMIT: Duration = Duration::from_secs(1);
-    const ADMISSION_POLL: Duration = Duration::from_millis(1);
-    let fixture = crate::store::query::test_support::QueryFixture::new(QUERY_FACTS);
-    let request = fixture.request_day();
-    let clock = Arc::new(RuntimeClock::new());
-    let workers = Workers::start(fixture.store, metadata(), clock.clone(), Arc::new(|| {}))
-        .expect("real workers");
-    let runtime = RuntimeFixture {
-        directory: fixture.directory,
-        workers,
-        clock,
-    };
-    runtime.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
-    runtime.observe(CaptureEvent::Foreground {
-        source: ObservationSource::Review,
-        foreground: Foreground::None(NoForegroundReason::Empty),
-    });
-    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
-    let mut reply = runtime
-        .workers
-        .queries
-        .submit(request)
-        .expect("large query admission");
-    let admitted = Instant::now();
-    while runtime.workers.queries.queued_requests() > 0 {
-        assert!(
-            admitted.elapsed() < COMMIT_LIMIT,
-            "DB must start queued query"
-        );
-        std::thread::sleep(ADMISSION_POLL);
-    }
-    assert!(
-        matches!(
-            reply.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ),
-        "large query is running when capture write is submitted"
-    );
-    let submitted = Instant::now();
-    runtime.observe(CaptureEvent::Stop(StopChange::Begin(StopReason::Paused)));
-    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
-    let latency = submitted.elapsed();
-    assert!(
-        latency < COMMIT_LIMIT,
-        "capture commit took {latency:?} while query was running"
-    );
-    let mut inspection = runtime.reader();
-    let pauses = availability_intervals::table
-        .filter(availability_intervals::reason.eq(enums::AvailabilityReason::Paused))
-        .count()
-        .get_result::<i64>(&mut inspection)
-        .expect("committed capture pause");
-    assert_eq!(pauses, 1);
-    assert!(reply.blocking_recv().expect("query reply").is_ok());
-    assert!(runtime.clock.read().is_ok());
-    runtime.shutdown();
 }
 
 #[test]
@@ -2345,20 +1799,27 @@ fn clock_confirmation_invalidates_query_versions_before_first_foreground_fact() 
         start: 0,
         end: 60_000,
     };
-    let before = fixture
-        .store
-        .version_state("classification-test")
-        .expect("initial versions")
-        .digest(range);
+    let before = fixture.store.version_state().expect("initial versions");
     fixture.persist(at(59_000), CaptureEvent::Wake);
     assert!(fixture.intervals().is_empty());
-    let after = fixture
-        .store
-        .version_state("classification-test")
-        .expect("confirmed versions")
-        .digest(range);
+    let after = fixture.store.version_state().expect("confirmed versions");
+    let before =
+        crate::query::versions::VersionState::from_stored(before, "classification-test".into())
+            .digest(range);
+    let after =
+        crate::query::versions::VersionState::from_stored(after, "classification-test".into())
+            .digest(range);
     assert_ne!(
         before, after,
         "clock-only coverage changes invalidate cursors and day subscriptions"
     );
+}
+
+fn idle_sample(tick_ms: u64) -> IdleSample {
+    IdleSample {
+        tick: std::time::Duration::from_millis(tick_ms),
+        last_input: LastInput::Tick(0),
+        policy: IdlePolicy::default(),
+        exceptions: Vec::new(),
+    }
 }

@@ -16,9 +16,8 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use client::CONNECT_TIMEOUT;
-pub(crate) use client::{OpenCorePipeError, PipeClient};
+pub(crate) use client::CoreClient;
+#[cfg(test)]
+pub(crate) use client::OpenCorePipeError;
 
 pub(crate) use pipe_name::PipeName;
-
-#[cfg(test)]
-pub(crate) use server::ConnectionTimeouts;

@@ -176,11 +176,13 @@ crates/
 | `main` | clap 参数解析与模式分发 |
 | `core::app` | 核心装配、线程启动、关闭顺序 |
 | `platform::windows::{foreground, idle, session, power, tray, process, autostart}` | Win32 采集与系统集成 |
-| `capture` | 观测事件 → 身份解析 → 隐私策略 → 状态机 → 写入命令 |
-| `store` | schema 迁移、写入、读取、保留清理 |
+| `persistence` | 数据库线程的写入队列、批量事务、失败缓冲与采集反馈 |
+| `store` | schema 迁移、写入、读取、保留清理；`store::versions` 管理版本行、配置键和事务版本变更 |
 | `rules::registry` | 规则注册表：规则状态的唯一写者，发布不可变规则快照（第 6.2 节） |
-| `query` | 查询调度、纯切片与聚合、版本摘要与分页 |
-| `ipc` | 管道服务、会话、角色权限、订阅 |
+| `query` | 查询调度、纯切片与聚合、版本摘要与分页；`query::runner` 持有分批查询任务并归还只读连接 |
+| `ipc` | 会话、角色权限、订阅和协议客户端；`ipc::connection` 在异步读写流上执行单连接协议循环 |
+
+`query` 依赖 `store` 读取事实和版本值，`store` 通过 `quartz-domain` 的事实类型返回数据。`ipc` 依赖 `query` 的调度接口；`platform::windows::ipc` 创建和验证命名管道，并调用 `ipc::connection`。`core::app` 组合数据库线程的存储、规则外壳、持久化队列、查询执行器和版本发布器。
 
 ## 6. 线程模型
 
@@ -191,9 +193,9 @@ crates/
 | 数据库线程 | 持有写连接和只读连接；写连接批量写入，只读连接持有查询的 WAL 快照 | 查询分批计算，批间让出给写连接处理写入；同一响应使用同一读事务 |
 | I/O 线程 | tokio current-thread；管道 accept、读写、订阅推送 | 不执行 SQLite；查询请求转给数据库线程，用 oneshot 取回结果 |
 
-查询任务持有只读事务，按 `QUERY_BATCH_ROWS`（256）分批读取事实、扫描边界和聚合片段；每批之间先处理待写命令，并在写入截止时间前预留 `COMMIT_HEADROOM`（100 毫秒）执行提交。I/O 线程以非阻塞方式投递到容量为 8 的查询通道，异步等待 oneshot 回复；查询结束或取消后归还只读连接。
+查询任务持有只读事务，按 `QUERY_BATCH_ROWS`（256）分批读取事实、扫描边界和聚合片段；每批之间先处理待写命令，并在写入截止时间前预留 `COMMIT_HEADROOM`（100 毫秒）执行提交。I/O 线程以非阻塞方式投递到容量为 8 的查询通道，异步等待 oneshot 回复；查询结束或取消后，`query::runner` 归还只读连接。`DatabaseLoop` 直接持有 `Store`，规则外壳按调用借用存储，规则事务的时间由数据库线程的时钟提供。
 
-I/O 线程内用普通 tokio task 和有界 `mpsc` 实现一个连接注册表 actor，以及每个连接独立的 outbox actor。注册表持有连接角色、订阅和发送句柄，扇出只调用非阻塞投递；outbox 负责发送预算、可靠消息顺序和最新状态槽。主线程通过 watch 发布已清洗状态，通过有界邮箱非阻塞投递控制消息；客户端写入只由 outbox 等待，详细规则见 04 第 7 节。
+I/O 线程内用普通 tokio task 和有界 `mpsc` 实现一个连接注册表 actor，以及每个连接独立的 outbox actor。数据库线程的 `VersionPublisher` 保存 UTC 日期版本并计算已订阅逻辑日期的摘要，通过 watch 发布 `{date, versions}`；注册表只保留已订阅日期的摘要。注册表持有连接角色、订阅和发送句柄，扇出只调用非阻塞投递；outbox 负责发送预算、可靠消息顺序和最新状态槽。主线程通过 watch 发布已清洗状态，通过有界邮箱非阻塞投递控制消息；客户端写入只由 outbox 等待，详细规则见 04 第 7 节。
 
 线程之间用有界通道连接：
 

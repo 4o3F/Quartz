@@ -2,6 +2,7 @@
 
 pub mod capture;
 pub mod domain_name;
+pub mod facts;
 pub mod text;
 
 pub mod rules;

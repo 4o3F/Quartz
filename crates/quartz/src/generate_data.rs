@@ -6,10 +6,10 @@ use crate::{
     store::{
         self, ReadOnlyStore, Store,
         capture::{CaptureKeys, RunMetadata, WindowsSessionId},
-        facts::UTC_DAY_MS,
     },
 };
 use clap::ValueEnum;
+use quartz_domain::capture::limits::UTC_DAY_MS;
 use quartz_domain::capture::{
     self as capture, AppIdentity, AvailabilityEndReason, AvailabilityReason, CaptureGap,
     CaptureLevel, CaptureWrite, CapturedFields, ClockEndReason, IdleException, IdlePolicy,

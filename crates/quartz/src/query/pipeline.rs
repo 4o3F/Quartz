@@ -7,13 +7,14 @@ use super::{
     },
 };
 use quartz_protocol::{
-    Activity, ApplicationId, ApplicationRank, CategoryRef, CategorySource, ClockSegmentId,
-    DayMetrics, QueryStopReason, TimelineDetail, TimelineSegment,
+    Activity, ApplicationId, ApplicationRank, CategoryRef, CategorySource, DayMetrics,
+    QueryStopReason, TimelineDetail, TimelineSegment,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Bounds each compute turn independently of the size of the query range.
-pub(crate) const QUERY_BATCH_ROWS: usize = 256;
+pub(crate) use crate::store::query::READ_BATCH_ROWS as QUERY_BATCH_ROWS;
+use quartz_domain::facts::ClockSegmentId;
 const HOUR_MS: f64 = 3_600_000.0;
 #[derive(Debug, snafu::Snafu)]
 pub(crate) enum DeriveSegmentsError {
@@ -252,7 +253,14 @@ impl Pipeline {
                     state: Availability::Stopped(reason),
                     span,
                 } => {
-                    reasons.insert(*reason);
+                    reasons.insert(match reason {
+                        quartz_domain::capture::StopReason::Locked => QueryStopReason::Locked,
+                        quartz_domain::capture::StopReason::Disconnected => {
+                            QueryStopReason::Disconnected
+                        }
+                        quartz_domain::capture::StopReason::Suspended => QueryStopReason::Suspended,
+                        quartz_domain::capture::StopReason::Paused => QueryStopReason::Paused,
+                    });
                     stopped_span = Some(span);
                 }
                 InputRow::Gap { reason, span } => {
@@ -264,7 +272,19 @@ impl Pipeline {
         }
         // TODO(M2-D): Apply annotation category and activity overrides before aggregation.
         let activity = if let Some(reason) = gap {
-            Activity::Gap { reason }
+            Activity::Gap {
+                reason: match reason {
+                    quartz_domain::capture::GapReason::EventOverload => {
+                        quartz_protocol::QueryGapReason::EventOverload
+                    }
+                    quartz_domain::capture::GapReason::WriteQueueOverload => {
+                        quartz_protocol::QueryGapReason::WriteQueueOverload
+                    }
+                    quartz_domain::capture::GapReason::DatabaseError => {
+                        quartz_protocol::QueryGapReason::DatabaseError
+                    }
+                },
+            }
         } else if !reasons.is_empty() {
             Activity::Stopped {
                 reasons: reasons.into_iter().collect(),
@@ -295,13 +315,19 @@ impl Pipeline {
                 start_utc_ms,
                 end_utc_ms,
                 duration_ms,
-                clock_segment_id: Some(sweep.clock.id),
+                clock_segment_id: Some(quartz_protocol::ClockSegmentId(sweep.clock.id.0)),
                 activity,
                 category: CategoryRef::Unclassified,
                 category_source: CategorySource::Unclassified,
                 app: foreground
                     .filter(|row| row.level != CaptureLevel::Excluded)
-                    .and_then(|row| row.app.clone()),
+                    .and_then(|row| row.app.as_ref())
+                    .map(|app| quartz_protocol::ApplicationRef {
+                        id: ApplicationId(app.id.0),
+                        exe_name: app.exe_name.clone(),
+                        display_name: app.display_name.clone(),
+                        aumid: app.aumid.clone(),
+                    }),
                 title: foreground
                     .filter(|row| row.level == CaptureLevel::Full)
                     .and_then(|row| row.title.clone()),
@@ -332,7 +358,7 @@ impl DayAggregation {
 }
 #[derive(Debug)]
 struct PreviousActive {
-    segment: Option<ClockSegmentId>,
+    segment: Option<quartz_protocol::ClockSegmentId>,
     end: i64,
     app: Option<ApplicationId>,
 }

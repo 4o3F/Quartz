@@ -13,6 +13,8 @@ pub(crate) use errors::{CaptureColumn, DecodeCaptureRowError, ExecuteCaptureBatc
 #[cfg(any(windows, test))]
 pub(crate) use recovery::{CaptureStartup, RecoverCaptureError};
 #[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
 mod tests;
 
 use super::{
@@ -85,12 +87,11 @@ pub(crate) struct RunMetadata {
     pub win_session_id: WindowsSessionId,
     pub app_version: String,
 }
-/// Caller-owned mappings; publish the transaction's copy only after commit succeeds.
+/// Caller-owned mappings with rollback copies of only the runs touched by a transaction.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CaptureKeys {
     runs: BTreeMap<RunId, RunKeys>,
-    pub(super) changed_versions: Vec<crate::query::versions::FactVersion>,
-    pub(super) metadata_version: Option<i64>,
+    original_runs: Option<BTreeMap<RunId, Option<RunKeys>>>,
 }
 #[derive(Debug, Clone, Default)]
 struct RunKeys {
@@ -105,6 +106,7 @@ pub(crate) struct Capture<'connection> {
     connection: &'connection mut SqliteConnection,
     keys: &'connection mut CaptureKeys,
     metadata: &'connection RunMetadata,
+    pub(super) effects: super::versions::TxEffects,
 }
 impl std::fmt::Debug for Capture<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -121,6 +123,7 @@ impl<'connection> Capture<'connection> {
             connection,
             keys,
             metadata,
+            effects: super::versions::TxEffects::default(),
         }
     }
     pub(crate) fn execute(&mut self, batch: &WriteBatch) -> Result<(), ExecuteCaptureBatchError> {
@@ -174,6 +177,7 @@ impl<'connection> Capture<'connection> {
         }
     }
     fn run_keys(&mut self, run: RunId) -> &mut RunKeys {
+        self.keys.record(run);
         self.keys.runs.entry(run).or_default()
     }
     fn segment(&mut self, run: RunId, key: SegmentId) -> Result<DbRowId, ExecuteCaptureBatchError> {
@@ -235,4 +239,38 @@ impl<'connection> Capture<'connection> {
             ),
         )
     }
+}
+
+impl CaptureKeys {
+    pub(super) fn begin(&mut self) {
+        self.original_runs = Some(BTreeMap::new());
+    }
+    fn record(&mut self, run: RunId) {
+        if let Some(originals) = &mut self.original_runs {
+            originals
+                .entry(run)
+                .or_insert_with(|| self.runs.get(&run).cloned());
+        }
+    }
+    pub(super) fn finish(&mut self, outcome: KeyTransaction) {
+        if let Some(originals) = self.original_runs.take()
+            && outcome == KeyTransaction::Rollback
+        {
+            for (run, original) in originals {
+                match original {
+                    Some(keys) => {
+                        self.runs.insert(run, keys);
+                    }
+                    None => {
+                        self.runs.remove(&run);
+                    }
+                }
+            }
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeyTransaction {
+    Commit,
+    Rollback,
 }

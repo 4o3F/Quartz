@@ -1,6 +1,7 @@
 //! Core IPC sessions, registry and outbox actors, snapshots, and command clients.
 
 pub(crate) mod client;
+pub(crate) mod connection;
 pub(crate) mod outbox;
 pub(crate) mod registry;
 mod session;

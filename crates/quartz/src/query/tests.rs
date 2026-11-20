@@ -4,7 +4,11 @@ use input::{
     Availability, CaptureLevel, ClockSegment, FactId, FactSpan, Foreground, ForegroundKind,
     InputRow,
 };
-use quartz_protocol::{Activity, ApplicationId, ApplicationRef, ClockSegmentId, QueryStopReason};
+use quartz_domain::{
+    capture::StopReason,
+    facts::{ApplicationId, ApplicationRef, ClockSegmentId},
+};
+use quartz_protocol::{Activity, QueryStopReason};
 
 fn span(id: i64, start: i64, end: i64) -> FactSpan {
     FactSpan {
@@ -59,11 +63,11 @@ fn idle_masks_window_and_overlapping_stop_reasons_slice_boundaries() {
         },
         InputRow::Availability {
             span: span(3, 50, 80),
-            state: Availability::Stopped(QueryStopReason::Locked),
+            state: Availability::Stopped(StopReason::Locked),
         },
         InputRow::Availability {
             span: span(4, 60, 90),
-            state: Availability::Stopped(QueryStopReason::Paused),
+            state: Availability::Stopped(StopReason::Paused),
         },
     ];
     let segments = derive(rows, QueryRange { start: 0, end: 100 });
@@ -183,7 +187,7 @@ fn gaps_excluded_and_no_foreground_preserve_all_state_boundaries() {
         window(1, 0, 100),
         InputRow::Gap {
             span: span(2, 20, 40),
-            reason: quartz_protocol::QueryGapReason::DatabaseError,
+            reason: quartz_domain::capture::GapReason::DatabaseError,
         },
         excluded,
         no_foreground,
@@ -212,7 +216,7 @@ fn zero_monotonic_sleep_retains_its_stopped_wall_range() {
         }),
         InputRow::Availability {
             span: sleeping,
-            state: Availability::Stopped(QueryStopReason::Suspended),
+            state: Availability::Stopped(StopReason::Suspended),
         },
     ];
     let segments = derive(rows, QueryRange { start: 10, end: 90 });
@@ -247,7 +251,7 @@ fn timeline_merge_never_crosses_activity_gaps_or_clock_segments() {
     assert_eq!(projection.into_segments().len(), 3);
     segments[1].display.activity = Activity::Active;
     segments[1].display.start_utc_ms += 1;
-    segments[2].display.clock_segment_id = Some(ClockSegmentId(2));
+    segments[2].display.clock_segment_id = Some(quartz_protocol::ClockSegmentId(2));
     let mut projection = TimelineProjection::default();
     for segment in &segments {
         projection.push(segment, quartz_protocol::TimelineDetail::Category, 100);

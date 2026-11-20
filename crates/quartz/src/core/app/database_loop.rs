@@ -5,11 +5,11 @@ use super::{
     SendMainCommandError,
 };
 use crate::{
-    capture::{
+    core::sources::{ClockReader, ReadClockError},
+    persistence::{
         CheckpointCollection, FlushProgress, FlushStalledError, Persistence, PersistenceOutcome,
         PersistenceResult, PersistenceState, QueueShutdown,
     },
-    core::sources::{ClockReader, ReadClockError},
     rules::registry::{RegistryResult, RegistryShell, RunRegistryCommandError},
     store::Store,
 };
@@ -75,24 +75,22 @@ impl From<SendMainCommandError> for ShutdownDatabaseError {
 }
 
 pub(super) struct DatabaseLoop {
+    // Release any active read snapshot before closing the writer connection.
+    pub runner: crate::query::runner::QueryRunner,
+    pub store: Store,
     pub registry: RegistryShell,
     pub persistence: Persistence,
     pub writes: Receiver<DatabaseCommand>,
     pub queries: Receiver<crate::query::dispatch::QueryCommand>,
-    pub versions: tokio::sync::watch::Sender<crate::query::versions::VersionState>,
+    pub versions: crate::query::versions::VersionPublisher,
     pub feedback: Sender<Feedback>,
     pub main: MainPort,
     pub clock: Arc<dyn ClockReader>,
 }
-struct RunningQuery {
-    job: crate::query::QueryJob,
-    reply: tokio::sync::oneshot::Sender<
-        Result<crate::query::QueryResponse, quartz_protocol::ProtocolError>,
-    >,
-}
 enum DatabaseInput {
     Write(Option<DatabaseCommand>),
     Query(crate::query::dispatch::QueryCommand),
+    Versions(crate::query::versions::VersionCommand),
 }
 enum DatabaseProgress {
     Continue,
@@ -115,7 +113,7 @@ impl DatabaseLoop {
     }
     fn publish(&mut self, result: PersistenceResult) -> Result<(), RunDatabaseLoopError> {
         self.trace_commit_latency(&result);
-        self.publish_versions();
+        self.versions.publish(&mut self.store);
         if let Some(error) = result.failure() {
             tracing::error!(%error, "capture write failed");
         }
@@ -155,33 +153,7 @@ impl DatabaseLoop {
             }
         }
     }
-    fn publish_versions(&mut self) {
-        let changes = self.registry.store_mut().take_committed_versions();
-        let hash = self
-            .registry
-            .snapshots()
-            .load()
-            .hashes()
-            .classification
-            .to_string();
-        if changes.facts.is_empty()
-            && changes.metadata_version.is_none()
-            && self.versions.borrow().classification_hash == hash
-        {
-            return;
-        }
-        self.versions.send_modify(|state| {
-            for fact in changes.facts {
-                state.days.insert(fact.key, fact.version);
-            }
-            if let Some(version) = changes.metadata_version {
-                state.settings.metadata_version = version;
-            }
-            state.classification_hash = hash;
-        });
-    }
     pub(super) fn run(&mut self) -> Result<(), RunDatabaseLoopError> {
-        let mut running: Option<RunningQuery> = None;
         loop {
             if let Some(request) = self.persistence.writer().shutdown() {
                 return self.shutdown(request);
@@ -203,35 +175,14 @@ impl DatabaseLoop {
                 }
                 continue;
             }
-            if let Some(mut active) = running.take() {
-                let result = if active.reply.is_closed() {
-                    Some(Err(quartz_protocol::ProtocolError::new(
-                        quartz_protocol::ErrorKind::Internal,
-                    )))
-                } else {
-                    match active.job.advance() {
-                        Ok(Some(response)) => Some(Ok(response)),
-                        Ok(None) => None,
-                        Err(error) => {
-                            tracing::warn!(%error, "could not compute query");
-                            Some(Err(quartz_protocol::ProtocolError::new(error.kind())))
-                        }
-                    }
-                };
-                if let Some(result) = result {
-                    match active.job.finish() {
-                        Ok(reader) => self.registry.store_mut().return_query_reader(reader),
-                        Err(source) => {
-                            let _ = active.reply.send(Err(quartz_protocol::ProtocolError::new(
-                                quartz_protocol::ErrorKind::Internal,
-                            )));
-                            return Err(RunDatabaseLoopError::Query { source });
-                        }
-                    }
-                    let _ = active.reply.send(result);
-                } else {
-                    running = Some(active);
-                }
+            if let Ok(command) = self.versions.requests.try_recv() {
+                self.versions.receive(command);
+                continue;
+            }
+            if self.runner.is_running() {
+                self.runner
+                    .step(&mut self.store)
+                    .map_err(|source| RunDatabaseLoopError::Query { source })?;
                 continue;
             }
             match self.wait_for_input()? {
@@ -240,39 +191,12 @@ impl DatabaseLoop {
                         return Ok(());
                     }
                 }
-                DatabaseInput::Query(command) => running = self.start_query(command),
-            }
-        }
-    }
-    fn start_query(
-        &mut self,
-        command: crate::query::dispatch::QueryCommand,
-    ) -> Option<RunningQuery> {
-        if command.reply.is_closed() {
-            return None;
-        }
-        let hash = self
-            .registry
-            .snapshots()
-            .load()
-            .hashes()
-            .classification
-            .to_string();
-        let mut reader = self.registry.store_mut().take_query_reader();
-        match crate::query::QueryJob::start(&mut reader, command.request, &hash) {
-            Ok(job) => Some(RunningQuery {
-                job,
-                reply: command.reply,
-            }),
-            Err(error) => {
-                if let Some(reader) = reader {
-                    self.registry.store_mut().return_query_reader(reader);
-                }
-                tracing::warn!(%error, "could not start query");
-                let _ = command
-                    .reply
-                    .send(Err(quartz_protocol::ProtocolError::new(error.kind())));
-                None
+                DatabaseInput::Query(command) => self.runner.start(
+                    &mut self.store,
+                    command,
+                    &self.versions.classification_hash(),
+                ),
+                DatabaseInput::Versions(command) => self.versions.receive(command),
             }
         }
     }
@@ -287,9 +211,7 @@ impl DatabaseLoop {
             return Ok(DrainProgress::Waiting);
         }
         let checkpoints = self.checkpoint_collection();
-        let result = self
-            .persistence
-            .flush(self.registry.store_mut(), now, checkpoints);
+        let result = self.persistence.flush(&mut self.store, now, checkpoints);
         Self::ensure_progress(&result)
             .map_err(|source| RunDatabaseLoopError::Stalled { source })?;
         self.publish(result)?;
@@ -308,6 +230,7 @@ impl DatabaseLoop {
         };
         crossbeam_channel::select_biased! {
             recv(self.writes) -> command => command.map(|command| DatabaseInput::Write(Some(command))).map_err(|_| RunDatabaseLoopError::Receive),
+            recv(self.versions.requests) -> command => command.map(DatabaseInput::Versions).map_err(|_| RunDatabaseLoopError::Receive),
             recv(self.queries) -> command => match command { Ok(command) => Ok(DatabaseInput::Query(command)), Err(_) => self.wait_for_writes() },
             default(wait) => Ok(DatabaseInput::Write(None)),
         }
@@ -350,9 +273,9 @@ impl DatabaseLoop {
                     .now()
                     .map_err(|source| RunDatabaseLoopError::Clock { source })?;
                 let checkpoints = self.checkpoint_collection();
-                let result =
-                    self.persistence
-                        .flush_due(self.registry.store_mut(), now, checkpoints);
+                let result = self
+                    .persistence
+                    .flush_due(&mut self.store, now, checkpoints);
                 self.publish(result)?;
             }
             Some(DatabaseCommand::Registry { command, reply }) => {
@@ -363,9 +286,7 @@ impl DatabaseLoop {
                     .now()
                     .map_err(|source| RunDatabaseLoopError::Clock { source })?;
                 let checkpoints = self.checkpoint_collection();
-                let result = self
-                    .persistence
-                    .flush(self.registry.store_mut(), now, checkpoints);
+                let result = self.persistence.flush(&mut self.store, now, checkpoints);
                 Self::ensure_progress(&result)
                     .map_err(|source| RunDatabaseLoopError::Stalled { source })?;
                 self.publish(result)?;
@@ -378,8 +299,11 @@ impl DatabaseLoop {
         command: RegistryCommand,
         reply: Sender<Result<RegistryResult, RunRegistryCommandError>>,
     ) -> Result<(), RunDatabaseLoopError> {
-        let result = self.registry.run(command);
-        self.publish_versions();
+        let now = self
+            .now()
+            .map_err(|source| RunDatabaseLoopError::Clock { source })?;
+        let result = self.registry.run(&mut self.store, now.utc, command);
+        self.versions.publish(&mut self.store);
         if result.as_ref().is_ok_and(|result| result.event.is_some()) {
             self.feedback
                 .send(Feedback::RulesChanged)
@@ -417,16 +341,10 @@ impl DatabaseLoop {
             now.mono
                 .duration_since(request.at.mono)
                 .map_err(|source| ShutdownDatabaseError::Time { source })?;
-            self.registry
-                .store_mut()
+            self.store
                 .limit_write_wait(request.deadline.saturating_duration_since(Instant::now()));
             let checkpoints = self.checkpoint_collection();
-            let result = flush(
-                &mut self.persistence,
-                self.registry.store_mut(),
-                now,
-                checkpoints,
-            );
+            let result = flush(&mut self.persistence, &mut self.store, now, checkpoints);
             Self::ensure_progress(&result)
                 .map_err(|source| ShutdownDatabaseError::Stalled { source })?;
             if let DatabaseProgress::Ended = self.settle_shutdown(result, request.deadline)? {
@@ -488,6 +406,7 @@ mod tests {
         }
     }
     struct Fixture {
+        _versions: crate::query::versions::VersionPort,
         database: DatabaseLoop,
         _directory: tempfile::TempDir,
         _commands: Receiver<MainCommand>,
@@ -509,19 +428,21 @@ mod tests {
             let (_, writes) = bounded(CONTROL_CAPACITY);
             let (feedback, received_feedback) = bounded(CONTROL_CAPACITY);
             let (sender, commands) = bounded(CONTROL_CAPACITY);
-            let mut registry = RegistryShell::open(store).expect("registry");
-            let hash = registry
-                .snapshots()
-                .load()
-                .hashes()
-                .classification
-                .to_string();
-            let state = registry.store_mut().version_state(&hash).expect("versions");
+            let registry = RegistryShell::open(&mut store, UtcInstant::try_from(0).expect("UTC"))
+                .expect("registry");
+            let crate::query::versions::VersionChannel {
+                publisher: versions,
+                port,
+            } = crate::query::versions::VersionPublisher::open(&mut store, registry.snapshots())
+                .expect("versions");
             Self {
+                _versions: port,
                 database: DatabaseLoop {
                     registry,
                     queries: crossbeam_channel::never(),
-                    versions: tokio::sync::watch::channel(state).0,
+                    versions,
+                    store,
+                    runner: Default::default(),
                     persistence: opened.persistence,
                     writes,
                     feedback,
@@ -661,7 +582,7 @@ mod tests {
                 let _ = fixture.database.persistence.accept(parts, start);
             }
             let initial = fixture.database.persistence.flush(
-                fixture.database.registry.store_mut(),
+                &mut fixture.database.store,
                 start,
                 CheckpointCollection::Skip,
             );
@@ -697,7 +618,7 @@ mod tests {
             tracing::subscriber::with_default(subscriber, || {
                 assert_eq!(fixture.database.checkpoint_collection(), checkpoints);
                 let result = fixture.database.persistence.flush(
-                    fixture.database.registry.store_mut(),
+                    &mut fixture.database.store,
                     flush_at,
                     checkpoints,
                 );

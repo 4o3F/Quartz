@@ -4,8 +4,8 @@ use super::{
     DatabaseCommand, Feedback, MainCommand, MainPort, Observation, ObservedEvent,
     SendMainCommandError, Shutdown,
 };
-use crate::capture::WriteQueue;
 use crate::core::{foreground::EventKind, sources::ClockReader};
+use crate::persistence::WriteQueue;
 use crate::store::capture::CaptureStartup;
 use crossbeam_channel::{Receiver, Sender, TrySendError, select_biased};
 use quartz_domain::{
@@ -331,7 +331,7 @@ impl CaptureLoop {
         }
         if let Settlement::Final { deadline, .. } = settlement {
             self.writer
-                .finish(crate::capture::QueueShutdown { at, deadline });
+                .finish(crate::persistence::QueueShutdown { at, deadline });
             self.notify_database()?;
         }
         Ok(())
@@ -369,9 +369,9 @@ impl CaptureLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture::PersistenceState;
     use crate::core::app::{CONTROL_CAPACITY, CaptureSender};
     use crate::core::sources::ReadClockError;
+    use crate::persistence::PersistenceState;
     use crossbeam_channel::bounded;
     use quartz_domain::capture::*;
     use quartz_domain::rules::registry::{RegistryState, RuleRegistry};

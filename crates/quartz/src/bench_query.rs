@@ -1,13 +1,11 @@
 //! Fact-range and staged pipeline timings for an independent simulation database.
 
+use quartz_domain::capture::limits::UTC_DAY_MS;
 mod memory;
 
 use crate::{
     simulation::{SimulationPath, ValidateSimulationError},
-    store::{
-        self, ReadOnlyStore,
-        facts::{RangeRowCounts, UTC_DAY_MS},
-    },
+    store::{self, ReadOnlyStore, facts::RangeRowCounts},
 };
 use snafu::{ResultExt, Snafu};
 use std::{
@@ -159,6 +157,7 @@ impl<'path> BenchQuery<'path> {
             .date();
         let offset = reader
             .query_settings()
+            .map_err(crate::query::RunQueryError::from)
             .context(QuerySnafu)?
             .day_start_offset_min;
         let calendar =

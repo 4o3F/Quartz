@@ -1,9 +1,11 @@
 //! Temporary database worker for real pipe tests; no production paths are used.
 
 use super::*;
-use crate::{query::versions::VersionState, store::query::test_support::QueryFixture};
+use crate::{
+    query::versions::{VersionPort, VersionPublisher},
+    store::query::test_support::QueryFixture,
+};
 use std::thread::JoinHandle;
-use tokio::sync::watch;
 
 enum TestWrite {
     Append { reply: Sender<()> },
@@ -11,7 +13,7 @@ enum TestWrite {
 }
 pub(crate) struct TestDatabase {
     pub port: QueryPort,
-    pub versions: watch::Receiver<VersionState>,
+    pub versions: VersionPort,
     writes: Sender<TestWrite>,
     thread: Option<JoinHandle<()>>,
 }
@@ -19,11 +21,14 @@ impl TestDatabase {
     pub(crate) fn start() -> Self {
         let mut fixture = QueryFixture::new(4);
         let channel = QueryChannel::new();
-        let state = fixture
-            .store
-            .version_state("fixture-classification-v1")
-            .expect("initial versions");
-        let (publisher, versions) = watch::channel(state);
+        let snapshots =
+            quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+                .expect("rules")
+                .snapshots();
+        let crate::query::versions::VersionChannel {
+            mut publisher,
+            port: versions,
+        } = VersionPublisher::open(&mut fixture.store, snapshots).expect("versions");
         let (writes, receive) = bounded(QUERY_CHANNEL_CAPACITY);
         let thread = std::thread::spawn(move || {
             loop {
@@ -31,12 +36,12 @@ impl TestDatabase {
                     recv(receive) -> write => match write {
                         Ok(TestWrite::Append { reply }) => {
                             fixture.append_fact();
-                            let state = fixture.store.version_state("fixture-classification-v1").expect("committed versions");
-                            publisher.send_replace(state);
+                            publisher.publish(&mut fixture.store);
                             reply.send(()).expect("write receipt");
                         }
                         Ok(TestWrite::Stop) | Err(_) => return,
                     },
+                    recv(publisher.requests) -> request => match request { Ok(request) => publisher.receive(request), Err(_) => return },
                     recv(channel.receiver) -> query => match query {
                         Ok(query) => { let result = fixture.run(query.request).map_err(|error| ProtocolError::new(error.kind())); let _ = query.reply.send(result); }
                         Err(_) => return,

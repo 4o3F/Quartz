@@ -2,8 +2,10 @@
 
 mod capture_loop;
 mod database_loop;
+#[cfg(test)]
+mod tests;
 mod workers;
-use crate::capture::PersistenceState;
+use crate::persistence::PersistenceState;
 use crate::rules::registry::{RegistryResult, RunRegistryCommandError};
 use crossbeam_channel::{Receiver, Sender, TrySendError, select_biased};
 use quartz_domain::{
@@ -26,6 +28,8 @@ pub(crate) use workers::{JoinWorkersError, RequestShutdownError, StartWorkersErr
 /// Bounds final database settlement and worker joining, including SQLite's busy timeout.
 const WORKER_COUNT: usize = 2;
 const CONTROL_CAPACITY: usize = 1;
+/// Bounds database and capture notifications waiting for the main thread.
+const MAIN_NOTIFICATION_CAPACITY: usize = 1024;
 pub(crate) const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 /// Begin a pending transaction before the one-second commit limit (03 §4.2).
 pub(super) const COMMIT_HEADROOM: Duration = Duration::from_millis(100);
@@ -308,115 +312,5 @@ impl Drop for WorkerGuard {
             }
             (self.main.wake)();
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::capture::WriteQueue;
-    use crate::core::sources::{ClockReader, ReadClockError};
-    use capture_loop::{CaptureLoop, Settlement};
-    use crossbeam_channel::bounded;
-    use quartz_domain::capture::*;
-    use quartz_domain::rules::registry::{RegistryState, RuleRegistry};
-
-    struct TestClock(Timestamp);
-    impl ClockReader for TestClock {
-        fn read(&self) -> Result<Timestamp, ReadClockError> {
-            Ok(self.0)
-        }
-    }
-
-    #[test]
-    fn shutdown_notifications_deliver_values_and_tolerate_closed_receivers() {
-        let (sender, receiver) = bounded(CONTROL_CAPACITY);
-        sender.send_during_shutdown(Worker::Capture);
-        assert!(matches!(
-            receiver.recv().expect("completion"),
-            Worker::Capture
-        ));
-        drop(receiver);
-        sender.send_during_shutdown(Worker::Database);
-
-        let (sender, receiver) = bounded(CONTROL_CAPACITY);
-        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let main = MainPort {
-            sender,
-            wake: {
-                let wakes = Arc::clone(&wakes);
-                Arc::new(move || {
-                    wakes.fetch_add(1, Ordering::Relaxed);
-                })
-            },
-        };
-        main.send_during_shutdown(MainCommand::Fatal(Worker::Capture));
-        assert!(matches!(
-            receiver.recv().expect("fatal command"),
-            MainCommand::Fatal(Worker::Capture)
-        ));
-        assert_eq!(wakes.load(Ordering::Relaxed), 1);
-        drop(receiver);
-        main.send_during_shutdown(MainCommand::Fatal(Worker::Database));
-        assert_eq!(
-            wakes.load(Ordering::Relaxed),
-            1,
-            "no wake after receiver teardown"
-        );
-    }
-
-    #[test]
-    fn resume_notifications_create_only_one_clock_segment() {
-        let at = Timestamp {
-            utc: UtcInstant::try_from(0).expect("UTC"),
-            mono: MonoInstant::from_millis(0),
-        };
-        let started = CaptureCore::start(RunId::new(1), at).expect("core");
-        let (_sender, observed) = bounded(limits::MAIN_QUEUE_CAPACITY);
-        let (_feedback, replies) = bounded(limits::WRITE_QUEUE_CAPACITY);
-        let (_shutdown, stop) = bounded(CONTROL_CAPACITY);
-        let (database, _writes) = bounded(CONTROL_CAPACITY);
-        let (main, _commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
-        let snapshots = RuleRegistry::from_state(RegistryState::default())
-            .expect("rules")
-            .snapshots();
-        let mut capture = CaptureLoop {
-            #[cfg(windows)]
-            foreground: crate::platform::ForegroundResolver::new(),
-            core: started.core,
-            run: RunId::new(1),
-            at,
-            snapshots: snapshots.clone(),
-            observed,
-            replies,
-            stop,
-            database,
-            writer: WriteQueue::new(),
-            main: MainPort {
-                sender: main,
-                wake: Arc::new(|| {}),
-            },
-            overloaded: Arc::new(AtomicBool::new(false)),
-            clock: Arc::new(TestClock(at)),
-        };
-        for event in [
-            CaptureEvent::Session(SessionStatus::Ready(Default::default())),
-            CaptureEvent::Stop(StopChange::Begin(StopReason::Suspended)),
-            CaptureEvent::ClockChanged(ClockChange::Resume),
-            CaptureEvent::Stop(StopChange::End(StopReason::Suspended)),
-        ] {
-            capture
-                .step(ObservedEvent { at, event }, Settlement::Deferred)
-                .expect("power observation");
-        }
-        let ended = capture
-            .core
-            .step(CaptureInput {
-                at,
-                rules: snapshots.load(),
-                event: CaptureEvent::Shutdown,
-            })
-            .expect("final segment");
-        assert!(ended.writes.iter().any(|write| matches!(write, CaptureWrite::CloseClockSegment { segment, .. } if segment.get() == 2)));
     }
 }

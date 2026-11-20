@@ -4,10 +4,7 @@ use super::{RunQueryError, input::QueryRange};
 use jiff::{ToSpan, tz::TimeZone};
 use quartz_protocol::{CategoryDuration, CategoryRef, HourStack, LocalDate};
 
-/// Data model 03 §1: absent day.start_offset_min means local midnight.
-pub(crate) const DEFAULT_DAY_START_OFFSET_MIN: i64 = 0;
-/// Data model 03 §1 limits the day offset to twelve hours.
-pub(crate) const MAX_DAY_START_OFFSET_MIN: i64 = 720;
+use crate::store::versions::{DEFAULT_DAY_START_OFFSET_MIN, MAX_DAY_START_OFFSET_MIN};
 
 #[derive(Debug, Clone)]
 pub(crate) struct DayCalendar {

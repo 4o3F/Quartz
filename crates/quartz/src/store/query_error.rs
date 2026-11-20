@@ -1,13 +1,16 @@
-//! Storage error boundary for the query shell.
+//! Storage error boundary for snapshot reads.
 #[derive(Debug, snafu::Snafu)]
-#[snafu(display("could not read SQLite query snapshot: {source}"))]
-pub(crate) struct ReadQueryError {
-    pub source: diesel::result::Error,
+#[snafu(module)]
+pub(crate) enum ReadQueryError {
+    #[snafu(display("could not read SQLite query snapshot: {source}"))]
+    Read { source: diesel::result::Error },
+    #[snafu(display("invalid persisted query settings"))]
+    InvalidSettings,
+    #[snafu(display("invalid persisted capture facts"))]
+    InvalidFacts,
 }
-impl From<diesel::result::Error> for crate::query::RunQueryError {
+impl From<diesel::result::Error> for ReadQueryError {
     fn from(source: diesel::result::Error) -> Self {
-        crate::query::RunQueryError::Read {
-            source: ReadQueryError { source },
-        }
+        Self::Read { source }
     }
 }

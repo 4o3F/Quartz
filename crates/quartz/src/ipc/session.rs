@@ -188,17 +188,9 @@ impl ConnectionSession {
                         decision.subscription = Some(subscription);
                         decision
                     }
-                    Op::QueryDay => Decision::from_query(
+                    Op::QueryDay | Op::QueryTimeline => Decision::from_query(
                         id,
-                        serde_json::from_value::<quartz_protocol::QueryDayRequest>(request.body)
-                            .map(crate::query::QueryRequest::Day),
-                    ),
-                    Op::QueryTimeline => Decision::from_query(
-                        id,
-                        serde_json::from_value::<quartz_protocol::QueryTimelineRequest>(
-                            request.body,
-                        )
-                        .map(crate::query::QueryRequest::Timeline),
+                        crate::query::QueryRequest::decode(request.op, request.body),
                     ),
                     Op::Hello
                     | Op::QueryRange

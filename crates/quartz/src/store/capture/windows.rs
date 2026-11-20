@@ -4,7 +4,7 @@ use super::{Capture, CaptureColumn, DbRowId, DecodeCaptureRowError, ExecuteCaptu
 use crate::store::{
     enums,
     rows::{ApplicationsRow, WindowInstancesRow},
-    schema::{applications, settings, window_instances},
+    schema::{applications, window_instances},
 };
 use diesel::prelude::{AsChangeset, ExpressionMethods, QueryDsl, RunQueryDsl};
 use diesel::{NullableExpressionMethods, OptionalExtension};
@@ -92,31 +92,7 @@ impl Capture<'_> {
         Ok(())
     }
     fn bump_metadata_version(&mut self) -> Result<(), ExecuteCaptureBatchError> {
-        let value = settings::table
-            .filter(settings::key.eq("metadata_version"))
-            .select(settings::value)
-            .first::<String>(self.connection)
-            .optional()?;
-        let version: i64 = match value {
-            Some(value) => serde_json::from_str(&value)
-                .map_err(|_| ExecuteCaptureBatchError::MetadataVersion)?,
-            None => 0,
-        };
-        let version = version
-            .checked_add(1)
-            .filter(|version| *version > 0)
-            .ok_or(ExecuteCaptureBatchError::MetadataVersion)?;
-        diesel::insert_into(settings::table)
-            .values((
-                settings::key.eq("metadata_version"),
-                settings::value.eq(version.to_string()),
-            ))
-            .on_conflict(settings::key)
-            .do_update()
-            .set(settings::value.eq(version.to_string()))
-            .execute(self.connection)?;
-        self.keys.metadata_version = Some(version);
-        Ok(())
+        self.effects.bump_metadata(self.connection)
     }
     fn application(
         &mut self,
