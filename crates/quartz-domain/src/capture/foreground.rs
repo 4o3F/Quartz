@@ -111,6 +111,7 @@ impl EvaluatedForeground {
         match &self.observed {
             ObservedForeground::None(reason) => IntervalFact::NoForeground(*reason),
             ObservedForeground::Window(row) => IntervalFact::Window {
+                app: (row.fields.level != CaptureLevel::Excluded).then(|| row.instance.app.clone()),
                 instance: (row.fields.level != CaptureLevel::Excluded).then_some(row.instance.id),
                 fields: row.fields.clone(),
             },

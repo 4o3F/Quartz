@@ -310,6 +310,22 @@ impl CaptureLoop {
         settlement: Settlement,
     ) -> Result<(), RunCaptureLoopError> {
         let mut parts = step.into_parts(self.run);
+        if parts
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, CaptureEffect::StateChanged(_)))
+            || parts.batch.as_ref().is_some_and(|batch| {
+                batch
+                    .writes
+                    .iter()
+                    .any(|write| matches!(write, CaptureWrite::OpenInterval(_)))
+            })
+        {
+            self.main.send(MainCommand::CaptureSnapshot {
+                state: self.core.state(),
+                interval: self.core.current_interval(),
+            })?;
+        }
         for effect in std::mem::take(&mut parts.effects) {
             self.publish_effect(effect)?;
         }

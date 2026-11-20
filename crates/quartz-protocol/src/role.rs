@@ -218,6 +218,8 @@ mod tests {
         assert!(Role::Host.authorize(Op::DataDelete).is_err());
         assert!(Role::Cli.authorize(Op::AnnotationsCreate).is_err());
         assert!(Role::Cli.authorize(Op::Subscribe).is_err());
+        assert!(Role::Host.authorize(Op::Subscribe).is_err());
+        assert!(Role::Ui.authorize(Op::Subscribe).is_ok());
         assert!(Role::Cli.authorize(Op::RulesTextImport).is_err());
         assert!(Role::Cli.authorize(Op::RulesTextValidate).is_ok());
         assert!(Role::Ui.authorize(Op::BrowserState).is_err());

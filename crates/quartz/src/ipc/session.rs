@@ -3,7 +3,7 @@
 use quartz_protocol::{
     AcceptedBody, CoreStatusRequest, CoreStatusResponse, Envelope, ErrorKind, Hello, HelloResponse,
     Op, PROTOCOL_VERSION, ProtoRange, ProtocolError, RequestId, Response, ResponseOutcome, Role,
-    UiFirstFrameRequest, UiOpenRequest,
+    Subscribe, SubscribeResponse, Topic, UiFirstFrameRequest, UiOpenRequest,
 };
 
 /// Roles permitted by the authenticated executable path.
@@ -40,9 +40,10 @@ pub(crate) struct ConnectionSession {
 pub(crate) struct Decision {
     pub response: Response,
     pub command: Option<UiCommand>,
+    pub subscription: Option<Subscribe>,
 }
 impl Decision {
-    fn error(id: Option<RequestId>, kind: ErrorKind) -> Self {
+    pub(crate) fn error(id: Option<RequestId>, kind: ErrorKind) -> Self {
         Self {
             response: Response {
                 id,
@@ -51,6 +52,7 @@ impl Decision {
                 },
             },
             command: None,
+            subscription: None,
         }
     }
     fn success(id: RequestId, body: impl serde::Serialize) -> Self {
@@ -61,6 +63,7 @@ impl Decision {
                     outcome: ResponseOutcome::Ok { body },
                 },
                 command: None,
+                subscription: None,
             },
             Err(error) => {
                 tracing::error!(%error, "could not encode IPC response body");
@@ -78,6 +81,12 @@ impl ConnectionSession {
     }
     pub(crate) fn hello_pending(&self) -> bool {
         matches!(self.state, State::HelloPending)
+    }
+    pub(crate) fn role(&self) -> Option<Role> {
+        match self.state {
+            State::Ready(role) => Some(role),
+            _ => None,
+        }
     }
     pub(crate) fn closing(&self) -> bool {
         matches!(self.state, State::Closing)
@@ -153,7 +162,24 @@ impl ConnectionSession {
                         decision.command = Some(command);
                         decision
                     }
-                    // TODO(M2-B2): Implement subscriptions and database query dispatch.
+                    Op::Subscribe => {
+                        let Ok(subscription) = serde_json::from_value::<Subscribe>(request.body)
+                        else {
+                            return Decision::error(Some(id), ErrorKind::BadRequest);
+                        };
+                        // TODO(M2-C): Admit day topics with query-pipeline fact versions, atomically.
+                        if subscription
+                            .topics
+                            .iter()
+                            .any(|topic| matches!(topic, Topic::Day(_)))
+                        {
+                            return Decision::error(Some(id), ErrorKind::NotImplemented);
+                        }
+                        let mut decision = Decision::success(id, SubscribeResponse {});
+                        decision.subscription = Some(subscription);
+                        decision
+                    }
+                    // TODO(M2-C): Dispatch database queries.
                     _ => Decision::error(Some(id), ErrorKind::NotImplemented),
                 }
             }
@@ -181,7 +207,10 @@ mod tests {
         let mut pending = ConnectionSession::new(AllowedRoles::Quartz);
         assert_eq!(
             pending
-                .receive(request(7, Op::CoreStatus, serde_json::json!({})), &status)
+                .receive(
+                    request(7, Op::CoreStatus, serde_json::json!({})),
+                    &status.status
+                )
                 .response
                 .outcome,
             ResponseOutcome::Err {
@@ -192,7 +221,7 @@ mod tests {
         let mut session = ConnectionSession::new(AllowedRoles::Quartz);
         let hello =
             serde_json::json!({"proto":{"min":1,"max":1},"role":"cli","client_version":"test"});
-        let response = session.receive(request(1, Op::Hello, hello), &status);
+        let response = session.receive(request(1, Op::Hello, hello), &status.status);
         assert!(!session.closing());
         assert!(matches!(
             response.response.outcome,
@@ -200,13 +229,19 @@ mod tests {
         ));
         assert_eq!(
             session
-                .receive(request(2, Op::UiOpen, serde_json::json!({})), &status)
+                .receive(
+                    request(2, Op::UiOpen, serde_json::json!({})),
+                    &status.status
+                )
                 .command,
             Some(UiCommand::Open)
         );
         assert_eq!(
             session
-                .receive(request(3, Op::UiFirstFrame, serde_json::json!({})), &status)
+                .receive(
+                    request(3, Op::UiFirstFrame, serde_json::json!({})),
+                    &status.status
+                )
                 .response
                 .outcome,
             ResponseOutcome::Err {
@@ -215,7 +250,10 @@ mod tests {
         );
         assert_eq!(
             session
-                .receive(request(4, Op::CoreStatus, serde_json::json!(null)), &status)
+                .receive(
+                    request(4, Op::CoreStatus, serde_json::json!(null)),
+                    &status.status
+                )
                 .response
                 .outcome,
             ResponseOutcome::Err {
@@ -233,7 +271,7 @@ mod tests {
         let hello = serde_json::json!({"proto":{"min":1,"max":1},"client_version":"test","role":"host","browser":{
             "profile_instance_id":"12345678-1234-1234-1234-123456789abc","browser_session_id":"12345678-1234-1234-1234-123456789abc",
             "epoch":1,"proto":{"min":1,"max":1},"browser":"edge","extension_id":"test"}});
-        let decision = session.receive(request(1, Op::Hello, hello), &receiver.borrow());
+        let decision = session.receive(request(1, Op::Hello, hello), &receiver.borrow().status);
         assert_eq!(
             decision.response.outcome,
             ResponseOutcome::Err {
@@ -249,5 +287,67 @@ mod tests {
             assert_eq!(AllowedRoles::Quartz.permits(role), role != Role::Host);
             assert_eq!(AllowedRoles::Host.permits(role), role == Role::Host);
         }
+    }
+    #[test]
+    fn subscribe_validation_is_atomic_and_role_checked_without_io() {
+        let publisher =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("subscribe".into()));
+        let receiver = publisher.subscribe();
+        let status = &receiver.borrow().status;
+        let mut session = ConnectionSession::new(AllowedRoles::Quartz);
+        session.receive(request(1, Op::Hello, serde_json::json!({"proto":{"min":1,"max":1},"role":"ui","client_version":"test","ui":{"state":"starting"}})), status);
+        for body in [
+            serde_json::json!({"topics":["weather"]}),
+            serde_json::json!({"topics":["day:2026-02-30"]}),
+            serde_json::json!({"topics":null}),
+        ] {
+            let decision = session.receive(request(2, Op::Subscribe, body), status);
+            assert!(decision.subscription.is_none());
+            assert!(matches!(
+                decision.response.outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError {
+                        kind: ErrorKind::BadRequest,
+                        ..
+                    }
+                }
+            ));
+        }
+        let rejected = session.receive(
+            request(
+                3,
+                Op::Subscribe,
+                serde_json::json!({"topics":["state","day:2026-11-20"]}),
+            ),
+            status,
+        );
+        assert!(rejected.subscription.is_none());
+        assert!(matches!(
+            rejected.response.outcome,
+            ResponseOutcome::Err {
+                error: ProtocolError {
+                    kind: ErrorKind::NotImplemented,
+                    ..
+                }
+            }
+        ));
+        let accepted = session.receive(
+            request(
+                4,
+                Op::Subscribe,
+                serde_json::json!({"topics":["state","control"]}),
+            ),
+            status,
+        );
+        assert_eq!(
+            accepted.subscription.expect("valid subscription").topics,
+            vec![Topic::State, Topic::Control]
+        );
+        assert_eq!(
+            accepted.response.outcome,
+            ResponseOutcome::Ok {
+                body: serde_json::json!({})
+            }
+        );
     }
 }

@@ -7,6 +7,7 @@ mod handshake;
 mod op;
 mod role;
 mod startup_error;
+mod state;
 mod status;
 mod topic;
 
@@ -23,7 +24,11 @@ pub use handshake::{
 pub use op::{ControlBody, ControlOp, Op, OpFamily};
 pub use role::{AuthorizeOpError, Role};
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};
-pub use topic::{LocalDate, ParseTopicError, Subscribe, Topic};
+pub use topic::{LocalDate, ParseTopicError, Subscribe, SubscribeResponse, Topic};
+
+pub use state::{
+    AppIdentity, ForegroundState, HourCycle, LocaleSettings, StateSnapshot, UiLanguage, Weekday,
+};
 
 pub use status::{
     AcceptedBody, BrowserStream, BrowserStreamId, CoreStatusRequest, CoreStatusResponse,

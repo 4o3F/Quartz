@@ -23,9 +23,9 @@ impl Capture<'_> {
         let mut row = IntervalsRow::opened(Self::run_id(run)?, segment, open)?;
         match &open.fact {
             IntervalFact::NoForeground(reason) => row.no_foreground_reason = Some((*reason).into()),
-            IntervalFact::Window { instance, fields } => {
-                self.interval_window(run, *instance, fields, &mut row)?
-            }
+            IntervalFact::Window {
+                instance, fields, ..
+            } => self.interval_window(run, *instance, fields, &mut row)?,
         }
         let replacement = DbRowId::new(
             diesel::insert_into(intervals::table)

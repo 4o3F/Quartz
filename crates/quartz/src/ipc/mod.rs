@@ -1,11 +1,13 @@
-//! Core IPC decisions, status snapshots, and the blocking command client.
+//! Core IPC sessions, registry and outbox actors, snapshots, and command clients.
 
 pub(crate) mod client;
+pub(crate) mod outbox;
+pub(crate) mod registry;
 mod session;
 mod status;
 
 pub(crate) use session::{AllowedRoles, ConnectionSession, UiCommand};
-pub(crate) use status::StatusPublisher;
+pub(crate) use status::{PublishedStatus, StatusPublisher};
 
 use std::sync::Arc;
 

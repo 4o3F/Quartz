@@ -576,6 +576,13 @@ impl CaptureCore {
             self.phase.state()
         }
     }
+    /// Returns the current privacy-filtered interval with its actual boundary.
+    #[must_use]
+    pub fn current_interval(&self) -> Option<OpenInterval> {
+        matches!(self.state(), CaptureState::Tracking(_))
+            .then(|| self.phase.interval())
+            .flatten()
+    }
     /// Last transaction acknowledged by the store shell.
     pub fn committed_batch(&self) -> BatchId {
         self.ledger.committed

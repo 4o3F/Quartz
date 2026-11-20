@@ -116,7 +116,7 @@ fn handshake_status_and_ui_open_delivery() {
     let fixture = Fixture::new();
     let mut cli = fixture.cli();
     let status = cli.status().expect("status");
-    assert_eq!(status, *fixture.status.subscribe().borrow());
+    assert_eq!(status, fixture.status.subscribe().borrow().status);
     cli.open_ui().expect("accepted open");
     assert_eq!(
         fixture
@@ -361,5 +361,262 @@ fn silent_hello_expires_and_a_ready_client_survives_the_same_deadline() {
     assert!(
         ready.status().is_ok(),
         "hello timeout must stop applying after the handshake"
+    );
+}
+
+/// Short transport stress substitutes for the ten-minute M2-F acceptance run (04 §9).
+const SLOW_CLIENT_TEST_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
+/// Allows loaded Windows test runners headroom while catching a stalled I/O runtime.
+const STATUS_LATENCY_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+/// A watch publication must finish independently of client reads (01 §6).
+const PUBLISH_LATENCY_LIMIT: std::time::Duration = std::time::Duration::from_millis(100);
+/// Enough small status responses to exhaust a stalled connection's 1 MiB budget.
+const FLOOD_REQUESTS: u64 = 20_000;
+/// Bound the publisher's stress rate while keeping several changes per throttle window.
+const STRESS_PUBLISH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+
+fn state_event(client: &mut CoreClient) -> quartz_protocol::StateSnapshot {
+    let Envelope::Event(event) = client.read_envelope().expect("state event") else {
+        panic!("expected event after subscription response");
+    };
+    assert_eq!(event.topic, quartz_protocol::Topic::State);
+    serde_json::from_value(event.body).expect("typed state body")
+}
+fn publish_change(publisher: &StatusPublisher, change: u64) {
+    let persistence = if change.is_multiple_of(2) {
+        crate::capture::PersistenceState::Ready
+    } else {
+        crate::capture::PersistenceState::Failed { commands: 1 }
+    };
+    publisher.publish(None, persistence);
+}
+
+/// Fits the capture title cap and fills the 64 KiB pipe buffer within the scaled test.
+const STRESS_TITLE_CHARACTERS: usize = 4000;
+fn publish_large_foreground(publisher: &StatusPublisher, change: u64) {
+    use quartz_domain::capture::*;
+    let row = OpenInterval {
+        id: RowId::from_persisted(1),
+        segment: SegmentId::from_persisted(1),
+        session: SessionKey::from_persisted(1),
+        start: Timestamp {
+            utc: UtcInstant::try_from(123).expect("test UTC"),
+            mono: MonoInstant::from_millis(0),
+        },
+        fact: IntervalFact::Window {
+            app: Some(AppIdentity::Exe("c:\\app.exe".into())),
+            instance: Some(WindowId::from_persisted(1)),
+            fields: CapturedFields {
+                level: CaptureLevel::Full,
+                title: Some(format!("{change}{}", "界".repeat(STRESS_TITLE_CHARACTERS))),
+                title_status: TitleStatus::Ok,
+                privacy: None,
+                web: quartz_domain::rules::WebAction::None,
+            },
+        },
+    };
+    let tracking = CaptureState::Tracking(row.fact.clone());
+    publisher.publish_interval(Some(row));
+    publisher.publish(Some(&tracking), crate::capture::PersistenceState::Ready);
+}
+
+#[test]
+fn subscribe_response_precedes_snapshot_and_ten_changes_coalesce() {
+    let fixture = Fixture::new();
+    let mut ui = fixture.ui();
+    assert_eq!(
+        ui.request(Op::Subscribe, &json!({"topics":["state"]}))
+            .expect("subscribe"),
+        json!({})
+    );
+    let first = state_event(&mut ui);
+    assert_eq!(first, fixture.status.subscribe().borrow().snapshot());
+    for change in 0..10 {
+        publish_change(&fixture.status, change);
+    }
+    let latest = state_event(&mut ui);
+    assert_eq!(latest, fixture.status.subscribe().borrow().snapshot());
+    assert!(
+        matches!(
+            ui.read_envelope(),
+            Err(CallCoreError::ResponseTimeout { .. })
+        ),
+        "no third snapshot without a change"
+    );
+}
+
+#[test]
+fn subscribe_rejects_cli_unknown_topics_and_entire_day_request() {
+    let fixture = Fixture::new();
+    let mut cli = fixture.cli();
+    assert!(matches!(
+        cli.request(Op::Subscribe, &json!({"topics":["state"]})),
+        Err(CallCoreError::Protocol {
+            kind: ErrorKind::Forbidden
+        })
+    ));
+    let mut ui = fixture.ui();
+    assert!(matches!(
+        ui.request(Op::Subscribe, &json!({"topics":["state","day:2026-11-20"]})),
+        Err(CallCoreError::Protocol {
+            kind: ErrorKind::NotImplemented
+        })
+    ));
+    assert!(matches!(
+        ui.request(Op::Subscribe, &json!({"topics":["weather"]})),
+        Err(CallCoreError::Protocol {
+            kind: ErrorKind::BadRequest
+        })
+    ));
+    // A rejected mixed request must not leave a state event ahead of this response.
+    ui.status()
+        .expect("connection remains unsubscribed and usable");
+}
+
+#[test]
+fn stalled_state_reader_never_blocks_publication_or_another_clients_status() {
+    let fixture = Fixture::new();
+    let mut slow = fixture.ui();
+    slow.request(Op::Subscribe, &json!({"topics":["state"]}))
+        .expect("subscribe slow reader");
+    // Retain the immediate snapshot unread and never read this connection again.
+    let mut cli = fixture.cli();
+    let started = std::time::Instant::now();
+    let mut change = 0;
+    while started.elapsed() < SLOW_CLIENT_TEST_DURATION {
+        let publishing = std::time::Instant::now();
+        publish_large_foreground(&fixture.status, change);
+        assert!(
+            publishing.elapsed() < PUBLISH_LATENCY_LIMIT,
+            "publisher waited on stalled reader"
+        );
+        let requesting = std::time::Instant::now();
+        cli.status().expect("other connection status");
+        assert!(
+            requesting.elapsed() < STATUS_LATENCY_LIMIT,
+            "other connection waited on stalled reader"
+        );
+        change += 1;
+        std::thread::sleep(STRESS_PUBLISH_INTERVAL);
+    }
+    assert!(change > 10);
+    let metrics = fixture.server.metrics();
+    assert_eq!(metrics.len(), 2, "both connections remain alive");
+    assert!(
+        metrics.iter().any(|metric| metric.queued > 0),
+        "large state frames must actually fill the unread pipe"
+    );
+    for metric in metrics {
+        assert!(metric.queued <= crate::ipc::outbox::SEND_BUFFER_LIMIT);
+        assert!(metric.peak <= crate::ipc::outbox::SEND_BUFFER_LIMIT);
+    }
+}
+
+#[test]
+fn flooding_unread_responses_closes_only_the_slow_connection() {
+    let fixture = Fixture::new();
+    let name = fixture.name.clone();
+    let (ready, started) = bounded(1);
+    let flood = std::thread::spawn(move || {
+        let mut slow = CoreClient::connect_named(
+            &name,
+            HelloRole::Ui {
+                ui: UiHello {
+                    state: UiState::Starting,
+                },
+            },
+        )
+        .expect("flood UI hello");
+        slow.request(Op::Subscribe, &json!({"topics":["state"]}))
+            .expect("flood UI subscribe");
+        ready.send(()).expect("announce flood");
+        let mut requests = Vec::new();
+        for id in 2..FLOOD_REQUESTS {
+            let request = json!({"t":"req","id":id,"op":"core.status","body":{}});
+            requests.extend_from_slice(&wire(&encode_json(&request).expect("flood request")));
+        }
+        match slow.write_bytes(&requests) {
+            Ok(()) => {}
+            Err(CallCoreError::Io { .. } | CallCoreError::ResponseTimeout { .. }) => {}
+            Err(error) => panic!("unexpected flood failure: {error}"),
+        }
+        // A forced server disconnect discards unread responses; drain any frame already buffered locally.
+        loop {
+            match slow.read_envelope() {
+                Ok(_) => {}
+                Err(CallCoreError::Io { .. } | CallCoreError::DecodeFrame { .. }) => break,
+                Err(error) => panic!("slow connection must close: {error}"),
+            }
+        }
+    });
+    started
+        .recv_timeout(crate::ipc::client::CONNECT_TIMEOUT)
+        .expect("flood started");
+    let mut cli = fixture.cli();
+    let start = std::time::Instant::now();
+    while start.elapsed() < SLOW_CLIENT_TEST_DURATION {
+        let requesting = std::time::Instant::now();
+        cli.status().expect("healthy client during flood");
+        assert!(requesting.elapsed() < STATUS_LATENCY_LIMIT);
+        std::thread::sleep(STRESS_PUBLISH_INTERVAL);
+    }
+    flood.join().expect("flood closes within response deadline");
+    cli.status()
+        .expect("healthy client after slow connection closes");
+    assert!(
+        fixture
+            .server
+            .metrics()
+            .iter()
+            .all(|metric| metric.peak <= crate::ipc::outbox::SEND_BUFFER_LIMIT)
+    );
+}
+
+#[test]
+fn quit_control_is_implicit_and_flushed_before_server_shutdown() {
+    let fixture = Fixture::new();
+    let mut ui = fixture.ui();
+    // No explicit control subscription is necessary for UI lifecycle notifications.
+    let reader = std::thread::spawn(move || ui.read_envelope().expect("shutdown control"));
+    fixture
+        .server
+        .control(quartz_protocol::ControlOp::UiShutdown);
+    fixture.stop();
+    let Envelope::Event(event) = reader.join().expect("UI reader") else {
+        panic!("expected control event");
+    };
+    assert_eq!(event.topic, quartz_protocol::Topic::Control);
+    let control: quartz_protocol::ControlBody =
+        serde_json::from_value(event.body).expect("typed control");
+    assert_eq!(control.op, quartz_protocol::ControlOp::UiShutdown);
+}
+
+#[test]
+fn subscriptions_add_idempotently_and_control_is_not_duplicated() {
+    let fixture = Fixture::new();
+    let mut ui = fixture.ui();
+    ui.request(Op::Subscribe, &json!({"topics":["control"]}))
+        .expect("control subscription");
+    ui.request(Op::Subscribe, &json!({"topics":["state"]}))
+        .expect("add state subscription");
+    state_event(&mut ui);
+    ui.request(
+        Op::Subscribe,
+        &json!({"topics":["state","state","control"]}),
+    )
+    .expect("idempotent subscription");
+    fixture
+        .server
+        .control(quartz_protocol::ControlOp::UiShutdown);
+    let Envelope::Event(event) = ui.read_envelope().expect("single control") else {
+        panic!("control event");
+    };
+    assert_eq!(event.topic, quartz_protocol::Topic::Control);
+    assert!(
+        matches!(
+            ui.read_envelope(),
+            Err(CallCoreError::ResponseTimeout { .. })
+        ),
+        "no duplicate state or control event"
     );
 }

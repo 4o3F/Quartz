@@ -1,6 +1,6 @@
 //! Application dictionary and window instance writes.
 
-use super::{Capture, CaptureColumn, DbRowId, ExecuteCaptureBatchError};
+use super::{Capture, CaptureColumn, DbRowId, DecodeCaptureRowError, ExecuteCaptureBatchError};
 use crate::store::{
     enums,
     rows::{ApplicationsRow, WindowInstancesRow},
@@ -121,6 +121,26 @@ impl Capture<'_> {
     }
 }
 impl ApplicationsRow {
+    pub(super) fn into_identity(self) -> Result<AppIdentity, DecodeCaptureRowError> {
+        let context = super::RowContext::new(self.id);
+        Ok(match self.kind {
+            enums::ApplicationKind::Exe => {
+                AppIdentity::Exe(context.required(self.exe_path, applications::exe_path)?)
+            }
+            enums::ApplicationKind::Aumid => {
+                AppIdentity::Aumid(context.required(self.aumid, applications::aumid)?)
+            }
+            enums::ApplicationKind::Unresolved => AppIdentity::Unresolved(
+                self.identity_key
+                    .strip_prefix("unresolved:")
+                    .ok_or(DecodeCaptureRowError::ApplicationIdentity {
+                        field: context.field(applications::identity_key),
+                    })?
+                    .to_owned(),
+            ),
+        })
+    }
+
     fn observed(
         instance: &WindowInstance,
         at: Timestamp,

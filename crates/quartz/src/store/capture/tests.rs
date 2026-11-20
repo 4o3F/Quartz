@@ -130,6 +130,19 @@ impl Fixture {
         );
         self.persist(now, foreground(1, "first"));
     }
+    fn recovered_foreground(&mut self) -> IntervalFact {
+        let mut keys = CaptureKeys::default();
+        let metadata = metadata();
+        let mut runs = self
+            .store
+            .capture(&mut keys, &metadata)
+            .load_recoverable()
+            .expect("load persisted intervals");
+        assert_eq!(runs.len(), 1, "one recoverable run");
+        let mut run = runs.pop().expect("recoverable run");
+        assert_eq!(run.intervals.len(), 1, "one open foreground interval");
+        run.intervals.pop().expect("open interval").row.fact
+    }
     fn intervals(&mut self) -> Vec<IntervalsRow> {
         intervals::table
             .order(intervals::id)
@@ -664,6 +677,136 @@ fn recovery_closes_each_row_at_its_confirmation_and_splits_midnight() {
         .load::<i64>(&mut fixture.store._writer)
         .expect("versions");
     assert_eq!(versions, vec![0, 1]);
+}
+
+#[test]
+fn recovery_restores_allowed_application_identities_and_omits_excluded_ones() {
+    for identity in [
+        AppIdentity::Exe(r"c:\app.exe".into()),
+        AppIdentity::Aumid("Package!App".into()),
+        AppIdentity::Unresolved("TestClass".into()),
+    ] {
+        let mut fixture = Fixture::new(at(0));
+        fixture.persist(
+            at(0),
+            CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+        );
+        let CaptureEvent::Foreground {
+            foreground: Foreground::Window { mut facts, .. },
+            ..
+        } = foreground(1, "recoverable title")
+        else {
+            panic!("window fixture");
+        };
+        facts.app = identity.clone();
+        for level in [
+            CaptureLevel::Full,
+            CaptureLevel::TitleHidden,
+            CaptureLevel::Excluded,
+        ] {
+            let now = match level {
+                CaptureLevel::Full => at(0),
+                CaptureLevel::TitleHidden => at(1),
+                CaptureLevel::Excluded => at(2),
+            };
+            let privacy = match level {
+                CaptureLevel::Full => PrivacyContext::default(),
+                CaptureLevel::TitleHidden => PrivacyContext {
+                    mode: PrivacyMode::NoTitles,
+                    ..PrivacyContext::default()
+                },
+                CaptureLevel::Excluded => {
+                    use quartz_domain::rules::registry::RegistryCommand;
+                    let mut registry = RuleRegistry::from_state(RegistryState::default())
+                        .expect("privacy registry");
+                    let decision = registry.decide(RegistryCommand::Apply {
+                        key: "user.recovery".parse().expect("privacy rule set key"),
+                        file: "recovery-test.toml".into(),
+                        text: "format='quartz-rules/1'\n[set]\nkey='user.recovery'\nkind='privacy'\nname='Recovery tests'\n[[rule]]\nid='exclude'\nlabel='Excluded application'\npreset='excluded'\nwhen=[{field='app.exe_name',op='equals',value='app.exe'}]\n".into(),
+                        base_version: 0,
+                    }).into_parts();
+                    decision.reply.expect("valid exclusion rule");
+                    registry
+                        .committed(decision.outcome.expect("rule commit token"))
+                        .expect("commit exclusion rule");
+                    fixture.rules = registry.snapshots().load();
+                    PrivacyContext::default()
+                }
+            };
+            fixture.persist(
+                now,
+                CaptureEvent::Foreground {
+                    source: ObservationSource::Review,
+                    foreground: Foreground::Window {
+                        facts: facts.clone(),
+                        privacy,
+                    },
+                },
+            );
+            diesel::update(applications::table)
+                .set(applications::display_name.eq("Friendly name"))
+                .execute(&mut fixture.store._writer)
+                .expect("rename display metadata");
+            let IntervalFact::Window {
+                app,
+                instance,
+                fields,
+            } = fixture.recovered_foreground()
+            else {
+                panic!("recovered window interval");
+            };
+            assert_eq!(fields.level, level);
+            match level {
+                CaptureLevel::Full | CaptureLevel::TitleHidden => {
+                    assert_eq!(
+                        app.as_ref(),
+                        Some(&identity),
+                        "allowed {level:?} application identity must survive recovery"
+                    );
+                    assert!(instance.is_some());
+                }
+                CaptureLevel::Excluded => {
+                    assert_eq!(app, None);
+                    assert_eq!(instance, None);
+                    let rows = fixture.intervals();
+                    let row = rows.last().expect("excluded row");
+                    assert_eq!(row.app_id, None);
+                    assert_eq!(row.window_instance_id, None);
+                }
+            }
+            assert_eq!(
+                fields.title.as_deref(),
+                (level == CaptureLevel::Full).then_some("recoverable title")
+            );
+        }
+    }
+}
+
+#[test]
+fn recovery_rejects_missing_application_reference_in_an_allowed_interval() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    let row_id = fixture.intervals()[0].id.expect("interval id");
+    diesel::update(intervals::table)
+        .set(intervals::app_id.eq(None::<i64>))
+        .execute(&mut fixture.store._writer)
+        .expect("remove required application reference");
+    let mut keys = CaptureKeys::default();
+    let metadata = metadata();
+    let error = fixture
+        .store
+        .capture(&mut keys, &metadata)
+        .load_recoverable()
+        .expect_err("allowed interval needs an application identity");
+    let recovery::LoadRecoverableRunError::Decode {
+        source: DecodeCaptureRowError::MissingValue { field },
+    } = error
+    else {
+        panic!("expected missing application reference: {error:?}");
+    };
+    assert_eq!(field.table, TableName::of(intervals::table));
+    assert_eq!(field.column, ColumnName::of(intervals::app_id));
+    assert_eq!(field.row_id, Some(row_id));
 }
 
 #[test]

@@ -63,6 +63,9 @@ windows = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(windows)'.dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [dev-dependencies]
 quartz-i18n.workspace = true
 quartz-domain = { workspace = true, features = ["test-support"] }

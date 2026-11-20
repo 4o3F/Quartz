@@ -7,13 +7,16 @@ use super::{
 };
 use crate::{
     core::app::SHUTDOWN_TIMEOUT,
-    ipc::{ConnectionSession, UiPort},
+    ipc::{
+        ConnectionSession, UiPort,
+        outbox::OutboxTask,
+        registry::{ControlMessage, RegistryHandle},
+    },
 };
 use crossbeam_channel::{Receiver, bounded};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use quartz_protocol::{
-    CoreStatusResponse, Envelope, ErrorKind, ProtocolError, ResponseOutcome, decode_json,
-    encode_json, frame_codec,
+    Envelope, ErrorKind, ProtocolError, ResponseOutcome, decode_json, frame_codec,
 };
 use snafu::{ResultExt, Snafu};
 use std::{
@@ -24,12 +27,15 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncWrite, split},
+    io::{AsyncRead, split},
     net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions},
     sync::{mpsc, oneshot, watch},
     task::JoinSet,
 };
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodecError};
+use tokio_util::{
+    bytes::BytesMut,
+    codec::{FramedRead, LengthDelimitedCodec, LengthDelimitedCodecError},
+};
 use windows::Win32::{
     Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE},
     System::{
@@ -42,8 +48,23 @@ use windows::Win32::{
 const PIPE_INSTANCES: usize = 8;
 /// Core blocking-pool ceiling from 01 §7.2; the pipe tasks do not use that pool.
 const MAX_BLOCKING_THREADS: usize = 2;
-/// Bounded response count for B1 (04 §7); B2 adds byte accounting and coalescing.
-const RESPONSE_CAPACITY: usize = 16;
+/// Bounded non-blocking main-thread control commands (01 §6).
+const CONTROL_MAILBOX_CAPACITY: usize = 64;
+/// Yield while a bounded shutdown flush completes (01 §6).
+const SHUTDOWN_FLUSH_POLL: Duration = Duration::from_millis(10);
+
+enum ServerMessage {
+    Control(ControlMessage),
+    #[cfg(test)]
+    Inspect {
+        reply: crossbeam_channel::Sender<Vec<OutboxMetric>>,
+    },
+}
+#[cfg(test)]
+pub(crate) struct OutboxMetric {
+    pub(crate) queued: usize,
+    pub(crate) peak: usize,
+}
 /// Bound the final error response and close grace period (04 §2 error-and-close).
 const CLOSE_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 /// Require a complete first hello frame within five seconds (04 §4).
@@ -95,13 +116,14 @@ pub(crate) enum StopPipeServerError {
 }
 #[derive(Debug)]
 pub(crate) struct PipeServer {
+    control: mpsc::Sender<ServerMessage>,
     stop: Option<oneshot::Sender<()>>,
     completed: Receiver<()>,
     thread: Option<JoinHandle<()>>,
 }
 impl PipeServer {
     pub(crate) fn start(
-        status: watch::Receiver<CoreStatusResponse>,
+        status: watch::Receiver<crate::ipc::PublishedStatus>,
         ui: UiPort,
     ) -> Result<Self, StartPipeServerError> {
         let owner = ProcessIdentity::current().context(start_pipe_server_error::IdentitySnafu)?;
@@ -111,7 +133,7 @@ impl PipeServer {
     pub(crate) fn start_named(
         name: PipeName,
         owner: ProcessIdentity,
-        status: watch::Receiver<CoreStatusResponse>,
+        status: watch::Receiver<crate::ipc::PublishedStatus>,
         ui: UiPort,
     ) -> Result<Self, StartPipeServerError> {
         Self::start_configured(
@@ -127,10 +149,11 @@ impl PipeServer {
     pub(super) fn start_configured(
         config: PipeServerConfig,
         owner: ProcessIdentity,
-        status: watch::Receiver<CoreStatusResponse>,
+        status: watch::Receiver<crate::ipc::PublishedStatus>,
         ui: UiPort,
     ) -> Result<Self, StartPipeServerError> {
         let (stop, stopping) = oneshot::channel();
+        let (control, controls) = mpsc::channel(CONTROL_MAILBOX_CAPACITY);
         let (ready, startup) = bounded(LIFECYCLE_CAPACITY);
         let (finished, completed) = bounded(LIFECYCLE_CAPACITY);
         let io = IoThread {
@@ -142,6 +165,7 @@ impl PipeServer {
             status,
             ui,
             stopping,
+            controls,
         };
         let thread = thread::Builder::new()
             .name("quartz-io".into())
@@ -157,6 +181,7 @@ impl PipeServer {
             })
             .context(start_pipe_server_error::IoSnafu)?;
         let server = Self {
+            control,
             stop: Some(stop),
             completed,
             thread: Some(thread),
@@ -166,6 +191,24 @@ impl PipeServer {
             Ok(Err(error)) => Err(error),
             Err(_) => Err(StartPipeServerError::Startup),
         }
+    }
+    pub(crate) fn control(&self, op: quartz_protocol::ControlOp) {
+        if let Err(error) = self
+            .control
+            .try_send(ServerMessage::Control(ControlMessage { op }))
+        {
+            tracing::warn!(%error, "could not queue main-thread UI control");
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn metrics(&self) -> Vec<OutboxMetric> {
+        let (reply, received) = crossbeam_channel::bounded(1);
+        self.control
+            .try_send(ServerMessage::Inspect { reply })
+            .expect("queue metric request");
+        received
+            .recv_timeout(SHUTDOWN_TIMEOUT)
+            .expect("outbox metrics")
     }
     pub(crate) fn shutdown(mut self) -> Result<(), StopPipeServerError> {
         self.stop_and_join()
@@ -245,9 +288,10 @@ impl PipeListener {
 struct IoThread {
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
-    status: watch::Receiver<CoreStatusResponse>,
+    status: watch::Receiver<crate::ipc::PublishedStatus>,
     ui: UiPort,
     stopping: oneshot::Receiver<()>,
+    controls: mpsc::Receiver<ServerMessage>,
 }
 impl IoThread {
     fn run(
@@ -273,8 +317,9 @@ impl IoThread {
         runtime.block_on(self.serve(pipes));
         Ok(())
     }
-    fn slot(&self) -> Slot {
+    fn slot(&self, registry: &RegistryHandle) -> Slot {
         Slot {
+            registry: registry.clone(),
             listener: Arc::clone(&self.listener),
             timeouts: self.timeouts,
             status: self.status.clone(),
@@ -282,17 +327,40 @@ impl IoThread {
         }
     }
     async fn serve(mut self, pipes: Vec<NamedPipeServer>) {
+        let registry = RegistryHandle::start(self.status.clone());
         let mut slots = JoinSet::new();
         for pipe in pipes {
-            slots.spawn(self.slot().run(Some(pipe)));
+            slots.spawn(self.slot(&registry).run(Some(pipe)));
         }
         loop {
             tokio::select! {
                 _ = &mut self.stopping => break,
+                message = self.controls.recv() => {
+                    if let Some(message) = message { Self::server_message(message, &registry).await; }
+                }
                 failure = slots.join_next() => {
                     tracing::error!(?failure, "pipe slot task ended; restarting slot");
-                    slots.spawn(self.slot().run(None));
+                    slots.spawn(self.slot(&registry).run(None));
                 }
+            }
+        }
+        while let Ok(message) = self.controls.try_recv() {
+            Self::server_message(message, &registry).await;
+        }
+        // Barrier processes preceding controls before checking pending bytes; clients are never awaited by the registry.
+        match registry.outboxes().await {
+            Ok(outboxes) => {
+                let deadline = tokio::time::Instant::now() + self.timeouts.close_flush;
+                while outboxes.iter().any(|outbox| outbox.queued_bytes() != 0)
+                    && tokio::time::Instant::now() < deadline
+                {
+                    tokio::time::sleep(SHUTDOWN_FLUSH_POLL).await;
+                }
+                // Let readers consume a successfully flushed shutdown notification before disconnect.
+                tokio::time::sleep_until(deadline).await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "registry unavailable during bounded shutdown flush")
             }
         }
         slots.abort_all();
@@ -302,6 +370,31 @@ impl IoThread {
             {
                 tracing::warn!(%error, "pipe slot failed during shutdown");
             }
+        }
+    }
+    async fn server_message(message: ServerMessage, registry: &RegistryHandle) {
+        match message {
+            ServerMessage::Control(message) => {
+                if let Err(error) = registry.control(message) {
+                    tracing::warn!(%error, "control fan-out unavailable");
+                }
+            }
+            #[cfg(test)]
+            ServerMessage::Inspect { reply } => match registry.outboxes().await {
+                Ok(outboxes) => {
+                    let metrics = outboxes
+                        .iter()
+                        .map(|outbox| OutboxMetric {
+                            queued: outbox.queued_bytes(),
+                            peak: outbox.peak_bytes(),
+                        })
+                        .collect();
+                    if reply.send(metrics).is_err() {
+                        tracing::debug!("test metric caller left");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "could not inspect outboxes"),
+            },
         }
     }
 }
@@ -327,9 +420,10 @@ impl SlotBackoff {
 }
 
 struct Slot {
+    registry: RegistryHandle,
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
-    status: watch::Receiver<CoreStatusResponse>,
+    status: watch::Receiver<crate::ipc::PublishedStatus>,
     ui: UiPort,
 }
 impl Slot {
@@ -417,24 +511,18 @@ impl Slot {
     ) -> io::Result<()> {
         let (read, write) = split(pipe);
         let mut reader = FramedRead::new(read, frame_codec());
-        let (responses, queued) = mpsc::channel(RESPONSE_CAPACITY);
-        let writer = WriterTask::spawn(write, queued);
+        let writer = OutboxTask::spawn(write);
+        let outbox = writer.handle.clone();
+        let mut registration = None;
         loop {
-            let received = if session.hello_pending() {
-                match tokio::time::timeout_at(hello_deadline, reader.next()).await {
-                    Ok(received) => received,
-                    Err(error) => {
-                        tracing::debug!(%error, "pipe hello deadline expired; closing connection");
-                        return Ok(());
-                    }
-                }
-            } else {
-                reader.next().await
+            let received = tokio::select! {
+                () = outbox.closed() => return Ok(()),
+                received = self.next_frame(&mut reader, session, hello_deadline) => received,
             };
             let mut decision = match received {
                 None => break,
                 Some(Ok(payload)) => match decode_json::<Envelope>(&payload) {
-                    Ok(envelope) => session.receive(envelope, &self.status.borrow()),
+                    Ok(envelope) => session.receive(envelope, &self.status.borrow().status),
                     // Parse diagnostics can contain request body values; only the stable code is sent.
                     Err(_) => session.fail(ErrorKind::BadRequest),
                 },
@@ -463,24 +551,55 @@ impl Slot {
                     error: ProtocolError::new(ErrorKind::Internal),
                 };
             }
-            let payload =
-                encode_json(&Envelope::Response(decision.response)).map_err(io::Error::other)?;
-            // TODO(M2-B2): Account for queued bytes and coalesce replaceable state/day events.
-            if responses.try_send(payload).is_err() {
-                return Err(io::Error::other(
-                    "pipe response queue full or writer closed",
-                ));
+            if registration.is_none()
+                && let Some(role) = session.role()
+            {
+                registration = Some(
+                    self.registry
+                        .register(role, outbox.clone())
+                        .map_err(io::Error::other)?,
+                );
+            }
+            if let Some(subscription) = decision.subscription {
+                let id = registration
+                    .as_ref()
+                    .expect("subscription follows authenticated hello")
+                    .id;
+                self.registry
+                    .subscribe(id, subscription, decision.response)
+                    .await
+                    .map_err(io::Error::other)?;
+            } else {
+                outbox
+                    .response(decision.response)
+                    .map_err(io::Error::other)?;
             }
             if session.closing() {
-                drop(responses);
                 return self.finish_closing(writer).await;
             }
         }
-        drop(responses);
         drop(writer);
         Ok(())
     }
-    async fn finish_closing(&self, writer: WriterTask) -> io::Result<()> {
+    async fn next_frame<R: AsyncRead + Unpin>(
+        &self,
+        reader: &mut FramedRead<R, LengthDelimitedCodec>,
+        session: &ConnectionSession,
+        hello_deadline: tokio::time::Instant,
+    ) -> Option<io::Result<BytesMut>> {
+        if session.hello_pending() {
+            match tokio::time::timeout_at(hello_deadline, reader.next()).await {
+                Ok(received) => received,
+                Err(error) => {
+                    tracing::debug!(%error, "pipe hello deadline expired; closing connection");
+                    None
+                }
+            }
+        } else {
+            reader.next().await
+        }
+    }
+    async fn finish_closing(&self, writer: OutboxTask) -> io::Result<()> {
         let deadline = tokio::time::Instant::now() + self.timeouts.close_flush;
         let outcome = tokio::time::timeout(self.timeouts.close_flush, writer.finish()).await;
         match outcome {
@@ -528,35 +647,6 @@ impl PipeDisconnect {
     }
 }
 
-/// Aborts the sole writer on every early return and when its slot is cancelled.
-struct WriterTask {
-    task: tokio::task::JoinHandle<io::Result<()>>,
-}
-impl WriterTask {
-    fn spawn(
-        write: impl AsyncWrite + Unpin + Send + 'static,
-        mut queued: mpsc::Receiver<Vec<u8>>,
-    ) -> Self {
-        Self {
-            task: tokio::spawn(async move {
-                let mut writer = FramedWrite::new(write, frame_codec());
-                while let Some(payload) = queued.recv().await {
-                    writer.send(payload.as_slice()).await?;
-                }
-                Ok(())
-            }),
-        }
-    }
-    async fn finish(mut self) -> io::Result<()> {
-        (&mut self.task).await.map_err(io::Error::other)?
-    }
-}
-impl Drop for WriterTask {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,6 +659,7 @@ mod tests {
         let suffix = windows::core::GUID::new().expect("test pipe suffix");
         let publisher = StatusPublisher::new(quartz_protocol::InstanceId(format!("{suffix:?}")));
         Slot {
+            registry: RegistryHandle::start(publisher.subscribe()),
             listener: Arc::new(PipeListener {
                 name: PipeName::for_test(suffix),
                 owner: ProcessIdentity::current().expect("test identity"),
@@ -592,14 +683,22 @@ mod tests {
     #[test]
     fn final_response_timeout_aborts_a_stalled_writer() {
         runtime().block_on(async {
-            let writer = WriterTask {
-                task: tokio::spawn(std::future::pending()),
-            };
-            let abort = writer.task.abort_handle();
+            let (write, _read) = tokio::io::duplex(1);
+            let writer = OutboxTask::spawn(write);
+            writer
+                .handle
+                .response(quartz_protocol::Response {
+                    id: Some(quartz_protocol::RequestId(1)),
+                    outcome: ResponseOutcome::Ok {
+                        body: serde_json::json!({}),
+                    },
+                })
+                .expect("queue final response");
+            let outbox = writer.handle.clone();
             slot().finish_closing(writer).await.expect("bounded close");
             tokio::task::yield_now().await;
             assert!(
-                abort.is_finished(),
+                outbox.is_closed(),
                 "timed-out writer must release its pipe reference"
             );
         });

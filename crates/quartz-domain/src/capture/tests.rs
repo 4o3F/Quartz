@@ -2086,3 +2086,60 @@ fn invalid_capture_inputs_leave_every_core_component_unchanged() {
     }
     fixture.finish(at(20));
 }
+
+#[test]
+fn subscription_interval_has_actual_boundary_and_only_sanitized_identity_and_title() {
+    let mut fixture = Fixture::active();
+    let _ = fixture.hook(at(10), window(1, "allowed title"));
+    let row = fixture.core.current_interval().expect("tracking interval");
+    assert_eq!(row.start, at(10));
+    assert!(matches!(
+        row.fact,
+        IntervalFact::Window {
+            app: Some(AppIdentity::Exe(_)),
+            fields: CapturedFields { title: Some(_), .. },
+            ..
+        }
+    ));
+    fixture.policy(
+        &rule(
+            "title_hidden",
+            "{field='app.exe_name',op='equals',value='app.exe'}",
+        ),
+        0,
+    );
+    let _ = fixture.hook(at(20), window(1, "secret title"));
+    let row = fixture.core.current_interval().expect("redacted interval");
+    assert_eq!(row.start, at(20));
+    assert!(matches!(
+        row.fact,
+        IntervalFact::Window {
+            app: Some(_),
+            fields: CapturedFields { title: None, .. },
+            ..
+        }
+    ));
+    fixture.policy(
+        &rule(
+            "excluded",
+            "{field='app.exe_name',op='equals',value='app.exe'}",
+        ),
+        1,
+    );
+    let _ = fixture.hook(at(30), window(1, "excluded title"));
+    let row = fixture.core.current_interval().expect("excluded interval");
+    assert!(matches!(
+        row.fact,
+        IntervalFact::Window {
+            app: None,
+            fields: CapturedFields { title: None, .. },
+            ..
+        }
+    ));
+    let _ = fixture.send(
+        at(40),
+        CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
+    );
+    assert!(fixture.core.current_interval().is_none());
+    fixture.finish(at(50));
+}

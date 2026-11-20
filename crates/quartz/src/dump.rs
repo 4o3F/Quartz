@@ -247,6 +247,7 @@ mod tests {
                 session: SessionKey::from_persisted(1),
                 start,
                 fact: IntervalFact::Window {
+                    app: Some(capture::AppIdentity::Exe(r"c:\test\editor.exe".into())),
                     instance: Some(capture::WindowId::from_persisted(1)),
                     fields: capture::CapturedFields {
                         level: capture::CaptureLevel::TitleHidden,
@@ -273,6 +274,7 @@ mod tests {
                 session: SessionKey::from_persisted(2),
                 start: one,
                 fact: IntervalFact::Window {
+                    app: Some(capture::AppIdentity::Exe(r"c:\test\editor.exe".into())),
                     instance: Some(capture::WindowId::from_persisted(1)),
                     fields: capture::CapturedFields {
                         level: capture::CaptureLevel::Full,

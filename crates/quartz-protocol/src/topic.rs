@@ -105,12 +105,16 @@ impl<'de> Deserialize<'de> for Topic {
     }
 }
 
-/// Typed body for `subscribe`, rejecting unknown topics before authorization.
+/// Typed request body for `subscribe`, rejecting unknown or malformed topics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscribe {
     /// Requested state, logical-day, or control subscriptions.
     pub topics: Vec<Topic>,
 }
+
+/// Empty acknowledgement for a successful subscription.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscribeResponse {}
 
 #[cfg(test)]
 mod tests {

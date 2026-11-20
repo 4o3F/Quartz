@@ -123,23 +123,7 @@ impl Capture<'_> {
             .filter(applications::id.eq(id))
             .select(ApplicationsRow::as_select())
             .first::<ApplicationsRow>(self.connection)?;
-        let context = super::RowContext::new(Some(id));
-        Ok(match row.kind {
-            enums::ApplicationKind::Exe => {
-                AppIdentity::Exe(context.required(row.exe_path, applications::exe_path)?)
-            }
-            enums::ApplicationKind::Aumid => {
-                AppIdentity::Aumid(context.required(row.aumid, applications::aumid)?)
-            }
-            enums::ApplicationKind::Unresolved => AppIdentity::Unresolved(
-                row.identity_key
-                    .strip_prefix("unresolved:")
-                    .ok_or(DecodeCaptureRowError::ApplicationIdentity {
-                        field: context.field(applications::identity_key),
-                    })?
-                    .to_owned(),
-            ),
-        })
+        row.into_identity().map_err(LoadCaptureStartupError::from)
     }
 }
 impl ApplicationsRow {

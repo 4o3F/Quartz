@@ -221,7 +221,14 @@ impl CoreClient {
     pub(crate) fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), CallCoreError> {
         use tokio::io::AsyncWriteExt;
         self.runtime
-            .block_on(self.client.framed.get_mut().write_all(bytes))
+            .block_on(async {
+                tokio::time::timeout(
+                    RESPONSE_TIMEOUT,
+                    self.client.framed.get_mut().write_all(bytes),
+                )
+                .await
+            })
+            .context(call_core_error::ResponseTimeoutSnafu)?
             .context(call_core_error::IoSnafu)
     }
 }
@@ -376,7 +383,10 @@ mod tests {
         let receiver = status.subscribe();
         let snapshot = receiver.borrow();
         assert_eq!(
-            StatusReport { status: &snapshot }.to_string(),
+            StatusReport {
+                status: &snapshot.status
+            }
+            .to_string(),
             concat!(
                 "recording: false\n",
                 "stop_reason: starting\n",

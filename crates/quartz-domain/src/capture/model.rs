@@ -199,6 +199,8 @@ pub struct CaptureGap {
 pub enum IntervalFact {
     /// Allowed fields and optional allowed instance identity.
     Window {
+        /// Application identity after privacy filtering; absent only when the application is excluded.
+        app: Option<super::AppIdentity>,
         /// Logical identity of the observed window instance.
         instance: Option<WindowId>,
         /// Foreground fields after privacy actions have been applied.

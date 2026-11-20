@@ -5,6 +5,7 @@ mod handle;
 mod instance;
 pub(crate) mod ipc;
 mod language;
+mod locale;
 mod process;
 mod sources;
 mod tray;
@@ -293,9 +294,29 @@ impl CoreProcess {
             }
         });
         let instance_id = windows::core::GUID::new().context(CreateInstanceIdSnafu)?;
-        let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(format!(
-            "{instance_id:?}"
-        )));
+        let language = match UiLanguage::detect().language() {
+            quartz_i18n::Language::SimplifiedChinese => {
+                quartz_protocol::UiLanguage::SimplifiedChinese
+            }
+            quartz_i18n::Language::English => quartz_protocol::UiLanguage::English,
+            #[cfg(debug_assertions)]
+            quartz_i18n::Language::PseudoEnglish => {
+                tracing::debug!("publishing English catalog identity for debug pseudo language");
+                quartz_protocol::UiLanguage::English
+            }
+        };
+        let locale = match locale::UserLocale::read() {
+            Ok(locale) => Some(locale),
+            Err(error) => {
+                tracing::warn!(%error, "regional settings unavailable in state snapshot");
+                None
+            }
+        };
+        let status = crate::ipc::StatusPublisher::with_locale(
+            quartz_protocol::InstanceId(format!("{instance_id:?}")),
+            language,
+            locale,
+        );
         let (ui_sender, ui_commands) =
             crossbeam_channel::bounded(crate::ipc::MAIN_COMMAND_CAPACITY);
         let ui_port: crate::ipc::UiPort = Arc::new(move |command| {
@@ -353,6 +374,9 @@ impl CoreProcess {
         }
         tracing::info!(?autostart, "core message loop started");
         let result = self.message_loop(&mut tray, &workers, &mut sources, &status, &ui_commands);
+        if matches!(result, Ok(CoreExit::UserExit)) {
+            pipe.control(quartz_protocol::ControlOp::UiShutdown);
+        }
         self.ui = UiState::default();
         let pipe_stopped = pipe.shutdown();
         let exit = CoreExit::from_loop(&result);
@@ -411,6 +435,10 @@ impl CoreProcess {
             }
             while let Ok(command) = workers.commands.try_recv() {
                 match command {
+                    MainCommand::CaptureSnapshot { state, interval } => {
+                        self.capture = Some(state);
+                        status.publish_snapshot(self.capture.as_ref(), self.persistence, interval);
+                    }
                     MainCommand::Persistence(state) => {
                         self.persistence = state;
                         status.publish(self.capture.as_ref(), self.persistence);

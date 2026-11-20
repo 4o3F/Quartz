@@ -79,6 +79,10 @@ impl CaptureIndicator {
 
 #[derive(Debug)]
 pub(crate) enum MainCommand {
+    CaptureSnapshot {
+        state: CaptureState,
+        interval: Option<quartz_domain::capture::OpenInterval>,
+    },
     Effect(CaptureEffect),
     Persistence(PersistenceState),
     Fatal(Worker),
