@@ -20,7 +20,7 @@ pub enum SystemSignal {
     /// The shell confirmed that the signal is present.
     Present,
 }
-/// Foreground browser context supplied by a later browser shell.
+/// Browser classification and extension availability for privacy evaluation.
 #[derive(Debug, Clone, Default)]
 pub enum BrowserContext {
     /// This application is not a browser.
@@ -28,10 +28,6 @@ pub enum BrowserContext {
     NotBrowser,
     /// Extension is unavailable; dependent hidden fields are discarded immediately.
     Offline,
-    /// Context has not arrived; the core holds outputs for at most two seconds.
-    Pending,
-    /// A correlated context snapshot; only web fields are used.
-    Ready(FieldSnapshot),
 }
 /// Session and recognizer inputs captured with one observation.
 #[derive(Debug, Clone, Default)]
@@ -102,7 +98,7 @@ impl WindowFacts {
         context: &PrivacyContext,
         snapshot: &RuleSnapshot,
     ) -> CapturedFields {
-        let fields = self.rule_fields(context);
+        let fields = self.rule_fields();
         let evaluated = snapshot.privacy().evaluate(&fields);
         let mut policy = AppliedPrivacy::from_evaluation(evaluated, snapshot);
         policy.apply_recognizers(context);
@@ -110,7 +106,7 @@ impl WindowFacts {
         policy.apply_missing_web(context, snapshot);
         policy.capture(&self.title)
     }
-    fn rule_fields(&self, context: &PrivacyContext) -> FieldSnapshot {
+    fn rule_fields(&self) -> FieldSnapshot {
         let mut fields = FieldSnapshot::default();
         for (field, value) in [
             (Field::IdentityKey, Some(self.app.key())),
@@ -121,14 +117,6 @@ impl WindowFacts {
         ] {
             if let Some(value) = value {
                 fields.text.insert(field, NfcText::new(&value));
-            }
-        }
-        if let BrowserContext::Ready(web) = &context.browser {
-            fields.domain = web.domain.clone();
-            for field in [Field::TabTitle, Field::BrowserProfile] {
-                if let Some(value) = web.text.get(&field) {
-                    fields.text.insert(field, value.clone());
-                }
             }
         }
         fields
@@ -226,10 +214,7 @@ impl AppliedPrivacy {
     }
     fn apply_missing_web(&mut self, context: &PrivacyContext, snapshot: &RuleSnapshot) {
         if snapshot.privacy().requires_web_privacy()
-            && matches!(
-                context.browser,
-                BrowserContext::Offline | BrowserContext::Pending
-            )
+            && matches!(context.browser, BrowserContext::Offline)
         {
             self.restrict(
                 PrivacyAction {

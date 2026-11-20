@@ -444,10 +444,6 @@ impl Workload {
                 IntervalFact::NoForeground(NoForegroundReason::Empty)
             } else {
                 IntervalFact::Window {
-                    app: Some(AppIdentity::Exe(format!(
-                        "c:\\simulation\\{}.exe",
-                        APP_NAMES[app]
-                    ))),
                     instance: Some(instance),
                     fields: CapturedFields {
                         level: CaptureLevel::Full,

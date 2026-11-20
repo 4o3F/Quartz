@@ -93,7 +93,7 @@ impl CaptureLoop {
     ) -> Result<(), RunCaptureLoopError> {
         self.main.send(MainCommand::CaptureSnapshot {
             state: self.core.state(),
-            interval: self.core.current_interval(),
+            foreground: self.core.foreground_view(),
         })?;
         self.publish(step, self.at, Settlement::Deferred)?;
         for deadline in startup.deadlines {
@@ -335,7 +335,7 @@ impl CaptureLoop {
         {
             self.main.send(MainCommand::CaptureSnapshot {
                 state: self.core.state(),
-                interval: self.core.current_interval(),
+                foreground: self.core.foreground_view(),
             })?;
         }
         for effect in std::mem::take(&mut parts.effects) {

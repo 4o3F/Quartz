@@ -567,136 +567,6 @@ fn recovery_closes_each_row_at_its_confirmation_and_splits_midnight() {
 }
 
 #[test]
-fn recovery_restores_allowed_application_identities_and_omits_excluded_ones() {
-    for identity in [
-        AppIdentity::Exe(r"c:\app.exe".into()),
-        AppIdentity::Aumid("Package!App".into()),
-        AppIdentity::Unresolved("TestClass".into()),
-    ] {
-        let mut fixture = Fixture::new(at(0));
-        fixture.persist(
-            at(0),
-            CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
-        );
-        let CaptureEvent::Foreground {
-            foreground: Foreground::Window { mut facts, .. },
-            ..
-        } = foreground(1, "recoverable title")
-        else {
-            panic!("window fixture");
-        };
-        facts.app = identity.clone();
-        for level in [
-            CaptureLevel::Full,
-            CaptureLevel::TitleHidden,
-            CaptureLevel::Excluded,
-        ] {
-            let now = match level {
-                CaptureLevel::Full => at(0),
-                CaptureLevel::TitleHidden => at(1),
-                CaptureLevel::Excluded => at(2),
-            };
-            let privacy = match level {
-                CaptureLevel::Full => PrivacyContext::default(),
-                CaptureLevel::TitleHidden => PrivacyContext {
-                    mode: PrivacyMode::NoTitles,
-                    ..PrivacyContext::default()
-                },
-                CaptureLevel::Excluded => {
-                    use quartz_domain::rules::registry::RegistryCommand;
-                    let mut registry = RuleRegistry::from_state(RegistryState::default())
-                        .expect("privacy registry");
-                    let decision = registry.decide(RegistryCommand::Apply {
-                        key: "user.recovery".parse().expect("privacy rule set key"),
-                        file: "recovery-test.toml".into(),
-                        text: "format='quartz-rules/1'\n[set]\nkey='user.recovery'\nkind='privacy'\nname='Recovery tests'\n[[rule]]\nid='exclude'\nlabel='Excluded application'\npreset='excluded'\nwhen=[{field='app.exe_name',op='equals',value='app.exe'}]\n".into(),
-                        base_version: 0,
-                    }).into_parts();
-                    decision.reply.expect("valid exclusion rule");
-                    registry
-                        .committed(decision.outcome.expect("rule commit token"))
-                        .expect("commit exclusion rule");
-                    fixture.rules = registry.snapshots().load();
-                    PrivacyContext::default()
-                }
-            };
-            fixture.persist(
-                now,
-                CaptureEvent::Foreground {
-                    source: ObservationSource::Review,
-                    foreground: Foreground::Window {
-                        facts: facts.clone(),
-                        privacy,
-                    },
-                },
-            );
-            diesel::update(applications::table)
-                .set(applications::display_name.eq("Friendly name"))
-                .execute(&mut fixture.store.writer)
-                .expect("rename display metadata");
-            let IntervalFact::Window {
-                app,
-                instance,
-                fields,
-            } = fixture.recovered_foreground()
-            else {
-                panic!("recovered window interval");
-            };
-            assert_eq!(fields.level, level);
-            match level {
-                CaptureLevel::Full | CaptureLevel::TitleHidden => {
-                    assert_eq!(
-                        app.as_ref(),
-                        Some(&identity),
-                        "allowed {level:?} application identity must survive recovery"
-                    );
-                    assert!(instance.is_some());
-                }
-                CaptureLevel::Excluded => {
-                    assert_eq!(app, None);
-                    assert_eq!(instance, None);
-                    let rows = fixture.intervals();
-                    let row = rows.last().expect("excluded row");
-                    assert_eq!(row.app_id, None);
-                    assert_eq!(row.window_instance_id, None);
-                }
-            }
-            assert_eq!(
-                fields.title.as_deref(),
-                (level == CaptureLevel::Full).then_some("recoverable title")
-            );
-        }
-    }
-}
-
-#[test]
-fn recovery_rejects_missing_application_reference_in_an_allowed_interval() {
-    let mut fixture = Fixture::new(at(0));
-    fixture.ready(at(0));
-    let row_id = fixture.intervals()[0].id.expect("interval id");
-    diesel::update(intervals::table)
-        .set(intervals::app_id.eq(None::<i64>))
-        .execute(&mut fixture.store.writer)
-        .expect("remove required application reference");
-    let mut keys = CaptureKeys::default();
-    let metadata = metadata();
-    let error = fixture
-        .store
-        .capture(&mut keys, &metadata)
-        .load_recoverable()
-        .expect_err("allowed interval needs an application identity");
-    let recovery::LoadRecoverableRunError::Decode {
-        source: DecodeCaptureRowError::MissingValue { field },
-    } = error
-    else {
-        panic!("expected missing application reference: {error:?}");
-    };
-    assert_eq!(field.table, TableName::of(intervals::table));
-    assert_eq!(field.column, ColumnName::of(intervals::app_id));
-    assert_eq!(field.row_id, Some(row_id));
-}
-
-#[test]
 fn checkpoint_is_atomic_and_advances_every_open_row() {
     let mut fixture = Fixture::new(at(0));
     fixture.ready(at(0));
@@ -1822,4 +1692,84 @@ fn idle_sample(tick_ms: u64) -> IdleSample {
         policy: IdlePolicy::default(),
         exceptions: Vec::new(),
     }
+}
+
+#[test]
+fn offline_web_privacy_never_interns_the_browser_title() {
+    for field in [
+        quartz_domain::rules::Field::Domain,
+        quartz_domain::rules::Field::TabTitle,
+        quartz_domain::rules::Field::BrowserProfile,
+    ] {
+        let mut fixture = Fixture::new(at(0));
+        fixture.hide_web_field(field);
+        fixture.persist(
+            at(0),
+            CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+        );
+        let mut event = foreground(1, "offline database secret");
+        if let CaptureEvent::Foreground {
+            foreground: Foreground::Window { privacy, .. },
+            ..
+        } = &mut event
+        {
+            privacy.browser = BrowserContext::Offline;
+        }
+        fixture.persist(at(10), event);
+        let rows = fixture.intervals();
+        let browser = rows
+            .iter()
+            .find(|row| row.kind == enums::IntervalKind::Window)
+            .expect("browser interval");
+        assert_eq!(browser.start_utc_ms, 10);
+        assert!(rows.iter().all(|row| row.title_id.is_none()));
+        assert_eq!(
+            titles::table
+                .count()
+                .get_result::<i64>(&mut fixture.store.writer)
+                .expect("title dictionary"),
+            0
+        );
+    }
+}
+
+#[test]
+fn startup_warns_and_ignores_removed_browser_context_deadline_without_decoding_it() {
+    use crate::store::{schema::settings, versions};
+    let log = tempfile::NamedTempFile::new().expect("isolated log");
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(log.reopen().expect("log writer")))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let mut fixture = Fixture::new(at(0));
+        diesel::insert_into(settings::table)
+            .values([
+                crate::store::rows::SettingsRow {
+                    key: versions::REMOVED_PRIVACY_CONTEXT_DEADLINE_KEY.into(),
+                    value: "obsolete, not a timestamp".into(),
+                },
+                crate::store::rows::SettingsRow {
+                    key: versions::IDLE_DEADLINE_KEY.into(),
+                    value: "123".into(),
+                },
+            ])
+            .execute(&mut fixture.store.writer)
+            .expect("persist deadline fixtures");
+        let mut keys = CaptureKeys::default();
+        let metadata = metadata();
+        let startup = fixture
+            .store
+            .recover_capture(&mut keys, &metadata)
+            .expect("obsolete deadline permits startup");
+        assert_eq!(startup.deadlines.len(), 1);
+        assert_eq!(startup.deadlines[0].owner, SchedulerKind::Idle);
+        assert_eq!(startup.deadlines[0].at, at(123).utc);
+    });
+    let logged = std::fs::read_to_string(log.path()).expect("read warning");
+    assert!(logged.contains("WARN"));
+    assert!(logged.contains("ignoring persisted deadline for removed browser-context deferral"));
+    assert!(logged.contains(versions::REMOVED_PRIVACY_CONTEXT_DEADLINE_KEY));
+    assert!(!logged.contains("obsolete, not a timestamp"));
 }

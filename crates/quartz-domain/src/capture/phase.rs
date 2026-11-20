@@ -30,7 +30,6 @@ pub(super) struct IntervalTiming {
 }
 #[derive(Debug, Clone)]
 pub(super) struct WindowTiming {
-    app: Option<super::AppIdentity>,
     timing: IntervalTiming,
     instance: Option<WindowId>,
     fields: CapturedFields,
@@ -54,12 +53,7 @@ impl ActiveInterval {
             start: row.start,
         };
         match row.fact {
-            IntervalFact::Window {
-                app,
-                instance,
-                fields,
-            } => Self::Window(WindowTiming {
-                app,
+            IntervalFact::Window { instance, fields } => Self::Window(WindowTiming {
                 timing,
                 instance,
                 fields,
@@ -72,7 +66,6 @@ impl ActiveInterval {
             Self::Window(row) => (
                 &row.timing,
                 IntervalFact::Window {
-                    app: row.app.clone(),
                     instance: row.instance,
                     fields: row.fields.clone(),
                 },

@@ -59,7 +59,7 @@ impl From<ObservedEvent> for Observation {
 pub(crate) enum MainCommand {
     CaptureSnapshot {
         state: CaptureState,
-        interval: Option<quartz_domain::capture::OpenInterval>,
+        foreground: Option<quartz_domain::capture::ForegroundView>,
     },
     Effect(CaptureEffect),
     Persistence(PersistenceState),

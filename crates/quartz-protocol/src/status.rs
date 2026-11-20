@@ -65,8 +65,6 @@ pub enum StopReason {
     Suspended,
     /// The user paused capture.
     Paused,
-    /// Browser privacy context is pending.
-    AwaitingBrowserContext,
     /// No foreground window can be recorded.
     NoForeground,
     /// The capture run has ended.

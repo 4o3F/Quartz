@@ -225,5 +225,6 @@ impl Store {
 
 pub(crate) const MAINTENANCE_DEADLINE_KEY: &str = "capture.deadline.maintenance";
 pub(crate) const IDLE_DEADLINE_KEY: &str = "capture.deadline.idle";
-pub(crate) const PRIVACY_CONTEXT_DEADLINE_KEY: &str = "capture.deadline.privacy_context";
+/// Obsolete browser-context deferral key, recognized only to warn during recovery.
+pub(crate) const REMOVED_PRIVACY_CONTEXT_DEADLINE_KEY: &str = "capture.deadline.privacy_context";
 pub(crate) const MIDNIGHT_DEADLINE_KEY: &str = "capture.deadline.midnight";

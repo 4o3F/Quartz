@@ -273,9 +273,13 @@ impl CoreProcess {
             }
             while let Ok(command) = runtime.commands().try_recv() {
                 match command {
-                    MainCommand::CaptureSnapshot { state, interval } => {
+                    MainCommand::CaptureSnapshot { state, foreground } => {
                         self.capture = Some(state);
-                        status.publish_snapshot(self.capture.as_ref(), self.persistence, interval);
+                        status.publish_snapshot(
+                            self.capture.as_ref(),
+                            self.persistence,
+                            foreground,
+                        );
                     }
                     MainCommand::Persistence(state) => {
                         self.persistence = state;
@@ -328,10 +332,6 @@ impl CoreProcess {
                         CaptureEffect::DiscardQueuedObservations => {
                             // The capture worker has already discarded the queue before publishing this effect.
                             tracing::trace!("capture worker discarded queued observations");
-                        }
-                        CaptureEffect::AwaitBrowserContext { .. } => {
-                            // M5 supplies the browser port; CaptureCore owns the existing timeout.
-                            tracing::trace!("browser context request awaits browser integration");
                         }
                         CaptureEffect::PolicyExpired(kind) => {
                             // CaptureCore has applied expiration and requested the necessary fresh observations.
@@ -419,7 +419,6 @@ impl TrayState {
                 | StopReason::Disconnected
                 | StopReason::Suspended
                 | StopReason::Paused
-                | StopReason::AwaitingBrowserContext
                 | StopReason::NoForeground
                 | StopReason::Ended,
             ) => {
@@ -442,6 +441,62 @@ mod tests {
     use std::error::Error;
 
     #[test]
+    fn offline_web_privacy_keeps_titles_out_of_database_state_logs_and_tray() {
+        use crate::store::capture::test_support::{Fixture, at, foreground};
+        use quartz_domain::{capture::*, rules::Field};
+        for field in [Field::Domain, Field::TabTitle, Field::BrowserProfile] {
+            let log = tempfile::NamedTempFile::new().expect("isolated log");
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(log.reopen().expect("log writer")))
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let mut fixture = Fixture::new(at(0));
+                fixture.hide_web_field(field);
+                fixture.persist(
+                    at(0),
+                    CaptureEvent::Session(SessionStatus::Ready(Default::default())),
+                );
+                let mut event = foreground(1, "offline browser secret");
+                if let CaptureEvent::Foreground {
+                    foreground: Foreground::Window { privacy, .. },
+                    ..
+                } = &mut event
+                {
+                    privacy.browser = BrowserContext::Offline;
+                }
+                fixture.persist(at(10), event);
+                let IntervalFact::Window { fields, .. } = fixture.recovered_foreground() else {
+                    panic!("persisted window");
+                };
+                assert_eq!(fields.level, CaptureLevel::TitleHidden);
+                assert_eq!(fields.title, None);
+                let publisher = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(
+                    "offline-privacy".into(),
+                ));
+                publisher.publish_snapshot(
+                    Some(&fixture.core.state()),
+                    PersistenceState::Ready,
+                    fixture.core.foreground_view(),
+                );
+                let wire = serde_json::to_value(publisher.subscribe().borrow().snapshot())
+                    .expect("state body");
+                assert_eq!(wire["foreground"]["title"], serde_json::Value::Null);
+                assert_eq!(wire["foreground"]["interval_start_utc_ms"], 10);
+                assert_eq!(wire["foreground"]["app"]["value"], "c:\\app.exe");
+                assert!(!wire.to_string().contains("offline browser secret"));
+                let tray = TrayState::from_status(publisher.stop_reason(), TrayTooltip::Ready);
+                assert_eq!(tray.icon, TrayIconState::Normal);
+                assert_eq!(tray.tooltip, TrayTooltip::Ready);
+                assert!(!format!("{tray:?}").contains("offline browser secret"));
+            });
+            let logged = std::fs::read_to_string(log.path()).expect("read trace log");
+            assert!(!logged.contains("offline browser secret"));
+        }
+    }
+
+    #[test]
     fn published_stop_reasons_preserve_tray_appearance() {
         use quartz_protocol::StopReason;
         for reason in [
@@ -451,7 +506,6 @@ mod tests {
             Some(StopReason::Disconnected),
             Some(StopReason::Suspended),
             Some(StopReason::Paused),
-            Some(StopReason::AwaitingBrowserContext),
             Some(StopReason::NoForeground),
             Some(StopReason::Ended),
         ] {

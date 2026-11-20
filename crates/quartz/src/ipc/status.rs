@@ -5,40 +5,33 @@ use quartz_protocol::{CoreStatusResponse, CoreVersion, DatabaseState, InstanceId
 use tokio::sync::watch;
 
 use crate::persistence::PersistenceState;
-use quartz_domain::capture::{AppIdentity, IntervalFact, OpenInterval};
+use quartz_domain::capture::{AppIdentity, ForegroundView};
 use quartz_protocol::{ForegroundState, LocaleSettings, StateSnapshot, UiLanguage};
 
 /// Main-thread facts; the registry constructs wire state only when subscribed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishedStatus {
     pub(crate) status: CoreStatusResponse,
-    interval: Option<OpenInterval>,
+    foreground: Option<ForegroundView>,
     language: UiLanguage,
     locale: Option<LocaleSettings>,
 }
 impl PublishedStatus {
     pub(crate) fn snapshot(&self) -> StateSnapshot {
         let foreground = self
-            .interval
+            .foreground
             .as_ref()
             .filter(|_| self.status.recording)
-            .and_then(|row| {
-                let IntervalFact::Window { app, fields, .. } = &row.fact else {
-                    return None;
-                };
-                Some(ForegroundState {
-                    app: app.as_ref().map(|app| match app {
-                        AppIdentity::Exe(value) => quartz_protocol::AppIdentity::Exe(value.clone()),
-                        AppIdentity::Aumid(value) => {
-                            quartz_protocol::AppIdentity::Aumid(value.clone())
-                        }
-                        AppIdentity::Unresolved(value) => {
-                            quartz_protocol::AppIdentity::Unresolved(value.clone())
-                        }
-                    }),
-                    title: fields.title.clone(),
-                    interval_start_utc_ms: row.start.utc.get().as_millisecond(),
-                })
+            .map(|view| ForegroundState {
+                app: view.app.as_ref().map(|app| match app {
+                    AppIdentity::Exe(value) => quartz_protocol::AppIdentity::Exe(value.clone()),
+                    AppIdentity::Aumid(value) => quartz_protocol::AppIdentity::Aumid(value.clone()),
+                    AppIdentity::Unresolved(value) => {
+                        quartz_protocol::AppIdentity::Unresolved(value.clone())
+                    }
+                }),
+                title: view.title.clone(),
+                interval_start_utc_ms: view.start.utc.get().as_millisecond(),
             });
         StateSnapshot {
             foreground,
@@ -74,7 +67,7 @@ impl StatusPublisher {
     ) -> Self {
         Self {
             sender: watch::Sender::new(PublishedStatus {
-                interval: None,
+                foreground: None,
                 language,
                 locale,
                 status: CoreStatusResponse {
@@ -96,24 +89,24 @@ impl StatusPublisher {
         self.sender.subscribe()
     }
     #[cfg(test)]
-    pub(crate) fn publish_interval(&self, interval: Option<OpenInterval>) {
+    pub(crate) fn publish_foreground(&self, foreground: Option<ForegroundView>) {
         self.sender.send_if_modified(|published| {
-            if published.interval == interval {
+            if published.foreground == foreground {
                 return false;
             }
-            published.interval = interval;
+            published.foreground = foreground;
             true
         });
     }
     pub(crate) fn publish(&self, capture: Option<&CaptureState>, persistence: PersistenceState) {
-        let interval = self.sender.borrow().interval.clone();
-        self.publish_snapshot(capture, persistence, interval);
+        let foreground = self.sender.borrow().foreground.clone();
+        self.publish_snapshot(capture, persistence, foreground);
     }
     pub(crate) fn publish_snapshot(
         &self,
         capture: Option<&CaptureState>,
         persistence: PersistenceState,
-        interval: Option<OpenInterval>,
+        foreground: Option<ForegroundView>,
     ) {
         let database = match persistence {
             PersistenceState::Ready | PersistenceState::Buffered { .. } => DatabaseState::Ok,
@@ -146,7 +139,6 @@ impl StatusPublisher {
             // A ready session without a stop mask still needs a fresh foreground fact.
             .or(Some(StopReason::NoForeground)),
             Some(CaptureState::Tracking(_)) => None,
-            Some(CaptureState::AwaitingBrowserContext) => Some(StopReason::AwaitingBrowserContext),
             Some(CaptureState::NoForeground(_)) => Some(StopReason::NoForeground),
             Some(CaptureState::Ended) => Some(StopReason::Ended),
         };
@@ -154,11 +146,11 @@ impl StatusPublisher {
             let status = &mut published.status;
             if status.database == database
                 && status.stop_reason == stop_reason
-                && published.interval == interval
+                && published.foreground == foreground
             {
                 return false;
             }
-            published.interval = interval;
+            published.foreground = foreground;
             status.database = database;
             status.stop_reason = stop_reason;
             status.recording = stop_reason.is_none();
@@ -171,6 +163,77 @@ impl StatusPublisher {
 mod tests {
     use super::*;
     use quartz_domain::capture::{GapReason, IntervalFact, NoForegroundReason};
+
+    #[test]
+    fn projected_foreground_preserves_state_body_identity_title_and_interval_start() {
+        use quartz_domain::capture::{
+            CaptureLevel, CapturedFields, Timestamp, TitleStatus, WindowId,
+        };
+        use serde_json::json;
+        for app in [
+            AppIdentity::Exe("c:\\app.exe".into()),
+            AppIdentity::Aumid("Package!App".into()),
+            AppIdentity::Unresolved("WindowClass".into()),
+        ] {
+            for level in [
+                CaptureLevel::Full,
+                CaptureLevel::TitleHidden,
+                CaptureLevel::Excluded,
+            ] {
+                let publisher = StatusPublisher::new(InstanceId("state-test".into()));
+                let title = (level == CaptureLevel::Full).then(|| "allowed title".to_owned());
+                let identity = (level != CaptureLevel::Excluded).then_some(app.clone());
+                let expected_app = match &identity {
+                    Some(AppIdentity::Exe(value)) => json!({"kind":"exe", "value":value}),
+                    Some(AppIdentity::Aumid(value)) => json!({"kind":"aumid", "value":value}),
+                    Some(AppIdentity::Unresolved(value)) => {
+                        json!({"kind":"unresolved", "value":value})
+                    }
+                    None => serde_json::Value::Null,
+                };
+                let capture = CaptureState::Tracking(IntervalFact::Window {
+                    instance: (level != CaptureLevel::Excluded)
+                        .then_some(WindowId::from_persisted(1)),
+                    fields: CapturedFields {
+                        level,
+                        title: title.clone(),
+                        title_status: if title.is_some() {
+                            TitleStatus::Ok
+                        } else {
+                            TitleStatus::Redacted
+                        },
+                        privacy: None,
+                        web: quartz_domain::rules::WebAction::None,
+                    },
+                });
+                publisher.publish_snapshot(
+                    Some(&capture),
+                    PersistenceState::Ready,
+                    Some(ForegroundView {
+                        app: identity,
+                        title: title.clone(),
+                        start: Timestamp {
+                            utc: quartz_domain::capture::UtcInstant::try_from(123)
+                                .expect("test UTC"),
+                            mono: quartz_domain::capture::MonoInstant::from_millis(0),
+                        },
+                    }),
+                );
+                let receiver = publisher.subscribe();
+                let body = serde_json::to_value(receiver.borrow().snapshot()).expect("state body");
+                assert_eq!(
+                    body,
+                    json!({
+                        "foreground": {"app":expected_app, "title":title, "interval_start_utc_ms":123},
+                        "recording":true, "stop_reason":null, "browser_streams":[], "ui_language":"en",
+                        "locale":{"hour_cycle":"h24", "first_day_of_week":"monday"}
+                    })
+                );
+                publisher.publish(Some(&CaptureState::Ended), PersistenceState::Ready);
+                assert_eq!(receiver.borrow().snapshot().foreground, None);
+            }
+        }
+    }
 
     #[test]
     fn snapshots_follow_capture_and_persistence_with_fixed_priority() {

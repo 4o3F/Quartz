@@ -413,28 +413,25 @@ fn publish_change(publisher: &StatusPublisher, change: u64) {
 const STRESS_TITLE_CHARACTERS: usize = 4000;
 fn publish_large_foreground(publisher: &StatusPublisher, change: u64) {
     use quartz_domain::capture::*;
-    let row = OpenInterval {
-        id: RowId::from_persisted(1),
-        segment: SegmentId::from_persisted(1),
-        session: SessionKey::from_persisted(1),
+    let view = ForegroundView {
+        app: Some(AppIdentity::Exe("c:\\app.exe".into())),
+        title: Some(format!("{change}{}", "界".repeat(STRESS_TITLE_CHARACTERS))),
         start: Timestamp {
             utc: UtcInstant::try_from(123).expect("test UTC"),
             mono: MonoInstant::from_millis(0),
         },
-        fact: IntervalFact::Window {
-            app: Some(AppIdentity::Exe("c:\\app.exe".into())),
-            instance: Some(WindowId::from_persisted(1)),
-            fields: CapturedFields {
-                level: CaptureLevel::Full,
-                title: Some(format!("{change}{}", "界".repeat(STRESS_TITLE_CHARACTERS))),
-                title_status: TitleStatus::Ok,
-                privacy: None,
-                web: quartz_domain::rules::WebAction::None,
-            },
-        },
     };
-    let tracking = CaptureState::Tracking(row.fact.clone());
-    publisher.publish_interval(Some(row));
+    let tracking = CaptureState::Tracking(IntervalFact::Window {
+        instance: Some(WindowId::from_persisted(1)),
+        fields: CapturedFields {
+            level: CaptureLevel::Full,
+            title: view.title.clone(),
+            title_status: TitleStatus::Ok,
+            privacy: None,
+            web: quartz_domain::rules::WebAction::None,
+        },
+    });
+    publisher.publish_foreground(Some(view));
     publisher.publish(Some(&tracking), crate::persistence::PersistenceState::Ready);
 }
 

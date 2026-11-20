@@ -28,7 +28,7 @@ pub use idle::{
     ExceptionGrant, IdleDecision, IdleException, IdlePolicy, IdleRecord, IdleSample, IdleStatus,
     LastInput, ReadLastInputError,
 };
-pub use ids::{BatchId, ObservationId, RowId, RunId, SegmentId, SessionKey, WindowId};
+pub use ids::{BatchId, RowId, RunId, SegmentId, SessionKey, WindowId};
 pub use privacy::{
     BrowserContext, CaptureLevel, CapturedFields, PrivacyContext, PrivacyExplanation, PrivacyLabel,
     PrivacyMode, SystemSignal,
@@ -44,10 +44,10 @@ pub use window::{
 pub use model::{
     AvailabilityEndReason, AvailabilityReason, CaptureEffect, CaptureEvent, CaptureGap,
     CaptureInput, CaptureParts, CaptureState, CaptureStep, CaptureWrite, Checkpoint, ClockChange,
-    ClockEndReason, Foreground, GapReason, HookTarget, IntervalEndReason, IntervalFact,
-    NoForegroundReason, ObservationSource, OpenAvailability, OpenInterval, PolicyObservation,
-    RunEndReason, SegmentRange, SessionReadiness, SessionStatus, StopChange, StopReason, Timer,
-    TitleActivity,
+    ClockEndReason, Foreground, ForegroundView, GapReason, HookTarget, IntervalEndReason,
+    IntervalFact, NoForegroundReason, ObservationSource, OpenAvailability, OpenInterval,
+    PolicyObservation, RunEndReason, SegmentRange, SessionReadiness, SessionStatus, StopChange,
+    StopReason, Timer, TitleActivity,
 };
 
 const _: () = {

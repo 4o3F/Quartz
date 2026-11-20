@@ -6,13 +6,8 @@ use super::{
 };
 use crate::store::{
     enums::IntegerCode,
-    rows::{
-        ApplicationsRow, AvailabilityIntervalsRow, CaptureRunsRow, ClockSegmentsRow, IntervalsRow,
-    },
-    schema::{
-        applications, availability_intervals, capture_runs, clock_segments, intervals, settings,
-        titles,
-    },
+    rows::{AvailabilityIntervalsRow, CaptureRunsRow, ClockSegmentsRow, IntervalsRow},
+    schema::{availability_intervals, capture_runs, clock_segments, intervals, settings, titles},
 };
 use diesel::prelude::{
     ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper,
@@ -121,11 +116,25 @@ impl Capture<'_> {
         })
     }
     fn load_deadlines(&mut self) -> Result<Vec<PersistedDeadline>, LoadCaptureStartupError> {
+        // This removed pre-M5 feature used a settings key, not an integer enum code.
+        // Ignore it without decoding its value so obsolete data cannot block startup.
+        let removed_key = crate::store::versions::REMOVED_PRIVACY_CONTEXT_DEADLINE_KEY;
+        if settings::table
+            .find(removed_key)
+            .select(settings::key)
+            .first::<String>(self.connection)
+            .optional()?
+            .is_some()
+        {
+            tracing::warn!(
+                key = removed_key,
+                "ignoring persisted deadline for removed browser-context deferral"
+            );
+        }
         let mut deadlines = Vec::new();
         for owner in [
             domain::SchedulerKind::Maintenance,
             domain::SchedulerKind::Idle,
-            domain::SchedulerKind::PrivacyContext,
             domain::SchedulerKind::Midnight,
         ] {
             let key = Self::deadline_key(owner);
@@ -356,33 +365,13 @@ impl Capture<'_> {
                     .window_instance_id
                     .map(|id| self.remember_window(run, id, context))
                     .transpose()?;
-                let app = match row.capture_level {
-                    crate::store::enums::CaptureLevel::Excluded => None,
-                    crate::store::enums::CaptureLevel::Full
-                    | crate::store::enums::CaptureLevel::TitleHidden => {
-                        Some(self.load_interval_application(
-                            context.required(row.app_id, intervals::app_id)?,
-                        )?)
-                    }
-                };
                 let title = self.load_title(row.title_id)?;
                 Ok(domain::IntervalFact::Window {
-                    app,
                     instance,
                     fields: row.captured_fields(title, context)?,
                 })
             }
         }
-    }
-    fn load_interval_application(
-        &mut self,
-        id: i64,
-    ) -> Result<domain::AppIdentity, LoadRecoverableRunError> {
-        let row = applications::table
-            .filter(applications::id.eq(id))
-            .select(ApplicationsRow::as_select())
-            .first::<ApplicationsRow>(self.connection)?;
-        row.into_identity().map_err(LoadRecoverableRunError::from)
     }
     fn remember_window(
         &mut self,

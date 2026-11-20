@@ -99,10 +99,6 @@ impl PrivacyContext {
     fn clean_web(&mut self, fields: &CapturedFields) {
         if fields.web == crate::rules::WebAction::None {
             self.browser = BrowserContext::Offline;
-        } else if fields.web == crate::rules::WebAction::DomainOnly
-            && let BrowserContext::Ready(web) = &mut self.browser
-        {
-            web.text.remove(&crate::rules::Field::TabTitle);
         }
     }
 }
@@ -111,7 +107,6 @@ impl EvaluatedForeground {
         match &self.observed {
             ObservedForeground::None(reason) => IntervalFact::NoForeground(*reason),
             ObservedForeground::Window(row) => IntervalFact::Window {
-                app: (row.fields.level != CaptureLevel::Excluded).then(|| row.instance.app.clone()),
                 instance: (row.fields.level != CaptureLevel::Excluded).then_some(row.instance.id),
                 fields: row.fields.clone(),
             },

@@ -1,16 +1,11 @@
 //! Cohesive private capture state with named records and local operations.
 
 use super::{
-    AvailabilityEndReason, AvailabilityReason, BatchId, CaptureStep, CaptureWrite, Foreground,
-    IdleDecision, IdleRecord, IdleStatus, IntervalEndReason, MonoInstant, ObservationId,
-    ObservationSource, OpenAvailability, ReadLastInputError, RowId, RunId, SegmentId, TimeRange,
-    Timestamp, ids::IdAllocator,
+    AvailabilityEndReason, AvailabilityReason, BatchId, CaptureStep, CaptureWrite, IdleDecision,
+    IdleRecord, IdleStatus, IntervalEndReason, MonoInstant, OpenAvailability, ReadLastInputError,
+    RowId, RunId, SegmentId, TimeRange, Timestamp, ids::IdAllocator,
 };
-use crate::rules::registry::RuleSnapshot;
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
 pub(super) struct ClockSegment {
@@ -176,53 +171,6 @@ pub(super) struct ReviewHistory {
 impl ReviewHistory {
     pub(super) fn take(&mut self) -> Vec<WaitingRange> {
         std::mem::take(&mut self.ranges)
-    }
-}
-#[derive(Debug)]
-pub(super) struct DeferredObservation {
-    pub observation: ObservationId,
-    pub at: Timestamp,
-    pub rules: Arc<RuleSnapshot>,
-    pub source: ObservationSource,
-    pub foreground: Foreground,
-}
-#[derive(Debug, Default)]
-pub(super) struct DeferredBrowser {
-    observations: VecDeque<DeferredObservation>,
-}
-#[derive(Debug)]
-pub(super) enum BrowserResolution {
-    Discard,
-    Context {
-        observation: ObservationId,
-        browser: super::BrowserContext,
-    },
-}
-impl DeferredBrowser {
-    pub(super) fn is_empty(&self) -> bool {
-        self.observations.is_empty()
-    }
-    pub(super) fn is_full(&self) -> bool {
-        self.observations.len() == super::limits::MAIN_QUEUE_CAPACITY
-    }
-    pub(super) fn first(&self) -> Option<&DeferredObservation> {
-        self.observations.front()
-    }
-    pub(super) fn contains(&self, observation: ObservationId) -> bool {
-        self.observations
-            .iter()
-            .any(|pending| pending.observation == observation)
-    }
-    pub(super) fn push(&mut self, observation: DeferredObservation) {
-        self.observations.push_back(observation);
-    }
-    pub(super) fn pop(&mut self) -> Option<DeferredObservation> {
-        self.observations.pop_front()
-    }
-    pub(super) fn expired(&self, at: Timestamp) -> bool {
-        self.first().is_some_and(|pending| {
-            pending.at.mono.advance(super::limits::PRIVACY_CONTEXT_WAIT) <= at.mono
-        })
     }
 }
 #[derive(Debug, Clone, Copy)]

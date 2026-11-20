@@ -1,9 +1,5 @@
 use super::*;
-use crate::rules::{
-    Field, FieldSnapshot,
-    registry::{DecisionParts, RegistryCommand, RegistryState, RuleRegistry},
-};
-use crate::text::NfcText;
+use crate::rules::registry::{DecisionParts, RegistryCommand, RegistryState, RuleRegistry};
 use std::time::Duration;
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -1235,62 +1231,6 @@ fn excluded_fields_system_signals_and_policy_boundaries_are_sanitized() {
 }
 
 #[test]
-fn browser_privacy_wait_has_no_output_title_and_timeout_discards_it() {
-    let mut fixture = Fixture::active();
-    fixture.policy(
-        &rule(
-            "title_hidden",
-            "{field='web.domain',op='domain_suffix',value='bank.example'}",
-        ),
-        0,
-    );
-    let mut foreground = window(2, "bank secret");
-    if let Foreground::Window { privacy, .. } = &mut foreground {
-        privacy.browser = BrowserContext::Pending;
-    }
-    let pending = fixture.hook(at(10), foreground);
-    assert!(!format!("{pending:?}").contains("bank secret"));
-    assert!(matches!(
-        fixture.core.state(),
-        CaptureState::AwaitingBrowserContext
-    ));
-    let timeout = fixture.send(at(2_010), CaptureEvent::Wake);
-    assert_eq!(fields(&timeout).level, CaptureLevel::TitleHidden);
-    assert!(!format!("{timeout:?}").contains("bank secret"));
-    fixture.finish(at(2_020));
-}
-
-#[test]
-fn browser_context_evaluates_delayed_titles_and_domain_only_drops_windows_title() {
-    let mut fixture = Fixture::active();
-    fixture.policy(
-        &rule(
-            "title_hidden",
-            "{field='web.domain',op='domain_suffix',value='bank.example'}",
-        ),
-        0,
-    );
-    let mut foreground = window(2, "bank secret");
-    if let Foreground::Window { privacy, .. } = &mut foreground {
-        privacy.browser = BrowserContext::Pending;
-    }
-    let _ = fixture.hook(at(10), foreground.clone());
-    let mut web = FieldSnapshot {
-        domain: Some(crate::domain_name::DomainName::parse("bank.example").expect("domain")),
-        ..FieldSnapshot::default()
-    };
-    web.text
-        .insert(Field::TabTitle, NfcText::new("bank secret"));
-    if let Foreground::Window { privacy, .. } = &mut foreground {
-        privacy.browser = BrowserContext::Ready(web);
-    }
-    let ready = fixture.hook(at(20), foreground);
-    assert_eq!(fields(&ready).web, crate::rules::WebAction::DomainOnly);
-    assert!(!format!("{ready:?}").contains("bank secret"));
-    fixture.finish(at(30));
-}
-
-#[test]
 fn deadline_scheduler_expiration_cancellation_empty_and_clock_recalculation() {
     let mut deadlines = DeadlineScheduler::default();
     assert_eq!(deadlines.next(at(0)).expect("valid timer deadline"), None);
@@ -1982,62 +1922,6 @@ fn no_interval_is_emitted_until_session_and_fresh_foreground_read_both_arrive() 
 }
 
 #[test]
-fn browser_context_authorizes_only_its_correlated_snapshot_and_late_replies_cannot_restore_titles()
-{
-    let mut fixture = Fixture::active();
-    fixture.policy(
-        &rule(
-            "title_hidden",
-            "{field='web.domain',op='domain_suffix',value='bank.example'}",
-        ),
-        0,
-    );
-    let pending = |title: &str| {
-        let mut foreground = window(2, title);
-        if let Foreground::Window { privacy, .. } = &mut foreground {
-            privacy.browser = BrowserContext::Pending;
-        }
-        foreground
-    };
-    let first = fixture.hook(at(10), pending("secret older page"));
-    let second = fixture.hook(at(20), pending("allowed current page"));
-    let observation = |step: &CaptureStep| {
-        step.effects
-            .iter()
-            .find_map(|effect| match effect {
-                CaptureEffect::AwaitBrowserContext { observation, .. } => Some(*observation),
-                _ => None,
-            })
-            .expect("correlation key")
-    };
-    let first_id = observation(&first);
-    let second_id = observation(&second);
-    assert_ne!(first_id, second_id);
-    let context = FieldSnapshot {
-        domain: Some(crate::domain_name::DomainName::parse("normal.example").expect("domain")),
-        ..FieldSnapshot::default()
-    };
-    let ready = fixture.send(
-        at(30),
-        CaptureEvent::PrivacyContext {
-            observation: second_id,
-            browser: BrowserContext::Ready(context.clone()),
-        },
-    );
-    assert!(format!("{ready:?}").contains("allowed current page"));
-    assert!(!format!("{ready:?}").contains("secret older page"));
-    let late = fixture.send(
-        at(40),
-        CaptureEvent::PrivacyContext {
-            observation: first_id,
-            browser: BrowserContext::Ready(context),
-        },
-    );
-    assert!(late.writes.is_empty());
-    fixture.finish(at(50));
-}
-
-#[test]
 fn invalid_capture_inputs_leave_every_core_component_unchanged() {
     let mut fixture = Fixture::active();
     let _ = fixture.hook(at(10), window(1, "known state"));
@@ -2083,19 +1967,13 @@ fn invalid_capture_inputs_leave_every_core_component_unchanged() {
 }
 
 #[test]
-fn subscription_interval_has_actual_boundary_and_only_sanitized_identity_and_title() {
+fn foreground_view_has_actual_boundary_and_only_sanitized_identity_and_title() {
     let mut fixture = Fixture::active();
     let _ = fixture.hook(at(10), window(1, "allowed title"));
-    let row = fixture.core.current_interval().expect("tracking interval");
+    let row = fixture.core.foreground_view().expect("tracking interval");
     assert_eq!(row.start, at(10));
-    assert!(matches!(
-        row.fact,
-        IntervalFact::Window {
-            app: Some(AppIdentity::Exe(_)),
-            fields: CapturedFields { title: Some(_), .. },
-            ..
-        }
-    ));
+    assert_eq!(row.app, Some(AppIdentity::Exe("c:\\app.exe".into())));
+    assert_eq!(row.title.as_deref(), Some("allowed title"));
     fixture.policy(
         &rule(
             "title_hidden",
@@ -2104,16 +1982,10 @@ fn subscription_interval_has_actual_boundary_and_only_sanitized_identity_and_tit
         0,
     );
     let _ = fixture.hook(at(20), window(1, "secret title"));
-    let row = fixture.core.current_interval().expect("redacted interval");
+    let row = fixture.core.foreground_view().expect("redacted interval");
     assert_eq!(row.start, at(20));
-    assert!(matches!(
-        row.fact,
-        IntervalFact::Window {
-            app: Some(_),
-            fields: CapturedFields { title: None, .. },
-            ..
-        }
-    ));
+    assert_eq!(row.app, Some(AppIdentity::Exe("c:\\app.exe".into())));
+    assert_eq!(row.title, None);
     fixture.policy(
         &rule(
             "excluded",
@@ -2122,19 +1994,64 @@ fn subscription_interval_has_actual_boundary_and_only_sanitized_identity_and_tit
         1,
     );
     let _ = fixture.hook(at(30), window(1, "excluded title"));
-    let row = fixture.core.current_interval().expect("excluded interval");
-    assert!(matches!(
-        row.fact,
-        IntervalFact::Window {
-            app: None,
-            fields: CapturedFields { title: None, .. },
-            ..
-        }
-    ));
+    let row = fixture.core.foreground_view().expect("excluded interval");
+    assert_eq!(row.start, at(30));
+    assert_eq!(row.app, None);
+    assert_eq!(row.title, None);
     let _ = fixture.send(
         at(40),
         CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
     );
-    assert!(fixture.core.current_interval().is_none());
+    assert!(fixture.core.foreground_view().is_none());
     fixture.finish(at(50));
+}
+
+#[test]
+fn offline_web_privacy_drops_titles_immediately_without_changing_non_browser_capture() {
+    for condition in [
+        "{field='web.domain',op='domain_suffix',value='bank.example'}",
+        "{field='web.tab_title',op='contains',value='secret'}",
+        "{field='browser.profile_label',op='equals',value='Private'}",
+    ] {
+        let mut fixture = Fixture::active();
+        fixture.policy(&rule("title_hidden", condition), 0);
+        assert!(
+            fixture
+                .rules
+                .snapshots()
+                .load()
+                .privacy()
+                .requires_web_privacy()
+        );
+        let mut browser = window(2, "offline secret");
+        if let Foreground::Window { privacy, .. } = &mut browser {
+            privacy.browser = BrowserContext::Offline;
+        }
+        let step = fixture.hook(at(10), browser);
+        assert_eq!(fields(&step).level, CaptureLevel::TitleHidden);
+        assert_eq!(fields(&step).title, None);
+        assert!(!format!("{step:?}").contains("offline secret"));
+        let view = fixture
+            .core
+            .foreground_view()
+            .expect("offline browser view");
+        assert!(view.app.is_some());
+        assert_eq!(view.title, None);
+        assert_eq!(view.start, at(10));
+        let step = fixture.hook(at(20), window(3, "non-browser title"));
+        assert_eq!(fields(&step).level, CaptureLevel::Full);
+        assert_eq!(fields(&step).title.as_deref(), Some("non-browser title"));
+        fixture.finish(at(30));
+    }
+    let mut fixture = Fixture::active();
+    let mut browser = window(2, "allowed offline title");
+    if let Foreground::Window { privacy, .. } = &mut browser {
+        privacy.browser = BrowserContext::Offline;
+    }
+    let step = fixture.hook(at(10), browser);
+    assert_eq!(
+        fields(&step).title.as_deref(),
+        Some("allowed offline title")
+    );
+    fixture.finish(at(20));
 }

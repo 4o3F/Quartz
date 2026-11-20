@@ -119,7 +119,7 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 | `ui.shutdown` | 核心 → 界面 | 用户退出 Quartz 时通知界面关闭 |
 | `ui.first_frame` | UI 请求 | 参数 `{}`；每次显示或激活请求后的首帧完成时发送，返回 `{accepted:true}`，核心清除 `show_requested` |
 
-`core.status` 从主线程发布的不可变快照读取，不访问 SQLite。`database` 为 `ok | persistence_failed`，`stop_reason` 在记录时为 `null`，停止时为稳定枚举：`persistence_failed`、`starting`、`session_unavailable`、`capture_gap`、`suspended`、`disconnected`、`locked`、`paused`、`awaiting_browser_context`、`no_foreground`、`ended`。多个条件重叠时按上述顺序选择；`ended` 表示已结束的采集运行，运行结束的历史原因保留在采集记录中。`browser_streams` 是类型化连接列表，条目包含 `browser_stream` 标识，M5 前为空。`instance_id` 每次核心启动重新生成，`core_version` 为核心的 crate 版本。
+`core.status` 从主线程发布的不可变快照读取，不访问 SQLite。`database` 为 `ok | persistence_failed`，`stop_reason` 在记录时为 `null`，停止时为稳定枚举：`persistence_failed`、`starting`、`session_unavailable`、`capture_gap`、`suspended`、`disconnected`、`locked`、`paused`、`no_foreground`、`ended`。`awaiting_browser_context` 随 M5 浏览器扩展加入。多个条件重叠时按上述顺序选择；`ended` 表示已结束的采集运行，运行结束的历史原因保留在采集记录中。`browser_streams` 是类型化连接列表，条目包含 `browser_stream` 标识，M5 前为空。`instance_id` 每次核心启动重新生成，`core_version` 为核心的 crate 版本。
 
 核心只在握手能力列表中登记已实现的能力。已定义但当前核心尚未实现的操作返回 `not_implemented`；`host` 运行时实现前，`host` 握手返回 `forbidden` 并断开。
 

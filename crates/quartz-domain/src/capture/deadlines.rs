@@ -10,8 +10,6 @@ pub enum SchedulerKind {
     Maintenance,
     /// Adaptive last-input check.
     Idle,
-    /// Browser privacy context wait limit.
-    PrivacyContext,
     /// UTC midnight foreground boundary.
     Midnight,
 }

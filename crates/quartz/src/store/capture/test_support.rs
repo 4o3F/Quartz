@@ -86,6 +86,23 @@ impl Fixture {
             let _ = self.step(now, feedback);
         }
     }
+    pub(crate) fn hide_web_field(&mut self, field: quartz_domain::rules::Field) {
+        use quartz_domain::rules::registry::RegistryCommand;
+        let mut registry = RuleRegistry::from_state(RegistryState::default()).expect("rules");
+        let field = field.as_str();
+        let decision = registry.decide(RegistryCommand::Apply {
+            key: "user.capture".parse().expect("rule set key"),
+            file: "capture-test.toml".into(),
+            text: format!("format='quartz-rules/1'\n[set]\nkey='user.capture'\nkind='privacy'\nname='Privacy tests'\n[[rule]]\nid='hide'\nlabel='Sensitive'\npreset='title_hidden'\nwhen=[{{field='{field}',op='equals',value='secret.example'}}]\n"),
+            base_version: 0,
+        }).into_parts();
+        decision.reply.expect("valid privacy rule");
+        registry
+            .committed(decision.outcome.expect("rule commit token"))
+            .expect("install privacy rule");
+        self.rules = registry.snapshots().load();
+        assert!(self.rules.privacy().requires_web_privacy());
+    }
     pub(crate) fn ready(&mut self, now: Timestamp) {
         self.persist(
             now,

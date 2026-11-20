@@ -7,25 +7,22 @@ use super::foreground::{
     Retention,
 };
 use super::{
-    AvailabilityEndReason, AvailabilityReason, BatchId, BrowserContext, CaptureEffect,
-    CaptureEvent, CaptureGap, CaptureInput, CaptureState, CaptureStep, CaptureWrite, Checkpoint,
-    ClockChange, ClockEndReason, Deadline, DeadlineKind, DeadlineScheduler, Foreground, GapReason,
-    IdleRecord, IdleSample, IntervalEndReason, IntervalFact, MetadataRefresh, NoForegroundReason,
-    ObservationId, ObservationSource, OpenInterval, PolicyObservation, PrivacyContext, RowId,
-    RunEndReason, RunId, SchedulerKind, SegmentRange, SessionStatus, StopChange, StopReason,
-    TimeRange, TimedPolicyKind, Timer, Timestamp, WindowId, WindowInstances, ids::IdAllocator,
-    limits,
+    AvailabilityEndReason, AvailabilityReason, BatchId, CaptureEffect, CaptureEvent, CaptureGap,
+    CaptureInput, CaptureState, CaptureStep, CaptureWrite, Checkpoint, ClockChange, ClockEndReason,
+    Deadline, DeadlineKind, DeadlineScheduler, Foreground, ForegroundView, GapReason, IdleRecord,
+    IdleSample, IntervalEndReason, IntervalFact, MetadataRefresh, NoForegroundReason,
+    ObservationSource, OpenInterval, PolicyObservation, RowId, RunEndReason, RunId, SchedulerKind,
+    SegmentRange, SessionStatus, StopChange, StopReason, TimeRange, TimedPolicyKind, Timer,
+    Timestamp, WindowId, WindowInstances, ids::IdAllocator, limits,
 };
 use crate::rules::registry::{RuleSnapshot, SnapshotEpoch};
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use super::{
     AdvanceTimeError,
     components::{
         AvailabilityAction, AvailabilityEvidence, AvailabilitySet, BatchLedger, BatchSettlement,
-        BrowserResolution, ClockSegment, DeferredBrowser, DeferredObservation, ReviewHistory,
-        SessionBoundary, StepContext, WaitingRange,
+        ClockSegment, ReviewHistory, SessionBoundary, StepContext, WaitingRange,
     },
     phase::{GapSpan, Phase, ResumeTarget},
 };
@@ -73,7 +70,6 @@ pub struct CaptureCore {
     availability: AvailabilitySet,
     pending_availability: Vec<AvailabilityEvidence>,
     review_history: ReviewHistory,
-    deferred: DeferredBrowser,
     epoch: Option<SnapshotEpoch>,
     windows: WindowInstances,
     allowed_windows: BTreeSet<WindowId>,
@@ -110,7 +106,6 @@ impl CaptureCore {
             availability: AvailabilitySet::new(at),
             pending_availability: Vec::new(),
             review_history: ReviewHistory::default(),
-            deferred: DeferredBrowser::default(),
             epoch: None,
             windows: WindowInstances::default(),
             allowed_windows: BTreeSet::new(),
@@ -155,10 +150,7 @@ impl CaptureCore {
         step: &mut CaptureStep,
     ) -> StepContext {
         let previous_segment = self.clock.segment;
-        let mut previous_at = self
-            .deferred
-            .first()
-            .map_or(self.clock.last_at, |pending| pending.at);
+        let mut previous_at = self.clock.last_at;
         if let Some(waiting) = self.phase.waiting()
             && waiting.mono < previous_at.mono
         {
@@ -179,16 +171,6 @@ impl CaptureCore {
             previous_waiting,
             old_state: self.state(),
         };
-        // Deferred titles are drained before unrelated boundaries so confirmations never
-        // extend an obsolete foreground through an unprocessed title transition.
-        if !matches!(
-            event,
-            CaptureEvent::Foreground { .. }
-                | CaptureEvent::PrivacyContext { .. }
-                | CaptureEvent::Wake
-        ) {
-            self.flush_deferred(BrowserResolution::Discard, step);
-        }
         if !matches!(
             event,
             CaptureEvent::PersistenceGap { .. } | CaptureEvent::BatchDiscarded(_)
@@ -197,12 +179,10 @@ impl CaptureCore {
         }
         self.adopt_rules(at, rules, event, step);
         // Every input can arrive after midnight even if its timer notification was delayed.
-        if self.deferred.is_empty()
-            && !matches!(
-                event,
-                CaptureEvent::EventOverload | CaptureEvent::PersistenceGap { .. }
-            )
-        {
+        if !matches!(
+            event,
+            CaptureEvent::EventOverload | CaptureEvent::PersistenceGap { .. }
+        ) {
             self.split_foreground(at, step);
         }
         context
@@ -220,7 +200,6 @@ impl CaptureCore {
             None => rules.epoch(),
         });
         if epoch_changed && !matches!(event, CaptureEvent::PolicyChanged(_)) {
-            self.flush_deferred(BrowserResolution::Discard, step);
             self.policy_boundary(at, PolicyObservation::Refresh, rules, step);
         }
     }
@@ -228,7 +207,7 @@ impl CaptureCore {
         &mut self,
         event: CaptureEvent,
         at: Timestamp,
-        rules: &Arc<RuleSnapshot>,
+        rules: &RuleSnapshot,
         step: &mut CaptureStep,
     ) {
         match event {
@@ -236,10 +215,6 @@ impl CaptureCore {
             CaptureEvent::Foreground { source, foreground } => {
                 self.on_foreground(source, foreground, at, rules, step)
             }
-            CaptureEvent::PrivacyContext {
-                observation,
-                browser,
-            } => self.on_privacy_context(observation, browser, step),
             CaptureEvent::UntriggeredChange {
                 previous_window,
                 reviewed_window,
@@ -309,7 +284,7 @@ impl CaptureCore {
         source: ObservationSource,
         mut foreground: Foreground,
         at: Timestamp,
-        rules: &Arc<RuleSnapshot>,
+        rules: &RuleSnapshot,
         step: &mut CaptureStep,
     ) {
         if let Foreground::Window { privacy, .. } = &mut foreground
@@ -317,66 +292,15 @@ impl CaptureCore {
         {
             privacy.mode = mode;
         }
-        let waiting = matches!(
-            &foreground,
-            Foreground::Window {
-                privacy: PrivacyContext {
-                    browser: BrowserContext::Pending,
-                    ..
-                },
-                ..
-            }
-        ) && rules.privacy().requires_web_privacy();
-        if waiting && self.phase.ready() && self.phase.reasons().is_empty() {
-            if self.deferred.is_full() {
-                self.flush_deferred(BrowserResolution::Discard, step);
-            }
-            if self.deferred.is_empty() {
-                self.deadlines.register(
-                    SchedulerKind::PrivacyContext,
-                    Deadline::Mono(at.mono.advance(limits::PRIVACY_CONTEXT_WAIT)),
-                );
-            }
-            self.rebind(&foreground, step);
-            let observation = self.ids.observation();
-            step.effects
-                .push(CaptureEffect::AwaitBrowserContext { observation });
-            self.deferred.push(DeferredObservation {
-                observation,
-                at,
-                rules: Arc::clone(rules),
+        self.foreground(
+            ForegroundReading {
                 source,
                 foreground,
-            });
-        } else {
-            // A fresh reading cannot authorize older, separately withheld snapshots.
-            self.flush_deferred(BrowserResolution::Discard, step);
-            self.foreground(
-                ForegroundReading {
-                    source,
-                    foreground,
-                    at,
-                },
-                EvaluationContext::fresh(rules),
-                step,
-            );
-        }
-    }
-    fn on_privacy_context(
-        &mut self,
-        observation: ObservationId,
-        browser: BrowserContext,
-        step: &mut CaptureStep,
-    ) {
-        if self.deferred.contains(observation) {
-            self.flush_deferred(
-                BrowserResolution::Context {
-                    observation,
-                    browser,
-                },
-                step,
-            );
-        }
+                at,
+            },
+            EvaluationContext::fresh(rules),
+            step,
+        );
     }
     fn destroy(&mut self, id: WindowId, at: Timestamp, step: &mut CaptureStep) {
         self.windows.retire(id);
@@ -566,22 +490,37 @@ impl CaptureCore {
 
     /// Returns only sanitized state, suitable for subscriptions and tray rendering.
     pub fn state(&self) -> CaptureState {
-        if self.phase.ready()
-            && self.phase.reasons().is_empty()
-            && self.phase.gap().is_none()
-            && !self.deferred.is_empty()
-        {
-            CaptureState::AwaitingBrowserContext
-        } else {
-            self.phase.state()
-        }
+        self.phase.state()
     }
-    /// Returns the current privacy-filtered interval with its actual boundary.
+    /// Projects the current interval's allowed fields for subscriptions and tray state.
     #[must_use]
-    pub fn current_interval(&self) -> Option<OpenInterval> {
-        matches!(self.state(), CaptureState::Tracking(_))
-            .then(|| self.phase.interval())
-            .flatten()
+    pub fn foreground_view(&self) -> Option<ForegroundView> {
+        if !matches!(self.state(), CaptureState::Tracking(_)) {
+            return None;
+        }
+        let row = self
+            .phase
+            .interval()
+            .expect("tracking has an open interval");
+        let IntervalFact::Window { instance, fields } = row.fact else {
+            unreachable!("tracking has a window interval");
+        };
+        let app = instance.map(|id| {
+            assert_eq!(
+                self.tracker.instance(),
+                Some(id),
+                "current interval uses the tracked window"
+            );
+            self.tracker
+                .app()
+                .expect("tracked window has an application identity")
+                .clone()
+        });
+        Some(ForegroundView {
+            app,
+            title: fields.title,
+            start: row.start,
+        })
     }
     /// Last transaction acknowledged by the store shell.
     pub fn committed_batch(&self) -> BatchId {
@@ -1155,7 +1094,6 @@ impl CaptureCore {
         let app = if self.phase.ready()
             && !self.phase.needs_review()
             && self.phase.reasons().is_empty()
-            && self.deferred.is_empty()
         {
             self.tracker.app()
         } else {
@@ -1221,9 +1159,6 @@ impl CaptureCore {
         }
     }
     fn wake(&mut self, at: Timestamp, rules: &RuleSnapshot, step: &mut CaptureStep) {
-        if self.deferred.expired(at) {
-            self.flush_deferred(BrowserResolution::Discard, step);
-        }
         let due = self.deadlines.take_due(at);
         for owner in due {
             match owner {
@@ -1238,7 +1173,6 @@ impl CaptureCore {
         }
         match owner {
             SchedulerKind::Maintenance => {
-                self.flush_deferred(BrowserResolution::Discard, step);
                 if at.mono > self.clock.maintenance_deadline.advance(limits::BATCH_WAIT) {
                     self.begin_gap(self.clock.last_at, GapReason::EventOverload, step);
                 }
@@ -1266,9 +1200,7 @@ impl CaptureCore {
                 );
             }
             SchedulerKind::Midnight => {
-                if self.deferred.is_empty() {
-                    self.split_foreground(at, step);
-                }
+                self.split_foreground(at, step);
                 self.deadlines.register(
                     owner,
                     Deadline::Utc(
@@ -1278,7 +1210,6 @@ impl CaptureCore {
                 );
             }
             SchedulerKind::Idle => step.effects.push(CaptureEffect::CheckIdle),
-            SchedulerKind::PrivacyContext => self.flush_deferred(BrowserResolution::Discard, step),
         }
     }
     fn expire_policy(
@@ -1299,41 +1230,5 @@ impl CaptureCore {
         self.policy_boundary(at, PolicyObservation::Refresh, rules, step);
         step.effects.push(CaptureEffect::PolicyExpired(owner));
         step.effects.push(CaptureEffect::CheckIdle);
-    }
-
-    fn flush_deferred(&mut self, context: BrowserResolution, step: &mut CaptureStep) {
-        self.deadlines.cancel(SchedulerKind::PrivacyContext);
-        if self
-            .persisted_deadlines
-            .remove(&SchedulerKind::PrivacyContext)
-        {
-            step.writes.push(CaptureWrite::ClearDeadline {
-                owner: SchedulerKind::PrivacyContext,
-            });
-        }
-        while let Some(mut pending) = self.deferred.pop() {
-            if let Foreground::Window { privacy, .. } = &mut pending.foreground {
-                privacy.browser = match &context {
-                    BrowserResolution::Context {
-                        observation,
-                        browser,
-                    } if *observation == pending.observation
-                        && matches!(browser, BrowserContext::Ready(_)) =>
-                    {
-                        browser.clone()
-                    }
-                    _ => BrowserContext::Offline,
-                };
-            }
-            self.foreground(
-                ForegroundReading {
-                    source: pending.source,
-                    foreground: pending.foreground,
-                    at: pending.at,
-                },
-                EvaluationContext::fresh(&pending.rules),
-                step,
-            );
-        }
     }
 }

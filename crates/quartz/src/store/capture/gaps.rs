@@ -70,7 +70,6 @@ impl Capture<'_> {
         match owner {
             SchedulerKind::Maintenance => crate::store::versions::MAINTENANCE_DEADLINE_KEY,
             SchedulerKind::Idle => crate::store::versions::IDLE_DEADLINE_KEY,
-            SchedulerKind::PrivacyContext => crate::store::versions::PRIVACY_CONTEXT_DEADLINE_KEY,
             SchedulerKind::Midnight => crate::store::versions::MIDNIGHT_DEADLINE_KEY,
         }
     }

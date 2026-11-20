@@ -75,16 +75,6 @@ impl SessionKey {
         self.0
     }
 }
-/// Correlation key of one withheld observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ObservationId(u64);
-impl ObservationId {
-    /// Returns the logical value for the persistence adapter.
-    #[must_use]
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
 /// Ordered transaction acknowledgement key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BatchId(u64);
@@ -100,7 +90,6 @@ impl BatchId {
 pub(super) struct IdAllocator {
     row: u64,
     session: u64,
-    observation: u64,
     window: u64,
     segment: u64,
     batch: u64,
@@ -119,13 +108,6 @@ impl IdAllocator {
             .checked_add(1)
             .expect("logical identifier space exhausted");
         SessionKey(self.session)
-    }
-    pub(super) fn observation(&mut self) -> ObservationId {
-        self.observation = self
-            .observation
-            .checked_add(1)
-            .expect("logical identifier space exhausted");
-        ObservationId(self.observation)
     }
     pub(super) fn window(&mut self) -> WindowId {
         self.window = self

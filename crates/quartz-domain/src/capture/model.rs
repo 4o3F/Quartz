@@ -1,10 +1,10 @@
 //! Value inputs, transactional write descriptions and sanitized shell effects.
 
 use super::{
-    BatchId, BrowserContext, CapturedFields, Deadline, IdleException, IdleRecord, IdleSample,
-    MonoInstant, ObservationId, PrivacyContext, ProcessId, ReadLastInputError, RowId, RunId,
-    SchedulerKind, SegmentId, SessionKey, TimeRange, Timestamp, UtcInstant, WindowFacts,
-    WindowHandle, WindowId, WindowInstance, WriteBatch,
+    BatchId, CapturedFields, Deadline, IdleException, IdleRecord, IdleSample, MonoInstant,
+    PrivacyContext, ProcessId, ReadLastInputError, RowId, RunId, SchedulerKind, SegmentId,
+    SessionKey, TimeRange, Timestamp, UtcInstant, WindowFacts, WindowHandle, WindowId,
+    WindowInstance, WriteBatch,
 };
 use crate::rules::registry::RuleSnapshot;
 use std::{collections::BTreeSet, sync::Arc};
@@ -199,8 +199,6 @@ pub struct CaptureGap {
 pub enum IntervalFact {
     /// Allowed fields and optional allowed instance identity.
     Window {
-        /// Application identity after privacy filtering; absent only when the application is excluded.
-        app: Option<super::AppIdentity>,
         /// Logical identity of the observed window instance.
         instance: Option<WindowId>,
         /// Foreground fields after privacy actions have been applied.
@@ -208,6 +206,16 @@ pub enum IntervalFact {
     },
     /// Known absence of an observable foreground.
     NoForeground(NoForegroundReason),
+}
+/// Privacy-filtered foreground values projected for the main thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForegroundView {
+    /// Application identity; absent when the application is excluded.
+    pub app: Option<super::AppIdentity>,
+    /// Title already sanitized by the current interval's privacy evaluation.
+    pub title: Option<String>,
+    /// Actual start of the current interval piece.
+    pub start: Timestamp,
 }
 /// Open foreground row with core-assigned stable keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,8 +390,6 @@ impl CaptureWrite {
 /// Sanitized tray/subscription state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureState {
-    /// A browser title is withheld until correlated privacy context or timeout.
-    AwaitingBrowserContext,
     /// Current sanitized foreground row.
     Tracking(IntervalFact),
     /// Stop reasons may overlap; readiness can also prevent tracking.
@@ -403,11 +409,6 @@ pub enum CaptureState {
 /// Commands for platform and persistence shells, containing no unfiltered title.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureEffect {
-    /// Correlate browser privacy context to exactly this withheld observation.
-    AwaitBrowserContext {
-        /// Correlation key of exactly one withheld foreground snapshot.
-        observation: ObservationId,
-    },
     /// Main thread must check the target HWND and PID before replacing hooks.
     RebindHooks {
         /// Typed process binding or explicit hook removal.
@@ -467,13 +468,6 @@ pub enum CaptureEvent {
         previous_window: Option<WindowHandle>,
         /// Window at the fallback read.
         reviewed_window: Option<WindowHandle>,
-    },
-    /// Context for one withheld snapshot; late replies cannot recover discarded titles.
-    PrivacyContext {
-        /// Correlation key of exactly one withheld foreground snapshot.
-        observation: ObservationId,
-        /// Browser facts correlated to this withheld observation.
-        browser: BrowserContext,
     },
     /// Matching logical window was destroyed.
     Destroy(WindowId),
