@@ -557,3 +557,49 @@ fn user_category_uuid_and_metadata_are_returned_by_the_query() {
     assert_eq!(category.color, "cat.2");
     assert_eq!(category.tendency, quartz_protocol::CategoryTendency::Focus);
 }
+
+#[test]
+fn store_read_projects_private_fields_before_returning_foreground_facts() {
+    let mut fixture = QueryFixture::new(2);
+    for level in [
+        enums::CaptureLevel::Full,
+        enums::CaptureLevel::TitleHidden,
+        enums::CaptureLevel::Excluded,
+    ] {
+        fixture.redact_titles(level);
+        let range = QueryRange {
+            start: fixture.start,
+            end: fixture.start + 2000,
+        };
+        let mut snapshot = fixture
+            .store
+            .take_query_reader()
+            .expect("reader")
+            .snapshot();
+        snapshot.begin().expect("begin snapshot");
+        let mut foreground_count = 0;
+        while let Some(rows) = snapshot.read_batch(range).expect("read facts") {
+            for row in rows {
+                if let InputRow::Foreground(row) = row {
+                    foreground_count += 1;
+                    assert_eq!(
+                        row.visible_app().is_some(),
+                        level != enums::CaptureLevel::Excluded
+                    );
+                    assert_eq!(
+                        row.visible_title().is_some(),
+                        level == enums::CaptureLevel::Full
+                    );
+                    assert_eq!(
+                        row.visible_title_id().is_some(),
+                        level == enums::CaptureLevel::Full
+                    );
+                }
+            }
+        }
+        assert_eq!(foreground_count, 2);
+        fixture
+            .store
+            .return_query_reader(snapshot.finish().expect("finish snapshot"));
+    }
+}

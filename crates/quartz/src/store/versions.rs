@@ -1,7 +1,6 @@
 //! Version rows, settings keys, and transaction-local invalidation effects.
 use super::{
     ReadOnlyStore, Store,
-    capture::{CaptureColumn, ExecuteCaptureBatchError},
     enums::{DataSource, IntegerCode},
     query::ReadSnapshot,
     query_error::ReadQueryError,
@@ -14,6 +13,32 @@ use quartz_domain::{
     facts::QueryRange,
 };
 use std::collections::BTreeMap;
+
+/// Failure to persist a fact-day or metadata version in the current transaction.
+#[derive(Debug, snafu::Snafu)]
+#[snafu(module)]
+pub(crate) enum BumpVersionError {
+    #[snafu(display("could not write query version"))]
+    Database { source: diesel::result::Error },
+    #[snafu(display("invalid version range time"))]
+    Time {
+        source: quartz_domain::capture::AdvanceTimeError,
+    },
+    #[snafu(display("could not decode metadata version"))]
+    DecodeMetadata { source: serde_json::Error },
+    #[snafu(display("invalid metadata version in settings"))]
+    MetadataVersion,
+}
+impl From<diesel::result::Error> for BumpVersionError {
+    fn from(source: diesel::result::Error) -> Self {
+        Self::Database { source }
+    }
+}
+impl From<quartz_domain::capture::AdvanceTimeError> for BumpVersionError {
+    fn from(source: quartz_domain::capture::AdvanceTimeError) -> Self {
+        Self::Time { source }
+    }
+}
 
 pub(crate) const METADATA_VERSION_KEY: &str = "metadata_version";
 pub(crate) const DEVICE_ID_KEY: &str = "device_id";
@@ -144,11 +169,11 @@ impl TxEffects {
         connection: &mut diesel::SqliteConnection,
         source: DataSource,
         range: TimeRange,
-    ) -> Result<(), ExecuteCaptureBatchError> {
-        let context = CaptureColumn::new(data_day_versions::utc_date);
-        let start = context.utc(range.start.utc)?;
-        let end = context.utc(range.end.utc)?;
-        context.range(range.start, range.end)?;
+    ) -> Result<(), BumpVersionError> {
+        let start = i64::try_from(range.start.utc)?;
+        let end = i64::try_from(range.end.utc)?;
+        range.end.utc.duration_since(range.start.utc)?;
+        range.end.mono.duration_since(range.start.mono)?;
         let last = if end > start { end - 1 } else { end };
         for day in start.div_euclid(UTC_DAY_MS)..=last.div_euclid(UTC_DAY_MS) {
             let version = diesel::insert_into(data_day_versions::table)
@@ -175,7 +200,7 @@ impl TxEffects {
     pub(super) fn bump_metadata(
         &mut self,
         connection: &mut diesel::SqliteConnection,
-    ) -> Result<(), ExecuteCaptureBatchError> {
+    ) -> Result<(), BumpVersionError> {
         let value = settings::table
             .filter(settings::key.eq(METADATA_VERSION_KEY))
             .select(settings::value)
@@ -183,13 +208,13 @@ impl TxEffects {
             .optional()?;
         let version: i64 = match value {
             Some(value) => serde_json::from_str(&value)
-                .map_err(|_| ExecuteCaptureBatchError::MetadataVersion)?,
+                .map_err(|source| BumpVersionError::DecodeMetadata { source })?,
             None => 0,
         };
         let version = version
             .checked_add(1)
             .filter(|version| *version > 0)
-            .ok_or(ExecuteCaptureBatchError::MetadataVersion)?;
+            .ok_or(BumpVersionError::MetadataVersion)?;
         diesel::insert_into(settings::table)
             .values((
                 settings::key.eq(METADATA_VERSION_KEY),

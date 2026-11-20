@@ -1,0 +1,44 @@
+{
+  "metrics": {
+    "active_ms": 1000,
+    "focus_ratio": 1.0,
+    "distract_ratio": 0.0,
+    "unclassified_ms": 0,
+    "longest_focus_ms": 1000,
+    "switches_per_hour": 0.0
+  },
+  "hours": [
+    {
+      "start_utc_ms": 0,
+      "end_utc_ms": 3600000,
+      "local_start": "1970-01-01T00:00:00+00:00[UTC]",
+      "categories": [
+        {
+          "category": {
+            "kind": "classified",
+            "id": 7,
+            "uuid": "71f5a800-423a-4000-8000-000000000001",
+            "builtin_key": "development",
+            "name": null,
+            "color": "cat.8",
+            "tendency": "focus"
+          },
+          "duration_ms": 1000
+        }
+      ]
+    }
+  ],
+  "applications": [
+    {
+      "app": {
+        "id": 3,
+        "exe_name": "code.exe",
+        "display_name": "Code",
+        "aumid": null
+      },
+      "active_ms": 1000
+    }
+  ],
+  "versions": "version-token",
+  "next_cursor": null
+}

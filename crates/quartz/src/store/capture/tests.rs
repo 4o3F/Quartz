@@ -1673,12 +1673,16 @@ fn clock_confirmation_invalidates_query_versions_before_first_foreground_fact() 
     fixture.persist(at(59_000), CaptureEvent::Wake);
     assert!(fixture.intervals().is_empty());
     let after = fixture.store.version_state().expect("confirmed versions");
-    let before =
-        crate::query::versions::VersionState::from_stored(before, "classification-test".into())
-            .digest(range);
-    let after =
-        crate::query::versions::VersionState::from_stored(after, "classification-test".into())
-            .digest(range);
+    let before = crate::query::versions::VersionState::from_stored(
+        before,
+        quartz_domain::rules::ContentHash::of("classification-test"),
+    )
+    .digest(range);
+    let after = crate::query::versions::VersionState::from_stored(
+        after,
+        quartz_domain::rules::ContentHash::of("classification-test"),
+    )
+    .digest(range);
     assert_ne!(
         before, after,
         "clock-only coverage changes invalidate cursors and day subscriptions"

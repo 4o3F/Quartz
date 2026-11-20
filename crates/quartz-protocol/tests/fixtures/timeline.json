@@ -1,0 +1,50 @@
+{
+  "segments": [
+    {
+      "start_utc_ms": 0,
+      "end_utc_ms": 1000,
+      "duration_ms": 1000,
+      "clock_segment_id": 2,
+      "activity": {
+        "kind": "active"
+      },
+      "category": {
+        "kind": "classified",
+        "id": 7,
+        "uuid": "71f5a800-423a-4000-8000-000000000001",
+        "builtin_key": "development",
+        "name": null,
+        "color": "cat.8",
+        "tendency": "focus"
+      },
+      "category_source": {
+        "kind": "rule",
+        "rule": "builtin.classification/vscode@2"
+      },
+      "app": {
+        "id": 3,
+        "exe_name": "code.exe",
+        "display_name": "Code",
+        "aumid": null
+      },
+      "title": "document"
+    },
+    {
+      "start_utc_ms": 1000,
+      "end_utc_ms": 2000,
+      "duration_ms": 1000,
+      "clock_segment_id": 2,
+      "activity": {
+        "kind": "excluded"
+      },
+      "category": {
+        "kind": "unclassified"
+      },
+      "category_source": {
+        "kind": "unclassified"
+      }
+    }
+  ],
+  "versions": "version-token",
+  "next_cursor": null
+}

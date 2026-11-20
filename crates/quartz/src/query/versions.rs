@@ -2,7 +2,7 @@
 
 use super::{RunQueryError, calendar::DayCalendar, input::QueryRange};
 use crate::store::versions::{QuerySettings, StoredVersions, VersionKey};
-use quartz_domain::capture::limits::UTC_DAY_MS;
+use quartz_domain::{capture::limits::UTC_DAY_MS, rules::ContentHash};
 use quartz_protocol::{DayChanged, LocalDate, QueryVersions};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -11,10 +11,10 @@ use std::collections::BTreeMap;
 pub(crate) struct VersionState {
     pub days: BTreeMap<VersionKey, i64>,
     pub settings: QuerySettings,
-    pub classification_hash: String,
+    pub classification_hash: ContentHash,
 }
 impl VersionState {
-    pub(crate) fn from_stored(stored: StoredVersions, classification_hash: String) -> Self {
+    pub(crate) fn from_stored(stored: StoredVersions, classification_hash: ContentHash) -> Self {
         Self {
             days: stored.days,
             settings: stored.settings,
@@ -29,7 +29,7 @@ impl VersionState {
         digest.update(self.settings.day_start_offset_min.to_le_bytes());
         digest.update(range.start.to_le_bytes());
         digest.update(range.end.to_le_bytes());
-        digest.update(self.classification_hash.as_bytes());
+        digest.update(self.classification_hash.as_str().as_bytes());
         let first = range.start.div_euclid(UTC_DAY_MS);
         let last = (range.end - 1).div_euclid(UTC_DAY_MS);
         for (key, version) in &self.days {

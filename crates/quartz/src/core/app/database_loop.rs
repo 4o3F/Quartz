@@ -59,7 +59,7 @@ pub(crate) enum ShutdownDatabaseError {
     Publish { source: SendMainCommandError },
     #[snafu(display("database final transaction failed"))]
     Flush {
-        source: Box<crate::store::capture::ExecuteCaptureBatchError>,
+        source: crate::store::capture::ExecuteCaptureBatchError,
     },
     #[snafu(display("database retained failed writes at shutdown"))]
     RetainedWrites,
@@ -377,9 +377,9 @@ impl DatabaseLoop {
                 Ok(DatabaseProgress::Ended)
             }
             PersistenceOutcome::Buffered { .. } => Ok(DatabaseProgress::Continue),
-            PersistenceOutcome::Failed { error, .. } => Err(ShutdownDatabaseError::Flush {
-                source: Box::new(error),
-            }),
+            PersistenceOutcome::Failed { error, .. } => {
+                Err(ShutdownDatabaseError::Flush { source: error })
+            }
             PersistenceOutcome::RetainedFailure { .. } => {
                 Err(ShutdownDatabaseError::RetainedWrites)
             }

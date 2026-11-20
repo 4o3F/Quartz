@@ -83,8 +83,10 @@ pub(crate) enum DecodeCaptureRowError {
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub(crate) enum ExecuteCaptureBatchError {
-    #[snafu(display("invalid metadata version in settings"))]
-    MetadataVersion,
+    #[snafu(display("could not update capture query versions"))]
+    Version {
+        source: crate::store::versions::BumpVersionError,
+    },
     #[snafu(display("could not execute capture writes"))]
     Database { source: diesel::result::Error },
     #[snafu(display("could not decode a persisted capture row before writing"))]
@@ -129,6 +131,11 @@ pub(crate) enum ExecuteCaptureBatchError {
         end: Timestamp,
         source: domain::AdvanceTimeError,
     },
+}
+impl From<crate::store::versions::BumpVersionError> for ExecuteCaptureBatchError {
+    fn from(source: crate::store::versions::BumpVersionError) -> Self {
+        Self::Version { source }
+    }
 }
 impl From<diesel::result::Error> for ExecuteCaptureBatchError {
     fn from(source: diesel::result::Error) -> Self {

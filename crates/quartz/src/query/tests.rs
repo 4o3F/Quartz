@@ -30,23 +30,38 @@ fn clock(id: i64, utc: i64, mono: i64, duration: i64) -> InputRow {
     })
 }
 fn window(id: i64, start: i64, end: i64) -> InputRow {
-    InputRow::Foreground(Foreground {
-        span: span(id, start, end),
-        kind: ForegroundKind::Window,
-        level: CaptureLevel::Full,
-        app: Some(
-            ApplicationRef {
-                id: ApplicationId(id),
-                identity_key: r"exe:c:ixture\editor.exe".into(),
-                exe_name: Some("editor.exe".into()),
-                display_name: "Editor".into(),
-                aumid: None,
-            }
-            .into(),
-        ),
-        title: Some("document".into()),
-        title_id: Some(quartz_domain::facts::TitleId(1)),
-    })
+    InputRow::Foreground(Foreground::new(
+        span(id, start, end),
+        ForegroundKind::Window,
+        CaptureLevel::Full,
+        quartz_domain::facts::ForegroundContent {
+            app: Some(
+                ApplicationRef {
+                    id: ApplicationId(id),
+                    identity_key: r"exe:c:ixture\editor.exe".into(),
+                    exe_name: Some("editor.exe".into()),
+                    display_name: "Editor".into(),
+                    aumid: None,
+                }
+                .into(),
+            ),
+            title: Some("document".into()),
+            title_id: Some(quartz_domain::facts::TitleId(1)),
+        },
+    ))
+}
+fn edit_foreground(
+    row: &mut Foreground,
+    level: CaptureLevel,
+    edit: impl FnOnce(&mut quartz_domain::facts::ForegroundContent),
+) {
+    let mut content = quartz_domain::facts::ForegroundContent {
+        app: row.visible_app().cloned(),
+        title: row.visible_title().map(str::to_owned),
+        title_id: row.visible_title_id(),
+    };
+    edit(&mut content);
+    *row = Foreground::new(row.span.clone(), row.kind.clone(), level, content);
 }
 fn derive(rows: Vec<InputRow>, range: QueryRange) -> Vec<pipeline::DerivedSegment> {
     let mut pipeline = Pipeline::new(
@@ -188,13 +203,15 @@ fn timeline_merge_is_strictly_subpixel_and_respects_projection_and_activity() {
 fn gaps_excluded_and_no_foreground_preserve_all_state_boundaries() {
     let mut excluded = window(5, 40, 60);
     if let InputRow::Foreground(row) = &mut excluded {
-        row.level = CaptureLevel::Excluded;
+        edit_foreground(row, CaptureLevel::Excluded, |_| {});
     }
     let mut no_foreground = window(6, 60, 80);
     if let InputRow::Foreground(row) = &mut no_foreground {
         row.kind = ForegroundKind::NoForeground;
-        row.app = None;
-        row.title = None;
+        edit_foreground(row, CaptureLevel::Full, |content| {
+            content.app = None;
+            content.title = None;
+        });
     }
     let rows = vec![
         clock(1, 0, 0, 100),
@@ -299,7 +316,7 @@ fn categories() -> Vec<quartz_domain::categories::Category> {
             uuid: builtin.uuid(),
             builtin_key: Some(builtin),
             name: None,
-            color: builtin.color().into(),
+            color: builtin.color(),
             tendency: builtin.tendency(),
         })
         .collect()
@@ -367,9 +384,11 @@ fn classifier(overlays: &[&str]) -> classification::Classifier {
 fn classified_window(id: i64, start: i64, end: i64, exe: &str) -> InputRow {
     let mut input = window(id, start, end);
     if let InputRow::Foreground(row) = &mut input {
-        let app = std::sync::Arc::make_mut(row.app.as_mut().expect("app"));
-        app.exe_name = Some(exe.into());
-        app.identity_key = format!(r"exe:c:\fixture\{exe}");
+        edit_foreground(row, CaptureLevel::Full, |content| {
+            let app = std::sync::Arc::make_mut(content.app.as_mut().expect("app"));
+            app.exe_name = Some(exe.into());
+            app.identity_key = format!(r"exe:c:\fixture\{exe}");
+        });
     }
     input
 }
@@ -412,13 +431,13 @@ when=[{field='title.raw',op='equals',value='document'}]
         classified_window(5, 50, 60, "code.exe"),
     ];
     if let InputRow::Foreground(row) = &mut rows[3] {
-        row.level = CaptureLevel::Excluded;
+        edit_foreground(row, CaptureLevel::Excluded, |_| {});
     }
     if let InputRow::Foreground(row) = &mut rows[4] {
-        row.level = CaptureLevel::TitleHidden;
+        edit_foreground(row, CaptureLevel::TitleHidden, |_| {});
     }
     if let InputRow::Foreground(row) = &mut rows[6] {
-        row.level = CaptureLevel::TitleHidden;
+        edit_foreground(row, CaptureLevel::TitleHidden, |_| {});
     }
     let segments = derive_classified(
         rows.clone(),
@@ -454,7 +473,7 @@ when=[{field='title.raw',op='equals',value='document'}]
     );
     let mut title_only = window(1, 0, 10);
     if let InputRow::Foreground(row) = &mut title_only {
-        row.app = None;
+        edit_foreground(row, row.capture_level(), |content| content.app = None);
     }
     let title_only = derive_classified(
         vec![clock(1, 0, 0, 10), title_only],
@@ -506,9 +525,12 @@ when=[{field='title.raw',op='equals',value='document'}]
 ";
     let mut changed_title = classified_window(2, 10, 20, "code.exe");
     if let InputRow::Foreground(row) = &mut changed_title {
-        std::sync::Arc::make_mut(row.app.as_mut().expect("application")).id = ApplicationId(1);
-        row.title_id = Some(quartz_domain::facts::TitleId(2));
-        row.title = Some("source code".into());
+        edit_foreground(row, CaptureLevel::Full, |content| {
+            std::sync::Arc::make_mut(content.app.as_mut().expect("application")).id =
+                ApplicationId(1);
+            content.title_id = Some(quartz_domain::facts::TitleId(2));
+            content.title = Some("source code".into());
+        });
     }
     let segments = derive_classified(
         vec![
@@ -601,6 +623,21 @@ fn day_tendencies_and_focus_continuity_and_category_projection_use_classificatio
         quartz_protocol::CategorySource::Mixed
     );
     assert_eq!(merged[0].duration_ms, 20);
+    let mut changed_metadata = split.clone();
+    if let quartz_protocol::CategoryRef::Classified { category } =
+        &mut changed_metadata[1].display.category
+    {
+        std::sync::Arc::make_mut(category).name = Some("Same category identity".into());
+    }
+    let mut identity_projection = TimelineProjection::default();
+    for segment in &changed_metadata {
+        identity_projection.push(segment, quartz_protocol::TimelineDetail::Category, 30);
+    }
+    assert_eq!(
+        identity_projection.into_segments().len(),
+        1,
+        "category identity controls merging"
+    );
     let mut separated = split;
     separated[1].display.clock_segment_id = Some(quartz_protocol::ClockSegmentId(2));
     let aggregate = DayAggregation::new(test_day_calendar(), &separated);
@@ -620,4 +657,34 @@ fn test_day_calendar() -> DayCalendar {
         hour.end_utc_ms -= offset;
     }
     calendar
+}
+
+#[test]
+fn read_errors_day_offsets_and_missing_readers_keep_internal_protocol_codes() {
+    for source in [
+        ReadQueryError::InvalidSettings,
+        ReadQueryError::InvalidFacts,
+    ] {
+        let error = RunQueryError::from(source);
+        assert!(matches!(error, RunQueryError::Read { .. }));
+        assert_eq!(error.kind(), quartz_protocol::ErrorKind::Internal);
+    }
+    let error =
+        DayCalendar::new("2025-01-02".parse().expect("date"), -1).expect_err("invalid offset");
+    assert!(matches!(error, RunQueryError::InvalidDayOffset));
+    assert_eq!(error.kind(), quartz_protocol::ErrorKind::Internal);
+    let request = QueryRequest::Day(QueryDayRequest {
+        local_date: "2025-01-02".parse().expect("date"),
+        cursor: None,
+    });
+    let rules = quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+        .expect("empty rules")
+        .snapshots()
+        .load();
+    let error = match QueryJob::start(&mut None, request, rules) {
+        Err(error) => error,
+        Ok(_) => panic!("a query requires a reader"),
+    };
+    assert!(matches!(error, RunQueryError::ReaderUnavailable));
+    assert_eq!(error.kind(), quartz_protocol::ErrorKind::Internal);
 }

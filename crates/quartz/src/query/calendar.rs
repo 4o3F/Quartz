@@ -14,7 +14,7 @@ pub(crate) struct DayCalendar {
 impl DayCalendar {
     pub(crate) fn new(date: LocalDate, offset: i64) -> Result<Self, RunQueryError> {
         if !(DEFAULT_DAY_START_OFFSET_MIN..=MAX_DAY_START_OFFSET_MIN).contains(&offset) {
-            return Err(RunQueryError::InvalidSettings);
+            return Err(RunQueryError::InvalidDayOffset);
         }
         let zone = TimeZone::system();
         let local_start = date.at(0, 0, 0, 0).checked_add(offset.minutes())?;

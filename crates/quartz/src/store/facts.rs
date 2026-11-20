@@ -877,7 +877,7 @@ pub(crate) enum PrepareClassificationWorkloadError {
     MissingApplication { exe_name: String },
     #[snafu(display("could not update simulation metadata version: {source}"))]
     Version {
-        source: Box<super::capture::ExecuteCaptureBatchError>,
+        source: super::versions::BumpVersionError,
     },
 }
 impl From<diesel::result::Error> for PrepareClassificationWorkloadError {
@@ -919,11 +919,9 @@ impl Store {
                         });
                     }
                 }
-                effects.bump_metadata(connection).map_err(|source| {
-                    PrepareClassificationWorkloadError::Version {
-                        source: Box::new(source),
-                    }
-                })?;
+                effects
+                    .bump_metadata(connection)
+                    .map_err(|source| PrepareClassificationWorkloadError::Version { source })?;
                 Ok(())
             })?;
         self.pending_effects.merge(effects);

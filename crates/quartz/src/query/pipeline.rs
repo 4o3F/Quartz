@@ -2,7 +2,7 @@
 
 use super::{
     calendar::DayCalendar,
-    classification::{ClassificationId, Classifier},
+    classification::{ClassificationId, Classifier, QueryCategoryRef},
     input::{
         Availability, CaptureLevel, ClockSegment, FactId, ForegroundKind, InputRow, QueryRange,
     },
@@ -34,7 +34,6 @@ struct ClockOrder {
 pub(crate) struct DerivedSegment {
     pub display: TimelineSegment,
     pub interval_id: Option<FactId>,
-    pub capture_level: Option<CaptureLevel>,
 }
 #[derive(Debug)]
 pub(super) struct ClassifiedInput {
@@ -231,7 +230,6 @@ impl Pipeline {
                         title: None,
                     },
                     interval_id: None,
-                    capture_level: None,
                 });
                 continue;
             }
@@ -337,7 +335,7 @@ impl Pipeline {
             }
         } else {
             match foreground {
-                Some(row) if row.level == CaptureLevel::Excluded => Activity::Excluded,
+                Some(row) if row.capture_level() == CaptureLevel::Excluded => Activity::Excluded,
                 None => Activity::NoForeground,
                 Some(row) if matches!(row.kind, ForegroundKind::NoForeground) => {
                     Activity::NoForeground
@@ -366,21 +364,17 @@ impl Pipeline {
                 activity,
                 category: classification.category.clone(),
                 category_source: classification.source.clone(),
-                app: foreground
-                    .filter(|row| row.level != CaptureLevel::Excluded)
-                    .and_then(|row| row.app.as_ref())
-                    .map(|app| quartz_protocol::ApplicationRef {
+                app: foreground.and_then(|row| row.visible_app()).map(|app| {
+                    quartz_protocol::ApplicationRef {
                         id: ApplicationId(app.id.0),
                         exe_name: app.exe_name.clone(),
                         display_name: app.display_name.clone(),
                         aumid: app.aumid.clone(),
-                    }),
-                title: foreground
-                    .filter(|row| row.level == CaptureLevel::Full)
-                    .and_then(|row| row.title.clone()),
+                    }
+                }),
+                title: foreground.and_then(|row| row.visible_title().map(str::to_owned)),
             },
             interval_id: foreground.map(|row| row.span.id),
-            capture_level: foreground.map(|row| row.level),
         }
     }
     pub(crate) fn into_segments(self) -> Vec<DerivedSegment> {
@@ -560,12 +554,6 @@ pub(crate) struct TimelineProjection {
 impl TimelineProjection {
     pub(crate) fn push(&mut self, segment: &DerivedSegment, detail: TimelineDetail, pixel_ms: u64) {
         let mut current = segment.display.clone();
-        if segment.capture_level != Some(CaptureLevel::Full) {
-            current.title = None;
-        }
-        if segment.capture_level == Some(CaptureLevel::Excluded) {
-            current.app = None;
-        }
         match detail {
             TimelineDetail::Category => {
                 current.app = None;
@@ -579,7 +567,7 @@ impl TimelineProjection {
             && last.end_utc_ms == current.start_utc_ms
             && last.clock_segment_id == current.clock_segment_id
             && last.activity == current.activity
-            && last.category == current.category
+            && last.category.id() == current.category.id()
             && (detail == TimelineDetail::Category
                 || last.category_source == current.category_source)
             && last.app == current.app

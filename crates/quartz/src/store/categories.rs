@@ -15,7 +15,7 @@ pub(crate) enum SeedCategoriesError {
     Insert { source: diesel::result::Error },
     #[snafu(display("could not update category metadata version: {source}"))]
     Version {
-        source: Box<super::capture::ExecuteCaptureBatchError>,
+        source: super::versions::BumpVersionError,
     },
 }
 impl From<diesel::result::Error> for SeedCategoriesError {
@@ -55,11 +55,9 @@ impl Store {
                         .execute(connection)?;
                 }
                 if inserted > 0 {
-                    effects.bump_metadata(connection).map_err(|source| {
-                        SeedCategoriesError::Version {
-                            source: Box::new(source),
-                        }
-                    })?;
+                    effects
+                        .bump_metadata(connection)
+                        .map_err(|source| SeedCategoriesError::Version { source })?;
                 }
                 Ok(())
             })?;
@@ -85,14 +83,11 @@ impl CategoriesRow {
             .builtin_key
             .map(|key| BuiltinCategory::from_key(&key).ok_or(ReadQueryError::InvalidCategories))
             .transpose()?;
-        let valid_color = self.color == "neutral"
-            || self.color.strip_prefix("cat.").is_some_and(|slot| {
-                slot.parse::<u8>().is_ok_and(|number| {
-                    (1..=quartz_domain::categories::PALETTE_SLOT_COUNT).contains(&number)
-                        && number.to_string() == slot
-                })
-            });
-        if !valid_color || (self.name.is_none() && builtin_key.is_none()) {
+        let color = self
+            .color
+            .parse()
+            .map_err(|_| ReadQueryError::InvalidCategories)?;
+        if self.name.is_none() && builtin_key.is_none() {
             return Err(ReadQueryError::InvalidCategories);
         }
         Ok(Category {
@@ -100,7 +95,7 @@ impl CategoriesRow {
             uuid: CategoryUuid(self.uuid),
             builtin_key,
             name: self.name,
-            color: self.color,
+            color,
             tendency: match self.tendency {
                 enums::CategoryTendency::Focus => CategoryTendency::Focus,
                 enums::CategoryTendency::Neutral => CategoryTendency::Neutral,

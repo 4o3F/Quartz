@@ -1213,3 +1213,25 @@ when=[{{field='title.raw',op='{}',value='Café',case_sensitive={},negate={}}}]
         }
     }
 }
+
+#[test]
+fn matching_bounds_normalized_text_at_utf16_character_boundaries() {
+    let prefix = "x".repeat(super::model::MAX_TEXT_UTF16 - 1);
+    let snapshot = FieldSnapshot {
+        text: BTreeMap::from([(Field::RawTitle, NfcText::new(&format!("{prefix}é😀secret")))]),
+        domain: None,
+    };
+    for operator in ["ends_with", "regex"] {
+        let pattern = if operator == "regex" { "é$" } else { "é" };
+        let result = evaluate_condition(
+            "title.raw",
+            operator,
+            pattern,
+            ",case_sensitive=true",
+            &snapshot,
+        );
+        assert_eq!(result.privacy.window_title, Action::Drop, "{operator}");
+    }
+    let result = evaluate_condition("title.raw", "contains", "secret", "", &snapshot);
+    assert_eq!(result.privacy.window_title, Action::Keep);
+}

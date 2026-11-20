@@ -110,7 +110,6 @@ impl ReadSnapshot {
     fn read_applications(&mut self, rows: &[ForegroundDetails]) -> Result<(), ReadQueryError> {
         let missing: BTreeSet<ApplicationId> = rows
             .iter()
-            .filter(|row| CaptureLevel::from(row.fact.capture_level) != CaptureLevel::Excluded)
             .filter_map(|row| row.fact.app_id.map(ApplicationId))
             .filter(|id| !self.applications.contains_key(id))
             .collect();
@@ -261,25 +260,11 @@ impl ReadSnapshot {
                         _ => id,
                     };
                     let level: CaptureLevel = row.capture_level.into();
-                    let app = if level == CaptureLevel::Excluded {
-                        None
-                    } else {
-                        row.app_id
-                            .map(|id| {
-                                self.applications
-                                    .get(&ApplicationId(id))
-                                    .cloned()
-                                    .ok_or(ReadQueryError::InvalidFacts)
-                            })
-                            .transpose()?
-                    };
-                    let title = if level == CaptureLevel::Full {
-                        details.title
-                    } else {
-                        None
-                    };
-                    result.push(InputRow::Foreground(Foreground {
-                        span: FactSpan {
+                    let app_id = row.app_id;
+                    let app =
+                        app_id.and_then(|id| self.applications.get(&ApplicationId(id)).cloned());
+                    let foreground = Foreground::new(
+                        FactSpan {
                             id: FactId(id),
                             segment: ClockSegmentId(row.clock_segment_id),
                             start_utc_ms: row.start_utc_ms,
@@ -287,18 +272,24 @@ impl ReadSnapshot {
                             start_mono_ms: row.start_mono_ms,
                             end_mono_ms: Self::endpoint(row.end_mono_ms, row.confirmed_mono_ms)?,
                         },
-                        kind: match row.kind {
+                        match row.kind {
                             enums::IntervalKind::Window => ForegroundKind::Window,
                             enums::IntervalKind::NoForeground => ForegroundKind::NoForeground,
                         },
                         level,
-                        app,
-                        title,
-                        title_id: row
-                            .title_id
-                            .filter(|_| level == CaptureLevel::Full)
-                            .map(quartz_domain::facts::TitleId),
-                    }));
+                        quartz_domain::facts::ForegroundContent {
+                            app,
+                            title: details.title,
+                            title_id: row.title_id.map(quartz_domain::facts::TitleId),
+                        },
+                    );
+                    if app_id.is_some()
+                        && foreground.visible_app().is_none()
+                        && foreground.capture_level() != CaptureLevel::Excluded
+                    {
+                        return Err(ReadQueryError::InvalidFacts);
+                    }
+                    result.push(InputRow::Foreground(foreground));
                 }
             }
             ReadStage::AvailabilityClosed | ReadStage::AvailabilityOpen => {

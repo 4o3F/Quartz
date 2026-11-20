@@ -89,14 +89,59 @@ pub enum ForegroundKind {
     Window,
     NoForeground,
 }
+/// Application and title values supplied by the persistence reader.
+#[derive(Debug, Clone, Default)]
+pub struct ForegroundContent {
+    pub app: Option<std::sync::Arc<ApplicationRef>>,
+    pub title: Option<String>,
+    pub title_id: Option<TitleId>,
+}
+/// A foreground fact whose visible fields obey its persisted capture level.
 #[derive(Debug, Clone)]
 pub struct Foreground {
     pub span: FactSpan,
     pub kind: ForegroundKind,
-    pub level: CaptureLevel,
-    pub app: Option<std::sync::Arc<ApplicationRef>>,
-    pub title: Option<String>,
-    pub title_id: Option<TitleId>,
+    level: CaptureLevel,
+    content: ForegroundContent,
+}
+impl Foreground {
+    /// Projects privacy once when a stored fact is read: excluded rows lose the application, and only full rows retain title text and identity.
+    pub fn new(
+        span: FactSpan,
+        kind: ForegroundKind,
+        level: CaptureLevel,
+        mut content: ForegroundContent,
+    ) -> Self {
+        if level == CaptureLevel::Excluded {
+            content.app = None;
+        }
+        if level != CaptureLevel::Full {
+            content.title = None;
+            content.title_id = None;
+        }
+        Self {
+            span,
+            kind,
+            level,
+            content,
+        }
+    }
+    /// Returns the persisted capture level for activity and cache identity.
+    pub fn capture_level(&self) -> CaptureLevel {
+        self.level
+    }
+    /// Returns application metadata after the read-time privacy projection.
+    pub fn visible_app(&self) -> Option<&std::sync::Arc<ApplicationRef>> {
+        self.content.app.as_ref()
+    }
+    /// Returns title text after the read-time privacy projection.
+    pub fn visible_title(&self) -> Option<&str> {
+        self.content.title.as_deref()
+    }
+    /// Returns the title identity used by the classification cache.
+    pub fn visible_title_id(&self) -> Option<TitleId> {
+        self.content.title_id
+    }
 }
 #[derive(Debug, Clone, Copy)]
 pub enum Availability {

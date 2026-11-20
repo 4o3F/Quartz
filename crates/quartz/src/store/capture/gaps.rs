@@ -39,7 +39,9 @@ impl Capture<'_> {
         source: DataSource,
         range: TimeRange,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        self.effects.bump_days(self.connection, source, range)
+        self.effects
+            .bump_days(self.connection, source, range)
+            .map_err(ExecuteCaptureBatchError::from)
     }
     pub(super) fn set_deadline(
         &mut self,

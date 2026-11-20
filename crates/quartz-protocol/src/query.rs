@@ -87,10 +87,92 @@ pub struct ApplicationRef {
     pub display_name: String,
     pub aumid: Option<String>,
 }
-pub use quartz_domain::categories::{
-    BuiltinCategory, Category, CategoryId, CategoryTendency, CategoryUuid,
-};
-pub use quartz_domain::rules::ExplanationId as ClassificationRuleId;
+/// Database identity carried in category metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CategoryId(pub i64);
+/// Durable category identity carried by the wire format.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CategoryUuid(pub String);
+/// Builtin localization key carried by category responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinCategory {
+    Development,
+    Learning,
+    Communication,
+    Entertainment,
+    System,
+}
+/// Tendency stored in category response metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CategoryTendency {
+    Focus,
+    Neutral,
+    Distraction,
+}
+/// Category presentation fields with a protocol-owned JSON representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Category {
+    pub id: CategoryId,
+    pub uuid: CategoryUuid,
+    pub builtin_key: Option<BuiltinCategory>,
+    pub name: Option<String>,
+    /// Palette string `cat.1` through `cat.14`, or `neutral`.
+    pub color: String,
+    pub tendency: CategoryTendency,
+}
+/// Revision-qualified classification source in `<set>/<rule>@<revision>` form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ClassificationRuleId(std::sync::Arc<str>);
+/// A classification source contains an invalid target or revision.
+#[derive(Debug, snafu::Snafu)]
+#[snafu(display("invalid revision-qualified classification rule"))]
+pub struct ParseClassificationRuleIdError;
+impl ClassificationRuleId {
+    /// Borrows the exact representation supplied by the core.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl std::str::FromStr for ClassificationRuleId {
+    type Err = ParseClassificationRuleIdError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let valid = value.rsplit_once('@').is_some_and(|(target, revision)| {
+            revision.parse::<std::num::NonZeroU32>().is_ok()
+                && target.split_once('/').is_some_and(|(set, rule)| {
+                    !set.is_empty()
+                        && set.bytes().all(|byte| {
+                            byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit()
+                                || b".-_".contains(&byte)
+                        })
+                        && !rule.is_empty()
+                        && rule
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+                })
+        });
+        if !valid {
+            return Err(ParseClassificationRuleIdError);
+        }
+        Ok(Self(value.into()))
+    }
+}
+impl TryFrom<String> for ClassificationRuleId {
+    type Error = ParseClassificationRuleIdError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+impl From<ClassificationRuleId> for String {
+    fn from(value: ClassificationRuleId) -> Self {
+        value.as_str().to_owned()
+    }
+}
 
 /// Classification result with language-independent category metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,15 +183,6 @@ pub enum CategoryRef {
         #[serde(flatten)]
         category: std::sync::Arc<Category>,
     },
-}
-impl CategoryRef {
-    /// Missing classification contributes a neutral tendency.
-    pub fn tendency(&self) -> CategoryTendency {
-        match self {
-            Self::Unclassified => CategoryTendency::Neutral,
-            Self::Classified { category } => category.tendency,
-        }
-    }
 }
 /// Provenance of a classification result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +326,109 @@ pub struct DayChanged {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn golden_category() -> CategoryRef {
+        CategoryRef::Classified {
+            category: Category {
+                id: CategoryId(7),
+                uuid: CategoryUuid("71f5a800-423a-4000-8000-000000000001".into()),
+                builtin_key: Some(BuiltinCategory::Development),
+                name: None,
+                color: "cat.8".into(),
+                tendency: CategoryTendency::Focus,
+            }
+            .into(),
+        }
+    }
+    fn golden_app() -> ApplicationRef {
+        ApplicationRef {
+            id: ApplicationId(3),
+            exe_name: Some("code.exe".into()),
+            display_name: "Code".into(),
+            aumid: None,
+        }
+    }
+    #[test]
+    fn day_response_matches_golden_json() {
+        let response = QueryDayResponse {
+            metrics: Some(DayMetrics {
+                active_ms: 1000,
+                focus_ratio: 1.0,
+                distract_ratio: 0.0,
+                unclassified_ms: 0,
+                longest_focus_ms: 1000,
+                switches_per_hour: 0.0,
+            }),
+            hours: Some(vec![HourStack {
+                start_utc_ms: 0,
+                end_utc_ms: 3600000,
+                local_start: "1970-01-01T00:00:00+00:00[UTC]".into(),
+                categories: vec![CategoryDuration {
+                    category: golden_category(),
+                    duration_ms: 1000,
+                }],
+            }]),
+            applications: vec![ApplicationRank {
+                app: golden_app(),
+                active_ms: 1000,
+            }],
+            versions: QueryVersions("version-token".into()),
+            next_cursor: None,
+        };
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/day.json"))
+                .expect("day golden JSON");
+        assert_eq!(serde_json::to_value(&response).expect("day JSON"), expected);
+        assert_eq!(
+            serde_json::from_value::<QueryDayResponse>(expected).expect("day response"),
+            response
+        );
+    }
+    #[test]
+    fn timeline_response_matches_golden_json() {
+        let response = QueryTimelineResponse {
+            segments: vec![
+                TimelineSegment {
+                    start_utc_ms: 0,
+                    end_utc_ms: 1000,
+                    duration_ms: 1000,
+                    clock_segment_id: Some(ClockSegmentId(2)),
+                    activity: Activity::Active,
+                    category: golden_category(),
+                    category_source: CategorySource::Rule {
+                        rule: "builtin.classification/vscode@2"
+                            .parse()
+                            .expect("rule revision"),
+                    },
+                    app: Some(golden_app()),
+                    title: Some("document".into()),
+                },
+                TimelineSegment {
+                    start_utc_ms: 1000,
+                    end_utc_ms: 2000,
+                    duration_ms: 1000,
+                    clock_segment_id: Some(ClockSegmentId(2)),
+                    activity: Activity::Excluded,
+                    category: CategoryRef::Unclassified,
+                    category_source: CategorySource::Unclassified,
+                    app: None,
+                    title: None,
+                },
+            ],
+            versions: QueryVersions("version-token".into()),
+            next_cursor: None,
+        };
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/timeline.json"))
+                .expect("timeline golden JSON");
+        assert_eq!(
+            serde_json::to_value(&response).expect("timeline JSON"),
+            expected
+        );
+        assert_eq!(
+            serde_json::from_value::<QueryTimelineResponse>(expected).expect("timeline response"),
+            response
+        );
+    }
     #[test]
     fn cursor_round_trips_as_an_object_with_typed_query_parameters() {
         let request = QueryDayRequest {
@@ -297,7 +473,7 @@ mod tests {
         let category = CategoryRef::Classified {
             category: Category {
                 id: CategoryId(7),
-                uuid: BuiltinCategory::Development.uuid(),
+                uuid: CategoryUuid("71f5a800-423a-4000-8000-000000000001".into()),
                 builtin_key: Some(BuiltinCategory::Development),
                 name: None,
                 color: "cat.8".into(),

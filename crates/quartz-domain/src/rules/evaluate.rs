@@ -52,129 +52,117 @@ struct PrivacyMatch {
     action: PrivacyAction,
 }
 
-/// Literal comparisons in one classification share each field's normalized forms.
-struct ClassificationFields<'snapshot> {
+/// Both fast classification and explanations cache each field's bounded comparison forms.
+struct FieldValues<'snapshot> {
     snapshot: &'snapshot FieldSnapshot,
-    values: BTreeMap<Field, ClassificationValue>,
+    values: BTreeMap<Field, FieldValue>,
 }
-struct ClassificationValue {
-    nfc: NfcText,
+struct FieldValue {
+    // A character-boundary prefix of NFC text remains NFC; FieldSnapshot already normalizes it.
+    nfc: String,
     folded: FoldedKey,
 }
-impl ClassificationValue {
+impl FieldValue {
     fn new(value: &str) -> Self {
-        let value = bounded(value);
+        let nfc = bounded(value);
+        let folded = FoldedKey::new(&nfc);
+        Self { nfc, folded }
+    }
+}
+impl<'snapshot> FieldValues<'snapshot> {
+    fn new(snapshot: &'snapshot FieldSnapshot) -> Self {
         Self {
-            nfc: NfcText::new(&value),
-            folded: FoldedKey::new(&value),
+            snapshot,
+            values: BTreeMap::new(),
+        }
+    }
+    fn evaluate(&mut self, condition: &CompiledCondition) -> ConditionOutcome {
+        let raw = self.snapshot.value(condition.condition.field);
+        let matched = raw.is_some_and(|raw| {
+            let value = self
+                .values
+                .entry(condition.condition.field)
+                .or_insert_with(|| FieldValue::new(raw));
+            condition.matches_value(value, self.snapshot.domain.as_ref())
+        });
+        ConditionOutcome {
+            field: condition.condition.field,
+            present: raw.is_some(),
+            matched: matched != condition.condition.negate,
         }
     }
 }
-impl ClassificationFields<'_> {
-    fn matches(&mut self, condition: &CompiledCondition) -> bool {
-        let Some(raw) = self.snapshot.value(condition.condition.field) else {
-            return condition.condition.negate;
-        };
-        let value = self
-            .values
-            .entry(condition.condition.field)
-            .or_insert_with(|| ClassificationValue::new(raw));
-        let matched = if let Some(regex) = &condition.regex {
-            regex.is_match(value.nfc.as_str())
-        } else if let Some(domain) = &condition.domain {
-            self.snapshot
-                .domain
-                .as_ref()
-                .is_some_and(|input| input.matches_suffix(domain))
-        } else {
-            condition.matches_literal(value)
-        };
-        matched != condition.condition.negate
-    }
+#[derive(Debug, Clone, Copy)]
+enum LiteralOperation {
+    Equals,
+    Contains,
+    StartsWith,
+    EndsWith,
 }
-
+#[derive(Debug, Clone)]
+enum ConditionMatcher {
+    Literal {
+        operation: LiteralOperation,
+        nfc: NfcText,
+        folded: FoldedKey,
+    },
+    Regex(Regex),
+    DomainSuffix(DomainName),
+}
 #[derive(Debug, Clone)]
 struct CompiledCondition {
     condition: Condition,
-    nfc: NfcText,
-    folded: FoldedKey,
-    regex: Option<Regex>,
-    domain: Option<DomainName>,
+    matcher: ConditionMatcher,
 }
 impl CompiledCondition {
-    fn matches_literal(&self, value: &ClassificationValue) -> bool {
-        let input = match self.condition.case {
-            CaseSensitivity::Sensitive => value.nfc.as_str(),
-            CaseSensitivity::Folded => value.folded.as_str(),
-        };
-        let pattern = match self.condition.case {
-            CaseSensitivity::Sensitive => self.nfc.as_str(),
-            CaseSensitivity::Folded => self.folded.as_str(),
-        };
-        match self.condition.op {
-            Operator::Equals => input == pattern,
-            Operator::Contains => input.contains(pattern),
-            Operator::StartsWith => input.starts_with(pattern),
-            Operator::EndsWith => input.ends_with(pattern),
-            Operator::Regex | Operator::DomainSuffix => {
-                unreachable!("compiled operators are handled before literal comparison")
+    fn matches_value(&self, value: &FieldValue, domain: Option<&DomainName>) -> bool {
+        match &self.matcher {
+            ConditionMatcher::Regex(regex) => regex.is_match(&value.nfc),
+            ConditionMatcher::DomainSuffix(suffix) => {
+                domain.is_some_and(|input| input.matches_suffix(suffix))
+            }
+            ConditionMatcher::Literal {
+                operation,
+                nfc,
+                folded,
+            } => {
+                let input = match self.condition.case {
+                    CaseSensitivity::Sensitive => value.nfc.as_str(),
+                    CaseSensitivity::Folded => value.folded.as_str(),
+                };
+                let pattern = match self.condition.case {
+                    CaseSensitivity::Sensitive => nfc.as_str(),
+                    CaseSensitivity::Folded => folded.as_str(),
+                };
+                match operation {
+                    LiteralOperation::Equals => input == pattern,
+                    LiteralOperation::Contains => input.contains(pattern),
+                    LiteralOperation::StartsWith => input.starts_with(pattern),
+                    LiteralOperation::EndsWith => input.ends_with(pattern),
+                }
             }
         }
     }
     fn compile(condition: &Condition) -> Result<Self, CompileRulesError> {
-        Ok(Self {
-            condition: condition.clone(),
+        let literal = |operation| ConditionMatcher::Literal {
+            operation,
             nfc: NfcText::new(&condition.value),
             folded: FoldedKey::new(&condition.value),
-            regex: if condition.op == Operator::Regex {
-                Some(compile_regex(&condition.value)?)
-            } else {
-                None
-            },
-            domain: if condition.op == Operator::DomainSuffix {
-                Some(DomainName::parse(&condition.value).context(DomainSnafu)?)
-            } else {
-                None
-            },
+        };
+        let matcher = match condition.op {
+            Operator::Equals => literal(LiteralOperation::Equals),
+            Operator::Contains => literal(LiteralOperation::Contains),
+            Operator::StartsWith => literal(LiteralOperation::StartsWith),
+            Operator::EndsWith => literal(LiteralOperation::EndsWith),
+            Operator::Regex => ConditionMatcher::Regex(compile_regex(&condition.value)?),
+            Operator::DomainSuffix => ConditionMatcher::DomainSuffix(
+                DomainName::parse(&condition.value).context(DomainSnafu)?,
+            ),
+        };
+        Ok(Self {
+            condition: condition.clone(),
+            matcher,
         })
-    }
-    fn evaluate(&self, snapshot: &FieldSnapshot) -> ConditionOutcome {
-        let value = snapshot.value(self.condition.field);
-        let matched = value.is_some_and(|value| {
-            let input = bounded(value);
-            if let Some(regex) = &self.regex {
-                return regex.is_match(NfcText::new(&input).as_str());
-            }
-            if let Some(domain) = &self.domain {
-                return snapshot
-                    .domain
-                    .as_ref()
-                    .is_some_and(|input| input.matches_suffix(domain));
-            }
-            let (input, pattern) = match self.condition.case {
-                CaseSensitivity::Sensitive => {
-                    (NfcText::new(&input).as_str().to_owned(), self.nfc.as_str())
-                }
-                CaseSensitivity::Folded => (
-                    FoldedKey::new(&input).as_str().to_owned(),
-                    self.folded.as_str(),
-                ),
-            };
-            match self.condition.op {
-                Operator::Equals => input == pattern,
-                Operator::Contains => input.contains(pattern),
-                Operator::StartsWith => input.starts_with(pattern),
-                Operator::EndsWith => input.ends_with(pattern),
-                Operator::Regex | Operator::DomainSuffix => {
-                    unreachable!("compiled operators handled before literal comparison")
-                }
-            }
-        });
-        ConditionOutcome {
-            field: self.condition.field,
-            present: value.is_some(),
-            matched: matched != self.condition.negate,
-        }
     }
 }
 fn bounded(value: &str) -> String {
@@ -374,10 +362,7 @@ impl CompiledRules {
 
     /// Evaluates classification in effective priority, depth, and file order.
     pub fn classify(&self, snapshot: &FieldSnapshot) -> Option<ClassificationMatch> {
-        let mut fields = ClassificationFields {
-            snapshot,
-            values: BTreeMap::new(),
-        };
+        let mut fields = FieldValues::new(snapshot);
         for index in 0..self.effective.rules.len() {
             let entry = &self.effective.rules[index];
             let RuleBody::Classification { category, mode, .. } = &entry.rule.body else {
@@ -385,8 +370,12 @@ impl CompiledRules {
             };
             let conditions = &self.conditions[index];
             let matched = match mode {
-                MatchMode::All => conditions.iter().all(|condition| fields.matches(condition)),
-                MatchMode::Any => conditions.iter().any(|condition| fields.matches(condition)),
+                MatchMode::All => conditions
+                    .iter()
+                    .all(|condition| fields.evaluate(condition).matched),
+                MatchMode::Any => conditions
+                    .iter()
+                    .any(|condition| fields.evaluate(condition).matched),
             };
             if matched {
                 return Some(ClassificationMatch {
@@ -447,10 +436,11 @@ impl CompiledRules {
         };
         let mut winner: Option<usize> = None;
         let mut privacy_matches = Vec::new();
+        let mut fields = FieldValues::new(snapshot);
         for (index, entry) in self.effective.rules.iter().enumerate() {
             let conditions: Vec<_> = self.conditions[index]
                 .iter()
-                .map(|condition| condition.evaluate(snapshot))
+                .map(|condition| fields.evaluate(condition))
                 .collect();
             let mode = match entry.rule.body {
                 RuleBody::Classification { mode, .. } | RuleBody::Privacy { mode, .. } => mode,

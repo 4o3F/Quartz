@@ -3,7 +3,7 @@ use super::VersionState;
 use crate::query::RunQueryError;
 use crate::store::Store;
 use crossbeam_channel::{Receiver, Sender};
-use quartz_domain::rules::registry::SnapshotCell;
+use quartz_domain::rules::{ContentHash, registry::SnapshotCell};
 use quartz_protocol::{DayChanged, ErrorKind, LocalDate, ProtocolError};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::sync::{oneshot, watch};
@@ -53,21 +53,23 @@ impl VersionPublisher {
         store: &mut Store,
         snapshots: SnapshotCell,
     ) -> Result<VersionChannel, RunQueryError> {
-        let state = VersionState::from_stored(store.version_state()?, String::new());
+        let state = VersionState::from_stored(
+            store.version_state()?,
+            snapshots.load().hashes().classification.clone(),
+        );
         let (requests, received) = crossbeam_channel::bounded(VERSION_CHANNEL_CAPACITY);
         let (published, updates) = watch::channel(PublishedVersions::default());
-        let mut publisher = Self {
+        let publisher = Self {
             state,
             snapshots,
             requests: received,
             published,
         };
-        publisher.state.classification_hash = publisher.classification_hash();
         let port = VersionPort { requests, updates };
         Ok(VersionChannel { publisher, port })
     }
-    pub(crate) fn classification_hash(&self) -> String {
-        self.snapshots.load().hashes().classification.to_string()
+    pub(crate) fn classification_hash(&self) -> ContentHash {
+        self.snapshots.load().hashes().classification.clone()
     }
     pub(crate) fn receive(&mut self, command: VersionCommand) {
         let result = command

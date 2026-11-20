@@ -14,7 +14,6 @@ workspace = true
 codec = ["dep:tokio-util"]
 
 [dependencies]
-quartz-domain.workspace = true
 tokio-util = { workspace = true, optional = true }
 jiff = { workspace = true, default-features = false, features = ["serde"] }
 serde = { workspace = true, features = ["rc"] }

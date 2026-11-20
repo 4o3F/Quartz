@@ -39,10 +39,10 @@ pub(crate) enum RunQueryError {
     InvalidCursor,
     #[snafu(display("query input versions changed"))]
     StaleCursor,
-    #[snafu(display("invalid persisted query settings"))]
-    InvalidSettings,
-    #[snafu(display("invalid persisted capture facts"))]
-    InvalidFacts,
+    #[snafu(display("invalid logical day offset"))]
+    InvalidDayOffset,
+    #[snafu(display("query reader is unavailable"))]
+    ReaderUnavailable,
     #[snafu(display("could not derive query segments: {source}"))]
     Derive {
         source: pipeline::DeriveSegmentsError,
@@ -58,11 +58,7 @@ pub(crate) enum RunQueryError {
 }
 impl From<ReadQueryError> for RunQueryError {
     fn from(source: ReadQueryError) -> Self {
-        match source {
-            ReadQueryError::InvalidSettings => Self::InvalidSettings,
-            ReadQueryError::InvalidFacts => Self::InvalidFacts,
-            source => Self::Read { source },
-        }
+        Self::Read { source }
     }
 }
 impl From<pipeline::DeriveSegmentsError> for RunQueryError {
@@ -155,12 +151,11 @@ impl QueryJob {
         request: QueryRequest,
         rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
     ) -> Result<Self, RunQueryError> {
-        let mut snapshot = reader.take().ok_or(RunQueryError::InvalidFacts)?.snapshot();
-        match Self::prepare(
-            &mut snapshot,
-            &request,
-            &rules.hashes().classification.to_string(),
-        ) {
+        let mut snapshot = reader
+            .take()
+            .ok_or(RunQueryError::ReaderUnavailable)?
+            .snapshot();
+        match Self::prepare(&mut snapshot, &request, &rules.hashes().classification) {
             Ok(prepared) => Ok(Self {
                 snapshot,
                 request,
@@ -183,7 +178,7 @@ impl QueryJob {
     fn prepare(
         snapshot: &mut ReadSnapshot,
         request: &QueryRequest,
-        classification_hash: &str,
+        classification_hash: &quartz_domain::rules::ContentHash,
     ) -> Result<PreparedQuery, RunQueryError> {
         snapshot.begin()?;
         let settings = snapshot.settings()?;

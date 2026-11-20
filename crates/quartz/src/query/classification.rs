@@ -12,6 +12,60 @@ use std::{
     sync::Arc,
 };
 
+struct QueryCategory {
+    uuid: CategoryUuid,
+    wire: Arc<quartz_protocol::Category>,
+}
+impl From<Category> for QueryCategory {
+    fn from(category: Category) -> Self {
+        use quartz_domain::categories::{BuiltinCategory, CategoryTendency};
+        Self {
+            uuid: category.uuid.clone(),
+            wire: Arc::new(quartz_protocol::Category {
+                id: quartz_protocol::CategoryId(category.id.0),
+                uuid: quartz_protocol::CategoryUuid(category.uuid.0),
+                builtin_key: category.builtin_key.map(|key| match key {
+                    BuiltinCategory::Development => quartz_protocol::BuiltinCategory::Development,
+                    BuiltinCategory::Learning => quartz_protocol::BuiltinCategory::Learning,
+                    BuiltinCategory::Communication => {
+                        quartz_protocol::BuiltinCategory::Communication
+                    }
+                    BuiltinCategory::Entertainment => {
+                        quartz_protocol::BuiltinCategory::Entertainment
+                    }
+                    BuiltinCategory::System => quartz_protocol::BuiltinCategory::System,
+                }),
+                name: category.name,
+                color: category.color.to_string(),
+                tendency: match category.tendency {
+                    CategoryTendency::Focus => quartz_protocol::CategoryTendency::Focus,
+                    CategoryTendency::Neutral => quartz_protocol::CategoryTendency::Neutral,
+                    CategoryTendency::Distraction => quartz_protocol::CategoryTendency::Distraction,
+                },
+            }),
+        }
+    }
+}
+/// Query aggregation treats unclassified time as neutral.
+pub(super) trait QueryCategoryRef {
+    fn tendency(&self) -> quartz_protocol::CategoryTendency;
+    fn id(&self) -> Option<quartz_protocol::CategoryId>;
+}
+impl QueryCategoryRef for CategoryRef {
+    fn tendency(&self) -> quartz_protocol::CategoryTendency {
+        match self {
+            Self::Unclassified => quartz_protocol::CategoryTendency::Neutral,
+            Self::Classified { category } => category.tendency,
+        }
+    }
+    fn id(&self) -> Option<quartz_protocol::CategoryId> {
+        match self {
+            Self::Unclassified => None,
+            Self::Classified { category } => Some(category.id),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct MatchKey {
     app: Option<ApplicationId>,
@@ -41,7 +95,7 @@ impl Classification {
 #[derive(Debug)]
 pub(crate) struct Classifier {
     rules: Arc<RuleSnapshot>,
-    categories: BTreeMap<CategoryUuid, Arc<Category>>,
+    categories: BTreeMap<CategoryUuid, Arc<quartz_protocol::Category>>,
     required_fields: BTreeSet<Field>,
     // The retained snapshot fixes the rule hash for every entry in this cache.
     cache: HashMap<MatchKey, ClassificationId>,
@@ -54,7 +108,8 @@ impl Classifier {
             rules,
             categories: categories
                 .into_iter()
-                .map(|category| (category.uuid.clone(), Arc::new(category)))
+                .map(QueryCategory::from)
+                .map(|category| (category.uuid, category.wire))
                 .collect(),
             required_fields,
             cache: HashMap::new(),
@@ -65,19 +120,19 @@ impl Classifier {
         &self.results[id.0]
     }
     pub(super) fn classify(&mut self, row: &Foreground) -> ClassificationId {
-        if row.level == CaptureLevel::Excluded || !matches!(row.kind, ForegroundKind::Window) {
+        if row.capture_level() == CaptureLevel::Excluded
+            || !matches!(row.kind, ForegroundKind::Window)
+        {
             return ClassificationId::UNCLASSIFIED;
         }
         let key = MatchKey {
-            app: row.app.as_ref().map(|app| app.id),
-            title: if row.level == CaptureLevel::Full
-                && self.required_fields.contains(&Field::RawTitle)
-            {
-                row.title_id
+            app: row.visible_app().map(|app| app.id),
+            title: if self.required_fields.contains(&Field::RawTitle) {
+                row.visible_title_id()
             } else {
                 None
             },
-            level: row.level,
+            level: row.capture_level(),
         };
         if let Some(result) = self.cache.get(&key) {
             return *result;
@@ -95,7 +150,7 @@ impl Classifier {
     }
     fn evaluate(&self, row: &Foreground) -> Classification {
         let mut fields = FieldSnapshot::default();
-        if let Some(app) = &row.app {
+        if let Some(app) = row.visible_app() {
             if self.required_fields.contains(&Field::IdentityKey) {
                 fields
                     .text
@@ -112,9 +167,8 @@ impl Classifier {
                 fields.text.insert(Field::ExeName, NfcText::new(exe));
             }
         }
-        if row.level == CaptureLevel::Full
-            && self.required_fields.contains(&Field::RawTitle)
-            && let Some(title) = &row.title
+        if self.required_fields.contains(&Field::RawTitle)
+            && let Some(title) = row.visible_title()
         {
             fields.text.insert(Field::RawTitle, NfcText::new(title));
         }
@@ -125,10 +179,16 @@ impl Classifier {
                     category: CategoryRef::Classified {
                         category: category.clone(),
                     },
-                    source: CategorySource::Rule { rule: matched.rule },
+                    source: CategorySource::Rule {
+                        rule: matched
+                            .rule
+                            .as_str()
+                            .parse()
+                            .expect("domain rule revision satisfies the wire grammar"),
+                    },
                 },
                 None => {
-                    tracing::warn!(rule = matched.rule.as_str(), category = %matched.category.0, "classification rule references a missing or archived category");
+                    tracing::debug!(rule = matched.rule.as_str(), category = %matched.category.0, "classification rule references a missing or archived category");
                     Classification::unclassified()
                 }
             },

@@ -92,7 +92,9 @@ impl Capture<'_> {
         Ok(())
     }
     fn bump_metadata_version(&mut self) -> Result<(), ExecuteCaptureBatchError> {
-        self.effects.bump_metadata(self.connection)
+        self.effects
+            .bump_metadata(self.connection)
+            .map_err(ExecuteCaptureBatchError::from)
     }
     fn application(
         &mut self,
