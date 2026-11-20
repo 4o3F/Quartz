@@ -179,7 +179,6 @@ impl Capture<'_> {
             intervals,
             availability,
             segments,
-            web_extension: domain::WebRowExtension::PendingM5,
         })
     }
     fn load_run_confirmation(

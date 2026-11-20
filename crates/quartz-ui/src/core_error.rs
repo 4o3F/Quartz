@@ -51,7 +51,7 @@ impl FailureText {
             ),
             // A code from a newer core than this UI knows also gets the generic text; the test
             // below fails when a code of this build has no text of its own.
-            CoreErrorCode::CoreStartFailed | _ => (
+            CoreErrorCode::CoreStartFailed => (
                 Msg::CoreErrorStartFailedTitle,
                 Msg::CoreErrorStartFailedMessage,
             ),
@@ -109,6 +109,7 @@ mod tests {
     use quartz_i18n::Language;
 
     use super::*;
+    use strum::VariantArray;
 
     #[test]
     fn localized_failure_includes_exact_path_and_restore_command() {
@@ -149,8 +150,9 @@ mod tests {
 
     #[test]
     fn every_code_has_its_own_text_without_inspecting_error_text() {
-        let titles: BTreeSet<String> = CoreErrorCode::ALL
-            .into_iter()
+        let titles: BTreeSet<String> = CoreErrorCode::VARIANTS
+            .iter()
+            .copied()
             .map(|code| {
                 CoreErrorPresentation::new(
                     &CoreError::new(code, vec![]),
@@ -159,6 +161,6 @@ mod tests {
                 .title
             })
             .collect();
-        assert_eq!(titles.len(), CoreErrorCode::ALL.len());
+        assert_eq!(titles.len(), CoreErrorCode::VARIANTS.len());
     }
 }

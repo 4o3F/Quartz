@@ -13,8 +13,8 @@ use super::{
     IdleRecord, IdleSample, IntervalEndReason, IntervalFact, MetadataRefresh, NoForegroundReason,
     ObservationId, ObservationSource, OpenInterval, PolicyObservation, PrivacyContext, RowId,
     RunEndReason, RunId, SchedulerKind, SegmentRange, SessionStatus, StopChange, StopReason,
-    TimeRange, TimedPolicyKind, Timer, Timestamp, WebRowExtension, WindowId, WindowInstances,
-    ids::IdAllocator, limits,
+    TimeRange, TimedPolicyKind, Timer, Timestamp, WindowId, WindowInstances, ids::IdAllocator,
+    limits,
 };
 use crate::rules::registry::{RuleSnapshot, SnapshotEpoch};
 use std::collections::BTreeSet;
@@ -1102,7 +1102,6 @@ impl CaptureCore {
             availability: self.availability.open_ids(),
             at,
             commit_by_mono: at.mono.advance(limits::BATCH_WAIT),
-            web_extension: WebRowExtension::PendingM5,
         }));
     }
     fn clock_boundary(&mut self, at: Timestamp, reason: ClockEndReason, step: &mut CaptureStep) {

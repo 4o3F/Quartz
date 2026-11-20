@@ -14,10 +14,10 @@ pub(crate) mod versions;
 use crate::store::{ReadOnlyStore, query::ReadSnapshot};
 use calendar::DayCalendar;
 use input::QueryRange;
-use paging::{PageBudget, PagePosition, Paging};
+use paging::{PageBudget, PagePosition};
 use pipeline::{DayAccumulator, DerivedSegment, Pipeline, QUERY_BATCH_ROWS, TimelineProjection};
 use quartz_protocol::{
-    CursorQuery, ErrorKind, QueryDayRequest, QueryDayResponse, QueryTimelineRequest,
+    CursorQuery, ErrorKind, QueryCursor, QueryDayRequest, QueryDayResponse, QueryTimelineRequest,
     QueryTimelineResponse, QueryVersions,
 };
 use serde::Serialize;
@@ -55,11 +55,6 @@ pub(crate) enum RunQueryError {
 }
 // Storage wraps Diesel failures, keeping Diesel names and conversions inside store.
 use crate::store::query_error as store_error;
-impl From<store_error::ReadQueryError> for RunQueryError {
-    fn from(source: store_error::ReadQueryError) -> Self {
-        Self::Read { source }
-    }
-}
 impl From<pipeline::DeriveSegmentsError> for RunQueryError {
     fn from(source: pipeline::DeriveSegmentsError) -> Self {
         Self::Derive { source }
@@ -191,7 +186,7 @@ impl QueryJob {
             QueryRequest::Day(day) => day.cursor.as_ref(),
             QueryRequest::Timeline(timeline) => timeline.cursor.as_ref(),
         };
-        let position = Paging::position(cursor, &versions, &parameters)?;
+        let position = PagePosition::from_cursor(cursor, &versions, &parameters)?;
         Ok(PreparedQuery {
             range,
             versions,
@@ -308,17 +303,17 @@ impl QueryJob {
                 let items = std::mem::take(&mut day.applications);
                 let page = PageBudget::new(day)?.page(items, self.position)?;
                 day.applications = page.items;
-                day.next_cursor = page
-                    .next
-                    .map(|position| Paging::cursor(&self.versions, &self.parameters, position));
+                day.next_cursor = page.next.map(|position| {
+                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
+                });
             }
             QueryResponse::Timeline(timeline) => {
                 let items = std::mem::take(&mut timeline.segments);
                 let page = PageBudget::new(timeline)?.page(items, self.position)?;
                 timeline.segments = page.items;
-                timeline.next_cursor = page
-                    .next
-                    .map(|position| Paging::cursor(&self.versions, &self.parameters, position));
+                timeline.next_cursor = page.next.map(|position| {
+                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
+                });
             }
         }
         Ok(response)

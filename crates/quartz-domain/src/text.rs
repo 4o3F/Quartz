@@ -98,6 +98,12 @@ impl fmt::Display for FoldedKey {
     }
 }
 
+/// Encodes bytes as lowercase hexadecimal digits.
+#[must_use]
+pub fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,7 +7,6 @@ use snafu::{ResultExt, Snafu};
 
 /// Failure to normalize a domain, without retaining private domain text.
 #[derive(Debug, Snafu)]
-#[non_exhaustive]
 pub enum NormalizeDomainError {
     /// The input fails UTS #46, URL host character or DNS length validation.
     #[snafu(display("invalid domain name"))]

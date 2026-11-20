@@ -89,6 +89,9 @@ impl StatusPublisher {
             }),
         }
     }
+    pub(crate) fn stop_reason(&self) -> Option<StopReason> {
+        self.sender.borrow().status.stop_reason
+    }
     pub(crate) fn subscribe(&self) -> watch::Receiver<PublishedStatus> {
         self.sender.subscribe()
     }

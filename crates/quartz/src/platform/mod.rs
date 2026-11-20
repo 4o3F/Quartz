@@ -4,7 +4,7 @@
 pub(crate) mod windows;
 
 #[cfg(windows)]
-pub(super) use windows::{AcquireInstance, AcquireInstanceError, CoreProcess, UiLanguage};
+pub(super) use windows::{AcquireInstance, AcquireInstanceError, CoreProcess, detect_ui_language};
 
 /// Attaches CLI output to the parent console on Windows.
 pub(super) fn attach_parent_console() {

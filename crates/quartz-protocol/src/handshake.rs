@@ -178,7 +178,6 @@ pub struct Epoch(pub u64);
 /// Browser implementation self-reported by the extension (05 §1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum BrowserKind {
     /// Google Chrome.
     Chrome,
@@ -279,7 +278,6 @@ pub struct Hello {
 
 /// Optional protocol features reported by the core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum Capability {
     /// Browser activity reporting version 1.
     #[serde(rename = "browser.v1")]

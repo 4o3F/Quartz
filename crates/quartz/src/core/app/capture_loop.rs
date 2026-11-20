@@ -42,9 +42,7 @@ pub(crate) enum RunCaptureLoopError {
     #[snafu(display("could not advance capture"))]
     Step { source: StepCaptureError },
     #[snafu(display("could not notify database"))]
-    Notify {
-        source: crossbeam_channel::TrySendError<()>,
-    },
+    Notify,
     #[snafu(display("database ended before capture shutdown"))]
     UnexpectedDatabaseEnd,
     #[snafu(display("could not await database shutdown"))]
@@ -93,10 +91,10 @@ impl CaptureLoop {
         step: CaptureStep,
         startup: CaptureStartup,
     ) -> Result<(), RunCaptureLoopError> {
-        self.main
-            .send(MainCommand::Effect(CaptureEffect::StateChanged(
-                self.core.state(),
-            )))?;
+        self.main.send(MainCommand::CaptureSnapshot {
+            state: self.core.state(),
+            interval: self.core.current_interval(),
+        })?;
         self.publish(step, self.at, Settlement::Deferred)?;
         for deadline in startup.deadlines {
             let event = CaptureEvent::RegisterDeadline {
@@ -298,9 +296,7 @@ impl CaptureLoop {
     fn notify_database(&self) -> Result<(), RunCaptureLoopError> {
         match self.database.try_send(DatabaseCommand::Drain) {
             Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
-            Err(TrySendError::Disconnected(_)) => Err(RunCaptureLoopError::Notify {
-                source: crossbeam_channel::TrySendError::Disconnected(()),
-            }),
+            Err(TrySendError::Disconnected(_)) => Err(RunCaptureLoopError::Notify),
         }
     }
     fn publish(
@@ -341,6 +337,9 @@ impl CaptureLoop {
         Ok(())
     }
     fn publish_effect(&self, effect: CaptureEffect) -> Result<(), RunCaptureLoopError> {
+        if matches!(effect, CaptureEffect::StateChanged(_)) {
+            return Ok(());
+        }
         if effect == CaptureEffect::DiscardQueuedObservations {
             self.discard_observations();
         }
@@ -474,10 +473,32 @@ mod tests {
             capture.core.state(),
             CaptureState::Gap(GapReason::EventOverload)
         );
-        assert!(commands.try_iter().any(|command| matches!(
+        let commands: Vec<_> = commands.try_iter().collect();
+        assert!(commands.iter().any(|command| matches!(
             command,
             MainCommand::Effect(CaptureEffect::ReviewForeground)
         )));
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| matches!(
+                    command,
+                    MainCommand::CaptureSnapshot {
+                        state: CaptureState::Gap(GapReason::EventOverload),
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "one main-thread snapshot per state change"
+        );
+        assert!(
+            !commands.iter().any(|command| matches!(
+                command,
+                MainCommand::Effect(CaptureEffect::StateChanged(_))
+            )),
+            "state changes use CaptureSnapshot exclusively"
+        );
         let review = capture
             .core
             .step(CaptureInput {
@@ -571,10 +592,12 @@ mod tests {
             .expect("overflow boundary");
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if let MainCommand::Effect(CaptureEffect::StateChanged(CaptureState::Gap(reason))) =
-                commands
-                    .recv_deadline(deadline)
-                    .expect("overflow completes without a database wait")
+            if let MainCommand::CaptureSnapshot {
+                state: CaptureState::Gap(reason),
+                ..
+            } = commands
+                .recv_deadline(deadline)
+                .expect("overflow completes without a database wait")
             {
                 assert_eq!(reason, GapReason::WriteQueueOverload);
                 break;

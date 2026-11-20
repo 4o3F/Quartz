@@ -47,7 +47,7 @@ pub use model::{
     ClockEndReason, Foreground, GapReason, HookTarget, IntervalEndReason, IntervalFact,
     NoForegroundReason, ObservationSource, OpenAvailability, OpenInterval, PolicyObservation,
     RunEndReason, SegmentRange, SessionReadiness, SessionStatus, StopChange, StopReason, Timer,
-    TitleActivity, WebRowExtension,
+    TitleActivity,
 };
 
 const _: () = {

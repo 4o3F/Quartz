@@ -287,14 +287,14 @@ fn main() -> ExitCode {
             };
             let options = if let Some(code) = core_error {
                 quartz_ui::RunOptions::CoreError {
-                    language: platform::UiLanguage::detect().as_str(),
+                    language: platform::detect_ui_language().code(),
                     error: quartz_protocol::CoreError::new(code, backup_path),
                 }
             } else {
                 match UiLaunch::from(prewarm) {
                     UiLaunch::Prewarm => quartz_ui::RunOptions::Prewarm,
                     UiLaunch::Open => quartz_ui::RunOptions::Open {
-                        language: platform::UiLanguage::detect().as_str(),
+                        language: platform::detect_ui_language().code(),
                     },
                 }
             };

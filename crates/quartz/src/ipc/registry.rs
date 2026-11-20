@@ -12,21 +12,13 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::{
-    sync::{mpsc, oneshot, watch},
-    time::Instant,
-};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Bounded registry commands on the existing I/O runtime (01 §6, 04 §7).
 const REGISTRY_MAILBOX_CAPACITY: usize = 64;
-pub(crate) use super::outbox::STATE_PUSH_INTERVAL;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ConnectionId(u64);
-
-pub(crate) struct ControlMessage {
-    pub(crate) op: ControlOp,
-}
 
 enum RegistryMessage {
     Register {
@@ -43,7 +35,7 @@ enum RegistryMessage {
         response: Response,
         reply: oneshot::Sender<Result<(), QueueFrameError>>,
     },
-    Control(ControlMessage),
+    Control(ControlOp),
     Outboxes {
         reply: oneshot::Sender<Vec<OutboxHandle>>,
     },
@@ -59,13 +51,9 @@ pub(crate) struct RegistryHandle {
 pub(crate) struct QueueRegistryError;
 
 impl RegistryHandle {
-    #[cfg(test)]
-    pub(crate) fn start(status: watch::Receiver<PublishedStatus>) -> Self {
-        Self::start_with_versions(status, None)
-    }
-    pub(crate) fn start_with_versions(
+    pub(crate) fn start(
         status: watch::Receiver<PublishedStatus>,
-        versions: Option<watch::Receiver<crate::query::versions::VersionState>>,
+        versions: watch::Receiver<crate::query::versions::VersionState>,
     ) -> Self {
         let (mailbox, receiver) = mpsc::channel(REGISTRY_MAILBOX_CAPACITY);
         let handle = Self {
@@ -96,13 +84,11 @@ impl RegistryHandle {
     ) -> Result<Registration, QueueRegistryError> {
         let id = ConnectionId(
             self.next_id
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    value.checked_add(1)
-                })
-                .map_err(|_| {
-                    tracing::error!("connection identity sequence exhausted");
-                    QueueRegistryError
-                })?,
+                .update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    value
+                        .checked_add(1)
+                        .expect("u64 counter cannot overflow in practice")
+                }),
         );
         self.send(RegistryMessage::Register { id, role, outbox })?;
         Ok(Registration {
@@ -126,8 +112,8 @@ impl RegistryHandle {
         .map_err(|_| QueueFrameError::Closed)?;
         received.await.map_err(|_| QueueFrameError::Closed)?
     }
-    pub(crate) fn control(&self, message: ControlMessage) -> Result<(), QueueRegistryError> {
-        self.send(RegistryMessage::Control(message))
+    pub(crate) fn control(&self, op: ControlOp) -> Result<(), QueueRegistryError> {
+        self.send(RegistryMessage::Control(op))
     }
     pub(crate) async fn outboxes(&self) -> Result<Vec<OutboxHandle>, QueueRegistryError> {
         let (reply, received) = oneshot::channel();
@@ -153,144 +139,69 @@ impl Drop for Registration {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StateChange {
-    Clean,
-    Pending,
+enum StateSubscription {
+    Absent,
+    Subscribed,
 }
-#[derive(Debug)]
-struct StateThrottle {
-    next: Instant,
-    change: StateChange,
-}
-impl StateThrottle {
-    fn after_snapshot(now: Instant) -> Self {
-        Self {
-            next: now + STATE_PUSH_INTERVAL,
-            change: StateChange::Clean,
-        }
-    }
-    fn changed(&mut self) {
-        self.change = StateChange::Pending;
-    }
-    fn deadline(&self) -> Option<Instant> {
-        (self.change == StateChange::Pending).then_some(self.next)
-    }
-    fn take_due(&mut self, now: Instant) -> bool {
-        if self.change == StateChange::Pending && now >= self.next {
-            *self = Self::after_snapshot(now);
-            true
-        } else {
-            false
-        }
-    }
-}
-#[derive(Debug)]
-struct DayThrottle {
-    latest: quartz_protocol::DayChanged,
-    next: Instant,
-    pending: StateChange,
-}
-impl DayThrottle {
-    fn new(latest: quartz_protocol::DayChanged, now: Instant) -> Self {
-        Self {
-            latest,
-            next: now + super::outbox::DAY_PUSH_INTERVAL,
-            pending: StateChange::Clean,
-        }
-    }
-    fn changed(&mut self, changed: quartz_protocol::DayChanged) {
-        if changed.versions != self.latest.versions {
-            self.latest = changed;
-            self.pending = StateChange::Pending;
-        }
-    }
-    fn deadline(&self) -> Option<Instant> {
-        (self.pending == StateChange::Pending).then_some(self.next)
-    }
-    fn take_due(&mut self, now: Instant) -> Option<quartz_protocol::DayChanged> {
-        if self.pending == StateChange::Pending && now >= self.next {
-            self.pending = StateChange::Clean;
-            self.next = now + super::outbox::DAY_PUSH_INTERVAL;
-            Some(self.latest.clone())
-        } else {
-            None
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionPublisher {
+    Active,
+    Stopped,
 }
 struct Connection {
     role: Role,
-    subscriptions: Vec<Topic>,
-    state: Option<StateThrottle>,
-    days: BTreeMap<quartz_protocol::LocalDate, DayThrottle>,
+    state: StateSubscription,
+    days: BTreeMap<quartz_protocol::LocalDate, quartz_protocol::DayChanged>,
     outbox: OutboxHandle,
 }
 struct ConnectionRegistry {
     receiver: mpsc::Receiver<RegistryMessage>,
     status: watch::Receiver<PublishedStatus>,
-    versions: Option<watch::Receiver<crate::query::versions::VersionState>>,
+    versions: watch::Receiver<crate::query::versions::VersionState>,
     connections: BTreeMap<ConnectionId, Connection>,
 }
 impl ConnectionRegistry {
     async fn run(mut self) {
+        let mut publisher = VersionPublisher::Active;
         loop {
             self.connections
                 .retain(|_, connection| !connection.outbox.is_closed());
-            let deadline = self
-                .connections
-                .values()
-                .filter_map(|connection| {
-                    connection
-                        .state
-                        .as_ref()
-                        .and_then(StateThrottle::deadline)
-                        .into_iter()
-                        .chain(connection.days.values().filter_map(DayThrottle::deadline))
-                        .min()
-                })
-                .min();
             tokio::select! {
                 message = self.receiver.recv() => match message { Some(message) => self.receive(message), None => return },
                 changed = self.status.changed() => {
                     if let Err(error) = changed { tracing::debug!(%error, "main status publisher stopped"); return; }
-                    for connection in self.connections.values_mut() { if let Some(state) = &mut connection.state { state.changed(); } }
+                    self.publish_state();
                 }
-                changed = Self::version_changed(&mut self.versions) => {
-                    if changed.is_err() { self.versions = None; } else { self.update_days(); }
+                changed = self.versions.changed(), if publisher == VersionPublisher::Active => {
+                    match changed {
+                        Ok(()) => self.update_days(),
+                        Err(error) => {
+                            tracing::debug!(%error, "day version publisher stopped");
+                            publisher = VersionPublisher::Stopped;
+                        }
+                    }
                 }
-                () = Self::deadline(deadline) => self.publish_due(),
             }
         }
     }
-    async fn version_changed(
-        versions: &mut Option<watch::Receiver<crate::query::versions::VersionState>>,
-    ) -> Result<(), watch::error::RecvError> {
-        match versions {
-            Some(versions) => versions.changed().await,
-            None => std::future::pending().await,
-        }
-    }
     fn update_days(&mut self) {
-        let Some(versions) = &self.versions else {
-            return;
-        };
         // Release the publisher lock before resolving subscribed dates.
-        let state = versions.borrow().clone();
+        let state = self.versions.borrow().clone();
         for connection in self.connections.values_mut() {
-            for (date, throttle) in &mut connection.days {
+            for (date, latest) in &mut connection.days {
                 match state.day(*date) {
-                    Ok(changed) => throttle.changed(changed),
+                    Ok(changed) => {
+                        if changed.versions != latest.versions {
+                            connection.outbox.day(changed.clone());
+                            *latest = changed;
+                        }
+                    }
                     Err(error) => {
                         tracing::error!(%error, "could not update day subscription");
                         connection.outbox.close();
                     }
                 }
             }
-        }
-    }
-    async fn deadline(deadline: Option<Instant>) {
-        match deadline {
-            Some(deadline) => tokio::time::sleep_until(deadline).await,
-            None => std::future::pending().await,
         }
     }
     fn receive(&mut self, message: RegistryMessage) {
@@ -300,8 +211,7 @@ impl ConnectionRegistry {
                     id,
                     Connection {
                         role,
-                        subscriptions: Vec::new(),
-                        state: None,
+                        state: StateSubscription::Absent,
                         days: BTreeMap::new(),
                         outbox,
                     },
@@ -321,15 +231,18 @@ impl ConnectionRegistry {
                     tracing::debug!("subscriber left before registry acknowledgement");
                 }
             }
-            RegistryMessage::Control(message) => {
-                match message.op {
+            RegistryMessage::Control(op) => {
+                match op {
                     ControlOp::UiShutdown => {}
                     ControlOp::UiShow | ControlOp::UiActivate => {
                         // TODO(M3): Route to the UI selected by the main-thread lifecycle.
                         tracing::debug!("UI show/activate routing awaits M3");
                         return;
                     }
-                    _ => {
+                    ControlOp::BrowserAck
+                    | ControlOp::BrowserPolicy
+                    | ControlOp::CoreOffline
+                    | ControlOp::BrowserPurge => {
                         // TODO(M5): Route browser control by its authenticated stream.
                         tracing::warn!("browser control fan-out awaits M5 routing");
                         return;
@@ -342,7 +255,7 @@ impl ConnectionRegistry {
                     .filter(|connection| connection.role == Role::Ui)
                 {
                     let body = ControlBody {
-                        op: message.op,
+                        op,
                         fields: serde_json::Map::new(),
                     };
                     if let Err(error) = connection.outbox.control(body) {
@@ -375,10 +288,11 @@ impl ConnectionRegistry {
         let mut prepared_days = BTreeMap::new();
         for topic in &subscription.topics {
             if let Topic::Day(date) = topic {
-                let result = match &self.versions {
-                    Some(versions) => versions.borrow().day(*date).map_err(|error| error.kind()),
-                    None => Err(quartz_protocol::ErrorKind::Internal),
-                };
+                let result = self
+                    .versions
+                    .borrow()
+                    .day(*date)
+                    .map_err(|error| error.kind());
                 match result {
                     Ok(changed) => {
                         prepared_days.insert(*date, changed);
@@ -401,42 +315,30 @@ impl ConnectionRegistry {
             .get_mut(&id)
             .ok_or(QueueFrameError::Closed)?;
         connection.outbox.response(response)?;
-        for topic in subscription.topics {
-            if !connection.subscriptions.contains(&topic) {
-                connection.subscriptions.push(topic);
-            }
-        }
         for changed in prepared_days.into_values() {
             let date = changed.date;
             if let std::collections::btree_map::Entry::Vacant(entry) = connection.days.entry(date) {
                 connection.outbox.day(changed.clone());
-                entry.insert(DayThrottle::new(changed, Instant::now()));
+                entry.insert(changed);
             }
         }
-        if connection.subscriptions.contains(&Topic::State) && connection.state.is_none() {
-            connection.state = Some(StateThrottle::after_snapshot(Instant::now()));
+        if subscription.topics.contains(&Topic::State)
+            && connection.state == StateSubscription::Absent
+        {
+            connection.state = StateSubscription::Subscribed;
             connection.outbox.state(self.status.borrow().snapshot());
         }
         Ok(())
     }
-    fn publish_due(&mut self) {
-        let now = Instant::now();
-        // Construct no event body unless at least one subscriber is actually due.
+    fn publish_state(&self) {
         let mut snapshot = None;
-        for connection in self.connections.values_mut() {
-            for throttle in connection.days.values_mut() {
-                if let Some(changed) = throttle.take_due(now) {
-                    connection.outbox.day(changed);
-                }
-            }
-            if connection
-                .state
-                .as_mut()
-                .is_some_and(|throttle| throttle.take_due(now))
-            {
-                let state = snapshot.get_or_insert_with(|| self.status.borrow().snapshot());
-                connection.outbox.state(state.clone());
-            }
+        for connection in self
+            .connections
+            .values()
+            .filter(|connection| connection.state == StateSubscription::Subscribed)
+        {
+            let state = snapshot.get_or_insert_with(|| self.status.borrow().snapshot());
+            connection.outbox.state(state.clone());
         }
     }
 }
@@ -444,25 +346,6 @@ impl ConnectionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn state_throttle_uses_latest_change_and_never_pushes_early() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("test runtime");
-        runtime.block_on(async {
-            tokio::time::pause();
-            let mut throttle = StateThrottle::after_snapshot(Instant::now());
-            for _ in 0..10 {
-                throttle.changed();
-            }
-            assert!(!throttle.take_due(Instant::now()));
-            tokio::time::advance(STATE_PUSH_INTERVAL).await;
-            assert!(throttle.take_due(Instant::now()));
-            assert!(!throttle.take_due(Instant::now()));
-            assert_eq!(throttle.deadline(), None);
-        });
-    }
     #[test]
     fn registry_registers_and_unregisters_connections() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -472,7 +355,9 @@ mod tests {
         runtime.block_on(async {
             let publisher =
                 crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("registry".into()));
-            let registry = RegistryHandle::start(publisher.subscribe());
+            let (_versions, versions) =
+                watch::channel(crate::query::versions::VersionState::empty());
+            let registry = RegistryHandle::start(publisher.subscribe(), versions);
             let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
             let registration = registry
                 .register(Role::Ui, writer.handle.clone())

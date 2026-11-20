@@ -2,12 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
-use std::{fmt, path::PathBuf, str::FromStr};
+use std::{fmt, path::PathBuf};
 
 /// Stable startup failure codes shared by argv and the future pipe protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
+#[derive(strum::VariantArray, strum::IntoStaticStr, strum::EnumString)]
+#[strum(serialize_all = "snake_case", parse_err_ty = ParseCoreErrorCodeError, parse_err_fn = parse_core_error_code)]
 pub enum CoreErrorCode {
     /// The database contains migrations unknown to this program.
     NewerDatabase,
@@ -19,29 +20,9 @@ pub enum CoreErrorCode {
     CoreStartFailed,
 }
 
-impl CoreErrorCode {
-    /// Every code, so consumers can check they handle each one.
-    pub const ALL: [Self; 4] = [
-        Self::NewerDatabase,
-        Self::MigrationFailed,
-        Self::OtherSession,
-        Self::CoreStartFailed,
-    ];
-
-    /// Returns the stable string used in command arguments and JSON.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::NewerDatabase => "newer_database",
-            Self::MigrationFailed => "migration_failed",
-            Self::OtherSession => "other_session",
-            Self::CoreStartFailed => "core_start_failed",
-        }
-    }
-}
 impl fmt::Display for CoreErrorCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str((*self).into())
     }
 }
 
@@ -61,22 +42,12 @@ pub mod cli {
 #[snafu(display("unknown core error code"))]
 pub struct ParseCoreErrorCodeError;
 
-impl FromStr for CoreErrorCode {
-    type Err = ParseCoreErrorCodeError;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "newer_database" => Ok(Self::NewerDatabase),
-            "migration_failed" => Ok(Self::MigrationFailed),
-            "other_session" => Ok(Self::OtherSession),
-            "core_start_failed" => Ok(Self::CoreStartFailed),
-            _ => Err(ParseCoreErrorCodeError),
-        }
-    }
+fn parse_core_error_code(_: &str) -> ParseCoreErrorCodeError {
+    ParseCoreErrorCodeError
 }
 
 /// A core failure and structured recovery paths, without presentation text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct CoreError {
     /// Determines the UI's localized presentation.
     pub code: CoreErrorCode,
@@ -95,24 +66,6 @@ impl CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn all_lists_every_code() {
-        for code in CoreErrorCode::ALL {
-            // Adding a variant breaks this match; add the variant to `ALL` as well.
-            match code {
-                CoreErrorCode::NewerDatabase
-                | CoreErrorCode::MigrationFailed
-                | CoreErrorCode::OtherSession
-                | CoreErrorCode::CoreStartFailed => {}
-            }
-        }
-        let distinct: std::collections::BTreeSet<&str> = CoreErrorCode::ALL
-            .iter()
-            .map(|code| code.as_str())
-            .collect();
-        assert_eq!(distinct.len(), CoreErrorCode::ALL.len());
-    }
-
     #[test]
     fn startup_codes_round_trip_through_argv_and_json() {
         for (code, text) in [

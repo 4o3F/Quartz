@@ -25,7 +25,6 @@ pub struct ValidateTextScaleError {
 
 /// A text scale text is not a number in the valid range.
 #[derive(Debug, Clone, PartialEq, Snafu)]
-#[non_exhaustive]
 pub enum ParseTextScaleError {
     /// The text is not a decimal number.
     #[snafu(display("text scale {text:?} is not a number"))]
@@ -40,7 +39,6 @@ pub enum ParseTextScaleError {
 
 /// Why the system text scale could not be read.
 #[derive(Debug, Snafu)]
-#[non_exhaustive]
 pub enum ReadTextScaleError {
     /// Windows did not provide `UISettings.TextScaleFactor`.
     #[cfg(windows)]

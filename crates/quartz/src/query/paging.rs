@@ -22,11 +22,7 @@ impl PagePosition {
     pub(crate) fn is_first(self) -> bool {
         matches!(self, Self::First)
     }
-}
-#[derive(Debug)]
-pub(crate) struct Paging;
-impl Paging {
-    pub(crate) fn position(
+    pub(crate) fn from_cursor(
         cursor: Option<&QueryCursor>,
         versions: &QueryVersions,
         query: &CursorQuery,
@@ -41,13 +37,6 @@ impl Paging {
             return Err(RunQueryError::StaleCursor);
         }
         Ok(PagePosition::Cursor(cursor.position()))
-    }
-    pub(crate) fn cursor(
-        versions: &QueryVersions,
-        query: &CursorQuery,
-        position: usize,
-    ) -> QueryCursor {
-        QueryCursor::new(versions.clone(), query.clone(), position)
     }
 }
 #[derive(Debug)]

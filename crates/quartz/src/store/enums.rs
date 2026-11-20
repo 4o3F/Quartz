@@ -311,89 +311,6 @@ impl EnumColumn for IdleException {
     const COLUMN: EnumName = EnumName::column(schema::availability_intervals::exception);
 }
 
-/// Boundary that closed a browser interval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
-#[diesel(sql_type = Integer)]
-#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
-#[strum(serialize_all = "snake_case")]
-#[repr(i32)]
-pub(super) enum WebEndReason {
-    /// The browser reported a new state.
-    BrowserState = 1,
-    /// The linked foreground interval ended.
-    ForegroundEnd = 2,
-    /// The browser stream disconnected.
-    Disconnected = 3,
-    /// A browser capture gap interrupted the interval.
-    Gap = 4,
-    /// The effective web privacy policy changed.
-    PolicyChanged = 5,
-    /// Recovery closed the interval at its last confirmed point.
-    CrashRecovered = 6,
-    Shutdown = 7,
-}
-
-impl EnumColumn for WebEndReason {
-    const COLUMN: EnumName = EnumName::column(schema::web_intervals::end_reason);
-}
-
-/// Confidence of a browser interval's foreground association.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
-#[diesel(sql_type = Integer)]
-#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
-#[strum(serialize_all = "snake_case")]
-#[repr(i32)]
-pub(super) enum LinkStatus {
-    /// The browser interval has an unambiguous foreground association.
-    Linked = 1,
-    /// The foreground association is ambiguous.
-    Ambiguous = 2,
-}
-
-impl EnumColumn for LinkStatus {
-    const COLUMN: EnumName = EnumName::column(schema::web_intervals::link_status);
-}
-
-/// Privacy level retained for a stored browser interval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
-#[diesel(sql_type = Integer)]
-#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
-#[strum(serialize_all = "snake_case")]
-#[repr(i32)]
-pub(super) enum WebLevel {
-    /// Retain domain and tab title.
-    Full = 1,
-    /// Retain the domain and redact the tab title.
-    DomainOnly = 2,
-}
-
-impl EnumColumn for WebLevel {
-    const COLUMN: EnumName = EnumName::column(schema::web_intervals::web_level);
-}
-
-/// Durable result used to acknowledge a browser message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
-#[diesel(sql_type = Integer)]
-#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
-#[strum(serialize_all = "snake_case")]
-#[repr(i32)]
-pub(super) enum IngestOutcome {
-    /// The message produced stored browser intervals.
-    Stored = 1,
-    /// The message did not overlap a foreground interval.
-    DiscardedNoOverlap = 2,
-    /// Privacy policy discarded the message.
-    DiscardedPrivacy = 3,
-    /// The message fell in a capture gap.
-    DiscardedGap = 4,
-    /// A deletion barrier discarded the late message.
-    DiscardedBarrier = 5,
-}
-
-impl EnumColumn for IngestOutcome {
-    const COLUMN: EnumName = EnumName::column(schema::ingest_receipts::outcome);
-}
-
 /// Contribution of a category to focus and distraction totals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
@@ -590,7 +507,7 @@ impl From<quartz_domain::capture::PrivacyMode> for PrivacyMode {
 }
 
 #[rustfmt::skip]
-impl_integer_sql!(TimedPolicyKind, PrivacyMode, RunEndReason, ClockEndReason, ApplicationKind, IntervalKind, NoForegroundReason, TitleStatus, CaptureLevel, IntervalEndReason, AvailabilityReason, AvailabilityEndReason, IdleException, WebEndReason, LinkStatus, WebLevel, IngestOutcome, CategoryTendency, RuleSetKind, RuleSetSource, AnnotationKind, DataSource, GapReason);
+impl_integer_sql!(TimedPolicyKind, PrivacyMode, RunEndReason, ClockEndReason, ApplicationKind, IntervalKind, NoForegroundReason, TitleStatus, CaptureLevel, IntervalEndReason, AvailabilityReason, AvailabilityEndReason, IdleException, CategoryTendency, RuleSetKind, RuleSetSource, AnnotationKind, DataSource, GapReason);
 
 impl From<quartz_domain::capture::RunEndReason> for RunEndReason {
     fn from(value: quartz_domain::capture::RunEndReason) -> Self {

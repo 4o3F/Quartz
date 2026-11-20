@@ -252,8 +252,6 @@ pub struct Checkpoint {
     pub at: Timestamp,
     /// Latest allowed transaction commit time, reserving one second for batching.
     pub commit_by_mono: MonoInstant,
-    /// M5 extends the confirmation target set with correlated open web rows (09 §M5).
-    pub web_extension: WebRowExtension,
 }
 /// Database-independent write descriptions; one step must remain indivisible when batching.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -582,13 +580,6 @@ pub enum TitleActivity {
     Ordinary,
     /// More than the design threshold within its rolling window.
     Storm,
-}
-/// Marker documenting the later browser-row confirmation integration.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum WebRowExtension {
-    /// Browser rows are added by M5.
-    #[default]
-    PendingM5,
 }
 /// Result of separating a capture transaction and its shell effects.
 #[derive(Debug)]

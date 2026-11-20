@@ -30,6 +30,7 @@ preview = ["dep:raw-window-handle"]
 # The view models, text and timeline geometry have no GPUI dependency; they are tested on every
 # platform but only used by the Windows views, so other platforms need them for tests alone.
 [dev-dependencies]
+strum.workspace = true
 jiff.workspace = true
 num-traits.workspace = true
 quartz-i18n.workspace = true

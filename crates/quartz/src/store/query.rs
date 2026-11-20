@@ -6,7 +6,7 @@ use super::{
     enums::{self, IntegerCode},
     rows::{
         AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow, ClockSegmentsRow,
-        DataDayVersionsRow, IntervalsRow,
+        DataDayVersionsRow, IntervalsRow, SettingsRow,
     },
     schema::{
         applications, availability_intervals, capture_gaps, capture_runs, clock_segments,
@@ -37,17 +37,13 @@ pub(crate) struct QuerySettings {
     pub day_start_offset_min: i64,
     pub metadata_version: i64,
 }
-#[derive(Debug, diesel::Queryable)]
-struct SettingRow {
-    key: String,
-    value: String,
-}
+
 impl ReadOnlyStore {
     pub(crate) fn query_settings(&mut self) -> Result<QuerySettings, RunQueryError> {
         let rows = settings::table
             .filter(settings::key.eq_any(["day.start_offset_min", "metadata_version"]))
             .select((settings::key, settings::value))
-            .load::<SettingRow>(&mut self.connection)?;
+            .load::<SettingsRow>(&mut self.connection)?;
         let mut offset = DEFAULT_DAY_START_OFFSET_MIN;
         let mut metadata = 0;
         for row in rows {
@@ -338,11 +334,7 @@ impl ReadSnapshot {
                         ReadStage::ForegroundOpen => row.run_id,
                         _ => id,
                     };
-                    let level = match row.capture_level {
-                        enums::CaptureLevel::Full => CaptureLevel::Full,
-                        enums::CaptureLevel::TitleHidden => CaptureLevel::TitleHidden,
-                        enums::CaptureLevel::Excluded => CaptureLevel::Excluded,
-                    };
+                    let level: CaptureLevel = row.capture_level.into();
                     let app = if level == CaptureLevel::Excluded {
                         None
                     } else {

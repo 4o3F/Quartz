@@ -51,7 +51,6 @@ gpui_kit::assets::icon_assets!(
 
 /// The embedded theme could not be read.
 #[derive(Debug, Snafu)]
-#[non_exhaustive]
 pub enum LoadThemeError {
     /// The component themes are not valid gpui-component theme JSON.
     #[snafu(display("could not decode the embedded Fluent component themes"))]

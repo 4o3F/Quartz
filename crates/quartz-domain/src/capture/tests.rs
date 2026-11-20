@@ -1411,7 +1411,6 @@ fn backlog_coalesces_only_replaceable_checkpoint_targets_and_detects_missed_comm
         availability: vec![],
         at: at(59_000),
         commit_by_mono: mono(60_000),
-        web_extension: WebRowExtension::PendingM5,
     };
     let mut first = batch(1, 0, 59_000, 0);
     first.writes.push(CaptureWrite::Checkpoint(point.clone()));
@@ -1421,7 +1420,7 @@ fn backlog_coalesces_only_replaceable_checkpoint_targets_and_detects_missed_comm
     replacement.writes = vec![CaptureWrite::Checkpoint(Checkpoint {
         at: at(59_100),
         commit_by_mono: mono(60_100),
-        web_extension: WebRowExtension::PendingM5,
+
         ..point
     })];
     assert_eq!(
@@ -1774,7 +1773,6 @@ fn crash_recovery_uses_each_rows_confirmation_and_splits_long_locked_mask() {
         CaptureWrite::OpenAvailability(row.clone()),
     ];
     let plan = RecoverableRun {
-        web_extension: WebRowExtension::PendingM5,
         run: RunId::new(1),
         confirmed,
         next_row: ids::IdAllocator::test_rowid(2),
@@ -1812,7 +1810,6 @@ fn crash_recovery_uses_each_rows_confirmation_and_splits_long_locked_mask() {
         })
         .expect("foreground row");
     let plan = RecoverableRun {
-        web_extension: WebRowExtension::PendingM5,
         run: RunId::new(1),
         confirmed: at(59_000),
         next_row: ids::IdAllocator::test_rowid(100),
@@ -1912,7 +1909,6 @@ fn backlog_has_one_adaptive_deadline_and_coalescing_preserves_oldest_commit_budg
         availability: vec![],
         at: at(59_000),
         commit_by_mono: mono(60_000),
-        web_extension: WebRowExtension::PendingM5,
     }));
     let _ = backlog.push(first, at(59_000));
     let mut latest = batch(3, 59_000, 59_100, 0);
@@ -1923,7 +1919,6 @@ fn backlog_has_one_adaptive_deadline_and_coalescing_preserves_oldest_commit_budg
         availability: vec![],
         at: at(59_100),
         commit_by_mono: mono(60_100),
-        web_extension: WebRowExtension::PendingM5,
     }));
     let coalesced = backlog.push(latest, at(59_100));
     assert_eq!(coalesced.coalesced, vec![ids::IdAllocator::test_batchid(2)]);

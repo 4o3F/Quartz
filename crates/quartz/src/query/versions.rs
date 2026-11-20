@@ -27,6 +27,18 @@ pub(crate) struct VersionState {
     pub classification_hash: String,
 }
 impl VersionState {
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self {
+            days: BTreeMap::new(),
+            settings: QuerySettings {
+                day_start_offset_min: super::calendar::DEFAULT_DAY_START_OFFSET_MIN,
+                metadata_version: 0,
+            },
+            classification_hash: String::new(),
+        }
+    }
+
     pub(crate) fn digest(&self, range: QueryRange) -> QueryVersions {
         let mut digest = Sha256::new();
         digest.update(super::QUERY_SEMANTICS_VERSION.to_le_bytes());
@@ -44,13 +56,7 @@ impl VersionState {
                 digest.update(version.to_le_bytes());
             }
         }
-        QueryVersions(
-            digest
-                .finalize()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
-        )
+        QueryVersions(quartz_domain::text::encode_hex(&digest.finalize()))
     }
     pub(crate) fn day(&self, date: LocalDate) -> Result<DayChanged, RunQueryError> {
         let calendar = DayCalendar::new(date, self.settings.day_start_offset_min)?;

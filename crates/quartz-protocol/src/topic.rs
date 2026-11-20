@@ -10,7 +10,6 @@ pub use jiff::civil::Date as LocalDate;
 
 /// Topics supported by the core; unknown subscriptions must return `bad_request`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum Topic {
     /// Current recording and application state.
     State,

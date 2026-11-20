@@ -6,30 +6,14 @@ use windows::{
     core::PWSTR,
 };
 
-/// Supported UI language selected from Windows preferences.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct UiLanguage(quartz_i18n::Language);
-
-impl UiLanguage {
-    /// Detects the preferred supported language, warning and falling back to English on failure.
-    pub(crate) fn detect() -> Self {
-        Self(
-            PreferredUiLanguages::read()
-                .map(|languages| languages.negotiate())
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "using English UI language");
-                    quartz_i18n::Language::English
-                }),
-        )
-    }
-
-    /// Returns the locale identifier accepted by the translation and UI APIs.
-    pub(crate) fn as_str(self) -> &'static str {
-        self.0.code()
-    }
-    pub(crate) fn language(self) -> quartz_i18n::Language {
-        self.0
-    }
+/// Detects the supported UI language, logging a warning before using English on failure.
+pub(crate) fn detect_ui_language() -> quartz_i18n::Language {
+    PreferredUiLanguages::read()
+        .map(|languages| languages.negotiate())
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "using English UI language");
+            quartz_i18n::Language::English
+        })
 }
 
 #[derive(Debug, Snafu)]

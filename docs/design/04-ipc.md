@@ -244,7 +244,7 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 | `ui_language` | 与托盘采用相同的 Windows 首选语言协商，生产值为 `zh-CN` 或 `en`；调试伪语言使用 `en` 的协议身份 |
 | `locale` | `{hour_cycle, first_day_of_week}`，值分别为 `h12` 或 `h24`，以及 `monday` 至 `sunday` 的英文星期名；分别解析用户区域的 `LOCALE_STIMEFORMAT`、`LOCALE_IFIRSTDAYOFWEEK`；读取失败时记录警告并发送 `null` |
 
-主线程通过 watch 发布已清洗的区间和状态，注册表仅在有到期的订阅者时构造消息体。托盘退出先向注册表投递 `ui.shutdown`，停止管道前在现有关闭期限内尽力写出控制消息；显示与激活的 UI 连接选择留待 M3。
+主线程通过 watch 发布已清洗的区间和状态；有 state 订阅者时，注册表在每次变化后构造一份状态快照并立即转发到各连接的最新值槽，day 变化也立即转发到对应槽。每个连接的 outbox 从实际写入完成时计时，按上述间隔限流，并仅保留各槽的最新值。托盘退出先向注册表投递 `ui.shutdown`，停止管道前在现有关闭期限内尽力写出控制消息；显示与激活的 UI 连接选择留待 M3。
 
 ## 8. 重连
 

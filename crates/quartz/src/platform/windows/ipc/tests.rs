@@ -43,14 +43,14 @@ impl Fixture {
                 .try_send(command)
                 .map_err(|_| crate::ipc::QueueUiError)
         });
-        let server = PipeServer::start_configured(
+        let server = PipeServer::start(
             server::PipeServerConfig {
+                owner: ProcessIdentity::current().expect("identity"),
                 name: name.clone(),
                 timeouts,
-                queries: Some(query_port.unwrap_or_else(|| database.port.clone())),
-                versions: Some(database.versions.clone()),
+                queries: query_port.unwrap_or_else(|| database.port.clone()),
+                versions: database.versions.clone(),
             },
-            ProcessIdentity::current().expect("identity"),
             status.subscribe(),
             port,
         )
@@ -117,7 +117,13 @@ fn hello() -> Value {
 }
 fn assert_closed(client: &mut CoreClient) {
     assert!(
-        matches!(client.read_envelope(), Err(CallCoreError::Io { source } | CallCoreError::DecodeFrame { source }) if source.kind() != std::io::ErrorKind::TimedOut),
+        match client.read_envelope() {
+            Err(CallCoreError::Io { source }) => source.kind() != std::io::ErrorKind::TimedOut,
+            Err(CallCoreError::Decode { source }) => source
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() != std::io::ErrorKind::TimedOut),
+            _ => false,
+        },
         "server must close after final error"
     );
 }
@@ -282,9 +288,14 @@ fn silent_client_does_not_block_another_client_or_shutdown() {
 fn first_instance_refuses_an_occupied_name() {
     let fixture = Fixture::new();
     let port: crate::ipc::UiPort = Arc::new(|_| Ok(()));
-    let result = PipeServer::start_named(
-        fixture.name.clone(),
-        ProcessIdentity::current().expect("identity"),
+    let result = PipeServer::start(
+        server::PipeServerConfig {
+            owner: ProcessIdentity::current().expect("identity"),
+            name: fixture.name.clone(),
+            timeouts: server::ConnectionTimeouts::default(),
+            queries: fixture.database.port.clone(),
+            versions: fixture.database.versions.clone(),
+        },
         fixture.status.subscribe(),
         port,
     );
@@ -548,7 +559,7 @@ fn flooding_unread_responses_closes_only_the_slow_connection() {
         loop {
             match slow.read_envelope() {
                 Ok(_) => {}
-                Err(CallCoreError::Io { .. } | CallCoreError::DecodeFrame { .. }) => break,
+                Err(CallCoreError::Io { .. } | CallCoreError::Decode { .. }) => break,
                 Err(error) => panic!("slow connection must close: {error}"),
             }
         }

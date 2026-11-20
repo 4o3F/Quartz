@@ -7,11 +7,7 @@ use super::{
 };
 use crate::{
     core::app::SHUTDOWN_TIMEOUT,
-    ipc::{
-        ConnectionSession, UiPort,
-        outbox::OutboxTask,
-        registry::{ControlMessage, RegistryHandle},
-    },
+    ipc::{ConnectionSession, UiPort, outbox::OutboxTask, registry::RegistryHandle},
 };
 use crossbeam_channel::{Receiver, bounded};
 use futures_util::StreamExt;
@@ -54,7 +50,7 @@ const CONTROL_MAILBOX_CAPACITY: usize = 64;
 const SHUTDOWN_FLUSH_POLL: Duration = Duration::from_millis(10);
 
 enum ServerMessage {
-    Control(ControlMessage),
+    Control(quartz_protocol::ControlOp),
     #[cfg(test)]
     Inspect {
         reply: crossbeam_channel::Sender<Vec<OutboxMetric>>,
@@ -75,9 +71,9 @@ const SLOT_RETRY_INITIAL: Duration = Duration::from_millis(25);
 const SLOT_RETRY_MAX: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct ConnectionTimeouts {
-    pub(super) hello: Duration,
-    pub(super) close_flush: Duration,
+pub(crate) struct ConnectionTimeouts {
+    pub(crate) hello: Duration,
+    pub(crate) close_flush: Duration,
 }
 impl Default for ConnectionTimeouts {
     fn default() -> Self {
@@ -87,11 +83,28 @@ impl Default for ConnectionTimeouts {
         }
     }
 }
-pub(super) struct PipeServerConfig {
-    pub(super) name: PipeName,
-    pub(super) timeouts: ConnectionTimeouts,
-    pub(super) queries: Option<crate::query::dispatch::QueryPort>,
-    pub(super) versions: Option<watch::Receiver<crate::query::versions::VersionState>>,
+pub(crate) struct PipeServerConfig {
+    pub(crate) owner: ProcessIdentity,
+    pub(crate) name: PipeName,
+    pub(crate) timeouts: ConnectionTimeouts,
+    pub(crate) queries: crate::query::dispatch::QueryPort,
+    pub(crate) versions: watch::Receiver<crate::query::versions::VersionState>,
+}
+
+impl PipeServerConfig {
+    pub(crate) fn current(
+        queries: crate::query::dispatch::QueryPort,
+        versions: watch::Receiver<crate::query::versions::VersionState>,
+    ) -> Result<Self, StartPipeServerError> {
+        let owner = ProcessIdentity::current().context(start_pipe_server_error::IdentitySnafu)?;
+        Ok(Self {
+            name: owner.pipe_name(),
+            owner,
+            timeouts: ConnectionTimeouts::default(),
+            queries,
+            versions,
+        })
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -125,47 +138,7 @@ pub(crate) struct PipeServer {
 }
 impl PipeServer {
     pub(crate) fn start(
-        status: watch::Receiver<crate::ipc::PublishedStatus>,
-        ui: UiPort,
-        queries: crate::query::dispatch::QueryPort,
-        versions: watch::Receiver<crate::query::versions::VersionState>,
-    ) -> Result<Self, StartPipeServerError> {
-        let owner = ProcessIdentity::current().context(start_pipe_server_error::IdentitySnafu)?;
-        let name = owner.pipe_name();
-        Self::start_configured(
-            PipeServerConfig {
-                name,
-                timeouts: ConnectionTimeouts::default(),
-                queries: Some(queries),
-                versions: Some(versions),
-            },
-            owner,
-            status,
-            ui,
-        )
-    }
-    #[cfg(test)]
-    pub(crate) fn start_named(
-        name: PipeName,
-        owner: ProcessIdentity,
-        status: watch::Receiver<crate::ipc::PublishedStatus>,
-        ui: UiPort,
-    ) -> Result<Self, StartPipeServerError> {
-        Self::start_configured(
-            PipeServerConfig {
-                name,
-                timeouts: ConnectionTimeouts::default(),
-                queries: None,
-                versions: None,
-            },
-            owner,
-            status,
-            ui,
-        )
-    }
-    pub(super) fn start_configured(
         config: PipeServerConfig,
-        owner: ProcessIdentity,
         status: watch::Receiver<crate::ipc::PublishedStatus>,
         ui: UiPort,
     ) -> Result<Self, StartPipeServerError> {
@@ -176,7 +149,7 @@ impl PipeServer {
         let io = IoThread {
             listener: Arc::new(PipeListener {
                 name: config.name,
-                owner,
+                owner: config.owner,
             }),
             timeouts: config.timeouts,
             queries: config.queries,
@@ -212,10 +185,7 @@ impl PipeServer {
         }
     }
     pub(crate) fn control(&self, op: quartz_protocol::ControlOp) {
-        if let Err(error) = self
-            .control
-            .try_send(ServerMessage::Control(ControlMessage { op }))
-        {
+        if let Err(error) = self.control.try_send(ServerMessage::Control(op)) {
             tracing::warn!(%error, "could not queue main-thread UI control");
         }
     }
@@ -305,8 +275,8 @@ impl PipeListener {
     }
 }
 struct IoThread {
-    queries: Option<crate::query::dispatch::QueryPort>,
-    versions: Option<watch::Receiver<crate::query::versions::VersionState>>,
+    queries: crate::query::dispatch::QueryPort,
+    versions: watch::Receiver<crate::query::versions::VersionState>,
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
     status: watch::Receiver<crate::ipc::PublishedStatus>,
@@ -349,8 +319,7 @@ impl IoThread {
         }
     }
     async fn serve(mut self, pipes: Vec<NamedPipeServer>) {
-        let registry =
-            RegistryHandle::start_with_versions(self.status.clone(), self.versions.take());
+        let registry = RegistryHandle::start(self.status.clone(), self.versions.clone());
         let mut slots = JoinSet::new();
         for pipe in pipes {
             slots.spawn(self.slot(&registry).run(Some(pipe)));
@@ -443,7 +412,7 @@ impl SlotBackoff {
 }
 
 struct Slot {
-    queries: Option<crate::query::dispatch::QueryPort>,
+    queries: crate::query::dispatch::QueryPort,
     registry: RegistryHandle,
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
@@ -568,10 +537,7 @@ impl Slot {
                 Some(Err(error)) => return Err(error),
             };
             if let Some(query) = decision.query.take() {
-                let result = match &self.queries {
-                    Some(port) => port.call(query).await,
-                    None => Err(ProtocolError::new(ErrorKind::Internal)),
-                };
+                let result = self.queries.call(query).await;
                 decision.response.outcome = match result {
                     Ok(response) => match serde_json::to_value(response) {
                         Ok(body) => ResponseOutcome::Ok { body },
@@ -694,22 +660,33 @@ mod tests {
     /// Bounds lifecycle unit tests independently of production connection deadlines.
     const TEST_CLOSE_TIMEOUT: Duration = Duration::from_millis(20);
 
-    fn slot() -> Slot {
+    struct TestSlot {
+        slot: Slot,
+        _queries: crossbeam_channel::Receiver<crate::query::dispatch::QueryCommand>,
+        _versions: watch::Sender<crate::query::versions::VersionState>,
+    }
+    fn slot() -> TestSlot {
         let suffix = windows::core::GUID::new().expect("test pipe suffix");
         let publisher = StatusPublisher::new(quartz_protocol::InstanceId(format!("{suffix:?}")));
-        Slot {
-            registry: RegistryHandle::start(publisher.subscribe()),
-            queries: None,
-            listener: Arc::new(PipeListener {
-                name: PipeName::for_test(suffix),
-                owner: ProcessIdentity::current().expect("test identity"),
-            }),
-            timeouts: ConnectionTimeouts {
-                hello: HELLO_TIMEOUT,
-                close_flush: TEST_CLOSE_TIMEOUT,
+        let channel = crate::query::dispatch::QueryChannel::new();
+        let (versions, received) = watch::channel(crate::query::versions::VersionState::empty());
+        TestSlot {
+            _queries: channel.receiver,
+            _versions: versions,
+            slot: Slot {
+                registry: RegistryHandle::start(publisher.subscribe(), received),
+                queries: channel.port,
+                listener: Arc::new(PipeListener {
+                    name: PipeName::for_test(suffix),
+                    owner: ProcessIdentity::current().expect("test identity"),
+                }),
+                timeouts: ConnectionTimeouts {
+                    hello: HELLO_TIMEOUT,
+                    close_flush: TEST_CLOSE_TIMEOUT,
+                },
+                status: publisher.subscribe(),
+                ui: Arc::new(|_| Ok(())),
             },
-            status: publisher.subscribe(),
-            ui: Arc::new(|_| Ok(())),
         }
     }
     fn runtime() -> tokio::runtime::Runtime {
@@ -735,7 +712,11 @@ mod tests {
                 })
                 .expect("queue final response");
             let outbox = writer.handle.clone();
-            slot().finish_closing(writer).await.expect("bounded close");
+            slot()
+                .slot
+                .finish_closing(writer)
+                .await
+                .expect("bounded close");
             tokio::task::yield_now().await;
             assert!(
                 outbox.is_closed(),
@@ -748,11 +729,11 @@ mod tests {
     fn failed_slot_creation_retries_and_recovers_after_capacity_frees() {
         runtime().block_on(async {
             let slot = slot();
-            let listener = Arc::clone(&slot.listener);
+            let listener = Arc::clone(&slot.slot.listener);
             let mut occupied = Vec::new();
             occupied.push(listener.create(InstanceOrder::First).expect("first instance"));
             for _ in 1..PIPE_INSTANCES { occupied.push(listener.create(InstanceOrder::Additional).expect("occupy instance")); }
-            let task = tokio::spawn(slot.run(None));
+            let task = tokio::spawn(slot.slot.run(None));
             tokio::time::sleep(SLOT_RETRY_INITIAL.saturating_add(SLOT_RETRY_INITIAL)).await;
             assert!(!task.is_finished(), "creation failure must keep retrying");
             drop(occupied.pop());

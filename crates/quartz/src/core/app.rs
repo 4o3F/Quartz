@@ -7,9 +7,7 @@ use crate::capture::PersistenceState;
 use crate::rules::registry::{RegistryResult, RunRegistryCommandError};
 use crossbeam_channel::{Receiver, Sender, TrySendError, select_biased};
 use quartz_domain::{
-    capture::{
-        CaptureEffect, CaptureEvent, CaptureState, RunEndReason, SessionReadiness, Timestamp,
-    },
+    capture::{CaptureEffect, CaptureEvent, CaptureState, RunEndReason, Timestamp},
     rules::registry::RegistryCommand,
 };
 use snafu::Snafu;
@@ -50,33 +48,6 @@ impl From<ObservedEvent> for Observation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CaptureIndicator {
-    Normal,
-    PersistenceFailed,
-    SessionUnavailable,
-    CaptureGap,
-}
-impl CaptureIndicator {
-    pub(crate) fn from_state(
-        capture: Option<&CaptureState>,
-        persistence: PersistenceState,
-    ) -> Self {
-        match (capture, persistence) {
-            (_, PersistenceState::Failed { .. }) => Self::PersistenceFailed,
-            (
-                Some(CaptureState::Stopped {
-                    session: SessionReadiness::AwaitingSession,
-                    ..
-                }),
-                _,
-            ) => Self::SessionUnavailable,
-            (Some(CaptureState::Gap(_)), _) => Self::CaptureGap,
-            _ => Self::Normal,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum MainCommand {
     CaptureSnapshot {
@@ -95,7 +66,10 @@ pub(crate) enum Worker {
 #[derive(Debug)]
 enum DatabaseCommand {
     Drain,
-    #[expect(dead_code, reason = "the registry port is connected to IPC in M2")]
+    #[expect(
+        dead_code,
+        reason = "rule-editing operations connect the registry port to IPC in M4"
+    )]
     Registry {
         command: Box<RegistryCommand>,
         reply: Sender<Result<RegistryResult, RunRegistryCommandError>>,
@@ -135,29 +109,21 @@ impl std::fmt::Display for Worker {
 #[snafu(module)]
 pub(crate) enum SendMainCommandError {
     #[snafu(display("main command delivery exceeded its deadline"))]
-    Deadline {
-        source: crossbeam_channel::SendTimeoutError<()>,
-    },
+    Deadline,
     #[snafu(display("main command receiver disconnected"))]
-    Disconnected {
-        source: crossbeam_channel::SendError<()>,
-    },
+    Disconnected,
 }
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub(crate) enum ObserveCaptureError {
     #[snafu(display("capture event receiver disconnected"))]
-    Disconnected {
-        source: crossbeam_channel::TrySendError<()>,
-    },
+    Disconnected,
 }
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub(crate) enum CloseCaptureError {
     #[snafu(display("could not request capture shutdown"))]
-    Send {
-        source: crossbeam_channel::SendTimeoutError<()>,
-    },
+    Disconnected,
     #[snafu(display("worker completion channel disconnected"))]
     Receive {
         source: crossbeam_channel::RecvError,
@@ -192,13 +158,9 @@ impl MainPort {
         self.sender
             .send_deadline(command, deadline)
             .map_err(|error| match error {
-                crossbeam_channel::SendTimeoutError::Timeout(_) => SendMainCommandError::Deadline {
-                    source: crossbeam_channel::SendTimeoutError::Timeout(()),
-                },
+                crossbeam_channel::SendTimeoutError::Timeout(_) => SendMainCommandError::Deadline,
                 crossbeam_channel::SendTimeoutError::Disconnected(_) => {
-                    SendMainCommandError::Disconnected {
-                        source: crossbeam_channel::SendError(()),
-                    }
+                    SendMainCommandError::Disconnected
                 }
             })?;
         (self.wake)();
@@ -207,9 +169,7 @@ impl MainPort {
     fn send(&self, command: MainCommand) -> Result<(), SendMainCommandError> {
         self.sender
             .send(command)
-            .map_err(|_| SendMainCommandError::Disconnected {
-                source: crossbeam_channel::SendError(()),
-            })?;
+            .map_err(|_| SendMainCommandError::Disconnected)?;
         (self.wake)();
         Ok(())
     }
@@ -242,9 +202,7 @@ impl CaptureSender {
                 self.overloaded.store(true, Ordering::Release);
                 Ok(())
             }
-            Err(TrySendError::Disconnected(_)) => Err(ObserveCaptureError::Disconnected {
-                source: crossbeam_channel::TrySendError::Disconnected(()),
-            }),
+            Err(TrySendError::Disconnected(_)) => Err(ObserveCaptureError::Disconnected),
         }
     }
 }
@@ -262,15 +220,11 @@ impl ShutdownPort {
         let deadline = stop.deadline;
         self.sender
             .send_deadline(stop, deadline)
-            .map_err(|error| CloseCaptureError::Send {
-                source: match error {
-                    crossbeam_channel::SendTimeoutError::Timeout(_) => {
-                        crossbeam_channel::SendTimeoutError::Timeout(())
-                    }
-                    crossbeam_channel::SendTimeoutError::Disconnected(_) => {
-                        crossbeam_channel::SendTimeoutError::Disconnected(())
-                    }
-                },
+            .map_err(|error| match error {
+                crossbeam_channel::SendTimeoutError::Timeout(_) => CloseCaptureError::Deadline,
+                crossbeam_channel::SendTimeoutError::Disconnected(_) => {
+                    CloseCaptureError::Disconnected
+                }
             })?;
         let mut commands = self.commands.clone();
         for _ in 0..WORKER_COUNT {
@@ -360,7 +314,7 @@ impl Drop for WorkerGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture::{PersistenceState, WriteQueue};
+    use crate::capture::WriteQueue;
     use crate::core::sources::{ClockReader, ReadClockError};
     use capture_loop::{CaptureLoop, Settlement};
     use crossbeam_channel::bounded;
@@ -411,37 +365,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn persistence_failure_selects_warning_indicator() {
-        assert_eq!(
-            CaptureIndicator::from_state(None, PersistenceState::Failed { commands: 1 }),
-            CaptureIndicator::PersistenceFailed
-        );
-        assert_eq!(
-            CaptureIndicator::from_state(None, PersistenceState::Ready),
-            CaptureIndicator::Normal
-        );
-    }
-    #[test]
-    fn session_and_gap_warnings_keep_distinct_indicators() {
-        let unavailable = CaptureState::Stopped {
-            reasons: Default::default(),
-            session: SessionReadiness::AwaitingSession,
-        };
-        assert_eq!(
-            CaptureIndicator::from_state(Some(&unavailable), PersistenceState::Ready),
-            CaptureIndicator::SessionUnavailable
-        );
-        let gap = CaptureState::Gap(GapReason::EventOverload);
-        assert_eq!(
-            CaptureIndicator::from_state(Some(&gap), PersistenceState::Ready),
-            CaptureIndicator::CaptureGap
-        );
-        assert_eq!(
-            CaptureIndicator::from_state(Some(&gap), PersistenceState::Failed { commands: 1 }),
-            CaptureIndicator::PersistenceFailed
-        );
-    }
     #[test]
     fn resume_notifications_create_only_one_clock_segment() {
         let at = Timestamp {

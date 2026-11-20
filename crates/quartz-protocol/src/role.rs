@@ -169,6 +169,7 @@ pub struct AuthorizeOpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strum::VariantArray;
 
     #[test]
     fn every_role_and_operation_matches_the_independent_permission_table() {
@@ -184,15 +185,16 @@ mod tests {
             };
             let expected: std::collections::BTreeSet<_> = expected.split_whitespace().collect();
             let mut actual = std::collections::BTreeSet::new();
-            for &op in Op::ALL {
-                let name = op.as_str().expect("known op");
+            for &op in Op::VARIANTS.iter().filter(|op| **op != Op::Unknown) {
+                let name = serde_json::to_value(op).expect("known op");
+                let name = name.as_str().expect("op wire string").to_owned();
                 assert_eq!(
                     role.authorize(op).is_ok(),
-                    expected.contains(name),
+                    expected.contains(name.as_str()),
                     "{role:?} {name}"
                 );
                 if role.authorize(op).is_ok() {
-                    actual.insert(name);
+                    actual.insert(name.clone());
                 }
                 assert_eq!(
                     serde_json::from_value::<Op>(serde_json::json!(name)).expect("parse op"),
@@ -203,11 +205,16 @@ mod tests {
                     serde_json::json!(name)
                 );
             }
-            assert_eq!(actual, expected, "no missing op in ALL for {role:?}");
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected,
+                "no missing request operation for {role:?}"
+            );
             assert!(role.authorize(Op::Unknown).is_err());
         }
-        let names: std::collections::BTreeSet<_> = Op::ALL.iter().map(|op| op.as_str()).collect();
-        assert_eq!(names.len(), Op::ALL.len(), "ALL has no duplicates");
     }
 
     #[test]

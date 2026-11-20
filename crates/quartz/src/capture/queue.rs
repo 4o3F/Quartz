@@ -340,7 +340,6 @@ mod tests {
                 availability: Vec::new(),
                 at,
                 commit_by_mono: Self::at(1_000).mono,
-                web_extension: WebRowExtension::PendingM5,
             })
         }
         fn range(start: u64, end: u64) -> TimeRange {

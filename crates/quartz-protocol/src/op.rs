@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 /// Permission families matching operation prefixes in 04 §5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum OpFamily {
     /// The `hello` operation family.
     Hello,
@@ -50,8 +49,7 @@ pub enum OpFamily {
 ///
 /// Unknown wire names decode to `Unknown`, preserving the enclosing request ID.
 /// Core-to-client pushes are represented separately by [`ControlOp`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::VariantArray)]
 pub enum Op {
     /// The `hello` request.
     #[serde(rename = "hello")]
@@ -218,63 +216,6 @@ pub enum Op {
 }
 
 impl Op {
-    /// Every known request, excluding the receive-only unknown variant.
-    pub const ALL: &[Self] = &[
-        Self::Hello,
-        Self::Subscribe,
-        Self::CoreStatus,
-        Self::UiOpen,
-        Self::UiFirstFrame,
-        Self::QueryDay,
-        Self::QueryTimeline,
-        Self::QueryRange,
-        Self::QuerySegmentDetail,
-        Self::QueryEntityDetail,
-        Self::QueryUnclassified,
-        Self::QueryPendingAway,
-        Self::RuleSetsTree,
-        Self::RuleSetsGet,
-        Self::RuleSetsVersions,
-        Self::RuleSetsSetEnabled,
-        Self::RuleSetsReorder,
-        Self::RuleSetsDelete,
-        Self::RuleSetsRevert,
-        Self::RuleSetsEdit,
-        Self::RulesPreview,
-        Self::RulesExplain,
-        Self::RulesTextValidate,
-        Self::RulesTextPreview,
-        Self::RulesTextDiff,
-        Self::RulesTextImport,
-        Self::RulesTextExport,
-        Self::CategoriesList,
-        Self::CategoriesCreate,
-        Self::CategoriesUpdate,
-        Self::CategoriesDelete,
-        Self::CategoriesReorder,
-        Self::AnnotationsCreate,
-        Self::AnnotationsUpdate,
-        Self::AnnotationsDelete,
-        Self::SettingsGet,
-        Self::SettingsSet,
-        Self::DataDelete,
-        Self::TrackingPause,
-        Self::TrackingResume,
-        Self::TrackingKeepAlive,
-        Self::BrowserHello,
-        Self::BrowserState,
-        Self::BrowserGap,
-        Self::BrowserPurgeAck,
-        Self::BrowserQuerySiteToday,
-        Self::AppsIcon,
-        Self::BrowserHostsStatus,
-        Self::BrowserHostsEnable,
-        Self::BrowserHostsDisable,
-        Self::MaintenanceBackup,
-        Self::MaintenanceCompact,
-        Self::PrivacyModeSet,
-    ];
-
     /// Returns the prefix family used for authorization.
     #[must_use]
     pub const fn family(self) -> OpFamily {
@@ -331,72 +272,10 @@ impl Op {
             Self::Unknown => OpFamily::Unknown,
         }
     }
-
-    /// Returns the stable wire name, or `None` for an unknown received name.
-    #[must_use]
-    pub const fn as_str(self) -> Option<&'static str> {
-        match self {
-            Self::Hello => Some("hello"),
-            Self::Subscribe => Some("subscribe"),
-            Self::CoreStatus => Some("core.status"),
-            Self::UiOpen => Some("ui.open"),
-            Self::UiFirstFrame => Some("ui.first_frame"),
-            Self::QueryDay => Some("query.day"),
-            Self::QueryTimeline => Some("query.timeline"),
-            Self::QueryRange => Some("query.range"),
-            Self::QuerySegmentDetail => Some("query.segment_detail"),
-            Self::QueryEntityDetail => Some("query.entity_detail"),
-            Self::QueryUnclassified => Some("query.unclassified"),
-            Self::QueryPendingAway => Some("query.pending_away"),
-            Self::RuleSetsTree => Some("rule_sets.tree"),
-            Self::RuleSetsGet => Some("rule_sets.get"),
-            Self::RuleSetsVersions => Some("rule_sets.versions"),
-            Self::RuleSetsSetEnabled => Some("rule_sets.set_enabled"),
-            Self::RuleSetsReorder => Some("rule_sets.reorder"),
-            Self::RuleSetsDelete => Some("rule_sets.delete"),
-            Self::RuleSetsRevert => Some("rule_sets.revert"),
-            Self::RuleSetsEdit => Some("rule_sets.edit"),
-            Self::RulesPreview => Some("rules.preview"),
-            Self::RulesExplain => Some("rules.explain"),
-            Self::RulesTextValidate => Some("rules_text.validate"),
-            Self::RulesTextPreview => Some("rules_text.preview"),
-            Self::RulesTextDiff => Some("rules_text.diff"),
-            Self::RulesTextImport => Some("rules_text.import"),
-            Self::RulesTextExport => Some("rules_text.export"),
-            Self::CategoriesList => Some("categories.list"),
-            Self::CategoriesCreate => Some("categories.create"),
-            Self::CategoriesUpdate => Some("categories.update"),
-            Self::CategoriesDelete => Some("categories.delete"),
-            Self::CategoriesReorder => Some("categories.reorder"),
-            Self::AnnotationsCreate => Some("annotations.create"),
-            Self::AnnotationsUpdate => Some("annotations.update"),
-            Self::AnnotationsDelete => Some("annotations.delete"),
-            Self::SettingsGet => Some("settings.get"),
-            Self::SettingsSet => Some("settings.set"),
-            Self::DataDelete => Some("data.delete"),
-            Self::TrackingPause => Some("tracking.pause"),
-            Self::TrackingResume => Some("tracking.resume"),
-            Self::TrackingKeepAlive => Some("tracking.keep_alive"),
-            Self::BrowserHello => Some("browser.hello"),
-            Self::BrowserState => Some("browser.state"),
-            Self::BrowserGap => Some("browser.gap"),
-            Self::BrowserPurgeAck => Some("browser.purge_ack"),
-            Self::BrowserQuerySiteToday => Some("browser.query_site_today"),
-            Self::AppsIcon => Some("apps.icon"),
-            Self::BrowserHostsStatus => Some("browser_hosts.status"),
-            Self::BrowserHostsEnable => Some("browser_hosts.enable"),
-            Self::BrowserHostsDisable => Some("browser_hosts.disable"),
-            Self::MaintenanceBackup => Some("maintenance.backup"),
-            Self::MaintenanceCompact => Some("maintenance.compact"),
-            Self::PrivacyModeSet => Some("privacy_mode.set"),
-            Self::Unknown => None,
-        }
-    }
 }
 
 /// Operations pushed in event bodies on the `control` topic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum ControlOp {
     /// The `ui.show` control notification.
     #[serde(rename = "ui.show")]

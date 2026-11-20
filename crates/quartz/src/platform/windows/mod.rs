@@ -14,8 +14,7 @@ use crate::{
     capture::PersistenceState,
     core::{
         app::{
-            CaptureIndicator, JoinWorkersError, MainCommand, RequestShutdownError,
-            StartWorkersError, Worker, Workers,
+            JoinWorkersError, MainCommand, RequestShutdownError, StartWorkersError, Worker, Workers,
         },
         sources::ClockReader,
     },
@@ -41,7 +40,7 @@ use crate::{
 pub(crate) use instance::{AcquireInstance, AcquireInstanceError};
 use tray::{CreateTrayError, Tray, TrayCommand, TrayIconState, TrayState, TrayTooltip};
 
-pub(crate) use language::UiLanguage;
+pub(crate) use language::detect_ui_language;
 
 #[derive(Debug, Snafu)]
 enum StartCoreError {
@@ -294,7 +293,7 @@ impl CoreProcess {
             }
         });
         let instance_id = windows::core::GUID::new().context(CreateInstanceIdSnafu)?;
-        let language = match UiLanguage::detect().language() {
+        let language = match detect_ui_language() {
             quartz_i18n::Language::SimplifiedChinese => {
                 quartz_protocol::UiLanguage::SimplifiedChinese
             }
@@ -344,12 +343,10 @@ impl CoreProcess {
         });
         let workers =
             Workers::start(store, metadata, sources::clock(), wake).context(StartWorkersSnafu)?;
-        let pipe = match ipc::PipeServer::start(
-            status.subscribe(),
-            ui_port,
-            workers.queries.clone(),
-            workers.versions.clone(),
-        ) {
+        let pipe =
+            ipc::PipeServerConfig::current(workers.queries.clone(), workers.versions.clone())
+                .and_then(|config| ipc::PipeServer::start(config, status.subscribe(), ui_port));
+        let pipe = match pipe {
             Ok(pipe) => pipe,
             Err(source) => {
                 if let Ok(at) = SystemClock.read() {
@@ -385,7 +382,10 @@ impl CoreProcess {
                 return Err(error).context(ObserveSystemSnafu);
             }
         };
-        if let Err(error) = tray.update(self.tray_state(TrayTooltip::Ready)) {
+        if let Err(error) = tray.update(TrayState::from_status(
+            status.stop_reason(),
+            TrayTooltip::Ready,
+        )) {
             tracing::error!(?error, "could not update tray state");
         }
         tracing::info!(?autostart, "core message loop started");
@@ -440,10 +440,13 @@ impl CoreProcess {
             }
             while let Ok(command) = ui_commands.try_recv() {
                 match command {
-                    crate::ipc::UiCommand::Open => self.open_ui(tray),
+                    crate::ipc::UiCommand::Open => self.open_ui(tray, status),
                     crate::ipc::UiCommand::FirstFrame => {
                         self.ui.first_frame();
-                        if let Err(error) = tray.update(self.tray_state(TrayTooltip::Ready)) {
+                        if let Err(error) = tray.update(TrayState::from_status(
+                            status.stop_reason(),
+                            TrayTooltip::Ready,
+                        )) {
                             tracing::warn!(%error, "could not restore tray after UI first frame");
                         }
                     }
@@ -464,9 +467,8 @@ impl CoreProcess {
                         return Err(WaitCoreEventsError::WorkerFailed { worker });
                     }
                     MainCommand::Effect(effect) => match effect {
-                        CaptureEffect::StateChanged(state) => {
-                            self.capture = Some(state);
-                            status.publish(self.capture.as_ref(), self.persistence);
+                        CaptureEffect::StateChanged(_) => {
+                            unreachable!("state arrives through CaptureSnapshot")
                         }
                         CaptureEffect::ScheduleTimer(timer) => {
                             sources.timer(timer).context(wait_error::ObserveSnafu)?
@@ -518,7 +520,10 @@ impl CoreProcess {
                         }
                     },
                 }
-                if let Err(error) = tray.update(self.tray_state(TrayTooltip::Ready)) {
+                if let Err(error) = tray.update(TrayState::from_status(
+                    status.stop_reason(),
+                    TrayTooltip::Ready,
+                )) {
                     tracing::error!(%error, "could not update capture tray state");
                 }
             }
@@ -534,7 +539,7 @@ impl CoreProcess {
                         TrayCommand::Deadline(at) => {
                             sources.fired(at).context(wait_error::ObserveSnafu)?
                         }
-                        TrayCommand::OpenUi => self.open_ui(tray),
+                        TrayCommand::OpenUi => self.open_ui(tray, status),
                     }
                 }
                 // Native dispatch can enqueue another batch of semantic commands.
@@ -558,33 +563,56 @@ impl CoreProcess {
                     process.log_exit();
                 }
                 self.ui.exited();
-                if let Err(error) = tray.update(self.tray_state(TrayTooltip::Ready)) {
+                if let Err(error) = tray.update(TrayState::from_status(
+                    status.stop_reason(),
+                    TrayTooltip::Ready,
+                )) {
                     tracing::error!(?error, "could not restore tray tooltip");
                 }
             }
         }
     }
-    fn tray_state(&self, tooltip: TrayTooltip) -> TrayState {
-        let indicator = CaptureIndicator::from_state(self.capture.as_ref(), self.persistence);
-        let icon = match indicator {
-            CaptureIndicator::Normal => TrayIconState::Normal,
-            _ => TrayIconState::Warning,
-        };
-        let tooltip = match indicator {
-            CaptureIndicator::Normal => tooltip,
-            CaptureIndicator::PersistenceFailed => TrayTooltip::PersistenceFailed,
-            CaptureIndicator::SessionUnavailable => TrayTooltip::SessionUnavailable,
-            CaptureIndicator::CaptureGap => TrayTooltip::CaptureGap,
-        };
-        TrayState { icon, tooltip }
-    }
-    fn open_ui(&mut self, tray: &mut Tray) {
+    fn open_ui(&mut self, tray: &mut Tray, status: &crate::ipc::StatusPublisher) {
         if let Err(error) = self.ui.open(process::UiProcess::launch) {
             tracing::error!(?error, "could not launch UI");
             return;
         }
-        if let Err(error) = tray.update(self.tray_state(TrayTooltip::Opening)) {
+        if let Err(error) = tray.update(TrayState::from_status(
+            status.stop_reason(),
+            TrayTooltip::Opening,
+        )) {
             tracing::error!(?error, "could not set opening tooltip");
+        }
+    }
+}
+
+impl TrayState {
+    fn from_status(reason: Option<quartz_protocol::StopReason>, normal: TrayTooltip) -> Self {
+        use quartz_protocol::StopReason;
+        let tooltip = match reason {
+            Some(StopReason::PersistenceFailed) => TrayTooltip::PersistenceFailed,
+            Some(StopReason::SessionUnavailable) => TrayTooltip::SessionUnavailable,
+            Some(StopReason::CaptureGap) => TrayTooltip::CaptureGap,
+            None
+            | Some(
+                StopReason::Starting
+                | StopReason::Locked
+                | StopReason::Disconnected
+                | StopReason::Suspended
+                | StopReason::Paused
+                | StopReason::AwaitingBrowserContext
+                | StopReason::NoForeground
+                | StopReason::Ended,
+            ) => {
+                return Self {
+                    icon: TrayIconState::Normal,
+                    tooltip: normal,
+                };
+            }
+        };
+        Self {
+            icon: TrayIconState::Warning,
+            tooltip,
         }
     }
 }
@@ -593,6 +621,44 @@ impl CoreProcess {
 mod tests {
     use super::*;
     use std::error::Error;
+
+    #[test]
+    fn published_stop_reasons_preserve_tray_appearance() {
+        use quartz_protocol::StopReason;
+        for reason in [
+            None,
+            Some(StopReason::Starting),
+            Some(StopReason::Locked),
+            Some(StopReason::Disconnected),
+            Some(StopReason::Suspended),
+            Some(StopReason::Paused),
+            Some(StopReason::AwaitingBrowserContext),
+            Some(StopReason::NoForeground),
+            Some(StopReason::Ended),
+        ] {
+            for tooltip in [TrayTooltip::Ready, TrayTooltip::Opening] {
+                let state = TrayState::from_status(reason, tooltip);
+                assert_eq!(state.icon, TrayIconState::Normal);
+                assert_eq!(state.tooltip, tooltip);
+            }
+        }
+        for reason in [
+            StopReason::PersistenceFailed,
+            StopReason::SessionUnavailable,
+            StopReason::CaptureGap,
+        ] {
+            let state = TrayState::from_status(Some(reason), TrayTooltip::Opening);
+            assert_eq!(state.icon, TrayIconState::Warning);
+            let expected = match reason {
+                StopReason::PersistenceFailed => TrayTooltip::PersistenceFailed,
+                StopReason::SessionUnavailable => TrayTooltip::SessionUnavailable,
+                StopReason::CaptureGap => TrayTooltip::CaptureGap,
+                _ => unreachable!("warning fixtures"),
+            };
+            assert_eq!(state.tooltip, expected);
+        }
+    }
+
     use windows::{Win32::Foundation::ERROR_ACCESS_DENIED, core::HRESULT};
 
     #[test]

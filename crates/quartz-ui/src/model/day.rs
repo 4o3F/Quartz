@@ -46,7 +46,6 @@ pub(crate) struct DayParts {
 
 /// The facts of a day contradict each other.
 #[derive(Debug, Clone, PartialEq, Eq, Snafu)]
-#[non_exhaustive]
 pub(crate) enum BuildDayError {
     #[snafu(display("category {id:?} is listed twice"))]
     DuplicateCategory { id: CategoryId },

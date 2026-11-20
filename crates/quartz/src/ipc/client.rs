@@ -7,10 +7,9 @@ use crate::platform::windows::ipc::PipeName;
 use crate::platform::windows::ipc::{OpenCorePipeError, PipeClient};
 use futures_util::{SinkExt, StreamExt};
 use quartz_protocol::{
-    AcceptedBody, ClientVersion, CoreStatusRequest, CoreStatusResponse, DecodeJsonError,
-    EncodeFrameError, Envelope, ErrorKind, Hello, HelloResponse, HelloRole, Op, PROTOCOL_VERSION,
-    ProtoRange, ProtoVersion, Request, RequestId, ResponseOutcome, UiOpenRequest, decode_json,
-    encode_json, frame_codec,
+    AcceptedBody, ClientVersion, CoreStatusRequest, CoreStatusResponse, Envelope, ErrorKind, Hello,
+    HelloResponse, HelloRole, Op, PROTOCOL_VERSION, ProtoRange, ProtoVersion, Request, RequestId,
+    ResponseOutcome, UiOpenRequest, decode_json, encode_json, frame_codec,
 };
 use snafu::{ResultExt, Snafu};
 use std::{io, time::Duration};
@@ -32,8 +31,6 @@ pub(crate) enum CallCoreError {
     Runtime { source: io::Error },
     #[snafu(display("{source}"))]
     Connect { source: OpenCorePipeError },
-    #[snafu(display("invalid core handshake response body"))]
-    Handshake { source: serde_json::Error },
     #[snafu(display("core negotiated an unexpected protocol version: {received:?}"))]
     HandshakeVersion { received: ProtoVersion },
     #[snafu(display("core rejected the request: {}", kind.code()))]
@@ -42,16 +39,14 @@ pub(crate) enum CallCoreError {
     Io { source: io::Error },
     #[snafu(display("core response deadline expired"))]
     ResponseTimeout { source: tokio::time::error::Elapsed },
-    #[snafu(display("could not serialize core request body"))]
-    SerializeBody { source: serde_json::Error },
-    #[snafu(display("invalid core response body"))]
-    DecodeBody { source: serde_json::Error },
-    #[snafu(display("invalid core response envelope"))]
-    DecodeEnvelope { source: DecodeJsonError },
-    #[snafu(display("invalid core frame"))]
-    DecodeFrame { source: io::Error },
-    #[snafu(display("could not encode core request frame"))]
-    EncodeFrame { source: EncodeFrameError },
+    #[snafu(display("invalid core response"))]
+    Decode {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[snafu(display("could not encode core request"))]
+    Encode {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[snafu(display("expected a core response envelope"))]
     UnexpectedEnvelope,
     #[snafu(display("core response id {received:?} does not match request {expected:?}"))]
@@ -59,8 +54,19 @@ pub(crate) enum CallCoreError {
         expected: RequestId,
         received: Option<RequestId>,
     },
-    #[snafu(display("core request id overflow"))]
-    RequestIdOverflow,
+}
+
+impl CallCoreError {
+    fn decode(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Decode {
+            source: Box::new(source),
+        }
+    }
+    fn encode(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Encode {
+            source: Box::new(source),
+        }
+    }
 }
 
 /// Core protocol client that can run on the M3 UI background runtime.
@@ -102,7 +108,7 @@ impl AsyncCoreClient {
         };
         let response: HelloResponse =
             serde_json::from_value(self.request(Op::Hello, &hello).await?)
-                .context(call_core_error::HandshakeSnafu)?;
+                .map_err(CallCoreError::decode)?;
         if response.proto != PROTOCOL_VERSION {
             return Err(CallCoreError::HandshakeVersion {
                 received: response.proto,
@@ -112,11 +118,11 @@ impl AsyncCoreClient {
     }
     pub(crate) async fn status(&mut self) -> Result<CoreStatusResponse, CallCoreError> {
         serde_json::from_value(self.request(Op::CoreStatus, &CoreStatusRequest {}).await?)
-            .context(call_core_error::DecodeBodySnafu)
+            .map_err(CallCoreError::decode)
     }
     pub(crate) async fn open_ui(&mut self) -> Result<AcceptedBody, CallCoreError> {
         serde_json::from_value(self.request(Op::UiOpen, &UiOpenRequest {}).await?)
-            .context(call_core_error::DecodeBodySnafu)
+            .map_err(CallCoreError::decode)
     }
     pub(crate) async fn request(
         &mut self,
@@ -126,11 +132,11 @@ impl AsyncCoreClient {
         let id = self.next_id;
         self.next_id = RequestId(
             id.0.checked_add(1)
-                .ok_or(CallCoreError::RequestIdOverflow)?,
+                .expect("u64 counter cannot overflow in practice"),
         );
-        let body = serde_json::to_value(body).context(call_core_error::SerializeBodySnafu)?;
+        let body = serde_json::to_value(body).map_err(CallCoreError::encode)?;
         let payload = encode_json(&Envelope::Request(Request { id, op, body }))
-            .context(call_core_error::EncodeFrameSnafu)?;
+            .map_err(CallCoreError::encode)?;
         tokio::time::timeout(RESPONSE_TIMEOUT, self.framed.send(payload.as_slice()))
             .await
             .context(call_core_error::ResponseTimeoutSnafu)?
@@ -156,8 +162,8 @@ impl AsyncCoreClient {
             .ok_or_else(|| CallCoreError::Io {
                 source: io::ErrorKind::UnexpectedEof.into(),
             })?
-            .context(call_core_error::DecodeFrameSnafu)?;
-        decode_json(&payload).context(call_core_error::DecodeEnvelopeSnafu)
+            .map_err(CallCoreError::decode)?;
+        decode_json(&payload).map_err(CallCoreError::decode)
     }
 }
 
@@ -250,9 +256,13 @@ impl std::fmt::Display for StatusReport<'_> {
             "stop_reason: {}",
             status
                 .stop_reason
-                .map_or("none", quartz_protocol::StopReason::as_str)
+                .map_or("none", Into::<&'static str>::into)
         )?;
-        writeln!(formatter, "database: {}", status.database.as_str())?;
+        writeln!(
+            formatter,
+            "database: {}",
+            Into::<&'static str>::into(status.database)
+        )?;
         writeln!(
             formatter,
             "browser_streams: {}",
@@ -266,9 +276,12 @@ impl std::fmt::Display for StatusReport<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quartz_protocol::{DecodeJsonError, EncodeFrameError};
     struct ConnectedClient {
         _server: crate::platform::windows::ipc::PipeServer,
         client: CoreClient,
+        _queries: crossbeam_channel::Receiver<crate::query::dispatch::QueryCommand>,
+        _versions: tokio::sync::watch::Sender<crate::query::versions::VersionState>,
     }
     impl ConnectedClient {
         fn new() -> Self {
@@ -278,15 +291,25 @@ mod tests {
             let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(format!(
                 "{suffix:?}"
             )));
-            let server = PipeServer::start_named(
-                name.clone(),
-                ProcessIdentity::current().expect("identity"),
+            let queries = crate::query::dispatch::QueryChannel::new();
+            let (versions, received) =
+                tokio::sync::watch::channel(crate::query::versions::VersionState::empty());
+            let server = PipeServer::start(
+                crate::platform::windows::ipc::PipeServerConfig {
+                    owner: ProcessIdentity::current().expect("identity"),
+                    name: name.clone(),
+                    timeouts: crate::platform::windows::ipc::ConnectionTimeouts::default(),
+                    queries: queries.port,
+                    versions: received,
+                },
                 status.subscribe(),
                 std::sync::Arc::new(|_| Ok(())),
             )
             .expect("test server");
             Self {
                 _server: server,
+                _queries: queries.receiver,
+                _versions: versions,
                 client: CoreClient::connect_named(&name, HelloRole::Cli).expect("test client"),
             }
         }
@@ -309,7 +332,7 @@ mod tests {
         let mut fixture = ConnectedClient::new();
         inject(&mut fixture.client, b"{garbage");
         let error = fixture.client.status().expect_err("invalid envelope");
-        assert!(matches!(error, CallCoreError::DecodeEnvelope { .. }));
+        assert!(matches!(error, CallCoreError::Decode { .. }));
         assert!(
             error
                 .source()
@@ -329,7 +352,7 @@ mod tests {
                 .expect("response"),
         );
         let error = fixture.client.status().expect_err("invalid body");
-        assert!(matches!(error, CallCoreError::DecodeBody { .. }));
+        assert!(matches!(error, CallCoreError::Decode { .. }));
         assert!(
             error
                 .source()
@@ -339,7 +362,7 @@ mod tests {
         );
     }
     #[test]
-    fn mismatched_response_id_and_request_id_overflow_are_distinct() {
+    fn mismatched_response_id_is_rejected() {
         let mut fixture = ConnectedClient::new();
         inject(
             &mut fixture.client,
@@ -353,11 +376,6 @@ mod tests {
                 received: Some(RequestId(99))
             })
         ));
-        fixture.client.client.next_id = RequestId(u64::MAX);
-        assert!(matches!(
-            fixture.client.status(),
-            Err(CallCoreError::RequestIdOverflow)
-        ));
     }
     #[test]
     fn oversized_request_keeps_the_encoder_source() {
@@ -367,7 +385,7 @@ mod tests {
             .client
             .request(Op::UiOpen, &"x".repeat(quartz_protocol::MAX_FRAME_LEN))
             .expect_err("oversize request");
-        assert!(matches!(error, CallCoreError::EncodeFrame { .. }));
+        assert!(matches!(error, CallCoreError::Encode { .. }));
         assert!(
             error
                 .source()

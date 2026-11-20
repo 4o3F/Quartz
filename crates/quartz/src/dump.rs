@@ -213,7 +213,6 @@ mod tests {
         Checkpoint, ClockEndReason, GapReason, IntervalEndReason, IntervalFact, MonoInstant,
         NoForegroundReason, OpenAvailability, OpenInterval, RowId, RunEndReason, RunId, SegmentId,
         SessionKey, StopReason, TimeRange, TimedPolicy, TimedState, Timestamp, UtcInstant,
-        WebRowExtension,
     };
 
     fn at(text: &str) -> Timestamp {
@@ -401,7 +400,6 @@ mod tests {
                 availability: Vec::new(),
                 at: confirmed,
                 commit_by_mono: confirmed.mono,
-                web_extension: WebRowExtension::PendingM5,
             }),
         ];
         store

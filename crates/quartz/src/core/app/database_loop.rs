@@ -13,7 +13,7 @@ use crate::{
     rules::registry::{RegistryResult, RegistryShell, RunRegistryCommandError},
     store::Store,
 };
-use crossbeam_channel::{Receiver, RecvError, RecvTimeoutError, SendError, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use quartz_domain::{
     capture::{AdvanceTimeError, MonoInstant, Timestamp},
     rules::registry::RegistryCommand,
@@ -29,11 +29,11 @@ pub(crate) enum RunDatabaseLoopError {
     #[snafu(display("could not read database worker clock"))]
     Clock { source: ReadClockError },
     #[snafu(display("database command channel disconnected"))]
-    Receive { source: RecvError },
+    Receive,
     #[snafu(display("could not publish database state"))]
     Publish { source: SendMainCommandError },
     #[snafu(display("capture feedback channel disconnected"))]
-    Feedback { source: SendError<()> },
+    Feedback,
     #[snafu(display("{source}"))]
     Stalled { source: FlushStalledError },
     #[snafu(display("query connection could not be returned to the database loop"))]
@@ -66,9 +66,7 @@ pub(crate) enum ShutdownDatabaseError {
     #[snafu(display("{source}"))]
     Stalled { source: FlushStalledError },
     #[snafu(display("could not acknowledge database shutdown"))]
-    Feedback {
-        source: crossbeam_channel::SendTimeoutError<()>,
-    },
+    Feedback,
 }
 impl From<SendMainCommandError> for ShutdownDatabaseError {
     fn from(source: SendMainCommandError) -> Self {
@@ -125,9 +123,7 @@ impl DatabaseLoop {
         if !result.feedback.is_empty() {
             self.feedback
                 .send(Feedback::Events(result.feedback))
-                .map_err(|_| RunDatabaseLoopError::Feedback {
-                    source: SendError(()),
-                })?;
+                .map_err(|_| RunDatabaseLoopError::Feedback)?;
         }
         Ok(())
     }
@@ -311,7 +307,7 @@ impl DatabaseLoop {
             None => Duration::MAX,
         };
         crossbeam_channel::select_biased! {
-            recv(self.writes) -> command => command.map(|command| DatabaseInput::Write(Some(command))).map_err(|_| RunDatabaseLoopError::Receive { source: RecvError }),
+            recv(self.writes) -> command => command.map(|command| DatabaseInput::Write(Some(command))).map_err(|_| RunDatabaseLoopError::Receive),
             recv(self.queries) -> command => match command { Ok(command) => Ok(DatabaseInput::Query(command)), Err(_) => self.wait_for_writes() },
             default(wait) => Ok(DatabaseInput::Write(None)),
         }
@@ -327,9 +323,7 @@ impl DatabaseLoop {
         match received {
             Ok(command) => Ok(DatabaseInput::Write(Some(command))),
             Err(RecvTimeoutError::Timeout) => Ok(DatabaseInput::Write(None)),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(RunDatabaseLoopError::Receive { source: RecvError })
-            }
+            Err(RecvTimeoutError::Disconnected) => Err(RunDatabaseLoopError::Receive),
         }
     }
     fn wait_duration(&self, deadline: MonoInstant) -> Result<Duration, RunDatabaseLoopError> {
@@ -387,11 +381,9 @@ impl DatabaseLoop {
         let result = self.registry.run(command);
         self.publish_versions();
         if result.as_ref().is_ok_and(|result| result.event.is_some()) {
-            self.feedback.send(Feedback::RulesChanged).map_err(|_| {
-                RunDatabaseLoopError::Feedback {
-                    source: SendError(()),
-                }
-            })?;
+            self.feedback
+                .send(Feedback::RulesChanged)
+                .map_err(|_| RunDatabaseLoopError::Feedback)?;
         }
         reply.send_during_shutdown(result);
         Ok(())
@@ -457,15 +449,13 @@ impl DatabaseLoop {
             PersistenceOutcome::Ready => {
                 self.feedback
                     .send_deadline(Feedback::Ended, deadline)
-                    .map_err(|error| ShutdownDatabaseError::Feedback {
-                        source: match error {
-                            crossbeam_channel::SendTimeoutError::Timeout(_) => {
-                                crossbeam_channel::SendTimeoutError::Timeout(())
-                            }
-                            crossbeam_channel::SendTimeoutError::Disconnected(_) => {
-                                crossbeam_channel::SendTimeoutError::Disconnected(())
-                            }
-                        },
+                    .map_err(|error| match error {
+                        crossbeam_channel::SendTimeoutError::Timeout(_) => {
+                            ShutdownDatabaseError::Deadline
+                        }
+                        crossbeam_channel::SendTimeoutError::Disconnected(_) => {
+                            ShutdownDatabaseError::Feedback
+                        }
                     })?;
                 Ok(DatabaseProgress::Ended)
             }

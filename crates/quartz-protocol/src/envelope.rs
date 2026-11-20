@@ -174,7 +174,7 @@ pub enum Envelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ControlBody, ControlOp, ErrorCode, decode_json, encode_json};
+    use crate::{ControlBody, ControlOp, ErrorKind, decode_json, encode_json};
 
     #[test]
     fn doc_envelope_examples_have_exact_wire_shapes() {
@@ -236,7 +236,7 @@ mod tests {
         else {
             panic!("expected error response")
         };
-        assert_eq!(error.kind.code(), ErrorCode::Unknown);
+        assert_eq!(error.kind, ErrorKind::Unknown);
         let future_connection_error: Envelope = serde_json::from_str(
             r#"{"t":"res","id":null,"ok":false,"err":{"code":"future_connection_error"}}"#,
         )
@@ -248,7 +248,7 @@ mod tests {
         else {
             panic!("expected connection-level error");
         };
-        assert_eq!(error.kind.code(), ErrorCode::Unknown);
+        assert_eq!(error.kind, ErrorKind::Unknown);
     }
 
     #[test]

@@ -11,12 +11,7 @@ pub struct ContentHash(String);
 impl ContentHash {
     /// Hashes the exact UTF-8 bytes of the supplied content.
     pub fn of(content: &str) -> Self {
-        Self(
-            Sha256::digest(content.as_bytes())
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
-        )
+        Self(crate::text::encode_hex(&Sha256::digest(content.as_bytes())))
     }
 
     /// Borrows the 64 lowercase hexadecimal digits without allocating.

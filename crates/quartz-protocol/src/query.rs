@@ -39,7 +39,6 @@ impl QueryCursor {
 /// Query parameters retained in a continuation, without recursive cursor fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum CursorQuery {
     /// A logical date in the core's current system time zone.
     Day { local_date: LocalDate },

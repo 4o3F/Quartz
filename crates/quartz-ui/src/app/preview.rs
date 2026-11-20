@@ -123,7 +123,6 @@ impl Default for PreviewSize {
 
 /// A preview size is not `<width>x<height>` in logical pixels from 640x480 up.
 #[derive(Debug, Clone, PartialEq, Eq, Snafu)]
-#[non_exhaustive]
 pub enum ParsePreviewSizeError {
     /// The text has no `x` between two numbers.
     #[snafu(display("preview size {text:?} is not <width>x<height>"))]
@@ -175,7 +174,6 @@ pub struct PreviewOptions {
 
 /// Failures while placing the preview window off-screen.
 #[derive(Debug, Snafu)]
-#[non_exhaustive]
 pub enum PlaceWindowError {
     /// GPUI did not provide the native window handle.
     #[snafu(display("could not get the native window handle"))]
@@ -190,7 +188,6 @@ pub enum PlaceWindowError {
 
 /// Failures while running the preview window.
 #[derive(Debug, Snafu)]
-#[non_exhaustive]
 pub enum RunPreviewError {
     /// The Windows text size could not be read.
     #[snafu(display("could not read the text size"))]

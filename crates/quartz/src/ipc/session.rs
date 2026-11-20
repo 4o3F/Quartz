@@ -44,6 +44,20 @@ pub(crate) struct Decision {
     pub query: Option<crate::query::QueryRequest>,
 }
 impl Decision {
+    fn from_query(
+        id: RequestId,
+        query: Result<crate::query::QueryRequest, serde_json::Error>,
+    ) -> Self {
+        match query {
+            Ok(query) => {
+                let mut decision = Self::success(id, serde_json::json!({}));
+                decision.query = Some(query);
+                decision
+            }
+            Err(_) => Self::error(Some(id), ErrorKind::BadRequest),
+        }
+    }
+
     pub(crate) fn error(id: Option<RequestId>, kind: ErrorKind) -> Self {
         Self {
             response: Response {
@@ -88,7 +102,7 @@ impl ConnectionSession {
     pub(crate) fn role(&self) -> Option<Role> {
         match self.state {
             State::Ready(role) => Some(role),
-            _ => None,
+            State::HelloPending | State::Closing => None,
         }
     }
     pub(crate) fn closing(&self) -> bool {
@@ -174,28 +188,66 @@ impl ConnectionSession {
                         decision.subscription = Some(subscription);
                         decision
                     }
-                    Op::QueryDay | Op::QueryTimeline => {
-                        let query = match request.op {
-                            Op::QueryDay => serde_json::from_value::<
-                                quartz_protocol::QueryDayRequest,
-                            >(request.body)
+                    Op::QueryDay => Decision::from_query(
+                        id,
+                        serde_json::from_value::<quartz_protocol::QueryDayRequest>(request.body)
                             .map(crate::query::QueryRequest::Day),
-                            Op::QueryTimeline => serde_json::from_value::<
-                                quartz_protocol::QueryTimelineRequest,
-                            >(request.body)
-                            .map(crate::query::QueryRequest::Timeline),
-                            _ => unreachable!("query dispatch arm"),
-                        };
-                        match query {
-                            Ok(query) => {
-                                let mut decision = Decision::success(id, serde_json::json!({}));
-                                decision.query = Some(query);
-                                decision
-                            }
-                            Err(_) => Decision::error(Some(id), ErrorKind::BadRequest),
-                        }
-                    }
-                    _ => Decision::error(Some(id), ErrorKind::NotImplemented),
+                    ),
+                    Op::QueryTimeline => Decision::from_query(
+                        id,
+                        serde_json::from_value::<quartz_protocol::QueryTimelineRequest>(
+                            request.body,
+                        )
+                        .map(crate::query::QueryRequest::Timeline),
+                    ),
+                    Op::Hello
+                    | Op::QueryRange
+                    | Op::QuerySegmentDetail
+                    | Op::QueryEntityDetail
+                    | Op::QueryUnclassified
+                    | Op::QueryPendingAway
+                    | Op::RuleSetsTree
+                    | Op::RuleSetsGet
+                    | Op::RuleSetsVersions
+                    | Op::RuleSetsSetEnabled
+                    | Op::RuleSetsReorder
+                    | Op::RuleSetsDelete
+                    | Op::RuleSetsRevert
+                    | Op::RuleSetsEdit
+                    | Op::RulesPreview
+                    | Op::RulesExplain
+                    | Op::RulesTextValidate
+                    | Op::RulesTextPreview
+                    | Op::RulesTextDiff
+                    | Op::RulesTextImport
+                    | Op::RulesTextExport
+                    | Op::CategoriesList
+                    | Op::CategoriesCreate
+                    | Op::CategoriesUpdate
+                    | Op::CategoriesDelete
+                    | Op::CategoriesReorder
+                    | Op::AnnotationsCreate
+                    | Op::AnnotationsUpdate
+                    | Op::AnnotationsDelete
+                    | Op::SettingsGet
+                    | Op::SettingsSet
+                    | Op::DataDelete
+                    | Op::TrackingPause
+                    | Op::TrackingResume
+                    | Op::TrackingKeepAlive
+                    | Op::BrowserHello
+                    | Op::BrowserState
+                    | Op::BrowserGap
+                    | Op::BrowserPurgeAck
+                    | Op::BrowserQuerySiteToday
+                    | Op::AppsIcon
+                    | Op::BrowserHostsStatus
+                    | Op::BrowserHostsEnable
+                    | Op::BrowserHostsDisable
+                    | Op::MaintenanceBackup
+                    | Op::MaintenanceCompact
+                    | Op::PrivacyModeSet
+                    | Op::Unknown => Decision::error(Some(id), ErrorKind::NotImplemented),
                 }
             }
             State::Closing => Decision::error(Some(id), ErrorKind::BadRequest),

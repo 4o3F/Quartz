@@ -45,9 +45,9 @@ pub(crate) enum StartWorkersError {
 #[snafu(module)]
 pub(crate) enum RequestShutdownError {
     #[snafu(display("could not queue capture shutdown"))]
-    Send {
-        source: crossbeam_channel::TrySendError<()>,
-    },
+    Full,
+    #[snafu(display("capture shutdown channel disconnected"))]
+    Disconnected,
 }
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module)]
@@ -284,15 +284,11 @@ impl Workers {
     ) -> Result<(), RequestShutdownError> {
         self.shutdown
             .try_send(Shutdown::new(at, reason))
-            .map_err(|error| RequestShutdownError::Send {
-                source: match error {
-                    crossbeam_channel::TrySendError::Full(_) => {
-                        crossbeam_channel::TrySendError::Full(())
-                    }
-                    crossbeam_channel::TrySendError::Disconnected(_) => {
-                        crossbeam_channel::TrySendError::Disconnected(())
-                    }
-                },
+            .map_err(|error| match error {
+                crossbeam_channel::TrySendError::Full(_) => RequestShutdownError::Full,
+                crossbeam_channel::TrySendError::Disconnected(_) => {
+                    RequestShutdownError::Disconnected
+                }
             })
     }
     pub(crate) fn join(mut self) -> Result<(), JoinWorkersError> {

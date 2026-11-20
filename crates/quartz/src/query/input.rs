@@ -5,12 +5,7 @@ use quartz_protocol::{ApplicationRef, ClockSegmentId, QueryGapReason, QueryStopR
 /// Persistent row identity, independent of capture's per-run row sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct FactId(pub i64);
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CaptureLevel {
-    Full,
-    TitleHidden,
-    Excluded,
-}
+pub(crate) use quartz_domain::capture::CaptureLevel;
 #[derive(Debug, Clone)]
 pub(crate) struct ClockSegment {
     pub id: ClockSegmentId,

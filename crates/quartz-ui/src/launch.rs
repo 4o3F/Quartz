@@ -35,7 +35,6 @@ const ERROR_WINDOW_SIZE: Size<f32> = Size {
 
 /// Selects a visible launch or the M3 prewarm placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum RunOptions {
     /// Opens one window in the language negotiated by the process entry point.
     Open { language: &'static str },
@@ -50,7 +49,6 @@ pub enum RunOptions {
 
 /// Failures while loading the embedded theme or opening the UI window.
 #[derive(Debug, Snafu)]
-#[non_exhaustive]
 pub enum RunUiError {
     /// The entry point passed a language code without a translation catalog.
     #[snafu(display("could not select the interface language"))]

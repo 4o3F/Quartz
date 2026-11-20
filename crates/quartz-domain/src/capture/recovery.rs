@@ -44,8 +44,6 @@ pub struct RecoverableRun {
     pub availability: Vec<ConfirmedAvailability>,
     /// Old open clock segments, closed after their rows.
     pub segments: Vec<ConfirmedSegment>,
-    /// M5 adds persisted browser-row confirmations to this recovery plan.
-    pub web_extension: super::WebRowExtension,
 }
 impl RecoverableRun {
     /// Settles each row at its own confirmed endpoint in one transaction, retaining midnight limits.

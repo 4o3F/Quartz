@@ -112,7 +112,7 @@ impl<'error> CoreErrorUi<'error> {
         command
             .arg("ui")
             .arg("--core-error")
-            .arg(self.error.code.as_str());
+            .arg(Into::<&'static str>::into(self.error.code));
         for backup in &self.error.backup_paths {
             command.arg("--backup-path").arg(backup);
         }

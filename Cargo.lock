@@ -5190,6 +5190,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "strum",
  "tokio-util",
 ]
 
@@ -5208,6 +5209,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "strum",
  "tracing",
  "windows 0.62.2",
 ]

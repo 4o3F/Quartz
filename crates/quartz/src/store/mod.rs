@@ -1,10 +1,6 @@
 //! SQLite connections, schema migrations, and offline backup recovery.
 
 pub(crate) mod capture;
-#[expect(
-    dead_code,
-    reason = "schema v1 also includes browser and annotation models for later milestones"
-)]
 mod enums;
 pub(crate) mod facts;
 mod identifiers;
@@ -12,10 +8,6 @@ mod migrations;
 pub(crate) mod query;
 pub(crate) mod query_error;
 mod raw;
-#[expect(
-    dead_code,
-    reason = "schema v1 also includes browser and annotation models for later milestones"
-)]
 mod rows;
 pub(crate) mod rules;
 mod schema;

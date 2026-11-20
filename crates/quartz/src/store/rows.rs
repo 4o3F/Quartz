@@ -3,15 +3,13 @@
 use super::{
     enums::{
         AnnotationKind, ApplicationKind, AvailabilityEndReason, AvailabilityReason, CaptureLevel,
-        CategoryTendency, ClockEndReason, DataSource, GapReason, IdleException, IngestOutcome,
-        IntervalEndReason, IntervalKind, LinkStatus, NoForegroundReason, RuleSetKind,
-        RuleSetSource, RunEndReason, TitleStatus, WebEndReason, WebLevel,
+        CategoryTendency, ClockEndReason, DataSource, GapReason, IdleException, IntervalEndReason,
+        IntervalKind, NoForegroundReason, RuleSetKind, RuleSetSource, RunEndReason, TitleStatus,
     },
     schema::{
-        annotations, applications, availability_intervals, browser_streams, capture_gaps,
-        capture_runs, categories, clock_segments, data_day_versions, deletion_barriers, domains,
-        enum_labels, ingest_receipts, intervals, rule_set_versions, rule_sets, settings, titles,
-        web_intervals, window_instances,
+        annotations, applications, availability_intervals, capture_gaps, capture_runs, categories,
+        clock_segments, data_day_versions, intervals, rule_set_versions, rule_sets, settings,
+        titles, window_instances,
     },
 };
 use diesel::{
@@ -69,19 +67,6 @@ pub(super) struct AvailabilityIntervalsRow {
     pub threshold_ms: Option<i64>,
     pub exception: Option<IdleException>,
     pub policy_version: i64,
-}
-
-#[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
-#[diesel(table_name = browser_streams)]
-#[diesel(check_for_backend(Sqlite))]
-pub(super) struct BrowserStreamsRow {
-    pub id: Option<i64>,
-    pub browser: String,
-    pub profile_instance_id: String,
-    pub extension_id: String,
-    pub label: Option<String>,
-    pub first_seen_utc_ms: i64,
-    pub last_seen_utc_ms: i64,
 }
 
 #[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
@@ -150,48 +135,6 @@ pub(super) struct DataDayVersionsRow {
     pub source: DataSource,
     pub utc_date: i64,
     pub version: i64,
-}
-
-#[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
-#[diesel(table_name = deletion_barriers)]
-#[diesel(check_for_backend(Sqlite))]
-pub(super) struct DeletionBarriersRow {
-    pub id: Option<i64>,
-    pub start_utc_ms: i64,
-    pub end_utc_ms: i64,
-    pub scope: String,
-    pub created_utc_ms: i64,
-}
-
-#[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
-#[diesel(table_name = domains)]
-#[diesel(check_for_backend(Sqlite))]
-pub(super) struct DomainsRow {
-    pub id: Option<i64>,
-    pub host: String,
-}
-
-#[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
-#[diesel(table_name = enum_labels)]
-#[diesel(primary_key(enum_name, code))]
-#[diesel(check_for_backend(Sqlite))]
-pub(super) struct EnumLabelsRow {
-    pub enum_name: String,
-    pub code: i32,
-    pub label: String,
-    pub deprecated: i32,
-}
-
-#[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
-#[diesel(table_name = ingest_receipts)]
-#[diesel(primary_key(stream_id, epoch, message_seq))]
-#[diesel(check_for_backend(Sqlite))]
-pub(super) struct IngestReceiptsRow {
-    pub stream_id: i64,
-    pub epoch: i64,
-    pub message_seq: i64,
-    pub received_utc_ms: i64,
-    pub outcome: IngestOutcome,
 }
 
 #[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
@@ -272,31 +215,6 @@ pub(super) struct SettingsRow {
 pub(super) struct TitlesRow {
     pub id: Option<i64>,
     pub text: String,
-}
-
-#[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
-#[diesel(table_name = web_intervals)]
-#[diesel(check_for_backend(Sqlite))]
-pub(super) struct WebIntervalsRow {
-    pub id: Option<i64>,
-    pub stream_id: i64,
-    pub interval_id: i64,
-    pub start_utc_ms: i64,
-    pub end_utc_ms: Option<i64>,
-    pub confirmed_utc_ms: Option<i64>,
-    pub end_reason: Option<WebEndReason>,
-    pub domain_id: Option<i64>,
-    pub tab_title_id: Option<i64>,
-    pub tab_title_status: TitleStatus,
-    pub tab_id: Option<i64>,
-    pub browser_window_id: Option<i64>,
-    pub navigation_id: Option<i64>,
-    pub audible: i32,
-    pub link_status: LinkStatus,
-    pub web_level: WebLevel,
-    pub privacy_rule_id: Option<String>,
-    pub privacy_label_key: Option<String>,
-    pub privacy_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]

@@ -859,7 +859,6 @@ fn checkpoint_is_atomic_and_advances_every_open_row() {
         availability: vec![availability_id],
         at: at(100),
         commit_by_mono: at(1000).mono,
-        web_extension: WebRowExtension::PendingM5,
     };
     let failure = fixture
         .store
@@ -1786,9 +1785,10 @@ fn real_threads_translate_channel_overload_into_a_durable_gap() {
     runtime.wait(|command| {
         matches!(
             command,
-            MainCommand::Effect(CaptureEffect::StateChanged(CaptureState::Gap(
-                GapReason::EventOverload
-            )))
+            MainCommand::CaptureSnapshot {
+                state: CaptureState::Gap(GapReason::EventOverload),
+                ..
+            }
         )
     });
     runtime.observe(CaptureEvent::Foreground {
@@ -1851,7 +1851,7 @@ impl RuntimeFixture {
         self.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
         self.observe(CaptureEvent::Idle(idle_sample(200_000)));
         self.observe(CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)));
-        self.wait(|command| matches!(command, MainCommand::Effect(CaptureEffect::StateChanged(CaptureState::Stopped { reasons, .. })) if reasons.contains(&StopReason::Locked)));
+        self.wait(|command| matches!(command, MainCommand::CaptureSnapshot { state: CaptureState::Stopped { reasons, .. }, .. } if reasons.contains(&StopReason::Locked)));
         self.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
     }
 }

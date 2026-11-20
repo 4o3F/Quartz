@@ -25,7 +25,7 @@ pub(crate) const STATE_PUSH_INTERVAL: Duration = Duration::from_millis(250);
 /// Minimum spacing of completed day writes per date (04 §7).
 pub(crate) const DAY_PUSH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Actual writer progress can lag registry publication, so each writer enforces spacing too.
+/// Measures state spacing from completed writes.
 #[derive(Debug, Default)]
 struct StatePushClock {
     next: Option<tokio::time::Instant>,
@@ -97,27 +97,10 @@ enum OutboxLife {
     Closed,
 }
 
-/// A bounded latest-value slot; replacement discards the previous unsent value.
-#[derive(Debug, Clone)]
-struct LatestSlot<T>(Option<T>);
-impl<T> Default for LatestSlot<T> {
-    fn default() -> Self {
-        Self(None)
-    }
-}
-impl<T> LatestSlot<T> {
-    fn replace(&mut self, value: T) {
-        self.0 = Some(value);
-    }
-    fn take(&mut self) -> Option<T> {
-        self.0.take()
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 struct LatestEvents {
-    state: LatestSlot<StateSnapshot>,
-    days: BTreeMap<quartz_protocol::LocalDate, LatestSlot<quartz_protocol::DayChanged>>,
+    state: Option<StateSnapshot>,
+    days: BTreeMap<quartz_protocol::LocalDate, quartz_protocol::DayChanged>,
 }
 
 /// Reliable mailbox entries own their byte reservations before enqueueing.
@@ -184,15 +167,11 @@ impl OutboxHandle {
     }
     pub(crate) fn state(&self, snapshot: StateSnapshot) {
         self.latest
-            .send_modify(|latest| latest.state.replace(snapshot));
+            .send_modify(|latest| latest.state = Some(snapshot));
     }
     pub(crate) fn day(&self, changed: quartz_protocol::DayChanged) {
         self.latest.send_modify(|latest| {
-            latest
-                .days
-                .entry(changed.date)
-                .or_default()
-                .replace(changed)
+            latest.days.insert(changed.date, changed);
         });
     }
     pub(crate) fn close(&self) {
@@ -285,14 +264,14 @@ struct OutboxActor {
     day_clocks: BTreeMap<quartz_protocol::LocalDate, tokio::time::Instant>,
 }
 impl OutboxActor {
-    fn next_sequence(&mut self) -> io::Result<EventSeq> {
+    fn next_sequence(&mut self) -> EventSeq {
         self.sequence = EventSeq(
             self.sequence
                 .0
                 .checked_add(1)
-                .ok_or_else(|| io::Error::other("event sequence exhausted"))?,
+                .expect("u64 counter cannot overflow in practice"),
         );
-        Ok(self.sequence)
+        self.sequence
     }
     async fn run(mut self, write: impl AsyncWrite + Unpin) -> io::Result<()> {
         let result = self.write(write).await;
@@ -315,14 +294,14 @@ impl OutboxActor {
             }
             let pending = self.snapshots.borrow_and_update().clone();
             let now = tokio::time::Instant::now();
-            if pending.state.0.is_some() && self.state_clock.ready(now) {
+            if pending.state.is_some() && self.state_clock.ready(now) {
                 let mut state = None;
                 self.handle.latest.send_if_modified(|latest| {
                     state = latest.state.take();
                     state.is_some()
                 });
                 if let Some(state) = state {
-                    let seq = self.next_sequence()?;
+                    let seq = self.next_sequence();
                     let payload =
                         OutboxHandle::event(Topic::State, seq, &state).map_err(io::Error::other)?;
                     let reservation = self
@@ -343,11 +322,11 @@ impl OutboxActor {
             if let Some(date) = due_date {
                 let mut changed = None;
                 self.handle.latest.send_if_modified(|latest| {
-                    changed = latest.days.remove(&date).and_then(|mut slot| slot.take());
+                    changed = latest.days.remove(&date);
                     changed.is_some()
                 });
                 if let Some(changed) = changed {
-                    let seq = self.next_sequence()?;
+                    let seq = self.next_sequence();
                     let payload = OutboxHandle::event(Topic::Day(date), seq, &changed)
                         .map_err(io::Error::other)?;
                     let reservation = self
@@ -366,7 +345,7 @@ impl OutboxActor {
                 .iter()
                 .filter(|entry| pending.days.contains_key(entry.0))
                 .map(|entry| *entry.1)
-                .chain(pending.state.0.as_ref().and(self.state_clock.next))
+                .chain(pending.state.as_ref().and(self.state_clock.next))
                 .min();
             tokio::select! {
                 message = self.receiver.recv() => {
@@ -398,7 +377,7 @@ impl OutboxActor {
                 drop(reservation);
             }
             OutboxMessage::Control { body, reservation } => {
-                let seq = self.next_sequence()?;
+                let seq = self.next_sequence();
                 let payload =
                     OutboxHandle::event(Topic::Control, seq, &body).map_err(io::Error::other)?;
                 writer.send(payload.as_slice()).await?;
@@ -426,15 +405,6 @@ mod tests {
         assert_eq!(budget.queued, SEND_BUFFER_LIMIT);
         budget.release(SEND_BUFFER_LIMIT);
         assert_eq!(budget.queued, 0);
-    }
-    #[test]
-    fn latest_slot_replaces_instead_of_growing() {
-        let mut slot = LatestSlot::default();
-        for value in 0..1000 {
-            slot.replace(value);
-        }
-        assert_eq!(slot.take(), Some(999));
-        assert_eq!(slot.take(), None);
     }
     #[test]
     fn responses_and_controls_reserve_before_mailbox_and_close_only_their_outbox() {
@@ -516,7 +486,7 @@ mod tests {
                 .expect("response before state");
             writer.handle.state(snapshot.clone());
             tokio::task::yield_now().await;
-            // The first response holds up the state past the registry's publication deadline.
+            // The first response delays the initial state write.
             tokio::time::advance(STATE_PUSH_INTERVAL).await;
             let mut reader = FramedRead::new(read, frame_codec());
             let response = reader
@@ -567,6 +537,100 @@ mod tests {
                 latest
             );
             assert!(writer.handle.peak_bytes() <= SEND_BUFFER_LIMIT);
+        });
+    }
+    #[test]
+    fn delayed_day_writes_keep_latest_versions_and_throttle_each_date_independently() {
+        use futures_util::StreamExt;
+        use quartz_protocol::{DayChanged, QueryVersions};
+        use tokio_util::codec::FramedRead;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            tokio::time::pause();
+            let (write, read) = tokio::io::duplex(1);
+            let writer = OutboxTask::spawn(write);
+            let date = "2025-01-02".parse().expect("first date");
+            let other_date = "2025-01-03".parse().expect("other date");
+            let initial = DayChanged {
+                date,
+                versions: QueryVersions("initial".into()),
+            };
+            writer.handle.day(initial.clone());
+            tokio::task::yield_now().await;
+            tokio::time::advance(DAY_PUSH_INTERVAL).await;
+            let mut reader = FramedRead::new(read, frame_codec());
+            let first = reader
+                .next()
+                .await
+                .expect("initial day")
+                .expect("day frame");
+            let Envelope::Event(first) =
+                quartz_protocol::decode_json::<Envelope>(&first).expect("day JSON")
+            else {
+                panic!("day event");
+            };
+            assert_eq!(
+                serde_json::from_value::<DayChanged>(first.body).expect("day body"),
+                initial
+            );
+            tokio::task::yield_now().await;
+            let completed = tokio::time::Instant::now();
+            writer.handle.day(DayChanged {
+                date,
+                versions: QueryVersions("intermediate".into()),
+            });
+            let latest = DayChanged {
+                date,
+                versions: QueryVersions("latest".into()),
+            };
+            writer.handle.day(latest.clone());
+            writer.handle.day(DayChanged {
+                date: other_date,
+                versions: QueryVersions("other".into()),
+            });
+            let other = reader
+                .next()
+                .await
+                .expect("independent date")
+                .expect("day frame");
+            let Envelope::Event(other) =
+                quartz_protocol::decode_json::<Envelope>(&other).expect("day JSON")
+            else {
+                panic!("day event");
+            };
+            assert_eq!(other.topic, Topic::Day(other_date));
+            assert_eq!(
+                tokio::time::Instant::now(),
+                completed,
+                "one date must not delay another"
+            );
+            assert!(
+                tokio::time::timeout(DAY_PUSH_INTERVAL / 2, reader.next())
+                    .await
+                    .is_err(),
+                "spacing starts when the delayed write completes"
+            );
+            let last = reader.next().await.expect("latest day").expect("day frame");
+            let Envelope::Event(last) =
+                quartz_protocol::decode_json::<Envelope>(&last).expect("day JSON")
+            else {
+                panic!("day event");
+            };
+            assert!(tokio::time::Instant::now() - completed >= DAY_PUSH_INTERVAL);
+            assert!(first.seq < other.seq && other.seq < last.seq);
+            assert_eq!(
+                serde_json::from_value::<DayChanged>(last.body).expect("day body"),
+                latest
+            );
+            assert!(
+                tokio::time::timeout(DAY_PUSH_INTERVAL, reader.next())
+                    .await
+                    .is_err(),
+                "intermediate versions are discarded"
+            );
         });
     }
 }

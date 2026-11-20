@@ -12,7 +12,6 @@ use crate::model::{CategoryColor, PaletteSlotMap};
 
 /// Failures while reading the Quartz tokens from the theme JSON.
 #[derive(Debug, Snafu)]
-#[non_exhaustive]
 pub enum LoadPaletteError {
     /// The theme file is not valid JSON, or a Quartz token is missing or not a color.
     #[snafu(display("could not decode the Quartz tokens of the theme"))]
