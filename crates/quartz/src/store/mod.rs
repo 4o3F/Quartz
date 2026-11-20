@@ -126,16 +126,7 @@ impl Store {
         Ok(value)
     }
 
-    pub(crate) fn capture_transaction<T>(
-        &mut self,
-        keys: &mut capture::CaptureKeys,
-        metadata: &capture::RunMetadata,
-        execute: impl FnOnce(&mut capture::Capture<'_>) -> Result<T, capture::ExecuteCaptureBatchError>,
-    ) -> Result<T, capture::ExecuteCaptureBatchError> {
-        self.capture_write(keys, metadata, execute)
-    }
-
-    fn capture_write<T, E>(
+    pub(crate) fn capture_transaction<T, E>(
         &mut self,
         keys: &mut capture::CaptureKeys,
         metadata: &capture::RunMetadata,

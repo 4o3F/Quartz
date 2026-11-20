@@ -1,17 +1,13 @@
-//! Identity-free gaps, policy deadlines and source-day invalidation.
+//! Identity-free gaps and policy deadlines.
 
 use super::{Capture, CaptureColumn, ExecuteCaptureBatchError};
 use crate::store::{
     enums::DataSource,
     rows::CaptureGapsRow,
     schema::{capture_gaps, settings},
-    versions::BumpVersionError,
 };
 use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl};
-use quartz_domain::{
-    capture::{CaptureGap, RunId, SchedulerKind, TimeRange, UtcInstant},
-    facts::QueryRange,
-};
+use quartz_domain::capture::{CaptureGap, RunId, SchedulerKind, UtcInstant};
 
 impl Capture<'_> {
     pub(super) fn record_gap(
@@ -37,27 +33,6 @@ impl Capture<'_> {
             .values(&row)
             .execute(self.connection)?;
         self.bump_days(DataSource::Gaps, gap.range)
-    }
-    pub(super) fn bump_days(
-        &mut self,
-        source: DataSource,
-        range: TimeRange,
-    ) -> Result<(), ExecuteCaptureBatchError> {
-        let start = i64::try_from(range.start.utc).map_err(BumpVersionError::from)?;
-        let end = i64::try_from(range.end.utc).map_err(BumpVersionError::from)?;
-        range
-            .end
-            .utc
-            .duration_since(range.start.utc)
-            .map_err(BumpVersionError::from)?;
-        range
-            .end
-            .mono
-            .duration_since(range.start.mono)
-            .map_err(BumpVersionError::from)?;
-        self.effects
-            .bump_days(self.connection, source, QueryRange { start, end })
-            .map_err(ExecuteCaptureBatchError::from)
     }
     pub(super) fn set_deadline(
         &mut self,

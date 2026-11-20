@@ -19,10 +19,6 @@ pub(crate) enum BumpVersionError {
     Database { source: diesel::result::Error },
     #[snafu(display("version range ends before it starts"))]
     InvalidRange,
-    #[snafu(display("invalid version range time"))]
-    Time {
-        source: quartz_domain::capture::AdvanceTimeError,
-    },
     #[snafu(display("could not decode metadata version"))]
     DecodeMetadata { source: serde_json::Error },
     #[snafu(display("invalid metadata version in settings"))]
@@ -31,11 +27,6 @@ pub(crate) enum BumpVersionError {
 impl From<diesel::result::Error> for BumpVersionError {
     fn from(source: diesel::result::Error) -> Self {
         Self::Database { source }
-    }
-}
-impl From<quartz_domain::capture::AdvanceTimeError> for BumpVersionError {
-    fn from(source: quartz_domain::capture::AdvanceTimeError) -> Self {
-        Self::Time { source }
     }
 }
 

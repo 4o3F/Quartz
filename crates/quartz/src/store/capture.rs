@@ -18,12 +18,16 @@ pub(crate) mod test_support;
 mod tests;
 
 use super::{
+    enums::DataSource,
     identifiers::{NamedTable, TableName},
     schema::capture_runs,
 };
 use diesel::SqliteConnection;
 use errors::{RowContext, TimeColumns};
-use quartz_domain::capture::{CaptureWrite, RowId, RunId, SegmentId, WindowId, WriteBatch};
+use quartz_domain::{
+    capture::{CaptureWrite, RowId, RunId, SegmentId, TimeRange, WindowId, WriteBatch},
+    facts::QueryRange,
+};
 use std::collections::BTreeMap;
 
 /// Windows session identity supplied by the platform shell.
@@ -175,6 +179,28 @@ impl<'connection> Capture<'connection> {
             CaptureWrite::ClearDeadline { owner } => self.clear_deadline(*owner),
             CaptureWrite::RecordGap(gap) => self.record_gap(run, gap),
         }
+    }
+    fn bump_days(
+        &mut self,
+        source: DataSource,
+        range: TimeRange,
+    ) -> Result<(), ExecuteCaptureBatchError> {
+        let invalid_time = |source| ExecuteCaptureBatchError::InvalidationTime { source };
+        let start = i64::try_from(range.start.utc).map_err(invalid_time)?;
+        let end = i64::try_from(range.end.utc).map_err(invalid_time)?;
+        range
+            .end
+            .utc
+            .duration_since(range.start.utc)
+            .map_err(invalid_time)?;
+        range
+            .end
+            .mono
+            .duration_since(range.start.mono)
+            .map_err(invalid_time)?;
+        self.effects
+            .bump_days(self.connection, source, QueryRange { start, end })
+            .map_err(ExecuteCaptureBatchError::from)
     }
     fn run_keys(&mut self, run: RunId) -> &mut RunKeys {
         self.keys.record(run);

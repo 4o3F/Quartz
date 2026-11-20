@@ -575,7 +575,7 @@ impl crate::store::Store {
         keys: &mut CaptureKeys,
         metadata: &RunMetadata,
     ) -> Result<CaptureStartup, RecoverCaptureError> {
-        self.capture_write(keys, metadata, |capture| {
+        self.capture_transaction(keys, metadata, |capture| {
             capture
                 .recover()
                 .map_err(|source| RecoveryTransactionError::Operation { source })

@@ -83,6 +83,8 @@ pub(crate) enum DecodeCaptureRowError {
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub(crate) enum ExecuteCaptureBatchError {
+    #[snafu(display("invalid capture invalidation time"))]
+    InvalidationTime { source: domain::AdvanceTimeError },
     #[snafu(display("could not update capture query versions"))]
     Version {
         source: crate::store::versions::BumpVersionError,
