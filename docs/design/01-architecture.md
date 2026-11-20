@@ -182,7 +182,9 @@ crates/
 | `query` | 查询调度、纯切片与聚合、版本摘要与分页；`query::runner` 持有分批查询任务并归还只读连接 |
 | `ipc` | 会话、角色权限、订阅和协议客户端；`ipc::connection` 在异步读写流上执行单连接协议循环 |
 
-`query` 依赖 `store` 读取事实和版本值，`store` 通过 `quartz-domain` 的事实类型返回数据。`ipc` 依赖 `query` 的调度接口；`platform::windows::ipc` 创建和验证命名管道，并调用 `ipc::connection`。`core::app` 组合数据库线程的存储、规则外壳、持久化队列、查询执行器和版本发布器。
+`query` 依赖 `store` 读取事实和版本值，`store` 通过 `quartz-domain` 的事实类型返回数据。`ipc` 依赖 `query` 的调度接口；`platform::windows::ipc` 创建和验证命名管道，并调用 `ipc::connection`。`core::app::CoreRuntime` 打开存储、取得安装标识、构造运行元数据与状态发布器，并启动采集线程、数据库线程和管道服务。`PlatformPorts` 提供时钟、主线程唤醒与界面命令通知、会话标识、安装标识候选值、核心实例标识、前台解析器工厂和管道工厂，以及语言与区域设置。前台解析器工厂在采集线程调用；Windows 实现持有该线程的 COM apartment，并在解析器释放后结束 COM。平台主线程持有托盘、系统观测源和消息循环，通过运行时取得观测入口、关闭端口和命令接收端。日志初始化由运行时提供，数据目录定位和实例锁仍使用 Windows 环境与系统接口。
+
+用户退出时，`CoreRuntime` 依次发送 `ui.shutdown`、限时发送待处理的管道消息并停止管道、请求采集结算、等待采集与数据库线程退出。启动失败和运行时释放也使用同一条关闭路径。`WM_ENDSESSION` 先通过 `ShutdownPort` 在回调内等待最终持久化，消息循环结束后由运行时停止管道并回收已完成的线程。关闭时读取时钟失败会保留错误，并使用采集线程最后一次观测时间结算。
 
 ## 6. 线程模型
 
@@ -288,7 +290,7 @@ RegistryCommand ─▶ RuleRegistry::decide(&self, cmd) ─▶ Decision { writes
 有明确接收者的操作应实现为拥有或借用该接收者的类型的方法，自由函数仅用于没有接收者的纯计算，关联函数用于构造对象。
 
 - `anyhow` 仅在 `quartz-ui` 的 GPUI 错误边界作为上游错误的 `source` 类型出现，所有内部错误均使用 `snafu`。
-- 按失败情形定义 snafu 错误类型，名称采用“动词 + 对象 + Error”；一个操作有多种失败原因时，用该操作命名的一个枚举为每种原因定义变体，并用 context selector 附加上下文（路径、调用名、规则 ID 等）。不定义整个 crate 共用的兜底错误枚举，不使用 `Box<dyn Error>`；裸名 `Error` 仅用于模块私有类型。
+- 按失败情形定义 snafu 错误类型，名称采用“动词 + 对象 + Error”；一个操作有多种失败原因时，用该操作命名的一个枚举为每种原因定义变体，并用 context selector 附加上下文（路径、调用名、规则 ID 等）。不定义整个 crate 共用的兜底错误枚举；跨平台端口与前台解析器工厂使用 `Box<dyn Error + Send + Sync>` 保留平台错误，操作错误仍由具体的 snafu 错误类型包装。裸名 `Error` 仅用于模块私有类型。
 - Win32 调用的 `windows::core::Error` 作为 `source` 保留，上下文写调用名，例如 `OpenProcessSnafu { pid }`。
 - 跨进程只传结构化错误码。`quartz-protocol` 定义错误码枚举，核心把内部 snafu 错误映射为错误码，界面和 host 只按错误码分支，不解析错误消息文本。
 - 错误的 `Display` 与上下文字段同样遵守 06 的日志约束：不携带标题、域名、URL。需要定位时只带区间 ID、规则 ID 等标识。

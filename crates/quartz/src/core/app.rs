@@ -1,7 +1,8 @@
-//! Worker loops. Only the main-thread notification closure is platform-specific.
+//! Core assembly, worker loops, and ordered shutdown through injected platform ports.
 
 mod capture_loop;
 mod database_loop;
+mod runtime;
 #[cfg(test)]
 mod tests;
 mod workers;
@@ -11,6 +12,10 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, select_biased};
 use quartz_domain::{
     capture::{CaptureEffect, CaptureEvent, CaptureState, RunEndReason, Timestamp},
     rules::registry::RegistryCommand,
+};
+pub(crate) use runtime::{
+    CallPlatformPortError, CorePipe, CoreRuntime, PipePorts, PlatformPorts, RuntimeExit,
+    StartCoreError, StopCoreError,
 };
 use snafu::Snafu;
 use std::{
@@ -22,7 +27,6 @@ use std::{
     time::{Duration, Instant},
 };
 pub(crate) use workers::Workers;
-#[cfg(windows)]
 pub(crate) use workers::{JoinWorkersError, RequestShutdownError, StartWorkersError};
 
 /// Bounds final database settlement and worker joining, including SQLite's busy timeout.
@@ -43,7 +47,6 @@ pub(crate) struct ObservedEvent {
 #[derive(Debug)]
 pub(crate) enum Observation {
     Event(ObservedEvent),
-    #[cfg(windows)]
     Foreground(crate::core::foreground::Snapshot),
 }
 impl From<ObservedEvent> for Observation {
@@ -87,14 +90,19 @@ enum Feedback {
 }
 #[derive(Debug)]
 struct Shutdown {
-    at: Timestamp,
+    at: ShutdownTime,
     reason: RunEndReason,
     deadline: Instant,
+}
+#[derive(Debug)]
+enum ShutdownTime {
+    Sampled(Timestamp),
+    LastObservation,
 }
 impl Shutdown {
     fn new(at: Timestamp, reason: RunEndReason) -> Self {
         Self {
-            at,
+            at: ShutdownTime::Sampled(at),
             reason,
             deadline: Instant::now() + SHUTDOWN_TIMEOUT,
         }
@@ -188,11 +196,9 @@ impl CaptureSender {
     pub(crate) fn observe(&self, observation: ObservedEvent) -> Result<(), ObserveCaptureError> {
         self.send(Observation::Event(observation))
     }
-    #[cfg(windows)]
     pub(crate) fn mark_overloaded(&self) {
         self.overloaded.store(true, Ordering::Release);
     }
-    #[cfg(windows)]
     pub(crate) fn foreground(
         &self,
         snapshot: crate::core::foreground::Snapshot,
@@ -311,6 +317,22 @@ impl Drop for WorkerGuard {
                 std::process::exit(1);
             }
             (self.main.wake)();
+        }
+    }
+}
+
+/// Controls whether duplicate core launches forward an open-UI request.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Autostart {
+    Enabled,
+    Disabled,
+}
+impl From<bool> for Autostart {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
         }
     }
 }

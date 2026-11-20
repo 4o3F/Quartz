@@ -12,6 +12,9 @@ name = "quartz"
 path = "src/main.rs"
 
 [dependencies]
+tokio-util.workspace = true
+futures-util.workspace = true
+quartz-i18n.workspace = true
 crossbeam-channel.workspace = true
 sha2.workspace = true
 num-traits.workspace = true
@@ -32,9 +35,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-tokio-util.workspace = true
-futures-util.workspace = true
-quartz-i18n.workspace = true
 quartz-ui.workspace = true
 windows = { workspace = true, features = [
     "std",
@@ -66,11 +66,8 @@ windows = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-[target.'cfg(windows)'.dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
-
 [dev-dependencies]
-quartz-i18n.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 quartz-domain = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 

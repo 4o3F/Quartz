@@ -171,10 +171,7 @@ pub(crate) struct Resolver {
     names: BoundedCache<String, String>,
     failures: u64,
 }
-pub(crate) enum Resolution {
-    Event(ObservedEvent),
-    Review,
-}
+pub(crate) use crate::core::foreground::Resolution;
 impl Resolver {
     pub(crate) fn new() -> Self {
         Self {

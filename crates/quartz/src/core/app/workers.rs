@@ -6,7 +6,10 @@ use super::{
 };
 use super::{capture_loop::CaptureLoop, database_loop::DatabaseLoop};
 use crate::{
-    core::sources::{ClockReader, ReadClockError},
+    core::{
+        foreground::CreateForeground,
+        sources::{ClockReader, ReadClockError},
+    },
     persistence::Persistence,
     rules::registry::{OpenRegistryShellError, RegistryShell},
     store::{
@@ -124,11 +127,12 @@ impl WorkerChannels {
         step: CaptureStep,
         startup: CaptureStartup,
         main: MainPort,
+        create_foreground: CreateForeground,
     ) -> Result<JoinHandle<()>, StartWorkersError> {
         self.spawn(Worker::Capture, main, move || {
             capture
                 .initialize(step, startup)
-                .and_then(|()| capture.run())
+                .and_then(|()| capture.run(create_foreground))
                 .map_err(|source| WorkerFailure::Capture {
                     source: Box::new(source),
                 })
@@ -200,13 +204,15 @@ impl Workers {
         metadata: RunMetadata,
         clock: Arc<dyn ClockReader>,
         wake: Arc<dyn Fn() + Send + Sync>,
+        create_foreground: CreateForeground,
     ) -> Result<Self, StartWorkersError> {
         let startup = Startup::open(store, metadata, clock)?;
-        Self::launch(startup, wake)
+        Self::launch(startup, wake, create_foreground)
     }
     fn launch(
         startup: Startup,
         wake: Arc<dyn Fn() + Send + Sync>,
+        create_foreground: CreateForeground,
     ) -> Result<Self, StartWorkersError> {
         let channels = WorkerChannels::new();
         let main = MainPort {
@@ -229,8 +235,6 @@ impl Workers {
         } = crate::query::versions::VersionPublisher::open(&mut store, registry.snapshots())
             .map_err(|source| StartWorkersError::Query { source })?;
         let capture = CaptureLoop {
-            #[cfg(windows)]
-            foreground: crate::platform::ForegroundResolver::new(),
             core: started.core,
             run: startup.next_run,
             at,
@@ -257,20 +261,33 @@ impl Workers {
             clock,
         };
         let db = channels.spawn_database(database, main.clone())?;
-        let capture = channels.spawn_capture(capture, started.step, startup, main)?;
-        Ok(Self {
+        let mut workers = Self {
             sender: CaptureSender {
-                sender: channels.observations.sender,
-                overloaded: channels.overloaded,
+                sender: channels.observations.sender.clone(),
+                overloaded: Arc::clone(&channels.overloaded),
             },
-            commands: channels.main.receiver,
+            commands: channels.main.receiver.clone(),
             queries: queries.port,
             versions: version_updates,
-            shutdown: channels.shutdown.sender,
-            finished: channels.finished.receiver,
-            completed: channels.completed.receiver,
-            handles: vec![capture, db],
-        })
+            shutdown: channels.shutdown.sender.clone(),
+            finished: channels.finished.receiver.clone(),
+            completed: channels.completed.receiver.clone(),
+            handles: vec![db],
+        };
+        let launched =
+            channels.spawn_capture(capture, started.step, startup, main, create_foreground);
+        // If capture could not spawn, dropping its write senders releases the database loop.
+        drop(channels);
+        match launched {
+            Ok(capture) => workers.handles.insert(0, capture),
+            Err(error) => {
+                if let Err(cleanup) = workers.join() {
+                    tracing::error!(%cleanup, "could not join database after capture spawn failure");
+                }
+                return Err(error);
+            }
+        }
+        Ok(workers)
     }
     pub(crate) fn shutdown_port(&self) -> ShutdownPort {
         ShutdownPort {
@@ -284,14 +301,23 @@ impl Workers {
         at: Timestamp,
         reason: RunEndReason,
     ) -> Result<(), RequestShutdownError> {
-        self.shutdown
-            .try_send(Shutdown::new(at, reason))
-            .map_err(|error| match error {
-                crossbeam_channel::TrySendError::Full(_) => RequestShutdownError::Full,
-                crossbeam_channel::TrySendError::Disconnected(_) => {
-                    RequestShutdownError::Disconnected
-                }
-            })
+        self.request_stop(Shutdown::new(at, reason))
+    }
+    pub(super) fn request_shutdown_after_clock_failure(
+        &self,
+        reason: RunEndReason,
+    ) -> Result<(), RequestShutdownError> {
+        self.request_stop(Shutdown {
+            at: super::ShutdownTime::LastObservation,
+            reason,
+            deadline: Instant::now() + SHUTDOWN_TIMEOUT,
+        })
+    }
+    fn request_stop(&self, stop: Shutdown) -> Result<(), RequestShutdownError> {
+        self.shutdown.try_send(stop).map_err(|error| match error {
+            crossbeam_channel::TrySendError::Full(_) => RequestShutdownError::Full,
+            crossbeam_channel::TrySendError::Disconnected(_) => RequestShutdownError::Disconnected,
+        })
     }
     pub(crate) fn join(mut self) -> Result<(), JoinWorkersError> {
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;

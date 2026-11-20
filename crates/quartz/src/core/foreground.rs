@@ -377,7 +377,6 @@ impl<V> BoundedCache<ProcessKey, V> {
         });
     }
 }
-#[cfg(windows)]
 #[derive(Debug)]
 pub(crate) struct Snapshot {
     pub at: quartz_domain::capture::Timestamp,
@@ -404,6 +403,22 @@ impl Desktop {
         }
     }
 }
+
+/// Resolves a main-thread snapshot on the capture thread.
+pub(crate) trait ForegroundResolve {
+    fn resolve(&mut self, snapshot: Snapshot) -> Resolution;
+}
+
+pub(crate) enum Resolution {
+    Event(crate::core::app::ObservedEvent),
+    Review,
+}
+
+/// The returned resolver may own thread-local resources such as a COM apartment.
+pub(crate) type CreateForeground = Box<
+    dyn FnOnce() -> Result<Box<dyn ForegroundResolve>, Box<dyn std::error::Error + Send + Sync>>
+        + Send,
+>;
 
 #[cfg(test)]
 mod tests {

@@ -95,7 +95,7 @@ pub(crate) enum QueryRequest {
     Timeline(QueryTimelineRequest),
 }
 impl QueryRequest {
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub(crate) fn decode(
         op: quartz_protocol::Op,
         body: serde_json::Value,

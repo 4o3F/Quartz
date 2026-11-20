@@ -62,6 +62,22 @@ pub(crate) enum OpenStoreError {
     },
 }
 
+/// Recovery information needed when opening the core database fails.
+pub(crate) enum StartupStoreFailure<'error> {
+    NewerDatabase,
+    MigrationFailed { backup: &'error Path },
+    Other,
+}
+impl OpenStoreError {
+    pub(crate) fn startup_failure(&self) -> StartupStoreFailure<'_> {
+        match self {
+            Self::NewerDatabase { .. } => StartupStoreFailure::NewerDatabase,
+            Self::Migrate { backup, .. } => StartupStoreFailure::MigrationFailed { backup },
+            _ => StartupStoreFailure::Other,
+        }
+    }
+}
+
 /// Owns both connections on the database thread.
 pub(crate) struct Store {
     writer: SqliteConnection,

@@ -79,9 +79,10 @@ pub(crate) enum ReadClockError {
     Utc { source: jiff::Error },
     #[snafu(display("system UTC reading exceeds integer milliseconds"))]
     Range { source: std::num::TryFromIntError },
-    #[cfg(windows)]
-    #[snafu(display("could not read QueryUnbiasedInterruptTime"))]
-    Interrupt { source: windows::core::Error },
+    #[snafu(display("could not read unbiased interrupt time"))]
+    Interrupt {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 pub(crate) trait ClockReader: Send + Sync {

@@ -124,7 +124,7 @@ pub(super) fn init() -> Result<(), InitTracingError> {
 }
 
 /// Logs before unwinding or aborting without including potentially sensitive panic payloads.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 pub(crate) fn install_core_panic_log() {
     std::panic::set_hook(Box::new(|info| {
         let thread = std::thread::current();

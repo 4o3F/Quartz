@@ -4,7 +4,10 @@ use super::{
     DatabaseCommand, Feedback, MainCommand, MainPort, Observation, ObservedEvent,
     SendMainCommandError, Shutdown,
 };
-use crate::core::{foreground::EventKind, sources::ClockReader};
+use crate::core::{
+    foreground::{CreateForeground, EventKind, ForegroundResolve, Resolution},
+    sources::ClockReader,
+};
 use crate::persistence::WriteQueue;
 use crate::store::capture::CaptureStartup;
 use crossbeam_channel::{Receiver, Sender, TrySendError, select_biased};
@@ -28,10 +31,9 @@ use std::{
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module)]
 pub(crate) enum RunCaptureLoopError {
-    #[cfg(windows)]
-    #[snafu(display("could not initialize capture worker COM"))]
-    InitializeCom {
-        source: crate::platform::InitializeCaptureComError,
+    #[snafu(display("could not create foreground resolver"))]
+    CreateResolver {
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[snafu(display("capture input channel disconnected"))]
     Receive {
@@ -70,8 +72,6 @@ enum CaptureWork {
     Feedback(Feedback),
 }
 pub(super) struct CaptureLoop {
-    #[cfg(windows)]
-    pub foreground: crate::platform::ForegroundResolver,
     pub core: CaptureCore,
     pub run: RunId,
     pub at: Timestamp,
@@ -114,14 +114,18 @@ impl CaptureLoop {
         }
         Ok(())
     }
-    pub(super) fn run(&mut self) -> Result<(), RunCaptureLoopError> {
-        #[cfg(windows)]
-        let _apartment = crate::platform::CaptureApartment::initialize()
-            .map_err(|source| RunCaptureLoopError::InitializeCom { source })?;
+    pub(super) fn run(
+        &mut self,
+        create_foreground: CreateForeground,
+    ) -> Result<(), RunCaptureLoopError> {
+        let mut foreground =
+            create_foreground().map_err(|source| RunCaptureLoopError::CreateResolver { source })?;
         loop {
             match self.next_work()? {
-                CaptureWork::Shutdown(stop) => return self.shutdown(stop),
-                CaptureWork::Observation(observation) => self.observe(observation)?,
+                CaptureWork::Shutdown(stop) => return self.shutdown(stop, foreground.as_mut()),
+                CaptureWork::Observation(observation) => {
+                    self.observe(observation, foreground.as_mut())?
+                }
                 CaptureWork::Feedback(feedback) => self.feedback(feedback)?,
             }
         }
@@ -133,11 +137,18 @@ impl CaptureLoop {
             recv(self.observed) -> observation => observation.map(CaptureWork::Observation).map_err(|_| RunCaptureLoopError::Receive { source: crossbeam_channel::RecvError }),
         }
     }
-    fn shutdown(&mut self, stop: Shutdown) -> Result<(), RunCaptureLoopError> {
-        self.drain_observations()?;
+    fn shutdown(
+        &mut self,
+        stop: Shutdown,
+        foreground: &mut dyn ForegroundResolve,
+    ) -> Result<(), RunCaptureLoopError> {
+        self.drain_observations(foreground)?;
         self.step(
             ObservedEvent {
-                at: stop.at,
+                at: match stop.at {
+                    super::ShutdownTime::Sampled(at) => at,
+                    super::ShutdownTime::LastObservation => self.at,
+                },
                 event: CaptureEvent::Shutdown,
             },
             Settlement::Final {
@@ -147,9 +158,12 @@ impl CaptureLoop {
         )?;
         self.wait_for_database(stop.deadline)
     }
-    fn drain_observations(&mut self) -> Result<(), RunCaptureLoopError> {
+    fn drain_observations(
+        &mut self,
+        foreground: &mut dyn ForegroundResolve,
+    ) -> Result<(), RunCaptureLoopError> {
         while let Ok(observation) = self.observed.try_recv() {
-            self.observe(observation)?;
+            self.observe(observation, foreground)?;
         }
         Ok(())
     }
@@ -165,14 +179,17 @@ impl CaptureLoop {
             }
         }
     }
-    fn observe(&mut self, observation: Observation) -> Result<(), RunCaptureLoopError> {
+    fn observe(
+        &mut self,
+        observation: Observation,
+        foreground: &mut dyn ForegroundResolve,
+    ) -> Result<(), RunCaptureLoopError> {
         if self.overloaded.swap(false, Ordering::AcqRel) {
             self.discard_observations();
             self.step(
                 ObservedEvent {
                     at: match &observation {
                         Observation::Event(event) => event.at,
-                        #[cfg(windows)]
                         Observation::Foreground(snapshot) => snapshot.at,
                     },
                     event: CaptureEvent::EventOverload,
@@ -182,20 +199,19 @@ impl CaptureLoop {
         } else {
             match observation {
                 Observation::Event(event) => self.step(event, Settlement::Deferred),
-                #[cfg(windows)]
                 Observation::Foreground(snapshot) => {
                     let callback_at = snapshot.at.mono;
                     let kind = snapshot.kind;
                     let event_time_ms = snapshot.event_time_ms;
-                    match self.foreground.resolve(snapshot) {
-                        crate::platform::ForegroundResolution::Event(event) => {
+                    match foreground.resolve(snapshot) {
+                        Resolution::Event(event) => {
                             self.step(event, Settlement::Deferred)?;
                             if let Some(event_time_ms) = event_time_ms {
                                 self.trace_callback_latency(callback_at, kind, event_time_ms);
                             }
                             Ok(())
                         }
-                        crate::platform::ForegroundResolution::Review => {
+                        Resolution::Review => {
                             self.main
                                 .send(MainCommand::Effect(CaptureEffect::ReviewForeground))?;
                             Ok(())
@@ -443,8 +459,6 @@ mod tests {
         let (database, _writes) = bounded(CONTROL_CAPACITY);
         let (main, commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
         let mut capture = CaptureLoop {
-            #[cfg(windows)]
-            foreground: crate::platform::ForegroundResolver::new(),
             core: started.core,
             run,
             at: at(10),
@@ -462,7 +476,10 @@ mod tests {
             clock: Arc::new(TestClock(at(30))),
         };
         capture
-            .observe(capture.observed.recv().expect("first stale event"))
+            .observe(
+                capture.observed.recv().expect("first stale event"),
+                &mut super::super::tests::FakeResolver,
+            )
             .expect("consume overload");
         assert!(
             capture.observed.is_empty(),
@@ -542,8 +559,6 @@ mod tests {
             .expect("rules")
             .snapshots();
         let mut capture = CaptureLoop {
-            #[cfg(windows)]
-            foreground: crate::platform::ForegroundResolver::new(),
             core: started.core,
             run,
             at: at(0),
@@ -572,7 +587,7 @@ mod tests {
                         policies: Vec::new(),
                     },
                 )
-                .and_then(|()| capture.run());
+                .and_then(|()| capture.run(super::super::tests::create_foreground()));
             finished.send(result).expect("capture result");
         });
         sender

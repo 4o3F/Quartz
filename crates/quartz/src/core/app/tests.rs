@@ -57,9 +57,14 @@ impl RuntimeFixture {
             "runtime-device"
         );
         let clock = Arc::new(RuntimeClock::new());
-        let workers =
-            crate::core::app::Workers::start(store, metadata(), clock.clone(), Arc::new(|| {}))
-                .expect("workers");
+        let workers = crate::core::app::Workers::start(
+            store,
+            metadata(),
+            clock.clone(),
+            Arc::new(|| {}),
+            create_foreground(),
+        )
+        .expect("workers");
         Self {
             directory,
             workers,
@@ -229,9 +234,14 @@ impl RuntimeFixture {
             Store::open(&DataDirectory::new(directory.path())).expect("reopen timed settings");
         let clock = Arc::new(RuntimeClock::new());
         clock.advance(200_000);
-        let workers =
-            crate::core::app::Workers::start(store, metadata(), clock.clone(), Arc::new(|| {}))
-                .expect("restart workers");
+        let workers = crate::core::app::Workers::start(
+            store,
+            metadata(),
+            clock.clone(),
+            Arc::new(|| {}),
+            create_foreground(),
+        )
+        .expect("restart workers");
         Self {
             directory,
             workers,
@@ -295,8 +305,14 @@ fn large_query_yields_to_capture_commits_before_the_one_second_limit() {
     let fixture = crate::store::query::test_support::QueryFixture::new(QUERY_FACTS);
     let request = fixture.request_day();
     let clock = Arc::new(RuntimeClock::new());
-    let workers = Workers::start(fixture.store, metadata(), clock.clone(), Arc::new(|| {}))
-        .expect("real workers");
+    let workers = Workers::start(
+        fixture.store,
+        metadata(),
+        clock.clone(),
+        Arc::new(|| {}),
+        create_foreground(),
+    )
+    .expect("real workers");
     let runtime = RuntimeFixture {
         directory: fixture.directory,
         workers,
@@ -411,8 +427,6 @@ fn resume_notifications_create_only_one_clock_segment() {
         .expect("rules")
         .snapshots();
     let mut capture = CaptureLoop {
-        #[cfg(windows)]
-        foreground: crate::platform::ForegroundResolver::new(),
         core: started.core,
         run: RunId::new(1),
         at,
@@ -448,4 +462,359 @@ fn resume_notifications_create_only_one_clock_segment() {
         })
         .expect("final segment");
     assert!(ended.writes.iter().any(|write| matches!(write, CaptureWrite::CloseClockSegment { segment, .. } if segment.get() == 2)));
+}
+
+pub(super) struct FakeResolver;
+impl crate::core::foreground::ForegroundResolve for FakeResolver {
+    fn resolve(
+        &mut self,
+        snapshot: crate::core::foreground::Snapshot,
+    ) -> crate::core::foreground::Resolution {
+        crate::core::foreground::Resolution::Event(super::ObservedEvent {
+            at: snapshot.at,
+            event: CaptureEvent::Foreground {
+                source: snapshot.source,
+                foreground: Foreground::None(NoForegroundReason::Empty),
+            },
+        })
+    }
+}
+pub(super) fn create_foreground() -> crate::core::foreground::CreateForeground {
+    Box::new(|| Ok(Box::new(FakeResolver)))
+}
+
+const RUNTIME_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleEvent {
+    ResolverCreated,
+    SnapshotResolved,
+    UiShutdown,
+    PipeStopped,
+    ResolverDropped,
+}
+#[derive(Clone, Default)]
+struct LifecycleLog(Arc<std::sync::Mutex<Vec<LifecycleEvent>>>);
+impl LifecycleLog {
+    fn record(&self, event: LifecycleEvent) {
+        self.0.lock().expect("lifecycle log").push(event);
+    }
+    fn events(&self) -> Vec<LifecycleEvent> {
+        self.0.lock().expect("lifecycle log").clone()
+    }
+}
+struct RecordedResolver {
+    log: LifecycleLog,
+    owner: std::thread::ThreadId,
+    // Proves that the injected resolver need not be Send.
+    _thread_local: std::rc::Rc<()>,
+}
+impl crate::core::foreground::ForegroundResolve for RecordedResolver {
+    fn resolve(
+        &mut self,
+        snapshot: crate::core::foreground::Snapshot,
+    ) -> crate::core::foreground::Resolution {
+        assert_eq!(
+            self.owner,
+            std::thread::current().id(),
+            "resolve on creator thread"
+        );
+        self.log.record(LifecycleEvent::SnapshotResolved);
+        FakeResolver.resolve(snapshot)
+    }
+}
+impl Drop for RecordedResolver {
+    fn drop(&mut self) {
+        assert_eq!(
+            self.owner,
+            std::thread::current().id(),
+            "release on creator thread"
+        );
+        self.log.record(LifecycleEvent::ResolverDropped);
+    }
+}
+struct TestPipe {
+    log: LifecycleLog,
+}
+impl super::CorePipe for TestPipe {
+    fn control(&self, op: quartz_protocol::ControlOp) {
+        assert_eq!(op, quartz_protocol::ControlOp::UiShutdown);
+        self.log.record(LifecycleEvent::UiShutdown);
+    }
+    fn shutdown(self: Box<Self>) -> Result<(), super::CallPlatformPortError> {
+        self.log.record(LifecycleEvent::PipeStopped);
+        Ok(())
+    }
+}
+#[derive(Clone, Copy)]
+enum StartTestPipe {
+    Succeed,
+    Fail,
+}
+struct RuntimePortsFixture {
+    ports: super::PlatformPorts,
+    log: LifecycleLog,
+    clock: Arc<RuntimeClock>,
+}
+impl RuntimePortsFixture {
+    fn new(start: StartTestPipe) -> Self {
+        let log = LifecycleLog::default();
+        let capture_log = log.clone();
+        let pipe_log = log.clone();
+        let (started, ready) = bounded(CONTROL_CAPACITY);
+        let clock = Arc::new(RuntimeClock::new());
+        let ports = super::PlatformPorts {
+            wake: Arc::new(|| {}),
+            ui_wake: Arc::new(|_| Ok(())),
+            clock: clock.clone(),
+            session_id: crate::store::capture::WindowsSessionId::new(7),
+            proposed_device_id: "test-device-guid".into(),
+            instance_id: quartz_protocol::InstanceId("test-instance-guid".into()),
+            foreground: Box::new(move || {
+                assert_eq!(
+                    std::thread::current().name(),
+                    Some("quartz-capture"),
+                    "factory called on capture thread"
+                );
+                capture_log.record(LifecycleEvent::ResolverCreated);
+                started.send(()).expect("factory startup receiver");
+                Ok(Box::new(RecordedResolver {
+                    log: capture_log,
+                    owner: std::thread::current().id(),
+                    _thread_local: std::rc::Rc::new(()),
+                }))
+            }),
+            pipe: Box::new(move |ports| {
+                ready
+                    .recv_timeout(RUNTIME_TEST_TIMEOUT)
+                    .expect("resolver starts on capture thread");
+                assert_eq!(ports.shutdown_timeout, super::SHUTDOWN_TIMEOUT);
+                match start {
+                    StartTestPipe::Succeed => {
+                        // Exercise the UI port assembled by the runtime.
+                        (ports.ui)(crate::ipc::UiCommand::Open).expect("queue UI request");
+                        Ok(Box::new(TestPipe { log: pipe_log }))
+                    }
+                    StartTestPipe::Fail => Err(Box::new(std::io::Error::from(
+                        std::io::ErrorKind::AddrInUse,
+                    ))),
+                }
+            }),
+            language: quartz_i18n::Language::English,
+            locale: None,
+        };
+        Self { ports, log, clock }
+    }
+}
+fn run_runtime_test(run: impl FnOnce() + Send + 'static) {
+    let (finished, completion) = bounded(CONTROL_CAPACITY);
+    let thread = std::thread::spawn(move || {
+        run();
+        finished.send(()).expect("completion receiver");
+    });
+    completion
+        .recv_timeout(RUNTIME_TEST_TIMEOUT)
+        .expect("runtime joins within shutdown budget");
+    thread.join().expect("runtime test thread");
+}
+#[test]
+fn core_runtime_starts_resolves_observation_and_shuts_down_in_order() {
+    run_runtime_test(|| {
+        let directory = tempfile::tempdir().expect("isolated runtime database");
+        let fixture = RuntimePortsFixture::new(StartTestPipe::Succeed);
+        let runtime =
+            super::CoreRuntime::start(&DataDirectory::new(directory.path()), fixture.ports)
+                .expect("start core runtime");
+        assert_eq!(
+            runtime.ui_commands.recv().expect("UI request"),
+            crate::ipc::UiCommand::Open
+        );
+        fixture.clock.advance(100);
+        let at = fixture.clock.read().expect("observation time");
+        runtime
+            .sender()
+            .foreground(crate::core::foreground::Snapshot {
+                at,
+                read_at: at,
+                event_time_ms: None,
+                source: ObservationSource::Hook,
+                kind: crate::core::foreground::EventKind::Foreground,
+                window: WindowHandle::new(0),
+                title: Title::readable(""),
+                desktop: crate::core::foreground::Desktop::Observable,
+            })
+            .expect("inject foreground observation");
+        runtime
+            .shutdown(super::RuntimeExit::UserExit)
+            .expect("stop core runtime");
+        let events = fixture.log.events();
+        assert!(
+            events.contains(&LifecycleEvent::SnapshotResolved),
+            "accepted observation resolved before shutdown returns"
+        );
+        let lifecycle: Vec<_> = events
+            .into_iter()
+            .filter(|event| *event != LifecycleEvent::SnapshotResolved)
+            .collect();
+        assert_eq!(
+            lifecycle,
+            vec![
+                LifecycleEvent::ResolverCreated,
+                LifecycleEvent::UiShutdown,
+                LifecycleEvent::PipeStopped,
+                LifecycleEvent::ResolverDropped,
+            ],
+            "pipe stops before capture resources are released"
+        );
+        let mut stored = Inspection::open(directory.path());
+        assert_eq!(stored.run(1).end_reason, Some(RunEndReason::UserExit));
+        assert_eq!(
+            stored.open_clock_count(),
+            0,
+            "final clock segment persisted"
+        );
+        drop(stored);
+        std::fs::remove_dir_all(directory.path()).expect("all database handles released");
+    });
+}
+#[test]
+fn core_runtime_pipe_start_failure_joins_started_workers() {
+    run_runtime_test(|| {
+        let directory = tempfile::tempdir().expect("isolated runtime database");
+        let fixture = RuntimePortsFixture::new(StartTestPipe::Fail);
+        let error = super::CoreRuntime::start(&DataDirectory::new(directory.path()), fixture.ports)
+            .err()
+            .expect("pipe startup fails");
+        assert!(matches!(error, super::StartCoreError::StartPipe { .. }));
+        assert_eq!(
+            fixture.log.events(),
+            vec![
+                LifecycleEvent::ResolverCreated,
+                LifecycleEvent::ResolverDropped
+            ],
+            "startup error returns after capture releases resources"
+        );
+        let mut stored = Inspection::open(directory.path());
+        assert_eq!(stored.run(1).end_reason, Some(RunEndReason::Shutdown));
+        assert_eq!(stored.open_clock_count(), 0);
+        drop(stored);
+        std::fs::remove_dir_all(directory.path())
+            .expect("failure cleanup released database handles");
+    });
+}
+#[test]
+fn core_runtime_drop_after_platform_start_failure_stops_pipe_before_workers() {
+    run_runtime_test(|| {
+        let directory = tempfile::tempdir().expect("isolated runtime database");
+        let fixture = RuntimePortsFixture::new(StartTestPipe::Succeed);
+        let runtime =
+            super::CoreRuntime::start(&DataDirectory::new(directory.path()), fixture.ports)
+                .expect("start core runtime");
+        // A fallible platform step (such as Sources::start) returns while owning the runtime.
+        drop(runtime);
+        assert_eq!(
+            fixture.log.events(),
+            vec![
+                LifecycleEvent::ResolverCreated,
+                LifecycleEvent::PipeStopped,
+                LifecycleEvent::ResolverDropped
+            ]
+        );
+        assert_eq!(
+            Inspection::open(directory.path()).run(1).end_reason,
+            Some(RunEndReason::Shutdown)
+        );
+    });
+}
+
+#[test]
+fn core_runtime_session_end_joins_workers_already_settled_by_shutdown_port() {
+    run_runtime_test(|| {
+        let directory = tempfile::tempdir().expect("isolated runtime database");
+        let fixture = RuntimePortsFixture::new(StartTestPipe::Succeed);
+        let runtime =
+            super::CoreRuntime::start(&DataDirectory::new(directory.path()), fixture.ports)
+                .expect("start core runtime");
+        runtime
+            .shutdown_port()
+            .close(fixture.clock.read().expect("session-end clock"))
+            .expect("WM_ENDSESSION waits for persistence");
+        assert_eq!(
+            Inspection::open(directory.path()).run(1).end_reason,
+            Some(RunEndReason::Shutdown)
+        );
+        runtime
+            .shutdown(super::RuntimeExit::SessionEnded)
+            .expect("join without requesting shutdown again");
+        assert_eq!(
+            fixture.log.events(),
+            vec![
+                LifecycleEvent::ResolverCreated,
+                LifecycleEvent::ResolverDropped,
+                LifecycleEvent::PipeStopped
+            ],
+            "session callback settles workers before returning to the message loop"
+        );
+    });
+}
+
+#[derive(Clone, Copy)]
+enum ClockReadOutcome {
+    Read,
+    Fail,
+}
+struct FailOnceClock {
+    clock: Arc<RuntimeClock>,
+    caller: std::thread::ThreadId,
+    next: std::sync::Mutex<ClockReadOutcome>,
+}
+impl ClockReader for FailOnceClock {
+    fn read(&self) -> Result<Timestamp, ReadClockError> {
+        if self.caller == std::thread::current().id() {
+            let outcome = std::mem::replace(
+                &mut *self.next.lock().expect("clock outcome"),
+                ClockReadOutcome::Read,
+            );
+            if matches!(outcome, ClockReadOutcome::Fail) {
+                return Err(ReadClockError::Interrupt {
+                    source: Box::new(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+                });
+            }
+        }
+        self.clock.read()
+    }
+}
+#[test]
+fn core_runtime_shutdown_clock_failure_still_settles_and_joins_workers() {
+    run_runtime_test(|| {
+        let directory = tempfile::tempdir().expect("isolated runtime database");
+        let mut fixture = RuntimePortsFixture::new(StartTestPipe::Succeed);
+        let clock = Arc::new(FailOnceClock {
+            clock: Arc::clone(&fixture.clock),
+            caller: std::thread::current().id(),
+            next: std::sync::Mutex::new(ClockReadOutcome::Read),
+        });
+        fixture.ports.clock = clock.clone();
+        let runtime =
+            super::CoreRuntime::start(&DataDirectory::new(directory.path()), fixture.ports)
+                .expect("start core runtime");
+        *clock.next.lock().expect("clock outcome") = ClockReadOutcome::Fail;
+        let error = runtime
+            .shutdown(super::RuntimeExit::Shutdown)
+            .expect_err("shutdown clock fails");
+        assert!(matches!(error, super::StopCoreError::ReadClock { .. }));
+        assert_eq!(
+            fixture.log.events(),
+            vec![
+                LifecycleEvent::ResolverCreated,
+                LifecycleEvent::PipeStopped,
+                LifecycleEvent::ResolverDropped
+            ]
+        );
+        let mut stored = Inspection::open(directory.path());
+        assert_eq!(stored.run(1).end_reason, Some(RunEndReason::Shutdown));
+        assert_eq!(stored.open_clock_count(), 0);
+        drop(stored);
+        std::fs::remove_dir_all(directory.path())
+            .expect("clock failure leaves no open database handles");
+    });
 }

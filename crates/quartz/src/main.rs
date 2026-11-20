@@ -10,7 +10,7 @@ mod core;
 mod data_directory;
 mod dump;
 mod generate_data;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod ipc;
 mod logging;
 #[cfg(any(windows, test))]
@@ -43,22 +43,6 @@ use clap::{Parser, Subcommand};
 use snafu::ResultExt;
 use snafu::Snafu;
 
-#[cfg(windows)]
-#[derive(Debug, Clone, Copy)]
-enum Autostart {
-    Enabled,
-    Disabled,
-}
-#[cfg(windows)]
-impl From<bool> for Autostart {
-    fn from(enabled: bool) -> Self {
-        if enabled {
-            Self::Enabled
-        } else {
-            Self::Disabled
-        }
-    }
-}
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy)]
 enum UiLaunch {
@@ -274,7 +258,7 @@ fn main() -> ExitCode {
     };
     match args.command {
         #[cfg(windows)]
-        None => platform::CoreProcess::new().run(Autostart::from(args.autostart)),
+        None => platform::CoreProcess::new().run(core::app::Autostart::from(args.autostart)),
         #[cfg(not(windows))]
         None => ExitCode::FAILURE,
         #[cfg(windows)]
@@ -303,7 +287,7 @@ fn main() -> ExitCode {
                     },
                 }
             };
-            UiCommand::new(options).run()
+            LaunchUiCommand::new(options).run()
         }
         #[cfg(not(windows))]
         Some(Command::Ui { .. }) => ExitCode::FAILURE,
@@ -345,11 +329,11 @@ fn init_ui_diagnostics() -> Result<(), StartUiError> {
 }
 
 #[cfg(windows)]
-struct UiCommand {
+struct LaunchUiCommand {
     options: quartz_ui::RunOptions,
 }
 #[cfg(windows)]
-impl UiCommand {
+impl LaunchUiCommand {
     fn new(options: quartz_ui::RunOptions) -> Self {
         Self { options }
     }

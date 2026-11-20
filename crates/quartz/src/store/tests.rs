@@ -562,3 +562,27 @@ fn prune_backups_propagates_directory_read_failure() {
         matches!(error, PruneMigrationBackupsError::ReadDirectory { source } if source.kind() == std::io::ErrorKind::NotFound)
     );
 }
+
+#[test]
+fn startup_failure_exposes_only_recovery_classification_and_backup() {
+    assert!(matches!(
+        OpenStoreError::NewerDatabase {
+            version: "future".into()
+        }
+        .startup_failure(),
+        StartupStoreFailure::NewerDatabase
+    ));
+    let backup = PathBuf::from("migration-backup.db");
+    let error = OpenStoreError::Migrate {
+        backup: backup.clone(),
+        source: migrations::ApplyMigrationError::UnregisteredSql,
+    };
+    let StartupStoreFailure::MigrationFailed { backup: actual } = error.startup_failure() else {
+        panic!("expected migration recovery information");
+    };
+    assert_eq!(actual, backup);
+    assert!(matches!(
+        OpenStoreError::InvalidPath.startup_failure(),
+        StartupStoreFailure::Other
+    ));
+}

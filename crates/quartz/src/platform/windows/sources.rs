@@ -54,7 +54,7 @@ impl ClockReader for SystemClock {
         // SAFETY: The output points to a live u64 for the duration of the call.
         if !unsafe { QueryUnbiasedInterruptTime(&mut interrupt_ticks) }.as_bool() {
             return Err(ReadClockError::Interrupt {
-                source: windows::core::Error::from_thread(),
+                source: Box::new(windows::core::Error::from_thread()),
             });
         }
         ClockSample {

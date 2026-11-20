@@ -66,6 +66,33 @@ impl DataDirectory {
     }
 }
 
+impl DataDirectory {
+    pub(crate) fn available_backups(&self) -> Vec<PathBuf> {
+        let entries = match std::fs::read_dir(self.backups()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                tracing::warn!(%error, "could not list migration backups");
+                return Vec::new();
+            }
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|ext| ext == "db") {
+                        files.push(path);
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "could not read migration backup entry"),
+            }
+        }
+        files.sort();
+        files
+    }
+}
+
 impl std::fmt::Display for DataDirectory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.as_path().display().fmt(f)

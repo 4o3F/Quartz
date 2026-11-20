@@ -1,5 +1,6 @@
 //! Real in-process pipe tests use random names and never start the production core.
 
+use super::server::StartPipeServerError;
 use super::*;
 use crate::ipc::{StatusPublisher, UiCommand, client::CallCoreError};
 use crossbeam_channel::{Receiver, bounded};
@@ -723,4 +724,97 @@ fn day_subscription_pushes_latest_committed_version_after_throttle() {
         .clone();
     assert_eq!(changed, expected);
     assert_ne!(first.versions, changed.versions);
+}
+
+#[test]
+fn core_runtime_with_fake_ports_flushes_shutdown_over_test_pipe() {
+    use crate::core::{
+        app::{CoreRuntime, ObservedEvent, PlatformPorts, RuntimeExit},
+        foreground::{ForegroundResolve, Resolution, Snapshot},
+        sources::{ClockReader, ReadClockError},
+    };
+    use crate::store::capture::{
+        WindowsSessionId,
+        test_support::{Inspection, at},
+    };
+    use quartz_domain::capture::{CaptureEvent, RunEndReason, SessionStatus, Timestamp};
+
+    struct TestClock;
+    impl ClockReader for TestClock {
+        fn read(&self) -> Result<Timestamp, ReadClockError> {
+            Ok(at(100))
+        }
+    }
+    struct TestResolver;
+    impl ForegroundResolve for TestResolver {
+        fn resolve(&mut self, _snapshot: Snapshot) -> Resolution {
+            Resolution::Review
+        }
+    }
+    let temporary = tempfile::tempdir().expect("isolated runtime database");
+    let name = PipeName::for_test(windows::core::GUID::new().expect("unique pipe name"));
+    let server_name = name.clone();
+    let runtime = CoreRuntime::start(
+        &crate::data_directory::DataDirectory::new(temporary.path()),
+        PlatformPorts {
+            wake: Arc::new(|| {}),
+            ui_wake: Arc::new(|_| Ok(())),
+            clock: Arc::new(TestClock),
+            session_id: WindowsSessionId::new(7),
+            proposed_device_id: "runtime-test-device-guid".into(),
+            instance_id: quartz_protocol::InstanceId("runtime-test-instance-guid".into()),
+            foreground: Box::new(|| Ok(Box::new(TestResolver))),
+            pipe: Box::new(move |ports| {
+                Ok(Box::new(PipeServer::start(
+                    server::PipeServerConfig {
+                        shutdown_timeout: ports.shutdown_timeout,
+                        owner: ProcessIdentity::current()?,
+                        name: server_name,
+                        timeouts: server::ConnectionTimeouts::default(),
+                        queries: ports.queries,
+                        versions: ports.versions,
+                    },
+                    ports.status,
+                    ports.ui,
+                )?))
+            }),
+            language: quartz_i18n::Language::English,
+            locale: None,
+        },
+    )
+    .expect("start runtime with isolated named pipe");
+    runtime
+        .sender()
+        .observe(ObservedEvent {
+            at: at(100),
+            event: CaptureEvent::Session(SessionStatus::Ready(Default::default())),
+        })
+        .expect("inject observation");
+    let mut ui = CoreClient::connect_named(
+        &name,
+        HelloRole::Ui {
+            ui: UiHello {
+                state: UiState::Starting,
+            },
+        },
+    )
+    .expect("UI handshake over test pipe");
+    let reader = std::thread::spawn(move || ui.read_envelope().expect("shutdown delivered"));
+    let stopping = std::time::Instant::now();
+    runtime
+        .shutdown(RuntimeExit::UserExit)
+        .expect("joined core runtime");
+    assert!(
+        stopping.elapsed() < crate::core::app::SHUTDOWN_TIMEOUT,
+        "runtime shutdown completes within budget"
+    );
+    let Envelope::Event(event) = reader.join().expect("UI reader joined") else {
+        panic!("expected shutdown control");
+    };
+    let control: quartz_protocol::ControlBody =
+        serde_json::from_value(event.body).expect("typed shutdown control");
+    assert_eq!(control.op, quartz_protocol::ControlOp::UiShutdown);
+    let mut stored = Inspection::open(temporary.path());
+    assert_eq!(stored.run(1).end_reason, Some(RunEndReason::UserExit));
+    assert_eq!(stored.open_clock_count(), 0);
 }

@@ -9,7 +9,7 @@ mod win32_error;
 
 pub(crate) use identity::{CheckPeerError, ProcessIdentity};
 pub(crate) use security::CreatePipeSecurityError;
-pub(crate) use server::{PipeServer, PipeServerConfig, StartPipeServerError};
+pub(crate) use server::{PipeServer, PipeServerConfig};
 
 #[cfg(test)]
 mod tests;
