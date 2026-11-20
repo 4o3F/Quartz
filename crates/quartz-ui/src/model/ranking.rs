@@ -70,6 +70,8 @@ pub(crate) struct RankRow {
     /// Display text of the key.
     pub(crate) name: String,
     pub(crate) total: Duration,
+    /// Category with the most time in this row; the last one wins a tie.
+    dominant: CategoryId,
     /// Time per category in category order; never empty.
     pub(crate) parts: Vec<CategoryTotal>,
 }
@@ -77,12 +79,8 @@ pub(crate) struct RankRow {
 impl RankRow {
     /// The category with the most time; the last one wins a tie.
     #[must_use]
-    pub(crate) fn dominant_category(&self) -> CategoryId {
-        self.parts
-            .iter()
-            .max_by_key(|part| part.total)
-            .map(|part| part.category)
-            .expect("a ranking row has at least one part")
+    pub(crate) const fn dominant_category(&self) -> CategoryId {
+        self.dominant
     }
 }
 
@@ -146,14 +144,20 @@ impl Day {
                     RankKey::App(app) => self.app(*app).name.clone(),
                     RankKey::Domain(text) | RankKey::Document(text) => text.clone(),
                 };
+                let parts = self.totals_by_category(segments.iter().map(|segment| CategoryTotal {
+                    category: segment.category,
+                    total: segment.duration(),
+                }));
+                let dominant = parts
+                    .iter()
+                    .max_by_key(|part| part.total)
+                    .expect("a ranking row has at least one non-empty segment")
+                    .category;
                 RankRow {
                     name,
                     total: total(segments.iter().map(|segment| segment.duration())),
-                    parts: self.totals_by_category(
-                        segments
-                            .iter()
-                            .map(|segment| (segment.category, segment.duration())),
-                    ),
+                    dominant,
+                    parts,
                     key,
                 }
             })

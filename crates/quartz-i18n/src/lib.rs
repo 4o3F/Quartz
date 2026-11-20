@@ -17,7 +17,7 @@ mod translations {
 use translations::{_rust_i18n_t, _rust_i18n_try_translate};
 
 /// A catalog message identifier, borrowed without allocating.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MessageKey<'key>(&'key str);
 impl<'key> MessageKey<'key> {
     /// Borrows the identifier used by the embedded catalog and rust-i18n macros.
@@ -115,14 +115,14 @@ impl Language {
     /// Looks up a template in this language without changing the global language; English
     /// fills in missing translations, and an unknown key comes back unchanged.
     #[must_use]
-    pub fn translate(self, key: &str) -> Cow<'_, str> {
-        MessageKey::new(key).in_language(self)
+    pub fn translate<'key>(self, key: MessageKey<'key>) -> Cow<'key, str> {
+        key.in_language(self)
     }
 
     /// Whether this language's own catalog has `key`, without falling back to English.
     #[must_use]
-    pub fn has_message(self, key: &str) -> bool {
-        MessageKey::new(key).is_in_catalog(self)
+    pub fn has_message(self, key: MessageKey<'_>) -> bool {
+        key.is_in_catalog(self)
     }
 
     /// Formats an unfinished-command diagnostic in this language.
@@ -358,8 +358,12 @@ mod tests {
             MessageKey::new("tray.open").in_language(Language::SimplifiedChinese),
             "打开"
         );
-        assert!(Language::SimplifiedChinese.has_message("tray.open"));
-        assert!(!Language::SimplifiedChinese.has_message("no.such.key"));
+        assert_eq!(
+            Language::SimplifiedChinese.translate(MessageKey::new("tray.open")),
+            "打开"
+        );
+        assert!(Language::SimplifiedChinese.has_message(MessageKey::new("tray.open")));
+        assert!(!Language::SimplifiedChinese.has_message(MessageKey::new("no.such.key")));
         assert_eq!(
             Language::negotiate(&["fr", "zh-TW"]),
             Language::SimplifiedChinese

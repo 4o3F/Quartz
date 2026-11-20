@@ -20,6 +20,8 @@ use crate::{
     model::{DaySummary, Share},
 };
 
+/// Number of cells in the status card (07 section 3).
+pub(super) const STAT_CELL_COUNT: usize = 6;
 /// Narrowest the date picker button gets; it grows with the formatted date (11 section 5.6).
 const DATE_PICKER_MIN_WIDTH: f32 = 120.;
 /// Widest the date picker button gets; a longer date ends with an ellipsis.
@@ -71,29 +73,46 @@ impl StatValue {
                 number,
                 unit,
             } => {
-                let (hours, minutes) = (
-                    formatter.text(Msg::UnitHour),
-                    formatter.text(Msg::UnitMinute),
-                );
-                let pairs = match DurationParts::from_duration(duration) {
-                    DurationParts::Minutes(count) => vec![(count, minutes)],
-                    DurationParts::Hours(count) => vec![(count, hours)],
+                struct DurationRun {
+                    count: u64,
+                    label: String,
+                }
+
+                let hours = formatter.text(Msg::UnitHour);
+                let minutes = formatter.text(Msg::UnitMinute);
+                let runs = match DurationParts::from_duration(duration) {
+                    DurationParts::Minutes(count) => vec![DurationRun {
+                        count,
+                        label: minutes,
+                    }],
+                    DurationParts::Hours(count) => vec![DurationRun {
+                        count,
+                        label: hours,
+                    }],
                     DurationParts::HoursMinutes {
                         hours: hour_count,
                         minutes: minute_count,
-                    } => vec![(hour_count, hours), (minute_count, minutes)],
+                    } => vec![
+                        DurationRun {
+                            count: hour_count,
+                            label: hours,
+                        },
+                        DurationRun {
+                            count: minute_count,
+                            label: minutes,
+                        },
+                    ],
                 };
-                pairs
-                    .into_iter()
-                    .flat_map(|(count, label)| {
+                runs.into_iter()
+                    .flat_map(|run| {
                         [
                             StatSegment {
-                                text: count.to_string(),
+                                text: run.count.to_string(),
                                 ramp: number,
                                 role: SegmentRole::Number,
                             },
                             StatSegment {
-                                text: label,
+                                text: run.label,
                                 ramp: unit,
                                 role: SegmentRole::Unit,
                             },
@@ -115,7 +134,7 @@ struct StatCell {
 }
 
 /// The status card cells in display order (07 section 3).
-fn stat_cells(summary: &DaySummary) -> [StatCell; 6] {
+fn stat_cells(summary: &DaySummary) -> [StatCell; STAT_CELL_COUNT] {
     let cell = |value, label| StatCell {
         value,
         label,
@@ -246,20 +265,15 @@ impl AppShell {
     /// The cells in equal columns: the largest of 6, 3, 2 or 1 columns in which the widest cell
     /// still fits the width the card gives the grid (07 section 2.1).
     fn render_status(&self, ui: &Widgets<'_>, measure: &TextMeasure<'_>) -> impl IntoElement {
-        let views: Vec<StatCellView> = stat_cells(self.day.summary())
-            .into_iter()
-            .map(|cell| self.stat_cell(ui, measure, cell))
-            .collect();
+        let views: [StatCellView; STAT_CELL_COUNT] =
+            stat_cells(self.day.summary()).map(|cell| self.stat_cell(ui, measure, cell));
         let widest = views
             .iter()
             .fold(0., |widest, view| f32::max(widest, view.width));
         let height = views
             .iter()
             .fold(px(0.), |height, view| height.max(view.height));
-        let cells = views
-            .into_iter()
-            .map(|view| view.element.into_any_element())
-            .collect();
+        let cells = views.map(|view| view.element.into_any_element());
         ui.card()
             .flex()
             .flex_col()

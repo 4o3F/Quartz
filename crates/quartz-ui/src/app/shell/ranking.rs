@@ -26,11 +26,18 @@ const BAR_HEIGHT: f32 = 6.;
 /// The duration column: as wide as its widest duration, within this range (11 section 5.6).
 const VALUE_RANGE: ColumnRange = ColumnRange::new(32., 96.);
 
+/// One category slice of a ranking proportion bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RankBarPart {
+    category: CategoryId,
+    share: Share,
+}
+
 /// The proportion bar of one row: its width relative to the longest row and its category parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RankBar {
     width: Share,
-    parts: Vec<(CategoryId, Share)>,
+    parts: Vec<RankBarPart>,
 }
 
 impl RankBar {
@@ -40,7 +47,10 @@ impl RankBar {
             parts: row
                 .parts
                 .iter()
-                .map(|part| (part.category, Share::of(part.total, row.total)))
+                .map(|part| RankBarPart {
+                    category: part.category,
+                    share: Share::of(part.total, row.total),
+                })
                 .collect(),
         }
     }
@@ -57,12 +67,31 @@ struct RankCell {
     value_width: f32,
 }
 
+/// One ranking tab in display order with its element id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RankingTab {
+    kind: RankingKind,
+    id: &'static str,
+}
+
 /// Ranking tabs in display order with their element ids.
-const TABS: [(RankingKind, &str); 4] = [
-    (RankingKind::Apps, "ranking-apps"),
-    (RankingKind::Domains, "ranking-domains"),
-    (RankingKind::Documents, "ranking-documents"),
-    (RankingKind::Mixed, "ranking-mixed"),
+const TABS: [RankingTab; 4] = [
+    RankingTab {
+        kind: RankingKind::Apps,
+        id: "ranking-apps",
+    },
+    RankingTab {
+        kind: RankingKind::Domains,
+        id: "ranking-domains",
+    },
+    RankingTab {
+        kind: RankingKind::Documents,
+        id: "ranking-documents",
+    },
+    RankingTab {
+        kind: RankingKind::Mixed,
+        id: "ranking-mixed",
+    },
 ];
 
 impl AppShell {
@@ -101,10 +130,10 @@ impl AppShell {
             );
         let tabs = ui.segmented(
             "ranking-tabs",
-            TABS.map(|(kind, id)| Segment {
-                id,
-                label: self.formatter.ranking_tab(kind),
-                value: kind,
+            TABS.map(|tab| Segment {
+                id: tab.id,
+                label: self.formatter.ranking_tab(tab.kind),
+                value: tab.kind,
             }),
             self.ranking,
             |kind| {
@@ -240,11 +269,11 @@ impl AppShell {
             .w(relative(bar.width.fraction()))
             .rounded_full()
             .overflow_hidden()
-            .children(bar.parts.iter().map(|(category, share)| {
+            .children(bar.parts.iter().map(|part| {
                 div()
                     .h_full()
-                    .w(relative(share.fraction()))
-                    .bg(ui.palette.category(self.day.category(*category).color))
+                    .w(relative(part.share.fraction()))
+                    .bg(ui.palette.category(self.day.category(part.category).color))
             }))
     }
 }
@@ -256,6 +285,12 @@ mod tests {
 
     #[test]
     fn bars_are_relative_to_the_longest_row_and_split_by_category() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct CategoryPercent {
+            category: CategoryId,
+            percent: u32,
+        }
+
         let day = day(
             vec![
                 segment(1, EDITOR, WORK, (9, 0), (10, 0)),
@@ -268,11 +303,26 @@ mod tests {
         let browser = rows.get(1).expect("browser row");
         let bar = RankBar::of(browser, Duration::from_secs(60 * 60));
         assert!((bar.width.fraction() - 0.5).abs() < f32::EPSILON);
-        let parts: Vec<(CategoryId, u32)> = bar
+        let parts: Vec<CategoryPercent> = bar
             .parts
             .iter()
-            .map(|(category, share)| (*category, share.percent()))
+            .map(|part| CategoryPercent {
+                category: part.category,
+                percent: part.share.percent(),
+            })
             .collect();
-        assert_eq!(parts, [(WORK, 33), (PLAY, 67)]);
+        assert_eq!(
+            parts,
+            [
+                CategoryPercent {
+                    category: WORK,
+                    percent: 33,
+                },
+                CategoryPercent {
+                    category: PLAY,
+                    percent: 67,
+                },
+            ]
+        );
     }
 }

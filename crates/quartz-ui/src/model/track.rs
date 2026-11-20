@@ -69,19 +69,27 @@ impl Day {
     }
 
     pub(super) fn compute_lanes(&self) -> Vec<Lane> {
+        struct AppTotal {
+            app: AppId,
+            total: Duration,
+        }
+
         let mut totals: BTreeMap<AppId, Duration> = BTreeMap::new();
         for segment in &self.segments {
             *totals.entry(segment.app).or_default() += segment.duration();
         }
-        let mut apps: Vec<(AppId, Duration)> = totals.into_iter().collect();
-        apps.sort_by_key(|(_, total)| std::cmp::Reverse(*total));
+        let mut apps: Vec<AppTotal> = totals
+            .into_iter()
+            .map(|(app, total)| AppTotal { app, total })
+            .collect();
+        apps.sort_by_key(|entry| std::cmp::Reverse(entry.total));
         apps.into_iter()
-            .map(|(app, _)| Lane {
-                app,
+            .map(|entry| Lane {
+                app: entry.app,
                 segments: self
                     .segments
                     .iter()
-                    .filter(|segment| segment.app == app)
+                    .filter(|segment| segment.app == entry.app)
                     .map(|segment| segment.id)
                     .collect(),
             })

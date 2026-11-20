@@ -238,6 +238,13 @@ fn place_offscreen(window: &Window) -> Result<(), PlaceWindowError> {
     Ok(())
 }
 
+/// Initial details panel subject and hovered segment of a preview window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct InitialView {
+    details: Option<DetailsSubject>,
+    hover: Option<SegmentId>,
+}
+
 impl PreviewState {
     /// The timeline range this state opens with.
     const fn range(self) -> RangeChoice {
@@ -248,12 +255,17 @@ impl PreviewState {
     }
 
     /// The details subject and hovered segment this state opens on the sample day.
-    fn initial_view(self, sample: &SampleDay) -> (Option<DetailsSubject>, Option<SegmentId>) {
+    fn initial_view(self, sample: &SampleDay) -> InitialView {
         match self {
-            Self::Today => (None, None),
-            Self::TodayDetails => (Some(DetailsSubject::Segment(sample.details_segment)), None),
-            Self::TodayHover => (None, Some(sample.hover_segment)),
-            Self::TodayFullDay => (None, None),
+            Self::Today | Self::TodayFullDay => InitialView::default(),
+            Self::TodayDetails => InitialView {
+                details: Some(DetailsSubject::Segment(sample.details_segment)),
+                hover: None,
+            },
+            Self::TodayHover => InitialView {
+                details: None,
+                hover: Some(sample.hover_segment),
+            },
         }
     }
 }
@@ -266,7 +278,7 @@ impl PreviewOptions {
     pub fn run(self) -> Result<(), RunPreviewError> {
         let theme = ThemeBundle::embedded().context(LoadThemeSnafu)?;
         let sample = SampleDay::new();
-        let (details, hover) = self.state.initial_view(&sample);
+        let initial = self.state.initial_view(&sample);
         let tokens = theme.tokens();
         let text_scale_source = self
             .text_scale
@@ -279,11 +291,11 @@ impl PreviewOptions {
                 formatter: Formatter::new(self.language),
                 tokens,
                 page: Page::Today,
-                details,
+                details: initial.details,
                 range: self.state.range(),
                 text_scale: LiveTextScale::read(text_scale_source).context(ReadTextScaleSnafu)?,
             };
-            self.open_window(init, hover, cx)
+            self.open_window(init, initial.hover, cx)
         })
     }
 
@@ -348,14 +360,23 @@ mod tests {
     #[test]
     fn each_state_opens_its_sample_segment() {
         let sample = SampleDay::new();
-        assert_eq!(PreviewState::Today.initial_view(&sample), (None, None));
+        assert_eq!(
+            PreviewState::Today.initial_view(&sample),
+            InitialView::default()
+        );
         assert_eq!(
             PreviewState::TodayDetails.initial_view(&sample),
-            (Some(DetailsSubject::Segment(sample.details_segment)), None)
+            InitialView {
+                details: Some(DetailsSubject::Segment(sample.details_segment)),
+                hover: None,
+            }
         );
         assert_eq!(
             PreviewState::TodayHover.initial_view(&sample),
-            (None, Some(sample.hover_segment))
+            InitialView {
+                details: None,
+                hover: Some(sample.hover_segment),
+            }
         );
     }
 

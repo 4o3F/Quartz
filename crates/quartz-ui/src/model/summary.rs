@@ -108,11 +108,11 @@ impl Day {
     /// Time per category of `parts`, in category order, without empty categories.
     pub(super) fn totals_by_category(
         &self,
-        parts: impl IntoIterator<Item = (CategoryId, Duration)>,
+        parts: impl IntoIterator<Item = CategoryTotal>,
     ) -> Vec<CategoryTotal> {
         let mut sums: BTreeMap<CategoryId, Duration> = BTreeMap::new();
-        for (category, duration) in parts {
-            *sums.entry(category).or_default() += duration;
+        for part in parts {
+            *sums.entry(part.category).or_default() += part.total;
         }
         self.categories
             .iter()
@@ -127,11 +127,11 @@ impl Day {
     }
 
     pub(super) fn compute_category_totals(&self) -> Vec<CategoryTotal> {
-        let mut totals = self.totals_by_category(
-            self.segments
-                .iter()
-                .map(|segment| (segment.category, segment.duration())),
-        );
+        let mut totals =
+            self.totals_by_category(self.segments.iter().map(|segment| CategoryTotal {
+                category: segment.category,
+                total: segment.duration(),
+            }));
         totals.sort_by_key(|entry| std::cmp::Reverse(entry.total));
         totals
     }
@@ -213,11 +213,12 @@ impl Day {
                 let window = TimeSpan::new(TimeOfDay::hm(hour, 0), TimeOfDay::hm(hour + 1, 0));
                 HourlyBar {
                     hour,
-                    parts: self.totals_by_category(
-                        self.segments
-                            .iter()
-                            .map(|segment| (segment.category, segment.span.overlap(window))),
-                    ),
+                    parts: self.totals_by_category(self.segments.iter().map(|segment| {
+                        CategoryTotal {
+                            category: segment.category,
+                            total: segment.span.overlap(window),
+                        }
+                    })),
                 }
             })
             .collect()
@@ -305,12 +306,32 @@ mod day_tests {
             ],
             vec![],
         );
-        let hours: Vec<(u32, Duration)> = day
+        #[derive(Debug, PartialEq, Eq)]
+        struct HourTotal {
+            hour: u32,
+            total: Duration,
+        }
+        let hours: Vec<HourTotal> = day
             .hourly()
             .iter()
-            .map(|bar| (bar.hour, bar.parts.iter().map(|part| part.total).sum()))
+            .map(|bar| HourTotal {
+                hour: bar.hour,
+                total: bar.parts.iter().map(|part| part.total).sum(),
+            })
             .collect();
-        assert_eq!(hours, [(9, minutes(20)), (10, minutes(60))]);
+        assert_eq!(
+            hours,
+            [
+                HourTotal {
+                    hour: 9,
+                    total: minutes(20)
+                },
+                HourTotal {
+                    hour: 10,
+                    total: minutes(60)
+                }
+            ]
+        );
         let ten = day.hourly().get(1).expect("hour 10");
         let categories: Vec<_> = ten.parts.iter().map(|part| part.category).collect();
         assert_eq!(categories, [WORK, PLAY], "category order");

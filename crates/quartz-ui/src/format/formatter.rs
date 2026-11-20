@@ -5,7 +5,7 @@ use std::time::Duration;
 use jiff::civil::{Date, Weekday};
 use quartz_i18n::Language;
 
-use super::message::{Arg, Msg};
+use super::message::{Arg, ArgValue, Msg};
 use crate::model::{
     BuiltinCategory, CategoryName, ClassificationSource, Day, MINUTES_PER_HOUR, RankingKind,
     RuleCondition, SECONDS_PER_MINUTE, Share, StateKind,
@@ -66,10 +66,10 @@ impl Formatter {
     /// A message with its placeholders filled in one pass, so placeholder-like text inside a
     /// value is never substituted again.
     #[must_use]
-    pub(crate) fn text_with(self, msg: Msg, values: &[(Arg, &str)]) -> String {
+    pub(crate) fn text_with(self, msg: Msg, values: &[ArgValue<'_>]) -> String {
         debug_assert!(
             values.len() == msg.args().len()
-                && values.iter().all(|(arg, _)| msg.args().contains(arg)),
+                && values.iter().all(|entry| msg.args().contains(&entry.arg)),
             "{msg:?} takes {:?}",
             msg.args()
         );
@@ -83,12 +83,12 @@ impl Formatter {
             DurationParts::HoursMinutes { hours, minutes } => self.text_with(
                 Msg::DurationHoursMinutes,
                 &[
-                    (Arg::Hours, &hours.to_string()),
-                    (Arg::Minutes, &minutes.to_string()),
+                    Arg::Hours.with(&hours.to_string()),
+                    Arg::Minutes.with(&minutes.to_string()),
                 ],
             ),
             DurationParts::Hours(hours) => {
-                self.text_with(Msg::DurationHours, &[(Arg::Hours, &hours.to_string())])
+                self.text_with(Msg::DurationHours, &[Arg::Hours.with(&hours.to_string())])
             }
             DurationParts::Minutes(minutes) => self.whole_minutes(minutes),
         }
@@ -99,20 +99,26 @@ impl Formatter {
     pub(crate) fn whole_minutes(self, minutes: u64) -> String {
         self.text_with(
             Msg::DurationMinutes,
-            &[(Arg::Minutes, &minutes.to_string())],
+            &[Arg::Minutes.with(&minutes.to_string())],
         )
     }
 
     /// Whole percent such as `64%`.
     #[must_use]
     pub(crate) fn percent(self, share: Share) -> String {
-        self.text_with(Msg::Percent, &[(Arg::Value, &share.percent().to_string())])
+        self.text_with(
+            Msg::Percent,
+            &[Arg::Value.with(&share.percent().to_string())],
+        )
     }
 
     /// The application switches per hour of the status card.
     #[must_use]
     pub(crate) fn switches(self, per_hour: u64) -> String {
-        self.text_with(Msg::StatSwitchCount, &[(Arg::Count, &per_hour.to_string())])
+        self.text_with(
+            Msg::StatSwitchCount,
+            &[Arg::Count.with(&per_hour.to_string())],
+        )
     }
 
     /// Display name of a category; user names are shown as typed.
@@ -168,13 +174,13 @@ impl Formatter {
                 let condition = day.rule(*rule).condition.value.as_str();
                 match form {
                     SourceText::Short => {
-                        self.text_with(Msg::DetailsRuleLine, &[(Arg::Condition, condition)])
+                        self.text_with(Msg::DetailsRuleLine, &[Arg::Condition.with(condition)])
                     }
                     SourceText::WithCategory(category) => self.text_with(
                         Msg::TooltipRule,
                         &[
-                            (Arg::Condition, condition),
-                            (Arg::Category, &self.category_name(category)),
+                            Arg::Condition.with(condition),
+                            Arg::Category.with(&self.category_name(category)),
                         ],
                     ),
                 }
@@ -190,9 +196,9 @@ impl Formatter {
         self.text_with(
             Msg::DetailsCondition,
             &[
-                (Arg::Field, condition.field.as_str()),
-                (Arg::Operator, condition.operator.as_str()),
-                (Arg::Value, &format!("{:?}", condition.value)),
+                Arg::Field.with(condition.field.as_str()),
+                Arg::Operator.with(condition.operator.as_str()),
+                Arg::Value.with(&format!("{:?}", condition.value)),
             ],
         )
     }
@@ -214,12 +220,13 @@ impl Formatter {
     /// Month and day with weekday, such as `11月16日 周一` or `Mon, Nov 16`.
     #[must_use]
     pub(crate) fn date(self, date: Date) -> String {
+        let month = Msg::month(date.month()).expect("a civil Date always has a month in 1..=12");
         self.text_with(
             Msg::MonthDayWeekday,
             &[
-                (Arg::Month, &self.text(Msg::month(date.month()))),
-                (Arg::Day, &date.day().to_string()),
-                (Arg::Weekday, &self.weekday(date.weekday())),
+                Arg::Month.with(&self.text(month)),
+                Arg::Day.with(&date.day().to_string()),
+                Arg::Weekday.with(&self.weekday(date.weekday())),
             ],
         )
     }
@@ -227,20 +234,16 @@ impl Formatter {
 
 /// Replaces every `%{name}` whose name appears in `values`; other text, including placeholders
 /// without a value, is copied unchanged.
-fn fill_placeholders(template: &str, values: &[(Arg, &str)]) -> String {
+fn fill_placeholders(template: &str, values: &[ArgValue<'_>]) -> String {
     let mut text = String::with_capacity(template.len());
     let mut rest = template;
-    while let Some(open) = rest.find("%{") {
-        let (before, placeholder) = rest.split_at(open);
+    while let Some((before, inner)) = rest.split_once("%{") {
         text.push_str(before);
-        let inner = placeholder
-            .strip_prefix("%{")
-            .expect("find stopped at a placeholder opening");
         let filled = inner.split_once('}').and_then(|(name, after)| {
             values
                 .iter()
-                .find(|(arg, _)| arg.name() == name)
-                .map(|(_, value)| (*value, after))
+                .find(|entry| entry.arg.name() == name)
+                .map(|entry| (entry.value, after))
         });
         match filled {
             Some((value, after)) => {
@@ -313,7 +316,10 @@ mod tests {
     fn placeholder_text_inside_a_value_is_not_substituted_again() {
         let label = EN.text_with(
             Msg::TimelineBlockLabel,
-            &[(Arg::Name, "%{duration} %{name}"), (Arg::Duration, "5m")],
+            &[
+                Arg::Name.with("%{duration} %{name}"),
+                Arg::Duration.with("5m"),
+            ],
         );
         assert_eq!(label, "%{duration} %{name} 5m");
     }
@@ -321,11 +327,11 @@ mod tests {
     #[test]
     fn unknown_and_unclosed_placeholders_are_copied() {
         assert_eq!(
-            fill_placeholders("a %{x} %{y", &[(Arg::Name, "1")]),
+            fill_placeholders("a %{x} %{y", &[Arg::Name.with("1")]),
             "a %{x} %{y"
         );
         assert_eq!(
-            fill_placeholders("%{name}%{name}", &[(Arg::Name, "1")]),
+            fill_placeholders("%{name}%{name}", &[Arg::Name.with("1")]),
             "11"
         );
     }

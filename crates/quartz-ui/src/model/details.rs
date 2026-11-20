@@ -10,7 +10,7 @@ use super::{
     day::{Day, WEEK_DAYS},
     rule::Explanation,
     segment::{ClassificationSource, Segment, SegmentId},
-    summary::total,
+    summary::{CategoryTotal, total},
     time::TimeSpan,
 };
 
@@ -87,11 +87,10 @@ impl Day {
         let category = match selected {
             Some(segment) => segment.category,
             None => {
-                self.totals_by_category(
-                    app_segments
-                        .iter()
-                        .map(|segment| (segment.category, segment.duration())),
-                )
+                self.totals_by_category(app_segments.iter().map(|segment| CategoryTotal {
+                    category: segment.category,
+                    total: segment.duration(),
+                }))
                 .into_iter()
                 .max_by_key(|entry| entry.total)?
                 .category

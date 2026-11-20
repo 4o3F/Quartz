@@ -86,6 +86,13 @@ pub(crate) struct Placement {
     pub(crate) width: f32,
 }
 
+/// Left edge and width of a span in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PixelSpan {
+    pub(crate) left: f32,
+    pub(crate) width: f32,
+}
+
 /// The physical pixel grid of one plot row (07 section 4.3). Every edge is a whole number of
 /// physical pixels computed from the same function of the time fraction, so touching blocks share
 /// an edge exactly at any scale factor. Lengths below are physical pixels held as whole `f32`s.
@@ -152,10 +159,13 @@ impl PlotGrid {
     /// The left edge and width of `placement` in logical pixels, without the block minimum or
     /// gap; for the selection overlay.
     #[must_use]
-    pub(crate) fn span(self, placement: Placement) -> (f32, f32) {
+    pub(crate) fn span(self, placement: Placement) -> PixelSpan {
         let left = self.edge(placement.left);
         let right = self.edge(placement.left + placement.width);
-        (self.scale.logical(left), self.scale.logical(right - left))
+        PixelSpan {
+            left: self.scale.logical(left),
+            width: self.scale.logical(right - left),
+        }
     }
 
     /// The tile of `placement`.
@@ -265,11 +275,18 @@ pub(crate) struct Marker<T> {
     longest: Duration,
 }
 
+/// One block tile at its interval's true extent.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Block<T> {
+    pub(crate) placement: PixelPlacement,
+    pub(crate) item: T,
+}
+
 /// The tiles of one row: blocks at their true extents, then markers (drawn above the blocks, in
 /// time order) with coincident ones grouped.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RowTiles<T> {
-    pub(crate) blocks: Vec<(PixelPlacement, T)>,
+    pub(crate) blocks: Vec<Block<T>>,
     pub(crate) markers: Vec<Marker<T>>,
 }
 
@@ -283,7 +300,10 @@ impl<T> RowTiles<T> {
         };
         for interval in intervals {
             match interval.placement.kind() {
-                PlacementKind::Block => tiles.blocks.push((interval.placement, interval.item)),
+                PlacementKind::Block => tiles.blocks.push(Block {
+                    placement: interval.placement,
+                    item: interval.item,
+                }),
                 PlacementKind::Marker => {
                     let cell = tiles
                         .markers
@@ -316,7 +336,7 @@ impl<T> RowTiles<T> {
         let markers = self.markers.into_iter().map(|marker| marker.representative);
         self.blocks
             .into_iter()
-            .map(|(_, item)| item)
+            .map(|block| block.item)
             .chain(markers)
             .collect()
     }
@@ -471,10 +491,10 @@ impl View {
             .collect()
     }
 
-    /// The span after one zoom step around the center, kept inside the day and no narrower
+    /// The view after one zoom step around the center, kept inside the day and no narrower
     /// than [`MIN_ZOOM_MINUTES`].
     #[must_use]
-    pub(crate) fn zoomed(self, step: ZoomStep) -> TimeSpan {
+    pub(crate) fn zoomed(self, step: ZoomStep) -> Self {
         let length = self.span.end().seconds() - self.span.start().seconds();
         let center = self.span.start().seconds() + length / 2;
         let half = match step {
@@ -490,7 +510,9 @@ impl View {
         let end =
             TimeOfDay::from_seconds(center.saturating_add(half).min(TimeOfDay::END.seconds()))
                 .expect("the end is clamped to the day");
-        TimeSpan::new(start, end)
+        Self {
+            span: TimeSpan::new(start, end),
+        }
     }
 }
 
@@ -816,15 +838,15 @@ mod tests {
         ]);
         assert_eq!(tiles.blocks.len(), 2);
         assert_eq!(tiles.markers.len(), 1);
-        let [(first, _), (second, _)] = tiles.blocks.as_slice() else {
+        let [first, second] = tiles.blocks.as_slice() else {
             panic!("two blocks");
         };
-        assert!((first.left()).abs() < 1e-3);
+        assert!((first.placement.left()).abs() < 1e-3);
         assert!(
-            (first.left() + first.width() - 150.).abs() < 1.,
+            (first.placement.left() + first.placement.width() - 150.).abs() < 1.,
             "the block keeps its own right edge, not stretched: {first:?}"
         );
-        assert!(second.left() >= first.left() + first.width() - 1e-3);
+        assert!(second.placement.left() >= first.placement.left() + first.placement.width() - 1e-3);
     }
 
     #[test]
@@ -838,16 +860,16 @@ mod tests {
     #[test]
     fn zoom_halves_and_doubles_within_bounds() {
         let view = View::new(span((10, 0), (12, 0))).expect("non-empty");
-        assert_eq!(view.zoomed(ZoomStep::In), span((10, 30), (11, 30)));
-        assert_eq!(view.zoomed(ZoomStep::Out), span((9, 0), (13, 0)));
+        assert_eq!(view.zoomed(ZoomStep::In).span(), span((10, 30), (11, 30)));
+        assert_eq!(view.zoomed(ZoomStep::Out).span(), span((9, 0), (13, 0)));
         let narrow = View::new(span((10, 0), (10, 6))).expect("non-empty");
         assert_eq!(
-            narrow.zoomed(ZoomStep::In).duration(),
+            narrow.zoomed(ZoomStep::In).span().duration(),
             Duration::from_secs(5 * 60)
         );
         let early = View::new(span((0, 0), (4, 0))).expect("non-empty");
-        assert_eq!(early.zoomed(ZoomStep::Out), span((0, 0), (6, 0)));
-        assert_eq!(View::full_day().zoomed(ZoomStep::Out), TimeSpan::DAY);
+        assert_eq!(early.zoomed(ZoomStep::Out).span(), span((0, 0), (6, 0)));
+        assert_eq!(View::full_day().zoomed(ZoomStep::Out).span(), TimeSpan::DAY);
     }
 
     #[test]

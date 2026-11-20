@@ -6,7 +6,7 @@
 
 use gpui_kit::{
     AnyElement, ClickEvent, Context, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    MouseMoveEvent, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
+    MouseMoveEvent, ParentElement as _, Pixels, Point, Stateful, StatefulInteractiveElement as _,
     Styled as _, anchored, assets::IconName, div, pattern_slash, point,
     prelude::FluentBuilder as _, px,
 };
@@ -42,18 +42,30 @@ const TOOLTIP_MIN_WIDTH: f32 = 200.;
 /// Widest the hover tooltip gets before its text wraps (11 section 5.6).
 const TOOLTIP_MAX_WIDTH: f32 = 320.;
 /// Offset of the tooltip from the pointer.
-const TOOLTIP_OFFSET: (f32, f32) = (12., 16.);
+const TOOLTIP_OFFSET: Point<Pixels> = point(px(12.), px(16.));
 /// Smallest height of a category chip; it grows with the text.
 const CHIP_HEIGHT: f32 = 20.;
 
+/// One lane-mode option with its element id and localized label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LaneModeOption {
+    mode: LaneMode,
+    id: &'static str,
+    label: Msg,
+}
+
 /// Lane-mode choices in display order with their element ids and labels.
-const LANE_MODES: [(LaneMode, &str, Msg); 2] = [
-    (LaneMode::Swimlanes, "lanes-apps", Msg::TimelineLanesApps),
-    (
-        LaneMode::CategoryOnly,
-        "lanes-category",
-        Msg::TimelineLanesCategory,
-    ),
+const LANE_MODES: [LaneModeOption; 2] = [
+    LaneModeOption {
+        mode: LaneMode::Swimlanes,
+        id: "lanes-apps",
+        label: Msg::TimelineLanesApps,
+    },
+    LaneModeOption {
+        mode: LaneMode::CategoryOnly,
+        id: "lanes-category",
+        label: Msg::TimelineLanesCategory,
+    },
 ];
 
 /// Whether the pointer is over a block.
@@ -96,9 +108,7 @@ impl AppShell {
         match self.range {
             RangeChoice::Activity => View::activity(self.day.activity_range()),
             RangeChoice::FullDay => View::full_day(),
-            RangeChoice::Zoomed(span) => {
-                View::new(span).expect("zooming never yields an empty span")
-            }
+            RangeChoice::Zoomed(view) => view,
         }
     }
 
@@ -152,11 +162,9 @@ impl AppShell {
     /// The height of the plot box: the rows between the vertical plot padding.
     fn plot_height(&self, ui: &Widgets<'_>) -> Pixels {
         let sizes = &ui.metrics.timeline;
-        let lanes = self.visible_lanes().len();
-        let lane_rows = (sizes.lane_gap + Self::lane_height(ui))
-            * f32::from(
-                u16::try_from(lanes).expect("a day has far fewer than 65536 application lanes"),
-            );
+        let lane_row = sizes.lane_gap + Self::lane_height(ui);
+        let lane_rows = std::iter::repeat_n(lane_row, self.visible_lanes().len())
+            .fold(px(0.), |total, row| total + row);
         2. * ui.metrics.space.xs + Self::track_height(ui) + lane_rows + Self::axis_height(ui)
     }
 
@@ -221,10 +229,10 @@ impl AppShell {
             )
             .child(ui.segmented(
                 "timeline-lanes",
-                LANE_MODES.map(|(mode, id, label)| SegmentedItem {
-                    id,
-                    label: self.formatter.text(label),
-                    value: mode,
+                LANE_MODES.map(|option| SegmentedItem {
+                    id: option.id,
+                    label: self.formatter.text(option.label),
+                    value: option.mode,
                 }),
                 self.lanes,
                 |mode| cx.listener(move |this, _: &ClickEvent, _, cx| this.set_lanes(mode, cx)),
@@ -390,15 +398,15 @@ impl AppShell {
         geometry: &PlotGeometry,
     ) -> Option<Div> {
         let interval = self.details.as_ref()?.content.interval.as_ref()?;
-        let (left, width) = geometry.grid.span(view.place(interval.span)?);
+        let span = geometry.grid.span(view.place(interval.span)?);
         let accent = ui.palette.accent_fill;
         Some(
             div()
                 .absolute()
                 .top(px(0.))
                 .bottom(px(0.))
-                .left(px(left))
-                .w(px(width))
+                .left(px(span.left))
+                .w(px(span.width))
                 .bg(accent.opacity(ui.metrics.opacity.selection))
                 .border_l_1()
                 .border_r_1()
@@ -480,8 +488,8 @@ impl AppShell {
         let full = self.formatter.text_with(
             Msg::TimelineBlockLabel,
             &[
-                (Arg::Name, &name),
-                (Arg::Duration, &self.formatter.duration(span.duration())),
+                Arg::Name.with(&name),
+                Arg::Duration.with(&self.formatter.duration(span.duration())),
             ],
         );
         block_text(
@@ -523,11 +531,8 @@ impl AppShell {
                 let full = self.formatter.text_with(
                     Msg::TimelineStateLabel,
                     &[
-                        (Arg::State, &name),
-                        (
-                            Arg::Duration,
-                            &self.formatter.duration(state.span.duration()),
-                        ),
+                        Arg::State.with(&name),
+                        Arg::Duration.with(&self.formatter.duration(state.span.duration())),
                     ],
                 );
                 block_text(
@@ -607,11 +612,10 @@ impl AppShell {
                     .expect("hover targets are main blocks of the day shown"),
             ),
         };
-        let (offset_x, offset_y) = TOOLTIP_OFFSET;
         Some(
             anchored()
                 .position(hover.position)
-                .offset(point(px(offset_x), px(offset_y)))
+                .offset(TOOLTIP_OFFSET)
                 .snap_to_window_with_margin(ui.metrics.space.s)
                 .child(
                     ui.flyout()

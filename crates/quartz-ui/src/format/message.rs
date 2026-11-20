@@ -2,6 +2,8 @@
 //! checks every id against the `en` and `zh-CN` catalogs, so a typo is a test failure instead of
 //! a key shown on screen.
 
+use quartz_i18n::MessageKey;
+
 /// Defines [`Msg`] with its catalog key and placeholders per variant.
 macro_rules! messages {
     ($($(#[$doc:meta])* $variant:ident => $key:literal $([$($arg:ident),+])?,)+) => {
@@ -18,10 +20,10 @@ macro_rules! messages {
 
             /// The catalog key.
             #[must_use]
-            pub(crate) const fn key(self) -> &'static str {
-                match self {
+            pub(crate) const fn key(self) -> MessageKey<'static> {
+                MessageKey::new(match self {
                     $(Self::$variant => $key,)+
-                }
+                })
             }
 
             /// The placeholders the message takes.
@@ -164,7 +166,20 @@ pub(crate) enum Arg {
     Weekday,
 }
 
+/// One placeholder argument paired with its replacement text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ArgValue<'a> {
+    pub(crate) arg: Arg,
+    pub(crate) value: &'a str,
+}
+
 impl Arg {
+    /// Pairs this placeholder with its replacement text.
+    #[must_use]
+    pub(crate) const fn with(self, value: &str) -> ArgValue<'_> {
+        ArgValue { arg: self, value }
+    }
+
     /// The placeholder name inside `%{…}`.
     #[must_use]
     pub(crate) const fn name(self) -> &'static str {
@@ -208,17 +223,11 @@ impl Msg {
         Self::MonthDecember,
     ];
 
-    /// The name of `month`, numbered 1 to 12.
-    ///
-    /// # Panics
-    /// Panics for numbers outside 1 to 12; month numbers come from validated dates.
+    /// The name of `month`, numbered 1 to 12; `None` outside that range.
     #[must_use]
-    pub(crate) fn month(month: i8) -> Self {
-        usize::try_from(month - 1)
-            .ok()
-            .and_then(|index| Self::MONTHS.get(index))
-            .copied()
-            .unwrap_or_else(|| panic!("month {month} is outside 1 to 12"))
+    pub(crate) fn month(month: i8) -> Option<Self> {
+        let index = usize::try_from(month.checked_sub(1)?).ok()?;
+        Self::MONTHS.get(index).copied()
     }
 }
 
@@ -260,13 +269,16 @@ mod tests {
 
     #[test]
     fn message_keys_are_unique() {
-        let keys: BTreeSet<&str> = Msg::ALL.iter().map(|msg| msg.key()).collect();
+        let keys: BTreeSet<MessageKey<'static>> = Msg::ALL.iter().map(|msg| msg.key()).collect();
         assert_eq!(keys.len(), Msg::ALL.len());
     }
 
     #[test]
     fn months_are_numbered_from_one() {
-        assert_eq!(Msg::month(1), Msg::MonthJanuary);
-        assert_eq!(Msg::month(12), Msg::MonthDecember);
+        assert_eq!(Msg::month(1), Some(Msg::MonthJanuary));
+        assert_eq!(Msg::month(12), Some(Msg::MonthDecember));
+        assert_eq!(Msg::month(0), None);
+        assert_eq!(Msg::month(13), None);
+        assert_eq!(Msg::month(i8::MIN), None);
     }
 }

@@ -262,7 +262,7 @@ impl AppShell {
                     ))
                     .child(self.formatter.text_with(
                         Msg::DetailsMerged,
-                        &[(Arg::Count, &interval.merged.to_string())],
+                        &[Arg::Count.with(&interval.merged.to_string())],
                     )),
             )
     }
@@ -436,8 +436,8 @@ impl AppShell {
                             .child(self.formatter.text_with(
                                 Msg::DetailsRulePriority,
                                 &[
-                                    (Arg::Rule, &why.rule.name),
-                                    (Arg::Priority, &why.rule.priority.to_string()),
+                                    Arg::Rule.with(&why.rule.name),
+                                    Arg::Priority.with(&why.rule.priority.to_string()),
                                 ],
                             )),
                     )
@@ -456,7 +456,7 @@ impl AppShell {
                     .text_color(palette.text_secondary)
                     .child(
                         self.formatter
-                            .text_with(Msg::DetailsRuleSet, &[(Arg::Name, &why.rule.rule_set)]),
+                            .text_with(Msg::DetailsRuleSet, &[Arg::Name.with(&why.rule.rule_set)]),
                     ),
             )
             .child(
@@ -488,7 +488,7 @@ impl AppShell {
                             .text_color(palette.text_secondary)
                             .child(
                                 self.formatter
-                                    .text_with(Msg::DetailsActual, &[(Arg::Value, &why.actual)]),
+                                    .text_with(Msg::DetailsActual, &[Arg::Value.with(&why.actual)]),
                             ),
                     ),
             )

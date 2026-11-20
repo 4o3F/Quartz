@@ -89,11 +89,8 @@ impl AppShell {
                         .child(self.formatter.text_with(
                             Msg::PendingRange,
                             &[
-                                (Arg::Range, &away.span.to_string()),
-                                (
-                                    Arg::Duration,
-                                    &self.formatter.duration(away.span.duration()),
-                                ),
+                                Arg::Range.with(&away.span.to_string()),
+                                Arg::Duration.with(&self.formatter.duration(away.span.duration())),
                             ],
                         )),
                 )

@@ -7,7 +7,12 @@ use gpui_kit::{
     Styled as _, Window, div, px, relative,
 };
 
+use super::today::STAT_CELL_COUNT;
 use crate::layout::StatColumns;
+
+/// [`STAT_CELL_COUNT`] as `u8`, matching the fixed cell count at compile time.
+const STAT_CELL_COUNT_U8: u8 = 6;
+const _: () = assert!(STAT_CELL_COUNT == 6);
 
 /// Cells laid out in `StatColumns` equal columns. The grid's height is measured from the same
 /// column choice that the cells are placed with, so the card is as tall as its rows.
@@ -23,19 +28,16 @@ pub(super) struct StatGrid {
 
 impl StatGrid {
     /// A grid of `cells`, each at least `widest` wide and `cell_height` tall.
-    ///
-    /// # Panics
-    /// Panics when there are more than 255 cells; the status card has six.
     pub(super) fn new(
-        cells: Vec<AnyElement>,
+        cells: [AnyElement; STAT_CELL_COUNT],
         widest: f32,
         cell_height: Pixels,
         column_gap: Pixels,
         row_gap: Pixels,
     ) -> Self {
         Self {
-            count: u8::try_from(cells.len()).expect("the status card has a handful of cells"),
-            cells: Some(cells),
+            count: STAT_CELL_COUNT_U8,
+            cells: Some(Vec::from(cells)),
             widest,
             cell_height,
             column_gap,

@@ -26,9 +26,9 @@ use super::{
 use crate::{
     format::{Formatter, Msg},
     layout::{NavLayout, PanelPlacement, PanelState, ShellLayout},
-    model::{Day, Details, DetailsSubject, RankingKind, SegmentId, TimeOfDay, TimeSpan},
+    model::{Day, Details, DetailsSubject, RankingKind, SegmentId, TimeOfDay},
     text_scale::{LiveTextScale, TextScaleChange},
-    timeline_scale::ScaleFactor,
+    timeline_scale::{ScaleFactor, View},
 };
 
 /// Top-level pages of the navigation (07 section 2).
@@ -88,8 +88,8 @@ pub(crate) enum RangeChoice {
     /// First to last activity with 15 minutes of margin (07 section 4.1).
     Activity,
     FullDay,
-    /// A span reached by zooming; never empty.
-    Zoomed(TimeSpan),
+    /// A view reached by zooming; never empty.
+    Zoomed(View),
 }
 
 /// What the pointer is over in the timeline.

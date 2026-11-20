@@ -209,37 +209,40 @@ impl Day {
     /// The category with `id`.
     ///
     /// # Panics
-    /// Panics when `id` is not a category of this day; ids taken from the day always are.
+    /// Panics when `id` is not a category of this day; [`Day::new`] validates every category id
+    /// stored in the day.
     #[must_use]
     pub(crate) fn category(&self, id: CategoryId) -> &Category {
         self.categories
             .iter()
             .find(|category| category.id == id)
-            .unwrap_or_else(|| panic!("category {id:?} is not part of this day"))
+            .unwrap_or_else(|| panic!("category {id:?} is validated by Day::new"))
     }
 
     /// The application with `id`.
     ///
     /// # Panics
-    /// Panics when `id` is not an application of this day; ids taken from the day always are.
+    /// Panics when `id` is not an application of this day; [`Day::new`] validates every
+    /// application id stored in the day.
     #[must_use]
     pub(crate) fn app(&self, id: AppId) -> &AppInfo {
         self.apps
             .iter()
             .find(|app| app.id == id)
-            .unwrap_or_else(|| panic!("application {id:?} is not part of this day"))
+            .unwrap_or_else(|| panic!("application {id:?} is validated by Day::new"))
     }
 
     /// The rule with `id`.
     ///
     /// # Panics
-    /// Panics when `id` is not a rule of this day; ids taken from the day always are.
+    /// Panics when `id` is not a rule of this day; [`Day::new`] validates every rule id stored in
+    /// the day.
     #[must_use]
     pub(crate) fn rule(&self, id: RuleId) -> &Rule {
         self.rules
             .iter()
             .find(|rule| rule.id == id)
-            .unwrap_or_else(|| panic!("rule {id:?} is not part of this day"))
+            .unwrap_or_else(|| panic!("rule {id:?} is validated by Day::new"))
     }
 
     /// The segment with `id`; `None` when it is not part of this day.
@@ -259,14 +262,14 @@ impl Day {
     /// Active time of `app` on the days before this one.
     ///
     /// # Panics
-    /// Panics when `app` is not part of this day; [`Day::new`] checks every application has
-    /// history.
+    /// Panics when `app` is not part of this day; [`Day::new`] validates that every application
+    /// has history.
     #[must_use]
     pub(crate) fn earlier_days(&self, app: AppId) -> EarlierDays {
         *self
             .history
             .get(&app)
-            .unwrap_or_else(|| panic!("application {app:?} is not part of this day"))
+            .unwrap_or_else(|| panic!("application {app:?} history is validated by Day::new"))
     }
 
     /// First to last activity of the day; `None` for a day without segments or states.
@@ -316,13 +319,17 @@ impl Day {
     }
 
     /// The segments of a swimlane of this day, in time order.
+    ///
+    /// # Panics
+    /// Panics when `lane` names a segment not belonging to this day; lanes are derived from the
+    /// day's own validated segments.
     pub(crate) fn lane_segments<'day>(
         &'day self,
         lane: &'day Lane,
     ) -> impl Iterator<Item = &'day Segment> {
         lane.segments.iter().map(|id| {
             self.segment(*id)
-                .unwrap_or_else(|| panic!("lane segment {id:?} is not part of this day"))
+                .unwrap_or_else(|| panic!("lane segment {id:?} is validated by Day::new"))
         })
     }
 

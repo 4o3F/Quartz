@@ -86,10 +86,7 @@ impl CoreErrorPresentation {
                     Some(command) => RecoveryLine::RestoreCommand(command),
                     None => RecoveryLine::Warning(formatter.text_with(
                         Msg::CoreErrorRestoreManually,
-                        &[(
-                            Arg::Command,
-                            &format!("{} {}", cli::PROGRAM, cli::RESTORE_BACKUP),
-                        )],
+                        &[Arg::Command.with(&format!("{} {}", cli::PROGRAM, cli::RESTORE_BACKUP))],
                     )),
                 });
             }

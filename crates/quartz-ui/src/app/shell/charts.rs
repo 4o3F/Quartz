@@ -116,8 +116,8 @@ impl AppShell {
                     .child(self.formatter.text_with(
                         Msg::LegendItem,
                         &[
-                            (Arg::Name, &self.formatter.category_name(&category.name)),
-                            (Arg::Duration, &self.formatter.duration(entry.total)),
+                            Arg::Name.with(&self.formatter.category_name(&category.name)),
+                            Arg::Duration.with(&self.formatter.duration(entry.total)),
                         ],
                     )),
             );
@@ -206,6 +206,9 @@ impl AppShell {
     fn hour_labels(&self, layer: &LayerCx<'_>) -> AnyElement {
         layer.with_ui(|ui, measure, _| {
             let bars = self.day.hourly();
+            if bars.is_empty() {
+                return div().size_full().into_any_element();
+            }
             let slot = f32::from(layer.bounds.size.width)
                 / f32::from(u8::try_from(bars.len()).expect("a day has 24 hourly bars"));
             let stride = HourStride::fit(slot, measure.width("00", Ramp::Caption));
