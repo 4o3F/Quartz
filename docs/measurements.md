@@ -734,3 +734,19 @@ deno task acceptance $offlineDump
 非 Quartz 客户端 PID 3172 连接后无回复断开，同一次连接的核心日志为 `rejected pipe client pid=3172 error=peer executable is not allowed`。真实当日 dump 的摘要计算为 active_ms=0、今日 0h 0m。检查通过 WM_CLOSE 正常停止本次验收核心，然后导出离线事实，format、coverage、idle、midnight、recovery、privacy、clock 全部 PASS。Windows PowerShell 的 quartz.exe 调用使用显式管道等待进程退出，dump 行通过 ForEach-Object 原样传递。
 
 人工待测：托盘各状态的视觉观察、今日提示与脚本输出的分钟比较、暂停满 15 分钟后的恢复、保持计时、隐私模式和长空闲后的快速标注；其他账户/会话拒绝、十分钟慢客户端。语言切换目前由 UI 角色的 settings.set、托盘语言通知及本地化菜单测试覆盖，M3 补实机设置操作。执行步骤及逐项记录要求见 [M2 验收手册](acceptance/m2.md)。
+
+## 2026-11-21 M2-F2：实机验收
+
+HEAD `f23a041`，Windows 11 build 26300，China Standard Time。release 构建，按 [M2 手册](acceptance/m2.md) 在独立 `LOCALAPPDATA`（`target\windows\acceptance-m2-20261121-185128`）启动验收核心 PID 5900，18:51 起。
+
+| 节 | 结果 |
+|---|---|
+| §2 status / 非 Quartz 客户端 | 两次 `quartz status` 通过；PowerShell PID 38424 无回复断开，日志 `rejected pipe client pid=38424 error=peer executable is not allowed` |
+| §3 托盘（用户观察） | 提示两行、菜单各项、暂停 15 分钟（灰色图标与自动恢复提示）后恢复、隐私模式（标记图标、标题隐藏，关闭后恢复）、锁屏后恢复，均符合预期 |
+| §4 托盘摘要与 dump | 18:59:33 托盘“今日 7 分钟”，管道 dump 计算 `active_ms=464268` → 0h 7m，一致；第一次采样差 1 分钟为整分钟边界，按手册重采 |
+| §6 十分钟慢客户端 | PASS：600.07 s，55,349 次提交，提交 P95 21.593 ms，排队峰值 12,380 bytes，Private Bytes 6,672,384 → 11,689,984（增量 5,017,600，上限 34,603,008） |
+| §7 退出与离线不变量 | 托盘“退出 Quartz”正常退出；核心停止后管道 dump 退出码 1 并提示 `--offline`；`dump --offline` 168 行，format、coverage、idle、midnight、recovery、privacy、clock 全部 PASS |
+
+发现：Windows PowerShell 5.1 按 OEM 代码页（中文系统为 GBK）解码 quartz.exe 的 UTF-8 输出，含中文应用名的 dump JSON 首次 89 行中 33 行损坏；quartz 输出本身正确。M1、M2 手册已在导出前设置 `[Console]::OutputEncoding`。
+
+待测：§5 长空闲后的快速标注、§3 保持计时（均需连续无输入，用户本轮未测）；其他账户/会话拒绝（需第二账户）；语言切换实机操作待 M3 设置界面。
