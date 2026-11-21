@@ -47,6 +47,7 @@ impl Fixture {
             name: name.clone(),
             timeouts,
             services: crate::ipc::Services {
+                summary: None,
                 timed: crate::ipc::TimedPolicyPort::unavailable(),
                 queries: query_port.unwrap_or_else(|| database.port.clone()),
                 writes: crate::ipc::WriteChannel::new().port,
@@ -293,6 +294,7 @@ fn first_instance_refuses_an_occupied_name() {
         name: fixture.name.clone(),
         timeouts: server::ConnectionTimeouts::default(),
         services: crate::ipc::Services {
+            summary: None,
             timed: crate::ipc::TimedPolicyPort::unavailable(),
             queries: fixture.database.port.clone(),
             writes: crate::ipc::WriteChannel::new().port,

@@ -2,9 +2,9 @@ _version: 2
 app.name:
   en: Quartz
 tray.open:
-  en: Open
+  en: Open Quartz
 tray.exit:
-  en: Exit
+  en: Exit Quartz
 tray.opening:
   en: Opening…
 error.not_implemented:
@@ -261,3 +261,35 @@ tray.am:
   en: "AM"
 tray.pm:
   en: "PM"
+tray.today:
+  en: "Today %{duration}"
+tray.summary:
+  en: "Quartz · Today %{duration} · Focus %{focus}% · Distraction %{distraction}%"
+tray.current:
+  en: "Current: %{current} · %{minutes} min"
+tray.recent:
+  en: "Last hour: %{activity}"
+tray.no_activity:
+  en: "No activity"
+tray.loading:
+  en: "Loading summary…"
+tray.annotate:
+  en: "Label the last %{minutes} minutes"
+tray.rest:
+  en: "Rest"
+tray.meeting:
+  en: "Meeting"
+tray.reading:
+  en: "Reading / thinking"
+tray.ignore:
+  en: "Ignore"
+tray.browsers:
+  en: "Browser extensions: %{count} connected"
+tray.settings:
+  en: "Settings…"
+tray.duration_hm:
+  en: "%{hours}h%{minutes}m"
+tray.duration_h:
+  en: "%{hours}h"
+tray.duration_m:
+  en: "%{minutes}m"

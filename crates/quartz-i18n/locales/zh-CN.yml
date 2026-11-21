@@ -2,9 +2,9 @@ _version: 2
 app.name:
   zh-CN: Quartz
 tray.open:
-  zh-CN: 打开
+  zh-CN: 打开 Quartz
 tray.exit:
-  zh-CN: 退出
+  zh-CN: 退出 Quartz
 tray.opening:
   zh-CN: 正在打开…
 error.not_implemented:
@@ -261,3 +261,35 @@ tray.am:
   zh-CN: "上午"
 tray.pm:
   zh-CN: "下午"
+tray.today:
+  zh-CN: "今日 %{duration}"
+tray.summary:
+  zh-CN: "Quartz · 今日 %{duration} · 专注 %{focus}% · 分心 %{distraction}%"
+tray.current:
+  zh-CN: "当前：%{current} 已 %{minutes} 分钟"
+tray.recent:
+  zh-CN: "最近 1 小时：%{activity}"
+tray.no_activity:
+  zh-CN: "暂无活动"
+tray.loading:
+  zh-CN: "正在计算摘要…"
+tray.annotate:
+  zh-CN: "把刚才的 %{minutes} 分钟记为"
+tray.rest:
+  zh-CN: "休息"
+tray.meeting:
+  zh-CN: "会议"
+tray.reading:
+  zh-CN: "阅读思考"
+tray.ignore:
+  zh-CN: "忽略"
+tray.browsers:
+  zh-CN: "浏览器扩展：已连接 %{count} 个"
+tray.settings:
+  zh-CN: "设置…"
+tray.duration_hm:
+  zh-CN: "%{hours}h%{minutes}m"
+tray.duration_h:
+  zh-CN: "%{hours}h"
+tray.duration_m:
+  zh-CN: "%{minutes}m"

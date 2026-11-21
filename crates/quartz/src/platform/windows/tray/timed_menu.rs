@@ -35,12 +35,18 @@ impl TrayMenuItem {
             Self::PrivateHour => TimedCommand::EnablePrivacy(hour),
             Self::PrivateTomorrow => TimedCommand::EnablePrivacy(tomorrow),
             Self::PrivateOff => TimedCommand::DisablePrivacy,
-            Self::Open | Self::Exit => return None,
+            Self::Open
+            | Self::Exit
+            | Self::Settings
+            | Self::Rest
+            | Self::Meeting
+            | Self::Reading
+            | Self::Ignore => return None,
         })
     }
 }
 impl Menu {
-    fn new() -> Result<Self, ShowTrayMenuError> {
+    pub(super) fn new() -> Result<Self, ShowTrayMenuError> {
         // SAFETY: Creates a uniquely owned empty menu.
         unsafe { WindowsAndMessaging::CreatePopupMenu() }
             .map(Self)
@@ -53,7 +59,7 @@ impl Menu {
     ) -> Result<(), ShowTrayMenuError> {
         self.append_label(item.label_key(), usize::from(item), MF_STRING, language)
     }
-    fn append_label(
+    pub(super) fn append_label(
         &self,
         key: MessageKey<'static>,
         id: usize,
@@ -65,7 +71,7 @@ impl Menu {
         unsafe { WindowsAndMessaging::AppendMenuW(self.0, flags, id, PCWSTR(label.as_ptr())) }
             .map_err(|source| ShowTrayMenuError::AppendMenu { key, source })
     }
-    fn submenu(
+    pub(super) fn submenu(
         &self,
         key: MessageKey<'static>,
         items: &[TrayMenuItem],

@@ -1,0 +1,191 @@
+//! Summary, annotation, browser status and default menu sections.
+
+use super::{
+    TrayContent,
+    icon::{Menu, ShowTrayMenuError, TrayMenuItem},
+};
+use crate::{
+    core::app::annotation::{AnnotationChoice, IdlePeriod},
+    platform::windows::WideString,
+};
+use quartz_i18n::{Language, MessageKey};
+use windows::{
+    Win32::UI::WindowsAndMessaging::{
+        self, MENU_ITEM_FLAGS, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    },
+    core::PCWSTR,
+};
+
+impl TrayMenuItem {
+    pub(super) fn annotation_choice(self) -> Option<AnnotationChoice> {
+        match self {
+            Self::Rest => Some(AnnotationChoice::Rest),
+            Self::Meeting => Some(AnnotationChoice::Meeting),
+            Self::Reading => Some(AnnotationChoice::Reading),
+            Self::Ignore => Some(AnnotationChoice::Ignore),
+            _ => None,
+        }
+    }
+}
+impl Menu {
+    fn append_text(
+        &self,
+        key: MessageKey<'static>,
+        text: &str,
+        id: usize,
+        flags: MENU_ITEM_FLAGS,
+    ) -> Result<(), ShowTrayMenuError> {
+        let label = WideString::new(text);
+        // SAFETY: The menu is live; AppendMenuW copies the terminated label.
+        unsafe { WindowsAndMessaging::AppendMenuW(self.0, flags, id, PCWSTR(label.as_ptr())) }
+            .map_err(|source| ShowTrayMenuError::AppendMenu { key, source })
+    }
+    pub(super) fn set_default(&self, item: TrayMenuItem) -> Result<(), ShowTrayMenuError> {
+        let id = u32::try_from(usize::from(item))
+            .map_err(|source| ShowTrayMenuError::MenuCommand { source })?;
+        // SAFETY: The command identifies an item already inserted into this live menu.
+        unsafe { WindowsAndMessaging::SetMenuDefaultItem(self.0, id, 0) }
+            .map_err(|source| ShowTrayMenuError::SetDefault { source })
+    }
+    pub(super) fn separator(&self) -> Result<(), ShowTrayMenuError> {
+        self.append_text(MessageKey::new("tray.open"), "", 0, MF_SEPARATOR)
+    }
+    pub(super) fn append_summary(
+        &self,
+        content: &TrayContent,
+        language: Language,
+    ) -> Result<(), ShowTrayMenuError> {
+        let key = MessageKey::new("tray.today");
+        if let Some(summary) = &content.summary {
+            for text in [
+                summary.today_text(language),
+                summary.categories_text(language),
+                summary.recent_text(language),
+            ] {
+                self.append_text(key, &text, 0, MF_STRING | MF_GRAYED)?;
+            }
+        } else {
+            let key = MessageKey::new("tray.loading");
+            self.append_text(key, &key.in_language(language), 0, MF_STRING | MF_GRAYED)?;
+        }
+        self.separator()
+    }
+    pub(super) fn append_annotation(
+        &self,
+        idle: Option<IdlePeriod>,
+        language: Language,
+    ) -> Result<(), ShowTrayMenuError> {
+        let Some(period) = idle else {
+            return Ok(());
+        };
+        let submenu = Self::new()?;
+        for item in [
+            TrayMenuItem::Rest,
+            TrayMenuItem::Meeting,
+            TrayMenuItem::Reading,
+            TrayMenuItem::Ignore,
+        ] {
+            submenu.append(item, language)?;
+        }
+        let key = MessageKey::new("tray.annotate");
+        let label = key
+            .in_language(language)
+            .replace("%{minutes}", &period.minutes().to_string());
+        self.append_text(key, &label, submenu.0.0.addr(), MF_POPUP)?;
+        std::mem::forget(submenu);
+        Ok(())
+    }
+    pub(super) fn append_browser_status(
+        &self,
+        count: usize,
+        language: Language,
+    ) -> Result<(), ShowTrayMenuError> {
+        let key = MessageKey::new("tray.browsers");
+        self.append_text(
+            key,
+            &key.in_language(language)
+                .replace("%{count}", &count.to_string()),
+            0,
+            MF_STRING | MF_GRAYED,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quartz_protocol::DayMetrics;
+    #[test]
+    fn native_summary_is_disabled_open_is_default_and_annotation_is_localized() {
+        for language in [Language::English, Language::SimplifiedChinese] {
+            let menu = Menu::new().expect("menu");
+            let content = TrayContent {
+                summary: Some(std::sync::Arc::new(crate::tray_summary::TraySummary {
+                    metrics: DayMetrics {
+                        active_ms: 0,
+                        focus_ratio: 0.0,
+                        distract_ratio: 0.0,
+                        unclassified_ms: 0,
+                        longest_focus_ms: 0,
+                        switches_per_hour: 0.0,
+                    },
+                    categories: Vec::new(),
+                    recent: None,
+                })),
+                idle: Some(IdlePeriod {
+                    start_utc_ms: 0,
+                    end_utc_ms: 25 * crate::tray_summary::MINUTE_MS,
+                }),
+                ..Default::default()
+            };
+            menu.append_summary(&content, language).expect("summary");
+            menu.append(TrayMenuItem::Open, language).expect("open");
+            menu.set_default(TrayMenuItem::Open).expect("default");
+            menu.append_annotation(content.idle, language)
+                .expect("annotation");
+            menu.append_browser_status(2, language)
+                .expect("browser status");
+            // SAFETY: All inspected menus are owned by the live parent for this iteration.
+            unsafe {
+                for position in 0..3 {
+                    assert_ne!(
+                        WindowsAndMessaging::GetMenuState(
+                            menu.0,
+                            position,
+                            WindowsAndMessaging::MF_BYPOSITION
+                        ) & MF_GRAYED.0,
+                        0
+                    );
+                }
+                assert_eq!(
+                    WindowsAndMessaging::GetMenuDefaultItem(menu.0, 0, Default::default()),
+                    u32::try_from(usize::from(TrayMenuItem::Open)).expect("command ID")
+                );
+                let submenu = WindowsAndMessaging::GetSubMenu(menu.0, 5);
+                assert_eq!(WindowsAndMessaging::GetMenuItemCount(Some(submenu)), 4);
+                let mut label = [0_u16; 128];
+                let count = WindowsAndMessaging::GetMenuStringW(
+                    menu.0,
+                    5,
+                    Some(&mut label),
+                    WindowsAndMessaging::MF_BYPOSITION,
+                );
+                assert_eq!(
+                    String::from_utf16(&label[..usize::try_from(count).expect("label length")])
+                        .expect("label"),
+                    MessageKey::new("tray.annotate")
+                        .in_language(language)
+                        .replace("%{minutes}", "25")
+                );
+                assert_ne!(
+                    WindowsAndMessaging::GetMenuState(
+                        menu.0,
+                        6,
+                        WindowsAndMessaging::MF_BYPOSITION
+                    ) & MF_GRAYED.0,
+                    0
+                );
+            }
+        }
+    }
+}

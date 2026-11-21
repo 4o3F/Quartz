@@ -164,6 +164,16 @@ pub(crate) struct CoreProcess {
     capture: Option<CaptureState>,
     persistence: PersistenceState,
     untriggered_changes: u64,
+    summary: Option<crate::ipc::summary::SummaryPort>,
+    annotation: crate::core::app::annotation::QuickAnnotation,
+    annotation_reply: Option<PendingAnnotation>,
+}
+#[derive(Debug)]
+struct PendingAnnotation {
+    period: crate::core::app::annotation::IdlePeriod,
+    reply: tokio::sync::oneshot::Receiver<
+        Result<crate::persistence::dispatch::WriteResponse, quartz_protocol::ProtocolError>,
+    >,
 }
 impl CoreProcess {
     pub(crate) fn new() -> Self {
@@ -172,6 +182,9 @@ impl CoreProcess {
             capture: None,
             persistence: PersistenceState::Ready,
             untriggered_changes: 0,
+            summary: None,
+            annotation: Default::default(),
+            annotation_reply: None,
         }
     }
     /// Runs the Windows core on the calling main thread and reports startup failures.
@@ -224,6 +237,8 @@ impl CoreProcess {
         if let Err(error) = tray.set_language(runtime.status.ui_settings().ui_language) {
             tracing::error!(%error, "could not apply initial tray language");
         }
+        self.summary = Some(runtime.summary.clone());
+        tray.attach_summary(runtime.summary.clone());
         let ingress = SystemIngress::new(runtime.sender(), runtime.shutdown_port());
         tray.attach_capture(ingress.clone());
         let mut sources = Sources::start(tray.raw_window(), ingress).context(ObserveSystemSnafu)?;
@@ -279,6 +294,8 @@ impl CoreProcess {
             while let Ok(command) = runtime.commands().try_recv() {
                 self.handle_main_command(command, tray, status, sources)?;
             }
+            self.poll_annotation();
+            self.refresh_tray(tray, status, TrayRefresh::Capture);
             loop {
                 let events = tray.commands();
                 if events.is_empty() {
@@ -286,7 +303,7 @@ impl CoreProcess {
                 }
                 for event in events {
                     if let Some(exit) =
-                        self.handle_tray_command(event, tray, status, sources, &runtime.timed)?
+                        self.handle_tray_command(event, tray, status, sources, runtime)?
                     {
                         return Ok(exit);
                     }
@@ -341,6 +358,12 @@ impl CoreProcess {
         sources: &mut Sources,
     ) -> Result<(), WaitCoreEventsError> {
         match command {
+            MainCommand::IdleAvailability(change) => self.annotation.observe(change),
+            MainCommand::PolicyChanged => {
+                if let Some(summary) = &self.summary {
+                    summary.request();
+                }
+            }
             MainCommand::CaptureSnapshot {
                 state,
                 foreground,
@@ -410,6 +433,9 @@ impl CoreProcess {
                 tracing::trace!("capture worker discarded queued observations");
             }
             CaptureEffect::PolicyExpired(kind) => {
+                if let Some(summary) = &self.summary {
+                    summary.request();
+                }
                 // CaptureCore has applied expiration and requested the necessary fresh observations.
                 tracing::trace!(?kind, "capture policy expired");
             }
@@ -422,22 +448,84 @@ impl CoreProcess {
         tray: &mut Tray,
         status: &StatusPublisher,
         sources: &mut Sources,
-        timed: &crate::ipc::TimedPolicyPort,
+        runtime: &CoreRuntime,
     ) -> Result<Option<CoreExit>, WaitCoreEventsError> {
         match event {
             TrayCommand::Exit => return Ok(Some(CoreExit::UserExit)),
             TrayCommand::EndSession => return Ok(Some(CoreExit::SessionEnded)),
             TrayCommand::Deadline(at) => sources.fired(at).context(wait_error::ObserveSnafu)?,
             TrayCommand::OpenUi => self.open_ui(tray, status),
+            TrayCommand::Annotate(choice) => self.submit_annotation(choice, runtime),
             TrayCommand::Timed(command) => {
-                if let Err(error) = timed.call(command) {
+                if let Err(error) = runtime.timed.call(command) {
                     tracing::warn!(kind = ?error.kind, "could not admit tray timed policy command");
                 }
             }
         }
         Ok(None)
     }
+    fn submit_annotation(
+        &mut self,
+        choice: crate::core::app::annotation::AnnotationChoice,
+        runtime: &CoreRuntime,
+    ) {
+        if self.annotation_reply.is_some() {
+            return;
+        }
+        let Some(period) = self
+            .annotation
+            .visible(jiff::Timestamp::now().as_millisecond())
+        else {
+            return;
+        };
+        let uuid = match windows::core::GUID::new() {
+            Ok(uuid) => match format!("{uuid:?}").parse() {
+                Ok(uuid) => quartz_protocol::AnnotationId(uuid),
+                Err(error) => {
+                    tracing::warn!(%error, "could not encode annotation identity");
+                    return;
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, "could not create annotation identity");
+                return;
+            }
+        };
+        let request = crate::persistence::dispatch::WriteRequest::Annotations(
+            crate::persistence::dispatch::AnnotationWrite::Create(choice.request(period, uuid)),
+        );
+        match runtime.writes().submit(request) {
+            Ok(reply) => self.annotation_reply = Some(PendingAnnotation { period, reply }),
+            Err(error) => tracing::warn!(kind = ?error.kind, "could not admit tray annotation"),
+        }
+    }
+    fn poll_annotation(&mut self) {
+        let Some(pending) = &mut self.annotation_reply else {
+            return;
+        };
+        match pending.reply.try_recv() {
+            Ok(Ok(_)) => self.annotation.completed(pending.period),
+            Ok(Err(error)) => tracing::warn!(kind = ?error.kind, "could not save tray annotation"),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                tracing::warn!("tray annotation writer stopped before replying")
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
+        }
+        self.annotation_reply = None;
+    }
     fn refresh_tray(&self, tray: &mut Tray, status: &StatusPublisher, refresh: TrayRefresh) {
+        let snapshot = status.subscribe().borrow().snapshot();
+        tray.set_content(tray::TrayContent {
+            summary: self.summary.as_ref().and_then(|summary| summary.latest()),
+            foreground: snapshot.foreground,
+            browser_count: snapshot.browser_streams.len(),
+            idle: if self.annotation_reply.is_none() {
+                self.annotation
+                    .visible(jiff::Timestamp::now().as_millisecond())
+            } else {
+                None
+            },
+        });
         let tooltip = match refresh {
             TrayRefresh::UiOpening => TrayTooltip::Opening,
             TrayRefresh::Startup
@@ -710,6 +798,65 @@ mod tests {
             std::io::ErrorKind::PermissionDenied
         );
     }
+    #[test]
+    fn annotation_reply_poll_preserves_failed_prompt_and_clears_successful_prompt() {
+        use crate::core::app::annotation::{IdleAvailability, MIN_ANNOTATION_IDLE_MS};
+        use crate::store::capture::test_support::at;
+        use quartz_domain::capture::{AvailabilityEndReason, RowId};
+        let mut process = CoreProcess::new();
+        let id = RowId::from_persisted(1);
+        process
+            .annotation
+            .observe(IdleAvailability::Opened { id, start: at(0) });
+        process.annotation.observe(IdleAvailability::Closed {
+            id,
+            at: at(u64::try_from(MIN_ANNOTATION_IDLE_MS).expect("idle duration")),
+            reason: AvailabilityEndReason::Resumed,
+        });
+        let period = process
+            .annotation
+            .visible(MIN_ANNOTATION_IDLE_MS)
+            .expect("idle prompt");
+        let (reply, received) = tokio::sync::oneshot::channel();
+        process.annotation_reply = Some(PendingAnnotation {
+            period,
+            reply: received,
+        });
+        process.poll_annotation();
+        assert!(
+            process.annotation_reply.is_some(),
+            "pending writer never blocks polling"
+        );
+        reply
+            .send(Err(quartz_protocol::ProtocolError::new(
+                quartz_protocol::ErrorKind::Busy,
+            )))
+            .expect("error reply");
+        process.poll_annotation();
+        assert!(process.annotation_reply.is_none());
+        assert_eq!(
+            process.annotation.visible(MIN_ANNOTATION_IDLE_MS),
+            Some(period)
+        );
+        let (reply, received) = tokio::sync::oneshot::channel();
+        process.annotation_reply = Some(PendingAnnotation {
+            period,
+            reply: received,
+        });
+        reply
+            .send(Ok(
+                crate::persistence::dispatch::WriteResponse::Annotations(
+                    quartz_protocol::AnnotationsResponse {
+                        entities: Vec::new(),
+                    },
+                ),
+            ))
+            .expect("committed reply");
+        process.poll_annotation();
+        assert!(process.annotation_reply.is_none());
+        assert!(process.annotation.visible(MIN_ANNOTATION_IDLE_MS).is_none());
+    }
+
     #[test]
     fn timed_tray_mapping_prioritizes_warning_then_grey_then_privacy() {
         use quartz_protocol::{

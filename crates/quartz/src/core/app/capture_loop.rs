@@ -323,6 +323,12 @@ impl CaptureLoop {
             observation.at = self.at;
         }
         self.at = observation.at;
+        let policy_changed = matches!(
+            observation.event,
+            CaptureEvent::PolicyChanged(_)
+                | CaptureEvent::SetTimedState(_)
+                | CaptureEvent::CancelTimedPolicy(_)
+        );
         let followup = self.followup(&observation.event);
         let event = self.normalize(observation.event);
         let step = self
@@ -334,6 +340,9 @@ impl CaptureLoop {
             })
             .map_err(|source| RunCaptureLoopError::Step { source })?;
         self.publish(step, observation.at, settlement)?;
+        if policy_changed {
+            self.main.send(MainCommand::PolicyChanged)?;
+        }
         if let Some(event) = followup {
             self.step(
                 ObservedEvent {
@@ -378,6 +387,32 @@ impl CaptureLoop {
         settlement: Settlement,
     ) -> Result<(), RunCaptureLoopError> {
         let mut parts = step.into_parts(self.run);
+        if let Some(batch) = &parts.batch {
+            for write in &batch.writes {
+                use super::annotation::IdleAvailability;
+                let change = match write {
+                    CaptureWrite::OpenAvailability(row)
+                        if row.reason == quartz_domain::capture::AvailabilityReason::Idle =>
+                    {
+                        Some(IdleAvailability::Opened {
+                            id: row.id,
+                            start: row.start,
+                        })
+                    }
+                    CaptureWrite::CloseAvailability { id, at, reason } => {
+                        Some(IdleAvailability::Closed {
+                            id: *id,
+                            at: *at,
+                            reason: *reason,
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(change) = change {
+                    self.main.send(MainCommand::IdleAvailability(change))?;
+                }
+            }
+        }
         if parts
             .effects
             .iter()

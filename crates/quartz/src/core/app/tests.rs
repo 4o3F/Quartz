@@ -828,6 +828,7 @@ fn io_write_replies_publish_committed_versions_and_rollback_keeps_versions() {
     runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
     let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("write-test".into()));
     let services = crate::ipc::Services {
+        summary: None,
         timed: crate::ipc::TimedPolicyPort::unavailable(),
         queries: runtime.workers.queries.clone(),
         writes: runtime.workers.writes.clone(),
@@ -1010,6 +1011,7 @@ fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
         "annotation-integration".into(),
     ));
     let services = crate::ipc::Services {
+        summary: None,
         timed: crate::ipc::TimedPolicyPort::unavailable(),
         queries: runtime.workers.queries.clone(),
         writes: runtime.workers.writes.clone(),
@@ -1227,6 +1229,7 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
     };
     let mut channel = crate::ipc::UiCommands::channel(Arc::new(|_| Ok(())));
     let services = crate::ipc::Services {
+        summary: None,
         timed: crate::ipc::TimedPolicyPort::unavailable(),
         queries: runtime.workers.queries.clone(),
         writes: runtime
@@ -1344,6 +1347,7 @@ fn timed_ipc_admits_typed_capture_events_and_reports_busy_and_invalid_deadlines(
         overloaded: overloaded.clone(),
     };
     let services = crate::ipc::Services {
+        summary: None,
         timed: ingress.timed_port(Arc::new(TestClock(at(10))), 0),
         queries: runtime.workers.queries.clone(),
         writes: runtime.workers.writes.clone(),

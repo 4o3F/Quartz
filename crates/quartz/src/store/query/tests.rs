@@ -779,7 +779,7 @@ fn annotation_write_invalidates_old_timeline_and_pending_away_cursors() {
 }
 
 #[test]
-fn pending_away_subtracts_partial_coverage_and_uses_only_idle_longer_than_fifteen_minutes() {
+fn pending_away_subtracts_partial_coverage_and_includes_fifteen_minute_idle() {
     use quartz_protocol::{AnnotationKind, QueryPendingAwayRequest};
     const MINUTE_MS: i64 = 60_000;
     let mut fixture = QueryFixture::new(1);
@@ -847,6 +847,11 @@ fn pending_away_subtracts_partial_coverage_and_uses_only_idle_longer_than_fiftee
                 start_utc_ms: fixture.start + 70 * MINUTE_MS,
                 end_utc_ms: fixture.start + 100 * MINUTE_MS,
                 duration_ms: 30 * MINUTE_MS
+            },
+            quartz_protocol::PendingAway {
+                start_utc_ms: fixture.start + 150 * MINUTE_MS,
+                end_utc_ms: fixture.start + 165 * MINUTE_MS,
+                duration_ms: 15 * MINUTE_MS
             },
         ]
     );

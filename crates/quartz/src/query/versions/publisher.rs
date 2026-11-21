@@ -14,7 +14,13 @@ const VERSION_CHANNEL_CAPACITY: usize = 8;
 pub(crate) struct PublishedVersions {
     pub days: BTreeMap<LocalDate, DayChanged>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum VersionSubscriber {
+    Registry,
+    Tray,
+}
 pub(crate) struct VersionCommand {
+    subscriber: VersionSubscriber,
     dates: BTreeSet<LocalDate>,
     reply: oneshot::Sender<Result<PublishedVersions, ProtocolError>>,
 }
@@ -28,9 +34,27 @@ impl VersionPort {
         &self,
         dates: BTreeSet<LocalDate>,
     ) -> Result<PublishedVersions, ProtocolError> {
+        self.subscribe(VersionSubscriber::Registry, dates).await
+    }
+    pub(crate) async fn set_summary_day(
+        &self,
+        date: LocalDate,
+    ) -> Result<PublishedVersions, ProtocolError> {
+        self.subscribe(VersionSubscriber::Tray, BTreeSet::from([date]))
+            .await
+    }
+    async fn subscribe(
+        &self,
+        subscriber: VersionSubscriber,
+        dates: BTreeSet<LocalDate>,
+    ) -> Result<PublishedVersions, ProtocolError> {
         let (reply, received) = oneshot::channel();
         self.requests
-            .try_send(VersionCommand { dates, reply })
+            .try_send(VersionCommand {
+                subscriber,
+                dates,
+                reply,
+            })
             .map_err(|error| {
                 ProtocolError::new(match error {
                     crossbeam_channel::TrySendError::Full(_) => ErrorKind::Busy,
@@ -43,6 +67,7 @@ impl VersionPort {
     }
 }
 pub(crate) struct VersionPublisher {
+    subscriptions: BTreeMap<VersionSubscriber, BTreeSet<LocalDate>>,
     state: VersionState,
     snapshots: SnapshotCell,
     pub requests: Receiver<VersionCommand>,
@@ -60,6 +85,7 @@ impl VersionPublisher {
         let (requests, received) = crossbeam_channel::bounded(VERSION_CHANNEL_CAPACITY);
         let (published, updates) = watch::channel(PublishedVersions::default());
         let publisher = Self {
+            subscriptions: BTreeMap::new(),
             state,
             snapshots,
             requests: received,
@@ -72,8 +98,9 @@ impl VersionPublisher {
         self.snapshots.load().hashes().classification.clone()
     }
     pub(crate) fn receive(&mut self, command: VersionCommand) {
-        let result = command
-            .dates
+        self.subscriptions.insert(command.subscriber, command.dates);
+        let dates: BTreeSet<_> = self.subscriptions.values().flatten().copied().collect();
+        let result = dates
             .into_iter()
             .map(|date| self.state.day(date).map(|changed| (date, changed)))
             .collect::<Result<BTreeMap<_, _>, _>>()
@@ -132,7 +159,11 @@ mod tests {
 
     fn set_days(publisher: &mut VersionPublisher, dates: BTreeSet<LocalDate>) -> PublishedVersions {
         let (reply, received) = oneshot::channel();
-        publisher.receive(VersionCommand { dates, reply });
+        publisher.receive(VersionCommand {
+            subscriber: VersionSubscriber::Registry,
+            dates,
+            reply,
+        });
         received
             .blocking_recv()
             .expect("version reply")
@@ -176,6 +207,53 @@ mod tests {
         fixture.bump_fact_version();
         publisher.publish(&mut fixture.store);
         assert!(port.updates.borrow().days.is_empty());
+    }
+    #[test]
+    fn tray_and_registry_subscriptions_preserve_each_others_dates() {
+        let mut fixture = QueryFixture::new(4);
+        let snapshots = RuleRegistry::from_state(Default::default())
+            .expect("rules")
+            .snapshots();
+        let VersionChannel {
+            mut publisher,
+            port,
+        } = VersionPublisher::open(&mut fixture.store, snapshots).expect("publisher");
+        let today: LocalDate = "2025-01-02".parse().expect("today");
+        let history = today.yesterday().expect("yesterday");
+        let (reply, received) = oneshot::channel();
+        publisher.receive(VersionCommand {
+            subscriber: VersionSubscriber::Tray,
+            dates: BTreeSet::from([today]),
+            reply,
+        });
+        received
+            .blocking_recv()
+            .expect("tray subscription")
+            .expect("valid date");
+        set_days(&mut publisher, BTreeSet::from([history]));
+        assert_eq!(
+            port.updates
+                .borrow()
+                .days
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([history, today])
+        );
+        set_days(&mut publisher, BTreeSet::new());
+        assert_eq!(
+            port.updates
+                .borrow()
+                .days
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![today]
+        );
+        let before = port.updates.borrow().days[&today].clone();
+        fixture.bump_fact_version();
+        publisher.publish(&mut fixture.store);
+        assert_ne!(port.updates.borrow().days[&today].versions, before.versions);
     }
     #[test]
     fn classification_install_and_upgrade_invalidate_subscribed_days() {

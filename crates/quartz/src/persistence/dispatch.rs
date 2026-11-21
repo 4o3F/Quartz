@@ -120,8 +120,21 @@ pub(crate) enum AnnotationWrite {
 }
 #[cfg(test)]
 pub(crate) use crate::store::versions::TestCommit;
+#[derive(Clone)]
+pub(crate) struct CompletionWake(std::sync::Arc<dyn Fn() + Send + Sync>);
+impl std::fmt::Debug for CompletionWake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompletionWake").finish_non_exhaustive()
+    }
+}
+impl CompletionWake {
+    pub(crate) fn wake(&self) {
+        (self.0)();
+    }
+}
 #[derive(Debug)]
 pub(crate) struct WriteCommand {
+    pub completion: Option<CompletionWake>,
     pub request: WriteRequest,
     pub reply: oneshot::Sender<Result<WriteResponse, ProtocolError>>,
     pub settings: Option<SettingsPorts>,
@@ -140,6 +153,7 @@ impl std::fmt::Debug for SettingsPorts {
 }
 #[derive(Debug, Clone)]
 pub(crate) struct WritePort {
+    completion: Option<CompletionWake>,
     sender: Sender<WriteCommand>,
     settings: Option<SettingsPorts>,
 }
@@ -152,6 +166,7 @@ impl WriteChannel {
         let (sender, receiver) = bounded(WRITE_CHANNEL_CAPACITY);
         Self {
             port: WritePort {
+                completion: None,
                 sender,
                 settings: None,
             },
@@ -160,6 +175,13 @@ impl WriteChannel {
     }
 }
 impl WritePort {
+    pub(crate) fn with_completion_wake(
+        mut self,
+        wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        self.completion = Some(CompletionWake(wake));
+        self
+    }
     pub(crate) fn with_settings(
         mut self,
         system: quartz_protocol::EffectiveUiSettings,
@@ -182,6 +204,7 @@ impl WritePort {
         let (reply, received) = oneshot::channel();
         self.sender
             .try_send(WriteCommand {
+                completion: self.completion.clone(),
                 request,
                 reply,
                 settings: self.settings.clone(),

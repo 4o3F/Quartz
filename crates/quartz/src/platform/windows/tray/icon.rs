@@ -66,6 +66,8 @@ pub(in crate::platform::windows) enum ShowTrayMenuError {
     MenuCommand { source: std::num::TryFromIntError },
     #[snafu(display("could not locate tray menu cursor (GetCursorPos)"))]
     GetCursorPosition { source: windows::core::Error },
+    #[snafu(display("could not set default tray menu item (SetMenuDefaultItem)"))]
+    SetDefault { source: windows::core::Error },
 }
 
 /// Tray commands with their Windows menu IDs and translation keys.
@@ -85,10 +87,15 @@ pub(super) enum TrayMenuItem {
     PrivateHour = 10,
     PrivateTomorrow = 11,
     PrivateOff = 12,
+    Settings = 13,
+    Rest = 14,
+    Meeting = 15,
+    Reading = 16,
+    Ignore = 17,
 }
 
 impl TrayMenuItem {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 17] = [
         Self::Open,
         Self::Exit,
         Self::Pause15,
@@ -101,11 +108,21 @@ impl TrayMenuItem {
         Self::PrivateHour,
         Self::PrivateTomorrow,
         Self::PrivateOff,
+        Self::Settings,
+        Self::Rest,
+        Self::Meeting,
+        Self::Reading,
+        Self::Ignore,
     ];
 
     pub(super) fn label_key(self) -> quartz_i18n::MessageKey<'static> {
         quartz_i18n::MessageKey::new(match self {
             Self::Open => "tray.open",
+            Self::Settings => "tray.settings",
+            Self::Rest => "tray.rest",
+            Self::Meeting => "tray.meeting",
+            Self::Reading => "tray.reading",
+            Self::Ignore => "tray.ignore",
             Self::Exit => "tray.exit",
             Self::Pause15 | Self::Private15 => "tray.minutes_15",
             Self::Keep30 => "tray.minutes_30",
@@ -122,6 +139,7 @@ impl TrayMenuItem {
 }
 
 pub(super) struct TrayIcon {
+    pub(super) content: super::TrayContent,
     data: NOTIFYICONDATAW,
     language: quartz_i18n::Language,
     variants: super::variants::IconVariants,
@@ -152,6 +170,7 @@ impl TrayIcon {
             .context(LoadIconSnafu)?;
         let variants = super::variants::IconVariants::new(icon).context(GenerateIconsSnafu)?;
         let tray = Self {
+            content: super::TrayContent::default(),
             variants,
             language,
             data: NOTIFYICONDATAW {
@@ -208,7 +227,15 @@ impl TrayIcon {
     /// # Errors
     /// Returns tooltip encoding or Shell update failures.
     pub(super) fn update(&mut self, state: super::TrayState) -> Result<(), UpdateTrayTooltipError> {
-        self.data.szTip = TrayTooltipText::try_from(state.tooltip.text(self.language).as_str())
+        let text = match (&self.content.summary, state.tooltip) {
+            (Some(summary), crate::tray_tooltip::TrayTooltip::Ready) => summary.tooltip(
+                self.content.foreground.as_ref(),
+                jiff::Timestamp::now().as_millisecond(),
+                self.language,
+            ),
+            _ => state.tooltip.text(self.language),
+        };
+        self.data.szTip = TrayTooltipText::try_from(text.as_str())
             .context(FormatTooltipSnafu)?
             .into_buffer();
         // SAFETY: Both icon identifiers name shared system resources.
@@ -250,8 +277,14 @@ impl TrayIcon {
         // SAFETY: Creates an empty, uniquely owned menu without pointer arguments.
         let menu =
             Menu(unsafe { WindowsAndMessaging::CreatePopupMenu() }.context(CreatePopupMenuSnafu)?);
+        menu.append_summary(&self.content, self.language)?;
         menu.append(TrayMenuItem::Open, self.language)?;
+        menu.set_default(TrayMenuItem::Open)?;
+        menu.append_annotation(self.content.idle, self.language)?;
         menu.append_timed(timed, self.language)?;
+        menu.append_browser_status(self.content.browser_count, self.language)?;
+        menu.separator()?;
+        menu.append(TrayMenuItem::Settings, self.language)?;
         menu.append(TrayMenuItem::Exit, self.language)?;
         let mut point = POINT::default();
         // SAFETY: point is writable storage for the screen-coordinate cursor position.
@@ -308,7 +341,7 @@ mod tests {
         for item in TrayMenuItem::ALL {
             assert_eq!(TrayMenuItem::from_command(usize::from(item)), Some(item));
         }
-        for id in [0, 13, usize::MAX] {
+        for id in [0, 18, usize::MAX] {
             assert_eq!(TrayMenuItem::from_command(id), None, "unknown command {id}");
         }
         assert_eq!(TrayMenuItem::Open.label_key().as_str(), "tray.open");

@@ -8,7 +8,7 @@ use windows::{
         Foundation::{self, ERROR_SUCCESS, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader,
         UI::{
-            Shell::NIN_SELECT,
+            Shell::{NIN_POPUPOPEN, NIN_SELECT},
             WindowsAndMessaging::{
                 self, CREATESTRUCTW, GWLP_USERDATA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
                 WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_NCCREATE, WM_NCDESTROY, WNDCLASSW,
@@ -61,6 +61,7 @@ impl TrayNotification {
 pub(super) enum CoreEvent {
     OpenUi,
     ShowTrayMenu,
+    Hover,
     RestoreTray,
     Quit,
     EndSession,
@@ -74,6 +75,7 @@ impl CoreEvent {
             Some(AppMessage::TrayCallback) => match TrayNotification(lparam).code() {
                 NIN_SELECT | NIN_KEYSELECT => Some(Self::OpenUi),
                 WM_CONTEXTMENU => Some(Self::ShowTrayMenu),
+                NIN_POPUPOPEN => Some(Self::Hover),
                 // TODO(M3): Start UI prewarming on hover, with TTL and cooldown.
                 _ => None,
             },
@@ -447,7 +449,11 @@ mod tests {
                 WM_CONTEXTMENU as isize,
                 Some(CoreEvent::ShowTrayMenu),
             ),
-            (tray_callback, NIN_POPUPOPEN as isize, None),
+            (
+                tray_callback,
+                isize::try_from(NIN_POPUPOPEN).expect("notification fits LPARAM"),
+                Some(CoreEvent::Hover),
+            ),
             (tray_callback, WM_MOUSEMOVE as isize, None),
             (
                 tray_callback,

@@ -282,7 +282,15 @@ mod tests {
                         .replace("%{time}", &time)
                         .replace("%{hour}", "12")
                         .replace("%{minute}", "59")
-                        .replace("%{period}", &period);
+                        .replace("%{period}", &period)
+                        .replace("%{duration}", "24h59m")
+                        .replace("%{hours}", "24")
+                        .replace("%{minutes}", "1440")
+                        .replace("%{focus}", "100")
+                        .replace("%{distraction}", "100")
+                        .replace("%{current}", "Code · quartz")
+                        .replace("%{activity}", "Code 60m")
+                        .replace("%{count}", "8");
                     assert!(
                         placeholders(&text).is_empty(),
                         "provide maximum placeholder values for {key}"
@@ -298,12 +306,12 @@ mod tests {
         let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
         assert_eq!(
             rust_i18n::t!("tray.open", locale = "zh-CN"),
-            "打开",
+            "打开 Quartz",
             "Chinese tray action"
         );
         assert_eq!(
             rust_i18n::t!("tray.exit", locale = "en"),
-            "Exit",
+            "Exit Quartz",
             "English tray action"
         );
         assert_eq!(
@@ -333,7 +341,7 @@ mod tests {
         Language::SimplifiedChinese.set_global();
         assert_eq!(
             MessageKey::new("tray.open").translate(),
-            "打开",
+            "打开 Quartz",
             "global Chinese locale"
         );
         assert_eq!(
@@ -352,7 +360,7 @@ mod tests {
         Language::English.set_global();
         assert_eq!(
             MessageKey::new("tray.open").translate(),
-            "Open",
+            "Open Quartz",
             "global English locale"
         );
     }
@@ -367,11 +375,11 @@ mod tests {
         assert!("fr".parse::<Language>().is_err());
         assert_eq!(
             MessageKey::new("tray.open").in_language(Language::SimplifiedChinese),
-            "打开"
+            "打开 Quartz"
         );
         assert_eq!(
             Language::SimplifiedChinese.translate(MessageKey::new("tray.open")),
-            "打开"
+            "打开 Quartz"
         );
         assert!(Language::SimplifiedChinese.has_message(MessageKey::new("tray.open")));
         assert!(!Language::SimplifiedChinese.has_message(MessageKey::new("no.such.key")));

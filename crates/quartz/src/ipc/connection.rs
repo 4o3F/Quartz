@@ -202,6 +202,7 @@ mod tests {
     fn connection(database: &TestDatabase, status: &StatusPublisher) -> Connection {
         Connection {
             services: Services {
+                summary: None,
                 timed: crate::ipc::TimedPolicyPort::unavailable(),
                 queries: database.port.clone(),
                 writes: crate::ipc::WriteChannel::new().port,

@@ -12,6 +12,19 @@ pub(crate) struct DayCalendar {
     pub hours: Vec<HourStack>,
 }
 impl DayCalendar {
+    pub(crate) fn current_date(
+        now: jiff::Timestamp,
+        offset: i64,
+    ) -> Result<LocalDate, RunQueryError> {
+        let zone = TimeZone::system();
+        let date = now.to_zoned_datetime(zone.clone()).date();
+        let today = Self::in_zone(date, offset, zone)?;
+        Ok(if now.as_millisecond() < today.range.start {
+            date.yesterday()?
+        } else {
+            date
+        })
+    }
     pub(crate) fn next_start(now: jiff::Timestamp, offset: i64) -> Result<i64, RunQueryError> {
         Self::next_start_in_zone(now, offset, TimeZone::system())
     }
@@ -67,6 +80,24 @@ impl DayCalendar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn current_date_changes_at_the_system_logical_day_boundary() {
+        let date = "2026-11-21".parse().expect("date");
+        let offset = 240;
+        let calendar = DayCalendar::new(date, offset).expect("logical day");
+        let before =
+            jiff::Timestamp::from_millisecond(calendar.range.start - 1).expect("before boundary");
+        let boundary =
+            jiff::Timestamp::from_millisecond(calendar.range.start).expect("at boundary");
+        assert_eq!(
+            DayCalendar::current_date(before, offset).expect("previous day"),
+            date.yesterday().expect("yesterday")
+        );
+        assert_eq!(
+            DayCalendar::current_date(boundary, offset).expect("today"),
+            date
+        );
+    }
     #[test]
     fn tomorrow_uses_current_logical_day_before_and_at_offset_and_across_dst() {
         let zone = TimeZone::get("America/Los_Angeles").expect("time zone");

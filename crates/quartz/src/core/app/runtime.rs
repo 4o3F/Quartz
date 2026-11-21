@@ -127,6 +127,7 @@ pub(crate) struct CoreRuntime {
     clock: Arc<dyn ClockReader>,
     pub status: StatusPublisher,
     _ui_port: UiPort,
+    pub summary: crate::ipc::summary::SummaryPort,
     pub timed: crate::ipc::TimedPolicyPort,
     pub ui_commands: crate::ipc::UiCommands,
 }
@@ -188,20 +189,23 @@ impl CoreRuntime {
             store,
             metadata,
             Arc::clone(&ports.clock),
-            ports.wake,
+            Arc::clone(&ports.wake),
             ports.foreground,
         )
         .map_err(|source| StartCoreError::StartWorkers { source })?;
         workers.writes = workers
             .writes
             .clone()
-            .with_settings(system, Arc::clone(&ui_port));
+            .with_settings(system, Arc::clone(&ui_port))
+            .with_completion_wake(Arc::clone(&ports.wake));
         let timed = workers
             .sender
             .timed_port(Arc::clone(&ports.clock), day_offset);
+        let summary = crate::ipc::summary::SummaryTask::channel(day_offset, ports.wake);
         let pipe_ports = PipePorts {
             shutdown_timeout: SHUTDOWN_TIMEOUT,
             services: Services {
+                summary: Some(summary.task),
                 queries: workers.queries.clone(),
                 writes: workers.writes.clone(),
                 versions: workers.versions.clone(),
@@ -215,6 +219,7 @@ impl CoreRuntime {
             pipe: None,
             clock: ports.clock,
             status,
+            summary: summary.port,
             ui_commands,
             _ui_port: ui_port,
             timed,
@@ -224,7 +229,6 @@ impl CoreRuntime {
             Some((ports.pipe)(pipe_ports).map_err(|source| StartCoreError::StartPipe { source })?);
         Ok(runtime)
     }
-    #[expect(dead_code, reason = "tray annotation actions are added next")]
     pub(crate) fn writes(&self) -> crate::persistence::dispatch::WritePort {
         self.workers().writes.clone()
     }

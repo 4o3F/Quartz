@@ -310,6 +310,9 @@ impl DatabaseLoop {
                 let _ = command.reply.send(Err(quartz_protocol::ProtocolError::new(
                     quartz_protocol::ErrorKind::Busy,
                 )));
+                if let Some(wake) = &command.completion {
+                    wake.wake();
+                }
                 return Ok(());
             }
             if self.persistence.state() == PersistenceState::Ready {
@@ -344,6 +347,9 @@ impl DatabaseLoop {
             ));
         }
         let _ = command.reply.send(result);
+        if let Some(wake) = &command.completion {
+            wake.wake();
+        }
         Ok(())
     }
     fn execute_write(
@@ -718,7 +724,7 @@ mod tests {
     }
     #[test]
     fn user_write_flushes_capture_before_commit_and_reply() {
-        use crate::persistence::dispatch::{TestCommit, WriteCommand, WriteRequest};
+        use crate::persistence::dispatch::{TestCommit, WriteChannel, WriteRequest};
         use quartz_domain::capture::{CaptureCore, RunId};
         let mut fixture = Fixture::new();
         let at = fixture.database.now().expect("clock");
@@ -732,17 +738,26 @@ mod tests {
             fixture.database.persistence.state(),
             PersistenceState::Buffered { .. }
         ));
-        let (reply, received) = tokio::sync::oneshot::channel();
+        let channel = WriteChannel::new();
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let notify = Arc::clone(&wakes);
+        let port = channel.port.with_completion_wake(Arc::new(move || {
+            notify.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+        let received = port
+            .submit(WriteRequest::BumpMetadata {
+                outcome: TestCommit::Commit,
+            })
+            .expect("admit write");
         fixture
             .database
-            .write_command(WriteCommand {
-                settings: None,
-                request: WriteRequest::BumpMetadata {
-                    outcome: TestCommit::Commit,
-                },
-                reply,
-            })
+            .write_command(channel.receiver.try_recv().expect("queued write"))
             .expect("dispatch write");
+        assert_eq!(
+            wakes.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "wake main after reply"
+        );
         received
             .blocking_recv()
             .expect("reply channel")
@@ -778,6 +793,7 @@ mod tests {
         fixture
             .database
             .write_command(WriteCommand {
+                completion: None,
                 settings: None,
                 request: WriteRequest::BumpMetadata {
                     outcome: TestCommit::Commit,

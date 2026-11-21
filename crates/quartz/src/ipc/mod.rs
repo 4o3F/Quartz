@@ -6,6 +6,7 @@ pub(crate) mod outbox;
 pub(crate) mod registry;
 mod session;
 mod status;
+pub(crate) mod summary;
 mod timed;
 pub(crate) use timed::{TimedCommand, TimedDeadline, TimedPolicyPort};
 
@@ -20,6 +21,7 @@ use std::sync::Arc;
 /// Application services shared by transport, registry, and connection tasks.
 #[derive(Clone)]
 pub(crate) struct Services {
+    pub summary: Option<summary::SummaryTask>,
     pub writes: crate::persistence::dispatch::WritePort,
     pub queries: crate::query::dispatch::QueryPort,
     pub versions: crate::query::versions::VersionPort,
@@ -29,6 +31,10 @@ pub(crate) struct Services {
 }
 impl Services {
     pub(crate) fn start_registry(&self) -> registry::RegistryHandle {
+        if let Some(task) = &self.summary {
+            task.clone()
+                .start(self.queries.clone(), self.versions.clone());
+        }
         registry::RegistryHandle::start(self.status.clone(), self.versions.clone())
     }
 }

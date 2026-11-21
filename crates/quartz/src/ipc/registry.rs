@@ -304,9 +304,13 @@ impl ConnectionRegistry {
             Topic::Day(date) => Some(*date),
             _ => None,
         }));
-        let needs_days = dates
-            .iter()
-            .any(|date| !self.versions.updates.borrow().days.contains_key(date));
+        // A date already published for the tray still needs its own registry subscription.
+        let needs_days = dates.iter().any(|date| {
+            !self
+                .connections
+                .values()
+                .any(|connection| connection.days.contains_key(date))
+        });
         let prepared = if needs_days {
             match self.versions.set_days(dates).await {
                 Ok(prepared) => prepared,
@@ -520,6 +524,51 @@ mod tests {
                 .expect("removal task");
             assert!(channel.publisher.requests.is_empty());
         });
+    }
+
+    #[tokio::test]
+    async fn subscribing_to_trays_today_survives_the_tray_advancing_to_tomorrow() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("tray-rollover".into()));
+        let database = crate::query::dispatch::test_support::TestDatabase::start();
+        let today: quartz_protocol::LocalDate = "2025-01-02".parse().expect("today");
+        let tomorrow = today.tomorrow().expect("tomorrow");
+        database
+            .versions
+            .set_summary_day(today)
+            .await
+            .expect("tray day");
+        let registry = RegistryHandle::start(status.subscribe(), database.versions.clone());
+        let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
+        let registration = registry
+            .register(Role::Ui, writer.handle.clone())
+            .expect("register");
+        registry
+            .subscribe(
+                registration.id,
+                Subscribe {
+                    topics: vec![Topic::Day(today)],
+                },
+                Response {
+                    id: Some(quartz_protocol::RequestId(1)),
+                    outcome: quartz_protocol::ResponseOutcome::Ok {
+                        body: serde_json::json!({}),
+                    },
+                },
+            )
+            .await
+            .expect("subscribe UI day already cached by tray");
+        let published = database
+            .versions
+            .set_summary_day(tomorrow)
+            .await
+            .expect("advance tray day");
+        assert!(
+            published.days.contains_key(&today),
+            "UI retains yesterday after tray rollover"
+        );
+        assert!(published.days.contains_key(&tomorrow));
+        assert!(!writer.handle.is_closed());
     }
 
     #[test]

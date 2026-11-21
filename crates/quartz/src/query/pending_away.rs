@@ -3,7 +3,7 @@
 use super::{input::QueryRange, pipeline::DerivedSegment};
 use quartz_protocol::PendingAway;
 
-/// 04 §6.2 and 07 Today item 6 require idle pieces longer than fifteen minutes.
+/// 04 §6.2 and 07 Today item 6 require idle pieces of at least fifteen minutes.
 const MIN_PENDING_AWAY_MS: i64 = 15 * 60 * 1000;
 
 #[derive(Debug, Default)]
@@ -30,7 +30,7 @@ impl PendingAwayAccumulator {
         }
         merged
             .into_iter()
-            .filter(|range| range.end - range.start > MIN_PENDING_AWAY_MS)
+            .filter(|range| range.end - range.start >= MIN_PENDING_AWAY_MS)
             .map(|range| PendingAway {
                 start_utc_ms: range.start,
                 end_utc_ms: range.end,

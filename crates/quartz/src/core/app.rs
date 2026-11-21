@@ -1,5 +1,6 @@
 //! Core assembly, worker loops, and ordered shutdown through injected platform ports.
 
+pub(crate) mod annotation;
 mod capture_loop;
 mod database_loop;
 mod runtime;
@@ -58,6 +59,8 @@ impl From<ObservedEvent> for Observation {
 
 #[derive(Debug)]
 pub(crate) enum MainCommand {
+    IdleAvailability(annotation::IdleAvailability),
+    PolicyChanged,
     CaptureSnapshot {
         state: CaptureState,
         timed: quartz_protocol::TimedPolicies,
