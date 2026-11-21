@@ -1,3 +1,4 @@
+import { ActiveTimeSummary } from "./acceptance-summary.ts";
 import {
   type Fact,
   inspectDump,
@@ -669,5 +670,155 @@ Deno.test("export guidance requires explicit offline for frozen and stopped snap
     !usage.includes("frozen pre-crash")
   ) {
     throw new Error("usage must distinguish running and frozen exports");
+  }
+});
+
+Deno.test("summary unions allowed windows and subtracts idle, all stops, gaps and hidden identities", () => {
+  const rows = [
+    row("clock_segment", 1, 0, 120_000),
+    row("foreground", 1, 0, 120_000, {
+      capture_level: "full",
+      sequence: 1,
+      session_key: 1,
+    }),
+    row("foreground", 2, 10_000, 20_000, {
+      capture_level: "full",
+      sequence: 2,
+      session_key: 2,
+    }),
+    idle(1, 30_000, 60_000),
+    ...["locked", "disconnected", "suspended", "paused"].map((reason, index) =>
+      row("availability", index + 2, 50_000, 70_000, { reason })
+    ),
+    row("capture_gap", 1, 65_000, 80_000, { reason: "database_error" }),
+    row("foreground", 3, 80_000, 90_000, {
+      capture_level: "excluded",
+      sequence: 3,
+      session_key: 3,
+    }),
+    row("no_foreground", 4, 90_000, 100_000, {
+      capture_level: "excluded",
+      sequence: 4,
+      session_key: 4,
+    }),
+    row("foreground", 5, 100_000, 120_000, {
+      capture_level: "title_hidden",
+      sequence: 5,
+      session_key: 5,
+    }),
+  ];
+  const summary = new ActiveTimeSummary(parseDump(jsonl(rows)), {
+    start: 0,
+    end: 120_000,
+  });
+  if (summary.activeMs() !== 50_000) throw new Error(summary.text());
+  const clipped = new ActiveTimeSummary(rows, { start: 20_000, end: 100_000 });
+  if (clipped.activeMs() !== 10_000) throw new Error(clipped.text());
+});
+Deno.test("summary sums repeated UTC ranges in separate clocks and ignores core-offline time", () => {
+  const first = fixture();
+  const second = first.map((value) => ({
+    ...value,
+    id: value.id + 10,
+    run_id: 11,
+    segment_id: value.segment_id === null ? null : 11,
+  }));
+  const summary = new ActiveTimeSummary([...first, ...second, ...first], {
+    start: -100,
+    end: 200,
+  });
+  if (summary.activeMs() !== 200) throw new Error(summary.text());
+});
+Deno.test("summary clips open facts and clock at independent confirmation points", () => {
+  const rows = [
+    open(row("clock_segment", 1, 0, 90)),
+    open(
+      row("foreground", 1, 0, 80, {
+        capture_level: "full",
+        sequence: 1,
+        session_key: 1,
+      }),
+    ),
+  ];
+  const summary = new ActiveTimeSummary(parseDump(jsonl(rows)), {
+    start: 0,
+    end: 100,
+  });
+  if (summary.activeMs() !== 80) throw new Error(summary.text());
+});
+Deno.test("summary uses integer monotonic interpolation for each clipped endpoint", () => {
+  const rows = [
+    row("clock_segment", 1, 0, 3, { end_mono_ms: 2, duration_ms: 2 }),
+    row("foreground", 1, 0, 3, {
+      capture_level: "full",
+      sequence: 1,
+      session_key: 1,
+      end_mono_ms: 2,
+      duration_ms: 2,
+    }),
+  ];
+  const summary = new ActiveTimeSummary(parseDump(jsonl(rows)), {
+    start: 1,
+    end: 3,
+  });
+  if (summary.activeMs() !== 2) throw new Error(summary.text());
+});
+Deno.test("summary floors total active milliseconds to whole minutes", () => {
+  const rows = [
+    row("clock_segment", 1, 0, 3_719_999),
+    row("foreground", 1, 0, 3_719_999, {
+      capture_level: "full",
+      sequence: 1,
+      session_key: 1,
+    }),
+  ];
+  const summary = new ActiveTimeSummary(rows, { start: 0, end: 3_719_999 });
+  if (!summary.text().includes("今日 1h 1m")) throw new Error(summary.text());
+});
+Deno.test("summary rejects conflicting snapshots and invalid local dates", () => {
+  for (const date of ["2025-02-30", "2025-13-01", "2025-2-01", "bad"]) {
+    let failed = false;
+    try {
+      ActiveTimeSummary.localDay(date);
+    } catch {
+      failed = true;
+    }
+    if (!failed) throw new Error(`Accepted invalid date: ${date}`);
+  }
+  const rows = fixture();
+  let failed = false;
+  try {
+    new ActiveTimeSummary([...rows, { ...rows[2], title: "conflict" }], {
+      start: 0,
+      end: 100,
+    }).activeMs();
+  } catch {
+    failed = true;
+  }
+  if (!failed) throw new Error("Accepted conflicting dump snapshots");
+});
+Deno.test("summary local calendar day advances to the next midnight", () => {
+  const range = ActiveTimeSummary.localDay("2025-01-02");
+  if (
+    new Date(range.start).getDate() !== 2 || new Date(range.end).getDate() !== 3
+  ) {
+    throw new Error("Invalid local calendar bounds");
+  }
+});
+
+Deno.test("summary rejects missing clock segments instead of reporting zero activity", () => {
+  for (
+    const rows of [
+      [],
+      fixture().filter((value) => value.kind !== "clock_segment"),
+    ]
+  ) {
+    let failed = false;
+    try {
+      new ActiveTimeSummary(rows, { start: 0, end: 100 }).activeMs();
+    } catch {
+      failed = true;
+    }
+    if (!failed) throw new Error("Accepted missing clock segment");
   }
 });

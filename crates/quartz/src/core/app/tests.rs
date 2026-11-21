@@ -1391,3 +1391,163 @@ fn timed_ipc_admits_typed_capture_events_and_reports_busy_and_invalid_deadlines(
     });
     runtime.shutdown();
 }
+
+/// Allows the restarted core's clock to differ from the original create time.
+const RESTART_CLOCK_ADVANCE_MS: u64 = 1000;
+const ANNOTATION_COMMIT_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RestartPhase {
+    BeforeRestart,
+    AfterRestart,
+}
+
+/// Reads through the storage snapshot API so integration assertions do not use Diesel.
+struct RestartAnnotations {
+    rows: Vec<crate::store::query::QueryAnnotation>,
+}
+impl RestartAnnotations {
+    fn read(directory: &DataDirectory) -> Self {
+        let mut snapshot = crate::store::ReadOnlyStore::open(&directory.database())
+            .expect("annotation reader")
+            .snapshot();
+        snapshot.begin().expect("pin annotation snapshot");
+        let mut rows = Vec::new();
+        while let Some(batch) = snapshot
+            .read_batch(quartz_domain::facts::QueryRange {
+                start: 0,
+                end: 1000,
+            })
+            .expect("annotation batch")
+        {
+            rows.extend(batch.into_iter().filter_map(|row| match row {
+                crate::store::query::InputRow::Annotation(annotation) => Some(annotation),
+                _ => None,
+            }));
+        }
+        Self { rows }
+    }
+    async fn wait(directory: &DataDirectory, count: usize) -> Self {
+        let started = std::time::Instant::now();
+        loop {
+            let snapshot = Self::read(directory);
+            if snapshot.rows.len() == count {
+                return snapshot;
+            }
+            assert!(
+                started.elapsed() < RUNTIME_TEST_TIMEOUT,
+                "annotation commit deadline"
+            );
+            tokio::time::sleep(ANNOTATION_COMMIT_POLL).await;
+        }
+    }
+}
+
+#[test]
+fn annotations_lost_response_retries_after_core_restart_without_duplicate_or_second_remainder() {
+    use quartz_protocol::{
+        AnnotationId, AnnotationKind, AnnotationValues, AnnotationsCreateRequest,
+        AnnotationsResponse, CreateAnnotation, Op, Role,
+    };
+    // Separate databases prove both the one-row create and the three-row split case.
+    for kind in [AnnotationKind::Note, AnnotationKind::ActiveOverride] {
+        let temporary = tempfile::tempdir().expect("restart database");
+        let directory = DataDirectory::new(temporary.path());
+        let writer = CreateAnnotation {
+            uuid: AnnotationId(
+                "00000000-0000-4000-8000-000000000002"
+                    .parse()
+                    .expect("writer UUID"),
+            ),
+            kind,
+            values: AnnotationValues {
+                start_utc_ms: 20,
+                end_utc_ms: 80,
+                category: None,
+                label: Some("restart annotation".into()),
+                note: None,
+            },
+        };
+        let request = AnnotationsCreateRequest {
+            entities: vec![writer.clone()],
+        };
+        let io = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("restart I/O");
+        let mut before = None;
+        for phase in [RestartPhase::BeforeRestart, RestartPhase::AfterRestart] {
+            let mut fixture = RuntimePortsFixture::new(StartTestPipe::Succeed);
+            fixture.ports.foreground = create_foreground();
+            if phase == RestartPhase::AfterRestart {
+                fixture.clock.advance(RESTART_CLOCK_ADVANCE_MS);
+            }
+            let (send, receive) = bounded(CONTROL_CAPACITY);
+            fixture.ports.pipe = Box::new(move |ports| {
+                send.send(ports.services).expect("receive runtime services");
+                Ok(Box::new(TestPipe {
+                    log: LifecycleLog::default(),
+                }))
+            });
+            let runtime = CoreRuntime::start(&directory, fixture.ports)
+                .expect("start core on same directory");
+            let services = receive
+                .recv_timeout(RUNTIME_TEST_TIMEOUT)
+                .expect("runtime services");
+            io.block_on(async {
+                let registry = services.start_registry();
+                let mut ui = AnnotationClient::connect(services, registry, Role::Ui).await;
+                if phase == RestartPhase::BeforeRestart && kind == AnnotationKind::ActiveOverride {
+                    let mut original = writer.clone();
+                    original.uuid = AnnotationId(
+                        "00000000-0000-4000-8000-000000000001"
+                            .parse()
+                            .expect("original UUID"),
+                    );
+                    original.values.start_utc_ms = 0;
+                    original.values.end_utc_ms = 100;
+                    ui.send(
+                        2,
+                        Op::AnnotationsCreate,
+                        serde_json::to_value(AnnotationsCreateRequest {
+                            entities: vec![original],
+                        })
+                        .expect("original body"),
+                    )
+                    .await;
+                    ui.success(2).await;
+                }
+                ui.send(
+                    3,
+                    Op::AnnotationsCreate,
+                    serde_json::to_value(&request).expect("create body"),
+                )
+                .await;
+                let expected_count = if kind == AnnotationKind::Note { 1 } else { 3 };
+                if phase == RestartPhase::BeforeRestart {
+                    // Observe the SQLite commit independently, then discard the unread response.
+                    before = Some(RestartAnnotations::wait(&directory, expected_count).await);
+                } else {
+                    let response: AnnotationsResponse =
+                        serde_json::from_value(ui.success(3).await).expect("retry entity");
+                    assert_eq!(response.entities.len(), 1);
+                    assert_eq!(response.entities[0].uuid, writer.uuid);
+                    assert_eq!(response.entities[0].kind, writer.kind);
+                    assert_eq!(response.entities[0].values, writer.values);
+                    let after = RestartAnnotations::read(&directory);
+                    let before = before.as_ref().expect("committed pre-restart snapshot");
+                    assert_eq!(after.rows.len(), expected_count);
+                    for (index, old) in before.rows.iter().enumerate() {
+                        let new = &after.rows[index];
+                        assert_eq!(old.id, new.id, "remainder identity survives retry");
+                        assert_eq!(old.range, new.range, "retry preserves clipped ranges");
+                        assert_eq!(old.kind, new.kind);
+                    }
+                }
+                ui.close().await;
+            });
+            runtime
+                .shutdown(RuntimeExit::UserExit)
+                .expect("real core shutdown before restart");
+        }
+    }
+}

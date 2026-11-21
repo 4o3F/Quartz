@@ -388,7 +388,7 @@ fn silent_hello_expires_and_a_ready_client_survives_the_same_deadline() {
     );
 }
 
-/// Short transport stress substitutes for the ten-minute M2-F acceptance run (04 §9).
+/// Scaled duration for the continuous capture driver and response flood (04 §9).
 const SLOW_CLIENT_TEST_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
 /// Allows loaded Windows test runners headroom while catching a stalled I/O runtime.
 const STATUS_LATENCY_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
@@ -487,43 +487,244 @@ fn subscribe_rejects_cli_and_unknown_topics() {
         .expect("connection remains unsubscribed and usable");
 }
 
+/// Full 04 §9 acceptance duration; run explicitly with a serial test harness.
+const SLOW_CLIENT_ACCEPTANCE_DURATION: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+/// Same capture commit budget as core/app's large-query contention test (08 §1.3).
+const CAPTURE_COMMIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Two SQLite caches, worker/runtime stacks, frame encoding and allocator retention.
+const PRIVATE_BYTES_SLACK: usize = 32 * 1024 * 1024;
+
+struct ProcessPrivateBytes;
+impl ProcessPrivateBytes {
+    fn sample() -> usize {
+        use windows::Win32::System::{
+            ProcessStatus::{
+                GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+            },
+            Threading::GetCurrentProcess,
+        };
+        let size =
+            u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>()).expect("counter size");
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+            cb: size,
+            ..Default::default()
+        };
+        // SAFETY: The live current-process handle and writable EX structure include PrivateUsage.
+        unsafe {
+            GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                (&raw mut counters).cast::<PROCESS_MEMORY_COUNTERS>(),
+                size,
+            )
+        }
+        .expect("sample process Private Bytes");
+        counters.PrivateUsage
+    }
+}
+struct StressClock(std::time::Instant);
+impl crate::core::sources::ClockReader for StressClock {
+    fn read(
+        &self,
+    ) -> Result<quartz_domain::capture::Timestamp, crate::core::sources::ReadClockError> {
+        Ok(crate::store::capture::test_support::at(
+            u64::try_from(self.0.elapsed().as_millis()).expect("stress clock"),
+        ))
+    }
+}
+struct StressResolver;
+impl crate::core::foreground::ForegroundResolve for StressResolver {
+    fn resolve(
+        &mut self,
+        _snapshot: crate::core::foreground::Snapshot,
+    ) -> crate::core::foreground::Resolution {
+        crate::core::foreground::Resolution::Review
+    }
+}
+struct SlowClientRun;
+impl SlowClientRun {
+    fn run(duration: std::time::Duration) {
+        use crate::core::{
+            app::{MainCommand, ObservedEvent, Workers},
+            sources::ClockReader,
+        };
+        use crate::store::capture::test_support::{Inspection, metadata};
+        use quartz_domain::capture::*;
+        let temporary = tempfile::tempdir().expect("slow-client isolated database");
+        let store =
+            crate::store::Store::open(&crate::data_directory::DataDirectory::new(temporary.path()))
+                .expect("slow-client store");
+        let clock = Arc::new(StressClock(std::time::Instant::now()));
+        let workers = Workers::start(
+            store,
+            metadata(),
+            clock.clone(),
+            Arc::new(|| {}),
+            Box::new(|| Ok(Box::new(StressResolver))),
+        )
+        .expect("real capture and database workers");
+        let name = PipeName::for_test(windows::core::GUID::new().expect("stress pipe"));
+        let status = StatusPublisher::new(quartz_protocol::InstanceId("slow-client-test".into()));
+        let server = PipeServer::start(server::PipeServerConfig {
+            shutdown_timeout: crate::core::app::SHUTDOWN_TIMEOUT,
+            owner: ProcessIdentity::current().expect("stress identity"),
+            name: name.clone(),
+            timeouts: server::ConnectionTimeouts::default(),
+            services: crate::ipc::Services {
+                summary: None,
+                timed: crate::ipc::TimedPolicyPort::unavailable(),
+                queries: workers.queries.clone(),
+                writes: workers.writes.clone(),
+                versions: workers.versions.clone(),
+                status: status.subscribe(),
+                ui: Arc::new(|_| Ok(())),
+            },
+        })
+        .expect("real test pipe server");
+        let mut slow = CoreClient::connect_named(
+            &name,
+            HelloRole::Ui {
+                ui: UiHello {
+                    state: UiState::Starting,
+                },
+            },
+        )
+        .expect("slow UI hello");
+        slow.request(Op::Subscribe, &json!({"topics":["state"]}))
+            .expect("subscribe slow reader");
+        // Retain the initial snapshot unread for the entire measured duration.
+        let mut cli = CoreClient::connect_named(&name, HelloRole::Cli).expect("healthy CLI hello");
+        let observe = |event| {
+            workers
+                .sender
+                .observe(ObservedEvent {
+                    at: clock.read().expect("stress time"),
+                    event,
+                })
+                .expect("capture admission")
+        };
+        observe(CaptureEvent::Session(SessionStatus::Ready(
+            Default::default(),
+        )));
+        observe(CaptureEvent::Foreground {
+            source: ObservationSource::Review,
+            foreground: Foreground::None(NoForegroundReason::Empty),
+        });
+        let mut inspection = Inspection::open(temporary.path());
+        let baseline = ProcessPrivateBytes::sample();
+        let mut peak = baseline;
+        let started = std::time::Instant::now();
+        let mut change = 0;
+        let mut committed = 0;
+        let mut latencies = Vec::new();
+        let mut queued_peak = 0;
+        while started.elapsed() < duration {
+            let submitted = std::time::Instant::now();
+            observe(CaptureEvent::Stop(StopChange::Begin(StopReason::Paused)));
+            // Confirm the exact new capture row in SQLite, rather than consuming an older Ready notice.
+            while inspection.pause_count() <= committed {
+                for command in workers.commands.try_iter() {
+                    if let MainCommand::Fatal(worker) = command {
+                        panic!("{worker} worker failed");
+                    }
+                }
+                let publishing = std::time::Instant::now();
+                publish_large_foreground(&status, change);
+                assert!(
+                    publishing.elapsed() < PUBLISH_LATENCY_LIMIT,
+                    "capture state publication stalled"
+                );
+                change += 1;
+                let requesting = std::time::Instant::now();
+                cli.status().expect("healthy client during capture writes");
+                assert!(
+                    requesting.elapsed() < STATUS_LATENCY_LIMIT,
+                    "status waited on slow client"
+                );
+                let metrics = server.metrics();
+                assert_eq!(metrics.len(), 2, "stalled reader remains connected");
+                for metric in metrics {
+                    queued_peak = queued_peak.max(metric.peak);
+                    assert!(metric.queued <= crate::ipc::outbox::SEND_BUFFER_LIMIT);
+                    assert!(metric.peak <= crate::ipc::outbox::SEND_BUFFER_LIMIT);
+                }
+                peak = peak.max(ProcessPrivateBytes::sample());
+                assert!(
+                    peak.saturating_sub(baseline)
+                        <= crate::ipc::outbox::SEND_BUFFER_LIMIT + PRIVATE_BYTES_SLACK,
+                    "process growth exceeded send budget plus 32 MiB slack"
+                );
+                assert!(
+                    submitted.elapsed() < crate::core::app::SHUTDOWN_TIMEOUT,
+                    "capture write stopped committing"
+                );
+                std::thread::sleep(STRESS_PUBLISH_INTERVAL);
+            }
+            let latency = submitted.elapsed();
+            committed += 1;
+            latencies.push(latency);
+            observe(CaptureEvent::Stop(StopChange::End(StopReason::Paused)));
+            observe(CaptureEvent::Foreground {
+                source: ObservationSource::Review,
+                foreground: Foreground::None(NoForegroundReason::Empty),
+            });
+        }
+        assert!(committed > 1, "continuous capture commits required");
+        assert!(queued_peak > 0, "unread pipe must have pending state bytes");
+        latencies.sort_unstable();
+        const PERCENTILE: usize = 95;
+        const PERCENT: usize = 100;
+        let rank = (latencies.len() * PERCENTILE).div_ceil(PERCENT);
+        let p95 = latencies[rank - 1];
+        assert!(
+            p95 < CAPTURE_COMMIT_LIMIT,
+            "capture commit P95 {p95:?} exceeds {CAPTURE_COMMIT_LIMIT:?}"
+        );
+        println!(
+            "duration={:?} commits={committed} commit_p95={p95:?} queued_peak={queued_peak} private_baseline={baseline} private_peak={peak} private_growth={} private_limit={}",
+            started.elapsed(),
+            peak.saturating_sub(baseline),
+            crate::ipc::outbox::SEND_BUFFER_LIMIT + PRIVATE_BYTES_SLACK
+        );
+        drop(slow);
+        drop(cli);
+        server.shutdown().expect("stop stress pipe");
+        workers
+            .request_shutdown(clock.read().expect("shutdown time"), RunEndReason::UserExit)
+            .expect("stop stress capture");
+        workers.join().expect("join real stress workers");
+    }
+}
+
 #[test]
-fn stalled_state_reader_never_blocks_publication_or_another_clients_status() {
-    let fixture = Fixture::new();
-    let mut slow = fixture.ui();
-    slow.request(Op::Subscribe, &json!({"topics":["state"]}))
-        .expect("subscribe slow reader");
-    // Retain the immediate snapshot unread and never read this connection again.
-    let mut cli = fixture.cli();
-    let started = std::time::Instant::now();
-    let mut change = 0;
-    while started.elapsed() < SLOW_CLIENT_TEST_DURATION {
-        let publishing = std::time::Instant::now();
-        publish_large_foreground(&fixture.status, change);
-        assert!(
-            publishing.elapsed() < PUBLISH_LATENCY_LIMIT,
-            "publisher waited on stalled reader"
-        );
-        let requesting = std::time::Instant::now();
-        cli.status().expect("other connection status");
-        assert!(
-            requesting.elapsed() < STATUS_LATENCY_LIMIT,
-            "other connection waited on stalled reader"
-        );
-        change += 1;
-        std::thread::sleep(STRESS_PUBLISH_INTERVAL);
+fn stalled_state_reader_preserves_capture_commits_status_budget_and_private_bytes() {
+    // Private Bytes is process-wide: isolate from unrelated parallel tests using the test harness.
+    const PROBE_ENV: &str = "QUARTZ_TEST_SLOW_CLIENT_PROBE";
+    match std::env::var(PROBE_ENV) {
+        Ok(value) => {
+            assert_eq!(value, "scaled", "unknown slow-client test mode");
+            SlowClientRun::run(SLOW_CLIENT_TEST_DURATION);
+        }
+        Err(std::env::VarError::NotPresent) => {
+            let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", "platform::windows::ipc::tests::stalled_state_reader_preserves_capture_commits_status_budget_and_private_bytes", "--nocapture", "--test-threads=1"])
+                .env(PROBE_ENV, "scaled").output().expect("isolated scaled test harness");
+            assert!(
+                output.status.success(),
+                "scaled slow-client test failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+        Err(error) => panic!("invalid slow-client test environment: {error}"),
     }
-    assert!(change > 10);
-    let metrics = fixture.server.metrics();
-    assert_eq!(metrics.len(), 2, "both connections remain alive");
-    assert!(
-        metrics.iter().any(|metric| metric.queued > 0),
-        "large state frames must actually fill the unread pipe"
-    );
-    for metric in metrics {
-        assert!(metric.queued <= crate::ipc::outbox::SEND_BUFFER_LIMIT);
-        assert!(metric.peak <= crate::ipc::outbox::SEND_BUFFER_LIMIT);
-    }
+}
+
+#[test]
+#[ignore = "ten-minute M2 slow-client acceptance; run alone with --test-threads=1"]
+fn slow_client_ten_minutes_preserves_capture_commits_status_budget_and_private_bytes() {
+    SlowClientRun::run(SLOW_CLIENT_ACCEPTANCE_DURATION);
 }
 
 #[test]

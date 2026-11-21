@@ -686,3 +686,51 @@ C1 运行 `bench-query --db <已准备模拟库> --runs 100`，C2 运行 `bench-
 无注解对照四轮的日汇总、日时间轴、七天时间轴 P95 范围分别为 6.751–7.888、7.790–9.513、50.006–52.653 ms；当前版本分别为 6.926–9.466、8.839–10.648、51.414–55.203 ms，pending_away 为 8.865–11.169 ms。前三项 P95 中位数分别高 6.20%、4.70%、5.67%，各轮测量区间重叠，差异与本轮默认调度下的波动相当。当前日汇总和七天时间轴均低于 D1 约 10.3 和 61 ms 的参考值。
 
 当前无注解与注解负载的最大 Private Bytes 增量为 7.914 MiB，低于 20 MiB。新增 `timeline-annotations.json` 和 `pending-away.json` 两份协议 golden；原有无注解 day 和 timeline golden 文件逐字节保持不变。
+
+## 2026-11-21 M2-F1：验收自动化
+
+基线为 `cb5c666` 加本次未提交修改。Windows 11 build 26300.9974，系统时区为 China Standard Time（UTC+08:00），Rust 1.100.0，Windows 与 WSL 的 Deno 均为 2.9.8。Rust 验证使用 Windows 工具链和 `target/windows`；Deno 检查与夹具测试在 WSL 执行。
+
+```powershell
+cargo.exe fmt --all
+cargo.exe clippy --workspace --all-targets --all-features --target-dir target/windows -- -D warnings
+cargo.exe clippy --workspace --all-targets --target-dir target/windows -- -D warnings
+cargo.exe test --workspace --all-features --target-dir target/windows
+cargo.exe test --workspace --all-features --target-dir target/windows
+deno task check
+deno task test
+cargo.exe test -p quartz --all-features --target-dir target/windows annotations_lost_response -- --nocapture
+cargo.exe test -p quartz --all-features --target-dir target/windows stalled_state_reader_preserves_capture_commits_status_budget_and_private_bytes -- --nocapture
+```
+
+全部通过。最终工作树的完整工作区测试连续两轮各 588 项通过、2 项忽略；忽略项为已有可见 ApplicationFrameWindow 检查和新增十分钟慢客户端测试。Deno 共 90 项通过，包含 8 项摘要计算夹具测试，覆盖窗口并集、独立 idle/停止/缺口遮罩、隐私字段、NoForeground、重复 UTC 的独立时钟段、开放确认点、单调时长插值、本地日期裁剪、整分钟向下取整与非法输入。
+
+UUID 测试在两个独立临时库中分别创建 note 和发生包含裁剪的 active_override。UI 发出 annotations.create 后，通过存储快照确认提交，丢弃未读取的回复，再正常关闭并重新启动同目录的真实 CoreRuntime。重试返回原实体；note 仍为 1 行，裁剪场景仍为原左段、写入段、右侧余段共 3 行，余段 UUID 和范围保持一致。
+
+两秒缩短测试使用真实采集/数据库线程、随机名称的 Windows 测试管道和停止读取 state 的 UI 连接，另一个 CLI 连接持续查询 core.status。Private Bytes 在独立测试进程中采样；下表为最终驱动的一次显式运行，报告采样区间为 2.0057458 秒。
+
+| 指标 | 结果 | 断言上限 |
+|---|---:|---:|
+| 采集提交数 | 335 | 至少 2 次 |
+| 采集提交 P95（nearest-rank） | 6.143 ms | < 1,000 ms |
+| 状态发布耗时 | 每次通过 | < 100 ms |
+| 另一客户端 core.status 往返 | 每次通过 | < 500 ms |
+| 连接排队字节峰值 | 12,380 bytes | ≤ 1,048,576 bytes |
+| Private Bytes 基线 | 6,615,040 bytes | — |
+| Private Bytes 采样峰值 | 6,934,528 bytes | — |
+| Private Bytes 增量 | 319,488 bytes | ≤ 34,603,008 bytes（发送预算 + 32 MiB） |
+
+发送预算单独由连接指标检查；进程增量另包含 SQLite 缓存、工作线程、运行时、测试采样与分配器保留空间。十分钟版本使用同一驱动和断言，命令见 [M2 手册第 6 节](acceptance/m2.md#6-十分钟慢客户端)。
+
+release 构建 `cargo.exe build --release -p quartz --target-dir target/windows` 通过。随后在 Windows PowerShell 中按手册覆盖 LOCALAPPDATA，启动独立验收核心（PID 51380）；2026-11-21 18:43（UTC+08:00）的检查执行如下命令，全部通过。
+
+```powershell
+& $exe status | Out-Host
+deno task acceptance-reject --data-root $dataRoot
+deno task acceptance-summary $summaryDump --date $today --no-annotations
+deno task acceptance $offlineDump
+```
+
+非 Quartz 客户端 PID 3172 连接后无回复断开，同一次连接的核心日志为 `rejected pipe client pid=3172 error=peer executable is not allowed`。真实当日 dump 的摘要计算为 active_ms=0、今日 0h 0m。检查通过 WM_CLOSE 正常停止本次验收核心，然后导出离线事实，format、coverage、idle、midnight、recovery、privacy、clock 全部 PASS。Windows PowerShell 的 quartz.exe 调用使用显式管道等待进程退出，dump 行通过 ForEach-Object 原样传递。
+
+人工待测：托盘各状态的视觉观察、今日提示与脚本输出的分钟比较、暂停满 15 分钟后的恢复、保持计时、隐私模式和长空闲后的快速标注；其他账户/会话拒绝、十分钟慢客户端。语言切换目前由 UI 角色的 settings.set、托盘语言通知及本地化菜单测试覆盖，M3 补实机设置操作。执行步骤及逐项记录要求见 [M2 验收手册](acceptance/m2.md)。
