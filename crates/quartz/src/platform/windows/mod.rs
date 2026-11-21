@@ -210,19 +210,26 @@ impl CoreProcess {
             AcquireInstance::OtherSession => return OtherSessionSnafu.fail(),
             AcquireInstance::Acquired(instance) => instance,
         };
-        let mut tray = Tray::create(TrayState {
-            tooltip: TrayTooltip::Upgrading,
-            ..TrayState::default()
-        })
+        let system_language = detect_ui_language();
+        let mut tray = Tray::create(
+            TrayState {
+                tooltip: TrayTooltip::Upgrading,
+                ..TrayState::default()
+            },
+            system_language,
+        )
         .context(CreateTraySnafu)?;
-        let ports = PlatformPorts::windows()?;
-        let runtime = CoreRuntime::start(&data_directory, ports).context(StartRuntimeSnafu)?;
+        let ports = PlatformPorts::windows(system_language)?;
+        let mut runtime = CoreRuntime::start(&data_directory, ports).context(StartRuntimeSnafu)?;
+        if let Err(error) = tray.set_language(runtime.status.ui_settings().ui_language) {
+            tracing::error!(%error, "could not apply initial tray language");
+        }
         let ingress = SystemIngress::new(runtime.sender(), runtime.shutdown_port());
         tray.attach_capture(ingress.clone());
         let mut sources = Sources::start(tray.raw_window(), ingress).context(ObserveSystemSnafu)?;
         self.refresh_tray(&mut tray, &runtime.status, TrayRefresh::Startup);
         tracing::info!(?autostart, "core message loop started");
-        let result = self.message_loop(&mut tray, &runtime, &mut sources);
+        let result = self.message_loop(&mut tray, &mut runtime, &mut sources);
         self.ui = UiState::default();
         let exit = CoreExit::from_loop(&result).runtime_exit();
         let stopped = runtime.shutdown(exit);
@@ -241,7 +248,7 @@ impl CoreProcess {
     fn message_loop(
         &mut self,
         tray: &mut Tray,
-        runtime: &CoreRuntime,
+        runtime: &mut CoreRuntime,
         sources: &mut Sources,
     ) -> Result<CoreExit, WaitCoreEventsError> {
         let status = &runtime.status;
@@ -262,6 +269,9 @@ impl CoreProcess {
                     let _ = WindowsAndMessaging::TranslateMessage(&message);
                     WindowsAndMessaging::DispatchMessageW(&message);
                 }
+            }
+            if let Some(effective) = runtime.ui_commands.take_settings_change() {
+                self.handle_ui_command(UiCommand::SettingsChanged(effective), tray, status);
             }
             while let Ok(command) = runtime.ui_commands.try_recv() {
                 self.handle_ui_command(command, tray, status);
@@ -307,6 +317,13 @@ impl CoreProcess {
     fn handle_ui_command(&mut self, command: UiCommand, tray: &mut Tray, status: &StatusPublisher) {
         match command {
             UiCommand::Open => self.open_ui(tray, status),
+            UiCommand::SettingsChanged(effective) => {
+                status.apply_ui_settings(effective, |language| {
+                    if let Err(error) = tray.set_language(language) {
+                        tracing::error!(%error, "could not update tray language");
+                    }
+                });
+            }
             UiCommand::FirstFrame => {
                 self.ui.first_frame();
                 self.refresh_tray(tray, status, TrayRefresh::FirstFrame);

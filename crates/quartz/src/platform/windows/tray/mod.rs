@@ -53,15 +53,38 @@ pub(super) struct UpdateTrayStateError {
 pub(super) struct Tray {
     // Fields drop in declaration order, removing the icon before its callback window.
     icon: TrayIcon,
+    state: TrayState,
     window: Window,
 }
 impl Tray {
-    pub(super) fn create(state: TrayState) -> Result<Self, CreateTrayError> {
-        super::detect_ui_language().set_global();
+    pub(super) fn create(
+        state: TrayState,
+        language: quartz_i18n::Language,
+    ) -> Result<Self, CreateTrayError> {
         let window = Window::create().context(WindowSnafu)?;
-        let mut icon = TrayIcon::add(&window).context(IconSnafu)?;
+        let mut icon = TrayIcon::add(&window, language).context(IconSnafu)?;
         icon.update(state).context(StateSnafu)?;
-        Ok(Self { icon, window })
+        Ok(Self {
+            icon,
+            state,
+            window,
+        })
+    }
+    pub(super) fn set_language(
+        &mut self,
+        language: quartz_protocol::UiLanguage,
+    ) -> Result<(), UpdateTrayStateError> {
+        let language = match language {
+            quartz_protocol::UiLanguage::English => quartz_i18n::Language::English,
+            quartz_protocol::UiLanguage::SimplifiedChinese => {
+                quartz_i18n::Language::SimplifiedChinese
+            }
+        };
+        if self.icon.language() == language {
+            return Ok(());
+        }
+        self.icon.set_language(language);
+        self.update(self.state)
     }
     pub(super) fn raw_window(&self) -> windows::Win32::Foundation::HWND {
         self.window.raw()
@@ -70,7 +93,9 @@ impl Tray {
         self.window.attach_capture(ingress);
     }
     pub(super) fn update(&mut self, state: TrayState) -> Result<(), UpdateTrayStateError> {
-        self.icon.update(state).context(UpdateTrayStateSnafu)
+        self.icon.update(state).context(UpdateTrayStateSnafu)?;
+        self.state = state;
+        Ok(())
     }
     pub(super) fn commands(&self) -> Vec<TrayCommand> {
         let mut commands = Vec::new();

@@ -24,6 +24,7 @@ impl AllowedRoles {
 pub(crate) enum UiCommand {
     Open,
     FirstFrame,
+    SettingsChanged(quartz_protocol::EffectiveUiSettings),
 }
 #[derive(Debug)]
 enum State {
@@ -191,7 +192,11 @@ impl ConnectionSession {
                         id,
                         crate::query::QueryRequest::decode(request.op, request.body),
                     ),
-                    Op::AnnotationsCreate | Op::AnnotationsUpdate | Op::AnnotationsDelete => {
+                    Op::SettingsGet
+                    | Op::SettingsSet
+                    | Op::AnnotationsCreate
+                    | Op::AnnotationsUpdate
+                    | Op::AnnotationsDelete => {
                         match crate::persistence::dispatch::WriteRequest::decode(
                             request.op,
                             request.body,
@@ -225,8 +230,6 @@ impl ConnectionSession {
                     | Op::CategoriesUpdate
                     | Op::CategoriesDelete
                     | Op::CategoriesReorder
-                    | Op::SettingsGet
-                    | Op::SettingsSet
                     | Op::DataDelete
                     | Op::TrackingPause
                     | Op::TrackingResume
@@ -413,5 +416,58 @@ mod tests {
         };
         assert_eq!(id, RequestId(4));
         assert_eq!(subscription.topics, vec![Topic::State, Topic::Control]);
+    }
+    #[test]
+    fn settings_permissions_and_invalid_bodies_are_decided_before_database_admission() {
+        let publisher = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(
+            "settings-session".into(),
+        ));
+        let receiver = publisher.subscribe();
+        let status = receiver.borrow();
+        for role in [Role::Cli, Role::Host] {
+            let mut session = ConnectionSession {
+                state: State::Ready(role),
+                allowed: AllowedRoles::Quartz,
+            };
+            for op in [Op::SettingsGet, Op::SettingsSet] {
+                let response = session
+                    .receive(request(1, op, serde_json::json!({})), &status.status)
+                    .reply();
+                assert_eq!(
+                    response.outcome,
+                    ResponseOutcome::Err {
+                        error: ProtocolError::new(ErrorKind::Forbidden)
+                    }
+                );
+            }
+        }
+        let mut ui = ConnectionSession {
+            state: State::Ready(Role::Ui),
+            allowed: AllowedRoles::Quartz,
+        };
+        for body in [
+            serde_json::json!({"language":"unknown"}),
+            serde_json::json!({"hour_cycle":"25"}),
+            serde_json::json!({"first_day_of_week":null}),
+        ] {
+            assert_eq!(
+                ui.receive(request(1, Op::SettingsSet, body), &status.status)
+                    .reply()
+                    .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::BadRequest)
+                }
+            );
+        }
+        assert!(matches!(
+            ui.receive(
+                request(2, Op::SettingsGet, serde_json::json!({})),
+                &status.status
+            ),
+            Action::Write {
+                request: crate::persistence::dispatch::WriteRequest::SettingsGet,
+                ..
+            }
+        ));
     }
 }

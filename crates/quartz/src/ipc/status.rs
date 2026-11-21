@@ -82,6 +82,31 @@ impl StatusPublisher {
             }),
         }
     }
+    pub(crate) fn apply_ui_settings(
+        &self,
+        settings: quartz_protocol::EffectiveUiSettings,
+        update_tray: impl FnOnce(UiLanguage),
+    ) {
+        update_tray(settings.ui_language);
+        self.set_ui_settings(settings);
+    }
+    pub(crate) fn set_ui_settings(&self, settings: quartz_protocol::EffectiveUiSettings) {
+        self.sender.send_if_modified(|published| {
+            if published.language == settings.ui_language && published.locale == settings.locale {
+                return false;
+            }
+            published.language = settings.ui_language;
+            published.locale = settings.locale;
+            true
+        });
+    }
+    pub(crate) fn ui_settings(&self) -> quartz_protocol::EffectiveUiSettings {
+        let published = self.sender.borrow();
+        quartz_protocol::EffectiveUiSettings {
+            ui_language: published.language,
+            locale: published.locale,
+        }
+    }
     pub(crate) fn stop_reason(&self) -> Option<StopReason> {
         self.sender.borrow().status.stop_reason
     }
@@ -283,5 +308,25 @@ mod tests {
             receiver.borrow().status.stop_reason,
             Some(StopReason::SessionUnavailable)
         );
+    }
+    #[test]
+    fn settings_setter_publishes_locale_changes_and_suppresses_identical_values() {
+        let publisher = StatusPublisher::new(InstanceId("locale-update".into()));
+        let mut receiver = publisher.subscribe();
+        let mut settings = publisher.ui_settings();
+        publisher.set_ui_settings(settings);
+        assert!(!receiver.has_changed().expect("publisher alive"));
+        settings.locale = Some(LocaleSettings {
+            hour_cycle: quartz_protocol::HourCycle::H12,
+            first_day_of_week: quartz_protocol::Weekday::Sunday,
+        });
+        publisher.set_ui_settings(settings);
+        assert!(receiver.has_changed().expect("publisher alive"));
+        assert_eq!(
+            receiver.borrow_and_update().snapshot().locale,
+            settings.locale
+        );
+        publisher.set_ui_settings(settings);
+        assert!(!receiver.has_changed().expect("identical settings"));
     }
 }

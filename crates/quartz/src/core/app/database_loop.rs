@@ -322,10 +322,26 @@ impl DatabaseLoop {
         }
         // Lock contention must return to capture settlement within its commit headroom.
         self.store.limit_write_wait(COMMIT_HEADROOM);
-        let result = self.execute_write(command.request);
+        let settings_changed = matches!(
+            command.request,
+            crate::persistence::dispatch::WriteRequest::SettingsSet(_)
+        );
+        let system = command.settings.as_ref().map(|ports| ports.system);
+        let mut result = self.execute_write(command.request, system);
         self.store.limit_write_wait(Duration::MAX);
         if result.is_ok() {
             self.versions.publish(&mut self.store);
+        }
+        if settings_changed
+            && let Ok(crate::persistence::dispatch::WriteResponse::Settings(response)) = &result
+            && let Some(ports) = command.settings
+            && let Err(error) =
+                (ports.notify)(crate::ipc::UiCommand::SettingsChanged(response.effective))
+        {
+            tracing::error!(%error, "could not notify main thread of committed settings");
+            result = Err(quartz_protocol::ProtocolError::new(
+                quartz_protocol::ErrorKind::Internal,
+            ));
         }
         let _ = command.reply.send(result);
         Ok(())
@@ -333,11 +349,12 @@ impl DatabaseLoop {
     fn execute_write(
         &mut self,
         request: crate::persistence::dispatch::WriteRequest,
+        system: Option<quartz_protocol::EffectiveUiSettings>,
     ) -> Result<crate::persistence::dispatch::WriteResponse, quartz_protocol::ProtocolError> {
         let now = self.now().map_err(|_| {
             quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::Internal)
         })?;
-        request.execute(&mut self.store, now.utc)
+        request.execute(&mut self.store, now.utc, system)
     }
     fn registry_command(
         &mut self,
@@ -719,6 +736,7 @@ mod tests {
         fixture
             .database
             .write_command(WriteCommand {
+                settings: None,
                 request: WriteRequest::BumpMetadata {
                     outcome: TestCommit::Commit,
                 },
@@ -760,6 +778,7 @@ mod tests {
         fixture
             .database
             .write_command(WriteCommand {
+                settings: None,
                 request: WriteRequest::BumpMetadata {
                     outcome: TestCommit::Commit,
                 },

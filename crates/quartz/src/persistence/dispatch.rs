@@ -11,6 +11,7 @@ use tokio::sync::oneshot;
 #[serde(untagged)]
 pub(crate) enum WriteResponse {
     Annotations(quartz_protocol::AnnotationsResponse),
+    Settings(quartz_protocol::SettingsResponse),
     Accepted(quartz_protocol::AcceptedBody),
 }
 impl WriteRequest {
@@ -28,15 +29,40 @@ impl WriteRequest {
             quartz_protocol::Op::AnnotationsDelete => serde_json::from_value(body)
                 .map(AnnotationWrite::Delete)
                 .map(Self::Annotations),
-            _ => unreachable!("write decoding follows annotation operation dispatch"),
+            quartz_protocol::Op::SettingsGet => {
+                serde_json::from_value::<quartz_protocol::SettingsGetRequest>(body)
+                    .map(|_| Self::SettingsGet)
+            }
+            quartz_protocol::Op::SettingsSet => serde_json::from_value(body).map(Self::SettingsSet),
+            _ => unreachable!("write decoding follows implemented operation dispatch"),
         }
     }
     pub(crate) fn execute(
         self,
         store: &mut Store,
         now: UtcInstant,
+        system: Option<quartz_protocol::EffectiveUiSettings>,
     ) -> Result<WriteResponse, ProtocolError> {
         let result = match self {
+            Self::SettingsGet | Self::SettingsSet(_) => {
+                let system = system.ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?;
+                let result = match self {
+                    Self::SettingsSet(update) => store.update_ui_settings(update),
+                    Self::SettingsGet => store.ui_settings(),
+                    _ => unreachable!("settings dispatch"),
+                };
+                return result
+                    .map(|ui| {
+                        WriteResponse::Settings(quartz_protocol::SettingsResponse {
+                            ui,
+                            effective: ui.resolve(system),
+                        })
+                    })
+                    .map_err(|error| {
+                        tracing::error!(%error, "could not access UI settings");
+                        ProtocolError::new(ErrorKind::Internal)
+                    });
+            }
             Self::Annotations(AnnotationWrite::Create(request)) => store
                 .create_annotations(request, now)
                 .map(WriteResponse::Annotations),
@@ -77,6 +103,8 @@ pub(crate) const WRITE_CHANNEL_CAPACITY: usize = 8;
 /// User writes executed serially by the database loop after capture commits.
 #[derive(Debug)]
 pub(crate) enum WriteRequest {
+    SettingsGet,
+    SettingsSet(quartz_protocol::SettingsSetRequest),
     Annotations(AnnotationWrite),
     #[cfg(test)]
     BumpMetadata {
@@ -96,10 +124,24 @@ pub(crate) use crate::store::versions::TestCommit;
 pub(crate) struct WriteCommand {
     pub request: WriteRequest,
     pub reply: oneshot::Sender<Result<WriteResponse, ProtocolError>>,
+    pub settings: Option<SettingsPorts>,
+}
+#[derive(Clone)]
+pub(crate) struct SettingsPorts {
+    pub system: quartz_protocol::EffectiveUiSettings,
+    pub notify: crate::ipc::UiPort,
+}
+impl std::fmt::Debug for SettingsPorts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettingsPorts")
+            .field("system", &self.system)
+            .finish_non_exhaustive()
+    }
 }
 #[derive(Debug, Clone)]
 pub(crate) struct WritePort {
     sender: Sender<WriteCommand>,
+    settings: Option<SettingsPorts>,
 }
 pub(crate) struct WriteChannel {
     pub port: WritePort,
@@ -109,12 +151,23 @@ impl WriteChannel {
     pub(crate) fn new() -> Self {
         let (sender, receiver) = bounded(WRITE_CHANNEL_CAPACITY);
         Self {
-            port: WritePort { sender },
+            port: WritePort {
+                sender,
+                settings: None,
+            },
             receiver,
         }
     }
 }
 impl WritePort {
+    pub(crate) fn with_settings(
+        mut self,
+        system: quartz_protocol::EffectiveUiSettings,
+        notify: crate::ipc::UiPort,
+    ) -> Self {
+        self.settings = Some(SettingsPorts { system, notify });
+        self
+    }
     pub(crate) async fn call(&self, request: WriteRequest) -> Result<WriteResponse, ProtocolError> {
         self.submit(request)?
             .await
@@ -128,7 +181,11 @@ impl WritePort {
     ) -> Result<oneshot::Receiver<Result<WriteResponse, ProtocolError>>, ProtocolError> {
         let (reply, received) = oneshot::channel();
         self.sender
-            .try_send(WriteCommand { request, reply })
+            .try_send(WriteCommand {
+                request,
+                reply,
+                settings: self.settings.clone(),
+            })
             .map_err(|error| {
                 ProtocolError::new(match error {
                     crossbeam_channel::TrySendError::Full(_) => ErrorKind::Busy,

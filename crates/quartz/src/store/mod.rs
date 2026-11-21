@@ -13,6 +13,7 @@ mod raw;
 mod rows;
 pub(crate) mod rules;
 mod schema;
+pub(crate) mod settings;
 pub(crate) mod versions;
 
 use crate::data_directory::DataDirectory;
@@ -560,8 +561,10 @@ impl From<rules::LoadRulesError> for ReadRulesError {
 pub(crate) enum LoadDeviceIdError {
     #[snafu(display("could not persist installation identity"))]
     Database { source: diesel::result::Error },
-    #[snafu(display("could not decode installation identity"))]
-    Decode { source: serde_json::Error },
+    #[snafu(display("could not access installation identity"))]
+    Setting {
+        source: settings::AccessSettingError,
+    },
 }
 #[cfg(any(windows, test))]
 impl From<diesel::result::Error> for LoadDeviceIdError {
@@ -578,28 +581,17 @@ impl Store {
             .set_busy_timeout(remaining.min(NORMAL_LOCK_WAIT));
     }
     pub(crate) fn installation_id(&mut self, proposed: &str) -> Result<String, LoadDeviceIdError> {
-        use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl};
-        use schema::settings;
         self.write(|tx| {
-            if let Some(value) = settings::table
-                .filter(settings::key.eq(versions::DEVICE_ID_KEY))
-                .select(settings::value)
-                .first::<String>(tx.connection)
-                .optional()
-                .map_err(|source| LoadDeviceIdError::Database { source })?
+            let mut settings = settings::Settings::new(tx.connection);
+            if let Some(value) = settings
+                .device_id()
+                .map_err(|source| LoadDeviceIdError::Setting { source })?
             {
-                return serde_json::from_str(&value)
-                    .map_err(|source| LoadDeviceIdError::Decode { source });
+                return Ok(value);
             }
-            let value = serde_json::to_string(proposed)
-                .map_err(|source| LoadDeviceIdError::Decode { source })?;
-            diesel::insert_into(settings::table)
-                .values((
-                    settings::key.eq(versions::DEVICE_ID_KEY),
-                    settings::value.eq(value),
-                ))
-                .execute(tx.connection)
-                .map_err(|source| LoadDeviceIdError::Database { source })?;
+            settings
+                .put_device_id(proposed)
+                .map_err(|source| LoadDeviceIdError::Setting { source })?;
             Ok(proposed.to_owned())
         })
     }

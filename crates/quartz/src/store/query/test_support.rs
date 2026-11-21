@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::query::calendar::DayCalendar;
-use crate::store::schema::{data_day_versions, settings};
+use crate::store::schema::data_day_versions;
 use crate::store::versions::{UtcDay, VersionKey, VersionSource};
 use crate::store::{
     enums::{
@@ -15,7 +15,6 @@ use crate::{
     data_directory::DataDirectory,
     query::{QueryJob, QueryRequest, QueryResponse, RunQueryError},
 };
-use diesel::OptionalExtension;
 use quartz_protocol::{
     MillisecondsPerPixel, QueryDayRequest, QueryTimelineRequest, TimelineDetail,
 };
@@ -220,24 +219,10 @@ impl QueryFixture {
         );
     }
     pub(crate) fn bump_metadata(&mut self) {
-        let old: i64 = settings::table
-            .filter(settings::key.eq("metadata_version"))
-            .select(settings::value)
-            .first::<String>(&mut self.store.writer)
-            .optional()
-            .expect("metadata query")
-            .map(|value| value.parse().expect("version integer"))
-            .unwrap_or_default();
-        let value = old + 1;
-        diesel::insert_into(settings::table)
-            .values((
-                settings::key.eq("metadata_version"),
-                settings::value.eq(value.to_string()),
-            ))
-            .on_conflict(settings::key)
-            .do_update()
-            .set(settings::value.eq(value.to_string()))
-            .execute(&mut self.store.writer)
+        let mut settings = crate::store::settings::Settings::new(&mut self.store.writer);
+        let value = settings.metadata_version().expect("metadata query") + 1;
+        settings
+            .put_metadata_version(value)
             .expect("metadata update");
         self.store.pending_effects.metadata = Some(value);
     }

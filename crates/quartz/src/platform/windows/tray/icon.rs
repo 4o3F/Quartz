@@ -94,6 +94,7 @@ impl TrayMenuItem {
 
 pub(super) struct TrayIcon {
     data: NOTIFYICONDATAW,
+    language: quartz_i18n::Language,
     window: windows::Win32::Foundation::HWND,
 }
 
@@ -111,12 +112,16 @@ impl TrayIcon {
     ///
     /// # Errors
     /// Returns icon loading, tooltip encoding, or Shell registration failures.
-    pub(super) fn add(window: &Window) -> Result<Self, AddTrayIconError> {
+    pub(super) fn add(
+        window: &Window,
+        language: quartz_i18n::Language,
+    ) -> Result<Self, AddTrayIconError> {
         // TODO(M6): Replace the shared default application icon with the Quartz icon resource.
         // SAFETY: IDI_APPLICATION names a shared system icon; it must not be destroyed by the caller.
         let icon = unsafe { WindowsAndMessaging::LoadIconW(None, IDI_APPLICATION) }
             .context(LoadIconSnafu)?;
         let tray = Self {
+            language,
             data: NOTIFYICONDATAW {
                 cbSize: const { super::super::structure_size::<NOTIFYICONDATAW>() },
                 hWnd: window.raw(),
@@ -126,7 +131,7 @@ impl TrayIcon {
                 hIcon: icon,
                 szTip: TrayTooltipText::try_from(
                     quartz_i18n::MessageKey::new("app.name")
-                        .translate()
+                        .in_language(language)
                         .as_ref(),
                 )
                 .context(FormatInitialTooltipSnafu)?
@@ -140,6 +145,14 @@ impl TrayIcon {
         };
         tray.readd()?;
         Ok(tray)
+    }
+
+    pub(super) fn language(&self) -> quartz_i18n::Language {
+        self.language
+    }
+
+    pub(super) fn set_language(&mut self, language: quartz_i18n::Language) {
+        self.language = language;
     }
 
     /// Re-registers the configured icon and callback version after Explorer restarts.
@@ -163,9 +176,10 @@ impl TrayIcon {
     /// # Errors
     /// Returns tooltip encoding or Shell update failures.
     pub(super) fn update(&mut self, state: super::TrayState) -> Result<(), UpdateTrayTooltipError> {
-        self.data.szTip = TrayTooltipText::try_from(state.tooltip.key().translate().as_ref())
-            .context(FormatTooltipSnafu)?
-            .into_buffer();
+        self.data.szTip =
+            TrayTooltipText::try_from(state.tooltip.key().in_language(self.language).as_ref())
+                .context(FormatTooltipSnafu)?
+                .into_buffer();
         // SAFETY: Both icon identifiers name shared system resources.
         self.data.hIcon = unsafe {
             WindowsAndMessaging::LoadIconW(
@@ -198,7 +212,7 @@ impl TrayIcon {
             Menu(unsafe { WindowsAndMessaging::CreatePopupMenu() }.context(CreatePopupMenuSnafu)?);
         for item in TrayMenuItem::ALL {
             let key = item.label_key();
-            let label = WideString::new(&key.translate());
+            let label = WideString::new(&key.in_language(self.language));
             // SAFETY: Menu is live; each label is terminated and copied synchronously by AppendMenuW.
             unsafe {
                 WindowsAndMessaging::AppendMenuW(
@@ -263,7 +277,7 @@ mod tests {
     #[test]
     fn tray_menu_commands_round_trip_and_unknown_ids_are_absent() {
         for item in TrayMenuItem::ALL {
-            assert_eq!(TrayMenuItem::from_command(item as usize), Some(item));
+            assert_eq!(TrayMenuItem::from_command(usize::from(item)), Some(item));
         }
         for id in [0, 3, usize::MAX] {
             assert_eq!(TrayMenuItem::from_command(id), None, "unknown command {id}");

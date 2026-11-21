@@ -18,7 +18,7 @@ use windows::Win32::{
 
 impl PlatformPorts {
     /// The tray has already created the calling main thread's message queue.
-    pub(super) fn windows() -> Result<Self, RunCoreError> {
+    pub(super) fn windows(system_language: quartz_i18n::Language) -> Result<Self, RunCoreError> {
         let proposed_device_id = windows::core::GUID::new().context(CreateDeviceIdSnafu)?;
         let session_id = sources::SystemMessage::session_id().context(ReadSessionIdSnafu)?;
         let instance_id = windows::core::GUID::new().context(CreateInstanceIdSnafu)?;
@@ -42,6 +42,9 @@ impl PlatformPorts {
             ui_wake: Arc::new(move |command| {
                 let message = match command {
                     crate::ipc::UiCommand::Open => tray::window::AppMessage::OpenUi,
+                    crate::ipc::UiCommand::SettingsChanged(_) => {
+                        tray::window::AppMessage::WakeWorkers
+                    }
                     crate::ipc::UiCommand::FirstFrame => tray::window::AppMessage::UiFirstFrame,
                 };
                 // SAFETY: The main thread owns an existing queue; the typed message has no pointers.
@@ -61,7 +64,7 @@ impl PlatformPorts {
                     ipc::PipeServerConfig::current(ports.shutdown_timeout, ports.services)?;
                 Ok(Box::new(ipc::PipeServer::start(config)?))
             }),
-            language: super::detect_ui_language(),
+            language: system_language,
             locale: match locale::UserLocale::read() {
                 Ok(locale) => Some(locale),
                 Err(error) => {

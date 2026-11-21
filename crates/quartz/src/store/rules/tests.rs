@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     data_directory::DataDirectory,
     rules::registry::{RegistryShell, RunRegistryCommandError},
-    store::{ReadOnlyStore, Store, schema},
+    store::{ReadOnlyStore, Store},
 };
 use diesel::connection::SimpleConnection;
 use quartz_domain::rules::registry::{
@@ -269,10 +269,8 @@ fn deletion_retains_relational_history_and_restoring_clears_the_null_marker() {
         .expect("marker");
     assert!(marker.is_none());
     assert_eq!(
-        schema::settings::table
-            .filter(schema::settings::key.ne(crate::store::versions::METADATA_VERSION_KEY))
-            .count()
-            .get_result::<i64>(&mut fixture.connection())
+        crate::store::settings::Settings::new(&mut fixture.connection())
+            .configuration_count()
             .expect("configuration count"),
         0
     );
@@ -389,10 +387,8 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
     assert!(same.event.is_none());
     assert_eq!(same.reply.epoch, result.reply.epoch);
     assert_eq!(
-        schema::settings::table
-            .filter(schema::settings::key.ne(crate::store::versions::METADATA_VERSION_KEY))
-            .count()
-            .get_result::<i64>(&mut fixture.connection())
+        crate::store::settings::Settings::new(&mut fixture.connection())
+            .configuration_count()
             .expect("configuration count"),
         0
     );

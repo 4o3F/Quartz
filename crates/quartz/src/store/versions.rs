@@ -1,13 +1,14 @@
-//! Version rows, settings keys, and transaction-local invalidation effects.
+//! Version rows and transaction-local invalidation effects.
 use super::{
     ReadOnlyStore, Store,
     enums::{DataSource, IntegerCode},
     query::ReadSnapshot,
     query_error::ReadQueryError,
-    rows::{DataDayVersionsRow, SettingsRow},
-    schema::{data_day_versions, settings},
+    rows::DataDayVersionsRow,
+    schema::data_day_versions,
+    settings::Settings,
 };
-use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper};
+use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
 use quartz_domain::{capture::limits::UTC_DAY_MS, facts::QueryRange};
 use std::{collections::BTreeMap, ops::RangeInclusive};
 
@@ -25,8 +26,10 @@ pub(crate) enum BumpVersionError {
     Database { source: diesel::result::Error },
     #[snafu(display("version range ends before it starts"))]
     InvalidRange,
-    #[snafu(display("could not decode metadata version"))]
-    DecodeMetadata { source: serde_json::Error },
+    #[snafu(display("could not access metadata version"))]
+    Setting {
+        source: crate::store::settings::AccessSettingError,
+    },
     #[snafu(display("invalid metadata version in settings"))]
     MetadataVersion,
 }
@@ -36,13 +39,6 @@ impl From<diesel::result::Error> for BumpVersionError {
     }
 }
 
-pub(crate) const METADATA_VERSION_KEY: &str = "metadata_version";
-pub(crate) const DEVICE_ID_KEY: &str = "device_id";
-pub(crate) const DAY_START_OFFSET_KEY: &str = "day.start_offset_min";
-/// Missing day offset means local midnight (03 §1).
-pub(crate) const DEFAULT_DAY_START_OFFSET_MIN: i64 = 0;
-/// Day offsets are limited to twelve hours (03 §1).
-pub(crate) const MAX_DAY_START_OFFSET_MIN: i64 = 720;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct UtcDay(pub i64);
 /// UTC days touched by a half-open UTC range; an empty range touches its start day.
@@ -97,30 +93,9 @@ pub(crate) struct QuerySettings {
 
 impl ReadOnlyStore {
     pub(crate) fn query_settings(&mut self) -> Result<QuerySettings, ReadQueryError> {
-        let rows = settings::table
-            .filter(settings::key.eq_any([DAY_START_OFFSET_KEY, METADATA_VERSION_KEY]))
-            .select((settings::key, settings::value))
-            .load::<SettingsRow>(&mut self.connection)?;
-        let mut offset = DEFAULT_DAY_START_OFFSET_MIN;
-        let mut metadata = 0;
-        for row in rows {
-            match row.key.as_str() {
-                DAY_START_OFFSET_KEY => {
-                    offset = serde_json::from_str(&row.value)
-                        .map_err(|_| ReadQueryError::InvalidSettings)?
-                }
-                METADATA_VERSION_KEY => {
-                    metadata = serde_json::from_str(&row.value)
-                        .map_err(|_| ReadQueryError::InvalidSettings)?
-                }
-                _ => unreachable!("settings selected by explicit key list"),
-            }
-        }
-        if !(DEFAULT_DAY_START_OFFSET_MIN..=MAX_DAY_START_OFFSET_MIN).contains(&offset)
-            || metadata < 0
-        {
-            return Err(ReadQueryError::InvalidSettings);
-        }
+        let mut settings = Settings::new(&mut self.connection);
+        let offset = settings.day_start_offset()?;
+        let metadata = settings.metadata_version()?;
         Ok(QuerySettings {
             day_start_offset_min: offset,
             metadata_version: metadata,
@@ -212,29 +187,12 @@ impl TxEffects {
         &mut self,
         connection: &mut diesel::SqliteConnection,
     ) -> Result<(), BumpVersionError> {
-        let value = settings::table
-            .filter(settings::key.eq(METADATA_VERSION_KEY))
-            .select(settings::value)
-            .first::<String>(connection)
-            .optional()?;
-        let version: i64 = match value {
-            Some(value) => serde_json::from_str(&value)
-                .map_err(|source| BumpVersionError::DecodeMetadata { source })?,
-            None => 0,
-        };
+        let mut settings = Settings::new(connection);
+        let version = settings.metadata_version()?;
         let version = version
             .checked_add(1)
-            .filter(|version| *version > 0)
             .ok_or(BumpVersionError::MetadataVersion)?;
-        diesel::insert_into(settings::table)
-            .values((
-                settings::key.eq(METADATA_VERSION_KEY),
-                settings::value.eq(version.to_string()),
-            ))
-            .on_conflict(settings::key)
-            .do_update()
-            .set(settings::value.eq(version.to_string()))
-            .execute(connection)?;
+        settings.put_metadata_version(version)?;
         self.metadata = Some(version);
         Ok(())
     }
@@ -272,11 +230,11 @@ impl Store {
     }
 }
 
-pub(crate) const MAINTENANCE_DEADLINE_KEY: &str = "capture.deadline.maintenance";
-pub(crate) const IDLE_DEADLINE_KEY: &str = "capture.deadline.idle";
-/// Obsolete browser-context deferral key, recognized only to warn during recovery.
-pub(crate) const REMOVED_PRIVACY_CONTEXT_DEADLINE_KEY: &str = "capture.deadline.privacy_context";
-pub(crate) const MIDNIGHT_DEADLINE_KEY: &str = "capture.deadline.midnight";
+impl From<super::settings::AccessSettingError> for BumpVersionError {
+    fn from(source: crate::store::settings::AccessSettingError) -> Self {
+        Self::Setting { source }
+    }
+}
 
 #[cfg(test)]
 mod tests {

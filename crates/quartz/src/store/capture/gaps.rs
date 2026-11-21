@@ -4,9 +4,10 @@ use super::{Capture, CaptureColumn, ExecuteCaptureBatchError};
 use crate::store::{
     enums::DataSource,
     rows::CaptureGapsRow,
-    schema::{capture_gaps, settings},
+    schema::capture_gaps,
+    settings::{SettingKey, Settings},
 };
-use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl};
+use diesel::prelude::RunQueryDsl;
 use quartz_domain::capture::{CaptureGap, RunId, SchedulerKind, UtcInstant};
 
 impl Capture<'_> {
@@ -39,31 +40,17 @@ impl Capture<'_> {
         owner: SchedulerKind,
         at: UtcInstant,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        let value = CaptureColumn::new(settings::value).utc(at)?.to_string();
-        diesel::insert_into(settings::table)
-            .values((
-                settings::key.eq(Self::deadline_key(owner)),
-                settings::value.eq(&value),
-            ))
-            .on_conflict(settings::key)
-            .do_update()
-            .set(settings::value.eq(&value))
-            .execute(self.connection)?;
+        Settings::new(self.connection).put_deadline(owner, at)?;
         Ok(())
     }
     pub(super) fn clear_deadline(
         &mut self,
         owner: SchedulerKind,
     ) -> Result<(), ExecuteCaptureBatchError> {
-        diesel::delete(settings::table.filter(settings::key.eq(Self::deadline_key(owner))))
-            .execute(self.connection)?;
+        Settings::new(self.connection).remove(Self::deadline_key(owner))?;
         Ok(())
     }
-    pub(super) fn deadline_key(owner: SchedulerKind) -> &'static str {
-        match owner {
-            SchedulerKind::Maintenance => crate::store::versions::MAINTENANCE_DEADLINE_KEY,
-            SchedulerKind::Idle => crate::store::versions::IDLE_DEADLINE_KEY,
-            SchedulerKind::Midnight => crate::store::versions::MIDNIGHT_DEADLINE_KEY,
-        }
+    pub(super) fn deadline_key(owner: SchedulerKind) -> SettingKey {
+        SettingKey::deadline(owner)
     }
 }

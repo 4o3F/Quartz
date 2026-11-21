@@ -60,6 +60,10 @@ pub(crate) enum StartCoreError {
     },
     #[snafu(display("could not load installation identity"))]
     LoadDeviceId { source: store::LoadDeviceIdError },
+    #[snafu(display("could not load UI settings"))]
+    LoadSettings {
+        source: store::settings::AccessSettingError,
+    },
     #[snafu(display("could not start capture workers"))]
     StartWorkers { source: StartWorkersError },
     #[snafu(display("could not start core pipe server"))]
@@ -122,7 +126,8 @@ pub(crate) struct CoreRuntime {
     pipe: Option<Box<dyn CorePipe>>,
     clock: Arc<dyn ClockReader>,
     pub status: StatusPublisher,
-    pub ui_commands: crossbeam_channel::Receiver<UiCommand>,
+    _ui_port: UiPort,
+    pub ui_commands: crate::ipc::UiCommands,
 }
 impl DataDirectory {
     /// Installs core logging before platform instance acquisition and tray creation.
@@ -158,17 +163,24 @@ impl CoreRuntime {
                 UiLanguage::English
             }
         };
-        let status = StatusPublisher::with_locale(ports.instance_id, language, ports.locale);
-        let (ui_sender, ui_commands) =
-            crossbeam_channel::bounded(crate::ipc::MAIN_COMMAND_CAPACITY);
-        let ui_port: UiPort = Arc::new(move |command| {
-            ui_sender.try_send(command).map_err(|error| {
-                tracing::warn!(%error, "could not queue IPC command for main thread");
-                QueueUiError
-            })?;
-            (ports.ui_wake)(command)
-        });
-        let workers = Workers::start(
+        let system = quartz_protocol::EffectiveUiSettings {
+            ui_language: language,
+            locale: ports.locale,
+        };
+        let ui = store
+            .recover_ui_settings()
+            .map_err(|source| StartCoreError::LoadSettings { source })?;
+        let effective = ui.resolve(system);
+        let status = StatusPublisher::with_locale(
+            ports.instance_id,
+            effective.ui_language,
+            effective.locale,
+        );
+        let crate::ipc::UiCommandChannel {
+            port: ui_port,
+            commands: ui_commands,
+        } = crate::ipc::UiCommands::channel(ports.ui_wake);
+        let mut workers = Workers::start(
             store,
             metadata,
             Arc::clone(&ports.clock),
@@ -176,6 +188,10 @@ impl CoreRuntime {
             ports.foreground,
         )
         .map_err(|source| StartCoreError::StartWorkers { source })?;
+        workers.writes = workers
+            .writes
+            .clone()
+            .with_settings(system, Arc::clone(&ui_port));
         let pipe_ports = PipePorts {
             shutdown_timeout: SHUTDOWN_TIMEOUT,
             services: Services {
@@ -183,7 +199,7 @@ impl CoreRuntime {
                 writes: workers.writes.clone(),
                 versions: workers.versions.clone(),
                 status: status.subscribe(),
-                ui: ui_port,
+                ui: Arc::clone(&ui_port),
             },
         };
         let mut runtime = Self {
@@ -192,6 +208,7 @@ impl CoreRuntime {
             clock: ports.clock,
             status,
             ui_commands,
+            _ui_port: ui_port,
         };
         // The runtime owns workers before the next fallible step; Drop uses the same shutdown path.
         runtime.pipe =

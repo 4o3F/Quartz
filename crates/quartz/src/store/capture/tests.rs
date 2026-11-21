@@ -1221,12 +1221,8 @@ fn startup_decode_failure_is_classified_as_startup_and_rolls_back_recovery() {
     let mut fixture = Fixture::new(at(0));
     fixture.ready(at(0));
     let key = Capture::deadline_key(SchedulerKind::Midnight);
-    diesel::insert_into(crate::store::schema::settings::table)
-        .values((
-            crate::store::schema::settings::key.eq(key),
-            crate::store::schema::settings::value.eq("invalid"),
-        ))
-        .execute(&mut fixture.store.writer)
+    crate::store::settings::Settings::new(&mut fixture.store.writer)
+        .corrupt(key, "invalid")
         .expect("invalid saved deadline");
     fixture.store.take_committed_versions();
     let versions_before = fixture
@@ -1246,20 +1242,20 @@ fn startup_decode_failure_is_classified_as_startup_and_rolls_back_recovery() {
     );
     let RecoverCaptureError::Startup {
         source:
-            recovery::LoadCaptureStartupError::Decode {
+            recovery::LoadCaptureStartupError::Setting {
                 source:
-                    DecodeCaptureRowError::Deadline {
-                        owner: actual_owner,
-                        value,
-                        ..
+                    crate::store::settings::AccessSettingError::Json {
+                        key: actual_key, ..
                     },
             },
     } = error
     else {
-        panic!("expected startup decode error: {error:?}");
+        panic!("expected startup setting error: {error:?}");
     };
-    assert_eq!(actual_owner, SchedulerKind::Midnight);
-    assert_eq!(value, "invalid");
+    assert_eq!(
+        actual_key,
+        crate::store::settings::SettingKey::MidnightDeadline
+    );
     assert!(
         fixture.intervals()[0].end_utc_ms.is_none(),
         "startup failure rolls back the prior settlement writes"
@@ -1769,7 +1765,7 @@ fn offline_web_privacy_never_interns_the_browser_title() {
 
 #[test]
 fn startup_warns_and_ignores_removed_browser_context_deadline_without_decoding_it() {
-    use crate::store::{schema::settings, versions};
+    use crate::store::settings::{SettingKey, Settings};
     let log = tempfile::NamedTempFile::new().expect("isolated log");
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
@@ -1778,19 +1774,16 @@ fn startup_warns_and_ignores_removed_browser_context_deadline_without_decoding_i
         .finish();
     tracing::subscriber::with_default(subscriber, || {
         let mut fixture = Fixture::new(at(0));
-        diesel::insert_into(settings::table)
-            .values([
-                crate::store::rows::SettingsRow {
-                    key: versions::REMOVED_PRIVACY_CONTEXT_DEADLINE_KEY.into(),
-                    value: "obsolete, not a timestamp".into(),
-                },
-                crate::store::rows::SettingsRow {
-                    key: versions::IDLE_DEADLINE_KEY.into(),
-                    value: "123".into(),
-                },
-            ])
-            .execute(&mut fixture.store.writer)
-            .expect("persist deadline fixtures");
+        let mut settings = Settings::new(&mut fixture.store.writer);
+        settings
+            .corrupt(
+                SettingKey::RemovedPrivacyContextDeadline,
+                "obsolete, not a timestamp",
+            )
+            .expect("obsolete deadline");
+        settings
+            .put_deadline(SchedulerKind::Idle, at(123).utc)
+            .expect("idle deadline");
         let mut keys = CaptureKeys::default();
         let metadata = metadata();
         let startup = fixture
@@ -1804,6 +1797,6 @@ fn startup_warns_and_ignores_removed_browser_context_deadline_without_decoding_i
     let logged = std::fs::read_to_string(log.path()).expect("read warning");
     assert!(logged.contains("WARN"));
     assert!(logged.contains("ignoring persisted deadline for removed browser-context deferral"));
-    assert!(logged.contains(versions::REMOVED_PRIVACY_CONTEXT_DEADLINE_KEY));
+    assert!(logged.contains(SettingKey::RemovedPrivacyContextDeadline.as_str()));
     assert!(!logged.contains("obsolete, not a timestamp"));
 }

@@ -8,6 +8,7 @@ mod handshake;
 mod op;
 mod query;
 mod role;
+mod settings;
 mod startup_error;
 mod state;
 mod status;
@@ -51,4 +52,9 @@ pub use annotations::{
     Annotation, AnnotationCategory, AnnotationId, AnnotationKind, AnnotationValues,
     AnnotationsCreateRequest, AnnotationsDeleteRequest, AnnotationsResponse,
     AnnotationsUpdateRequest, CreateAnnotation, UpdateAnnotation,
+};
+
+pub use settings::{
+    EffectiveUiSettings, FirstDayOfWeekSetting, HourCycleSetting, SettingsGetRequest,
+    SettingsResponse, SettingsSetRequest, UiLanguageSetting, UiSettings,
 };

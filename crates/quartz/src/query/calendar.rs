@@ -4,7 +4,7 @@ use super::{RunQueryError, input::QueryRange};
 use jiff::{ToSpan, tz::TimeZone};
 use quartz_protocol::{CategoryDuration, CategoryRef, HourStack, LocalDate};
 
-use crate::store::versions::{DEFAULT_DAY_START_OFFSET_MIN, MAX_DAY_START_OFFSET_MIN};
+use crate::store::settings::{DEFAULT_DAY_START_OFFSET_MIN, MAX_DAY_START_OFFSET_MIN};
 
 #[derive(Debug, Clone)]
 pub(crate) struct DayCalendar {

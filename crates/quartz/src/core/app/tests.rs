@@ -625,7 +625,7 @@ fn core_runtime_starts_resolves_observation_and_shuts_down_in_order() {
             super::CoreRuntime::start(&DataDirectory::new(directory.path()), fixture.ports)
                 .expect("start core runtime");
         assert_eq!(
-            runtime.ui_commands.recv().expect("UI request"),
+            runtime.ui_commands.try_recv().expect("UI request"),
             crate::ipc::UiCommand::Open
         );
         fixture.clock.advance(100);
@@ -1201,4 +1201,126 @@ fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
         subscriber.close().await;
     });
     runtime.shutdown();
+}
+
+#[test]
+fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port() {
+    use quartz_protocol::{
+        EffectiveUiSettings, HourCycle, LocaleSettings, Op, Role, SettingsResponse, UiLanguage,
+        Weekday,
+    };
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(
+        "settings-integration".into(),
+    ));
+    let system = EffectiveUiSettings {
+        ui_language: UiLanguage::English,
+        locale: Some(LocaleSettings {
+            hour_cycle: HourCycle::H24,
+            first_day_of_week: Weekday::Monday,
+        }),
+    };
+    let mut channel = crate::ipc::UiCommands::channel(Arc::new(|_| Ok(())));
+    let services = crate::ipc::Services {
+        queries: runtime.workers.queries.clone(),
+        writes: runtime
+            .workers
+            .writes
+            .clone()
+            .with_settings(system, Arc::clone(&channel.port)),
+        versions: runtime.workers.versions.clone(),
+        status: status.subscribe(),
+        ui: Arc::clone(&channel.port),
+    };
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("settings I/O runtime");
+    io.block_on(async {
+        let registry = services.start_registry();
+        let mut ui = AnnotationClient::connect(services.clone(), registry.clone(), Role::Ui).await;
+        let mut subscriber = AnnotationClient::connect(services.clone(), registry.clone(), Role::Ui).await;
+        subscriber.send(2, Op::Subscribe, serde_json::json!({"topics":["state"]})).await;
+        subscriber.success(2).await;
+        let quartz_protocol::Envelope::Event(initial) = subscriber.receive().await else { panic!("initial state event"); };
+        assert_eq!(initial.body["ui_language"], "en");
+        ui.send(2, Op::SettingsGet, serde_json::json!({})).await;
+        let initial: SettingsResponse = serde_json::from_value(ui.success(2).await).expect("typed defaults");
+        assert_eq!(initial.ui, quartz_protocol::UiSettings::default());
+        assert_eq!(initial.effective, system);
+        ui.send(3, Op::SettingsSet, serde_json::json!({"language":"zh-CN", "hour_cycle":"h12", "first_day_of_week":"sunday"})).await;
+        let updated: SettingsResponse = serde_json::from_value(ui.success(3).await).expect("typed updated settings");
+        assert_eq!(updated.effective.ui_language, UiLanguage::SimplifiedChinese);
+        assert_eq!(updated.effective.locale.expect("locale").hour_cycle, HourCycle::H12);
+        ui.send(4, Op::SettingsGet, serde_json::json!({})).await;
+        assert_eq!(serde_json::from_value::<SettingsResponse>(ui.success(4).await).expect("committed settings"), updated);
+        let changed = channel.commands.take_settings_change().expect("main-thread notification after commit");
+        let mut tray_language = None;
+        status.apply_ui_settings(changed, |language| tray_language = Some(language));
+        assert_eq!(tray_language, Some(UiLanguage::SimplifiedChinese));
+        let quartz_protocol::Envelope::Event(event) = subscriber.receive().await else { panic!("first state push after set"); };
+        assert_eq!(event.topic, quartz_protocol::Topic::State);
+        let state: quartz_protocol::StateSnapshot = serde_json::from_value(event.body).expect("typed state");
+        assert_eq!(state.ui_language, updated.effective.ui_language);
+        assert_eq!(state.locale, updated.effective.locale);
+        assert_eq!(channel.commands.take_settings_change(), None);
+        ui.send(5, Op::SettingsSet, serde_json::json!({"language":"auto"})).await;
+        let automatic: SettingsResponse = serde_json::from_value(ui.success(5).await).expect("automatic language");
+        assert_eq!(automatic.effective.ui_language, system.ui_language);
+        assert_eq!(automatic.ui.hour_cycle, updated.ui.hour_cycle);
+        assert_eq!(automatic.ui.first_day_of_week, updated.ui.first_day_of_week);
+        for body in [serde_json::json!({"language":"fr"}), serde_json::json!({"hour_cycle":null}), serde_json::json!({"first_day_of_week":"yesterday"})] {
+            ui.send(6, Op::SettingsSet, body).await;
+            assert_eq!(ui.response(6).await, quartz_protocol::ResponseOutcome::Err { error: quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::BadRequest) });
+        }
+        let mut cli = AnnotationClient::connect(services.clone(), registry.clone(), Role::Cli).await;
+        for op in [Op::SettingsGet, Op::SettingsSet] {
+            cli.send(2, op, serde_json::json!({})).await;
+            assert_eq!(cli.response(2).await, quartz_protocol::ResponseOutcome::Err { error: quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::Forbidden) });
+        }
+        cli.close().await;
+        ui.close().await;
+        subscriber.close().await;
+    });
+    drop(services);
+    let directory = runtime.shutdown();
+    let mut reopened =
+        Store::open(&DataDirectory::new(directory.path())).expect("reopen committed settings");
+    let settings = reopened.ui_settings().expect("stored UI settings");
+    assert_eq!(settings.language, quartz_protocol::UiLanguageSetting::Auto);
+    assert_eq!(settings.hour_cycle, quartz_protocol::HourCycleSetting::H12);
+    assert_eq!(
+        settings.first_day_of_week,
+        quartz_protocol::FirstDayOfWeekSetting::Sunday
+    );
+}
+
+#[test]
+fn core_runtime_starts_with_stored_preferences_overriding_platform_values() {
+    run_runtime_test(|| {
+        let directory = tempfile::tempdir().expect("isolated startup settings");
+        let data = DataDirectory::new(directory.path());
+        let mut store = Store::open(&data).expect("store");
+        let expected = store
+            .update_ui_settings(quartz_protocol::SettingsSetRequest {
+                language: Some(quartz_protocol::UiLanguageSetting::ZhCn),
+                hour_cycle: Some(quartz_protocol::HourCycleSetting::H12),
+                first_day_of_week: Some(quartz_protocol::FirstDayOfWeekSetting::Sunday),
+            })
+            .expect("saved preferences");
+        drop(store);
+        let fixture = RuntimePortsFixture::new(StartTestPipe::Succeed);
+        let runtime = super::CoreRuntime::start(&data, fixture.ports).expect("runtime");
+        assert_eq!(
+            runtime.status.ui_settings(),
+            expected.resolve(quartz_protocol::EffectiveUiSettings {
+                ui_language: quartz_protocol::UiLanguage::English,
+                locale: None
+            })
+        );
+        runtime
+            .shutdown(super::RuntimeExit::UserExit)
+            .expect("shutdown");
+    });
 }

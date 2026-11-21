@@ -8,8 +8,8 @@ use super::{
     },
     schema::{
         annotations, applications, availability_intervals, capture_gaps, capture_runs, categories,
-        clock_segments, data_day_versions, intervals, rule_set_versions, rule_sets, settings,
-        titles, window_instances,
+        clock_segments, data_day_versions, intervals, rule_set_versions, rule_sets, titles,
+        window_instances,
     },
 };
 use diesel::{
@@ -198,15 +198,6 @@ pub(super) struct RuleSetsRow {
     pub current_version: i64,
     pub chain_id: Option<i64>,
     pub created_utc_ms: i64,
-}
-
-#[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
-#[diesel(table_name = settings)]
-#[diesel(primary_key(key))]
-#[diesel(check_for_backend(Sqlite))]
-pub(super) struct SettingsRow {
-    pub key: String,
-    pub value: String,
 }
 
 #[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]

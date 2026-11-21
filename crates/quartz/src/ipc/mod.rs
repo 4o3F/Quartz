@@ -39,3 +39,84 @@ pub(crate) type UiPort = Arc<dyn Fn(UiCommand) -> Result<(), QueueUiError> + Sen
 #[derive(Debug, snafu::Snafu)]
 #[snafu(display("main-thread UI queue is unavailable"))]
 pub(crate) struct QueueUiError;
+
+/// Main-thread UI queue with one coalesced, committed settings notification.
+pub(crate) struct UiCommands {
+    commands: crossbeam_channel::Receiver<UiCommand>,
+    settings: tokio::sync::watch::Receiver<Option<quartz_protocol::EffectiveUiSettings>>,
+}
+impl UiCommands {
+    pub(crate) fn channel(wake: UiPort) -> UiCommandChannel {
+        let (sender, commands) = crossbeam_channel::bounded(MAIN_COMMAND_CAPACITY);
+        let (settings_sender, settings) = tokio::sync::watch::channel(None);
+        let port: UiPort = Arc::new(move |command| {
+            match command {
+                UiCommand::SettingsChanged(effective) => {
+                    settings_sender.send_replace(Some(effective));
+                }
+                UiCommand::Open | UiCommand::FirstFrame => {
+                    sender.try_send(command).map_err(|error| {
+                        tracing::warn!(%error, "could not queue IPC command for main thread");
+                        QueueUiError
+                    })?
+                }
+            }
+            wake(command)
+        });
+        UiCommandChannel {
+            port,
+            commands: Self { commands, settings },
+        }
+    }
+    pub(crate) fn try_recv(&self) -> Result<UiCommand, crossbeam_channel::TryRecvError> {
+        self.commands.try_recv()
+    }
+    pub(crate) fn take_settings_change(&mut self) -> Option<quartz_protocol::EffectiveUiSettings> {
+        if self
+            .settings
+            .has_changed()
+            .expect("runtime retains settings sender through its write port")
+        {
+            *self.settings.borrow_and_update()
+        } else {
+            None
+        }
+    }
+}
+pub(crate) struct UiCommandChannel {
+    pub port: UiPort,
+    pub commands: UiCommands,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn settings_notification_coalesces_without_waiting_for_a_full_ui_command_queue() {
+        let mut channel = UiCommands::channel(Arc::new(|_| Ok(())));
+        for _ in 0..MAIN_COMMAND_CAPACITY {
+            (channel.port)(UiCommand::Open).expect("fill UI queue");
+        }
+        let english = quartz_protocol::EffectiveUiSettings {
+            ui_language: quartz_protocol::UiLanguage::English,
+            locale: None,
+        };
+        let chinese = quartz_protocol::EffectiveUiSettings {
+            ui_language: quartz_protocol::UiLanguage::SimplifiedChinese,
+            ..english
+        };
+        (channel.port)(UiCommand::SettingsChanged(english))
+            .expect("settings bypass full command queue");
+        (channel.port)(UiCommand::SettingsChanged(chinese))
+            .expect("latest settings replace pending value");
+        assert_eq!(channel.commands.take_settings_change(), Some(chinese));
+        assert_eq!(channel.commands.take_settings_change(), None);
+        assert_eq!(
+            channel
+                .commands
+                .try_recv()
+                .expect("ordinary command retained"),
+            UiCommand::Open
+        );
+    }
+}

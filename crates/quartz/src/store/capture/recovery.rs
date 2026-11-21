@@ -7,11 +7,10 @@ use super::{
 use crate::store::{
     enums::IntegerCode,
     rows::{AvailabilityIntervalsRow, CaptureRunsRow, ClockSegmentsRow, IntervalsRow},
-    schema::{availability_intervals, capture_runs, clock_segments, intervals, settings, titles},
+    schema::{availability_intervals, capture_runs, clock_segments, intervals, titles},
+    settings::{SettingKey, Settings},
 };
-use diesel::prelude::{
-    ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper,
-};
+use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
 use quartz_domain::capture::{
     self as domain, ConfirmedAvailability, ConfirmedInterval, ConfirmedSegment, RecoverableRun,
     RowId, RunId, SegmentId, Timestamp, WindowId,
@@ -40,6 +39,10 @@ impl From<DecodeCaptureRowError> for LoadRecoverableRunError {
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub(crate) enum LoadCaptureStartupError {
+    #[snafu(display("could not read scheduler setting"))]
+    Setting {
+        source: crate::store::settings::AccessSettingError,
+    },
     #[snafu(display("could not read capture startup state"))]
     Database { source: diesel::result::Error },
     #[snafu(display("could not decode capture startup values"))]
@@ -118,18 +121,10 @@ impl Capture<'_> {
     fn load_deadlines(&mut self) -> Result<Vec<PersistedDeadline>, LoadCaptureStartupError> {
         // This removed pre-M5 feature used a settings key, not an integer enum code.
         // Ignore it without decoding its value so obsolete data cannot block startup.
-        let removed_key = crate::store::versions::REMOVED_PRIVACY_CONTEXT_DEADLINE_KEY;
-        if settings::table
-            .find(removed_key)
-            .select(settings::key)
-            .first::<String>(self.connection)
-            .optional()?
-            .is_some()
-        {
-            tracing::warn!(
-                key = removed_key,
-                "ignoring persisted deadline for removed browser-context deferral"
-            );
+        let mut settings = Settings::new(self.connection);
+        let removed_key = SettingKey::RemovedPrivacyContextDeadline;
+        if settings.contains(removed_key)? {
+            tracing::warn!(key = %removed_key, "ignoring persisted deadline for removed browser-context deferral");
         }
         let mut deadlines = Vec::new();
         for owner in [
@@ -137,22 +132,7 @@ impl Capture<'_> {
             domain::SchedulerKind::Idle,
             domain::SchedulerKind::Midnight,
         ] {
-            let key = Self::deadline_key(owner);
-            if let Some(value) = settings::table
-                .find(key)
-                .select(settings::value)
-                .first::<String>(self.connection)
-                .optional()?
-            {
-                let millis =
-                    value
-                        .parse::<i64>()
-                        .map_err(|source| DecodeCaptureRowError::Deadline {
-                            owner,
-                            value,
-                            source,
-                        })?;
-                let at = RowContext::new(None).utc(millis, settings::value)?;
+            if let Some(at) = settings.deadline(owner)? {
                 deadlines.push(PersistedDeadline { owner, at });
             }
         }
@@ -586,5 +566,11 @@ impl crate::store::Store {
                 RecoverCaptureError::Transaction { source }
             }
         })
+    }
+}
+
+impl From<crate::store::settings::AccessSettingError> for LoadCaptureStartupError {
+    fn from(source: crate::store::settings::AccessSettingError) -> Self {
+        Self::Setting { source }
     }
 }

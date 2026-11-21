@@ -67,3 +67,63 @@ impl PreferredUiLanguages {
         quartz_i18n::Language::negotiate(&preferred)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tray_tooltip::TrayTooltip;
+    use quartz_i18n::Language;
+
+    #[test]
+    fn interim_upgrade_tooltip_uses_system_preferred_language_resolution() {
+        struct Case {
+            preferred: &'static [&'static str],
+            language: Language,
+            tooltip: &'static str,
+        }
+        let cases = [
+            Case {
+                preferred: &["zh-CN"],
+                language: Language::SimplifiedChinese,
+                tooltip: "正在升级数据库…",
+            },
+            Case {
+                preferred: &["fr-FR", "zh-TW", "en-US"],
+                language: Language::SimplifiedChinese,
+                tooltip: "正在升级数据库…",
+            },
+            Case {
+                preferred: &["en-US", "zh-CN"],
+                language: Language::English,
+                tooltip: "Upgrading database…",
+            },
+            Case {
+                preferred: &["de-DE"],
+                language: Language::English,
+                tooltip: "Upgrading database…",
+            },
+            Case {
+                preferred: &[],
+                language: Language::English,
+                tooltip: "Upgrading database…",
+            },
+        ];
+        for case in cases {
+            let preferred = PreferredUiLanguages {
+                languages: case
+                    .preferred
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect(),
+            };
+            let language = preferred.negotiate();
+            assert_eq!(language, case.language, "preferred: {:?}", case.preferred);
+            assert_eq!(
+                TrayTooltip::Upgrading.key().in_language(language),
+                case.tooltip,
+                "preferred: {:?}",
+                case.preferred
+            );
+        }
+    }
+}

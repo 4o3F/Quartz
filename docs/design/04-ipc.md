@@ -186,6 +186,17 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 | `data.delete` | 按日期范围、应用、域名、标题关键词或隐私规则删除，见 03 第 6 节 |
 | `tracking.pause` / `tracking.resume` / `tracking.keep_alive` | 暂停、恢复、临时保持计时 |
 
+`settings.get` 和 `settings.set` 只允许 `ui`。`settings.get` 参数为 `{}`；`settings.set` 参数为部分更新对象，例如 `{"language":"zh-CN","hour_cycle":"h12","first_day_of_week":"sunday"}`，省略字段保持原值。`language` 可选 `auto | zh-CN | en`，`hour_cycle` 可选 `auto | h12 | h24`，`first_day_of_week` 可选 `auto | monday | tuesday | wednesday | thursday | friday | saturday | sunday`；无效值（包括显式 `null`）返回 `bad_request`，未知字段忽略。两者返回相同结构：
+
+```json
+{
+  "ui": {"language":"zh-CN","hour_cycle":"auto","first_day_of_week":"auto"},
+  "effective": {"ui_language":"zh-CN","locale":{"hour_cycle":"h24","first_day_of_week":"monday"}}
+}
+```
+
+`ui` 是三个设置的保存值，缺失行按 `auto` 返回；`effective` 与 `state` 使用相同的已解析语言和区域值。系统区域读取失败且设置仍需要自动值时，`locale` 为 `null`，核心记录警告。写入通过数据库线程的写入队列在一个事务内提交，提交后通知主线程刷新托盘并推送 `state`，响应在提交后返回。
+
 标注写操作只允许 `ui`。请求体与响应体如下，可选字段 `category`、`label`、`note` 缺省为 `null`：
 
 ```json

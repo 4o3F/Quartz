@@ -1,6 +1,6 @@
 //! Context attached to rejected capture values and persisted rows.
 
-use super::{Capture, DbRowId, LogicalKey};
+use super::{DbRowId, LogicalKey};
 use crate::store::identifiers::{ColumnName, SchemaColumn, TableName};
 use quartz_domain::capture::{self as domain, RunId, Timestamp};
 use snafu::Snafu;
@@ -72,17 +72,15 @@ pub(crate) enum DecodeCaptureRowError {
         value: i32,
         source: crate::store::enums::ConvertTitleStatusError,
     },
-    #[snafu(display("invalid deadline {value} in settings[{key}]", key = Capture::deadline_key(*owner)))]
-    Deadline {
-        owner: domain::SchedulerKind,
-        value: String,
-        source: std::num::ParseIntError,
-    },
 }
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub(crate) enum ExecuteCaptureBatchError {
+    #[snafu(display("could not persist scheduler setting"))]
+    Setting {
+        source: crate::store::settings::AccessSettingError,
+    },
     #[snafu(display("invalid capture invalidation time"))]
     InvalidationTime { source: domain::AdvanceTimeError },
     #[snafu(display("could not update capture query versions"))]
@@ -409,5 +407,11 @@ impl RowContext {
                 source,
             })?;
         Ok(Timestamp { utc, mono })
+    }
+}
+
+impl From<crate::store::settings::AccessSettingError> for ExecuteCaptureBatchError {
+    fn from(source: crate::store::settings::AccessSettingError) -> Self {
+        Self::Setting { source }
     }
 }

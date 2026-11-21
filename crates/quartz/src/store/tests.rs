@@ -294,12 +294,8 @@ fn readonly_connection_settings_and_uri_escaping() {
     let store = Store::open(&DataDirectory::new(&nested)).expect("special path startup");
     let mut reader = store.reader.expect("reader").connection;
     assert!(
-        diesel::insert_into(schema::settings::table)
-            .values((
-                schema::settings::key.eq("forbidden"),
-                schema::settings::value.eq("{}")
-            ))
-            .execute(&mut reader)
+        settings::Settings::new(&mut reader)
+            .put_device_id("forbidden")
             .is_err()
     );
     #[derive(QueryableByName)]
