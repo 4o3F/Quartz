@@ -1,14 +1,14 @@
 //! Local-calendar-day capture inspection for acceptance tooling.
 
+#[cfg(any(windows, test))]
+use crate::ipc::client::{CallCoreError, CoreClient};
 use crate::{
     data_directory::DataDirectory,
-    store::{
-        ReadOnlyStore,
-        facts::{Fact, FactEnd, FactKind, ReadFactsError},
-    },
+    store::{ReadOnlyStore, facts::ReadFactsError},
 };
 use clap::ValueEnum;
 use jiff::{civil::Date, tz::TimeZone};
+use quartz_protocol::facts::FactRecord;
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::io::{self, Write};
 
@@ -39,8 +39,22 @@ pub(crate) enum DumpFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DumpSource {
+    Pipe,
+    Offline,
+}
+
 #[derive(Debug, Snafu)]
 pub(crate) enum DumpDayError {
+    #[cfg(any(windows, test))]
+    #[snafu(display(
+        "could not query Quartz core: {source}; if the core is stopped, use --offline"
+    ))]
+    Core { source: CallCoreError },
+    #[snafu(display("core pipe queries require Windows; use --offline to read the database"))]
+    UnsupportedPipe,
+
     #[snafu(display("could not resolve production data directory: {source}"))]
     Directory {
         source: crate::data_directory::ResolveDataDirectoryError,
@@ -72,7 +86,27 @@ impl<'date> DumpDay<'date> {
     pub(crate) fn new(date: &'date str, format: DumpFormat) -> Self {
         Self { date, format }
     }
-    pub(crate) fn run(&self) -> Result<(), DumpDayError> {
+    pub(crate) fn run(&self, source: DumpSource) -> Result<(), DumpDayError> {
+        self.local_date()?;
+        match source {
+            DumpSource::Offline => self.run_offline(),
+            DumpSource::Pipe => {
+                #[cfg(windows)]
+                {
+                    self.write_pipe(
+                        crate::platform::windows::ipc::CoreClient::connect(),
+                        &TimeZone::try_system().context(DateSnafu)?,
+                        &mut io::stdout().lock(),
+                    )
+                }
+                #[cfg(not(windows))]
+                {
+                    Err(DumpDayError::UnsupportedPipe)
+                }
+            }
+        }
+    }
+    fn run_offline(&self) -> Result<(), DumpDayError> {
         let directory = DataDirectory::resolve().context(DirectorySnafu)?;
         let zone = TimeZone::try_system().context(DateSnafu)?;
         let mut store = ReadOnlyStore::open_facts(&directory.database()).context(OpenSnafu)?;
@@ -85,20 +119,7 @@ impl<'date> DumpDay<'date> {
         zone: &TimeZone,
         output: &mut impl Write,
     ) -> Result<(), DumpDayError> {
-        snafu::ensure!(
-            self.date.len() == DATE_BYTES
-                && self.date.as_bytes()[YEAR_SEPARATOR] == b'-'
-                && self.date.as_bytes()[MONTH_SEPARATOR] == b'-'
-                && self
-                    .date
-                    .bytes()
-                    .enumerate()
-                    .all(|(index, byte)| index == YEAR_SEPARATOR
-                        || index == MONTH_SEPARATOR
-                        || byte.is_ascii_digit()),
-            DateFormatSnafu
-        );
-        let date: Date = self.date.parse().context(DateSnafu)?;
+        let date = self.local_date()?;
         let from = date
             .to_zoned_datetime(zone.clone())
             .context(DateSnafu)?
@@ -112,9 +133,48 @@ impl<'date> DumpDay<'date> {
             .timestamp()
             .as_millisecond();
         for fact in store.dump_range(from, to).context(ReadSnafu)? {
-            self.write_fact(&fact, zone, output)?;
+            self.write_fact(&fact.record().context(JsonSnafu)?, zone, output)?;
         }
         Ok(())
+    }
+    fn local_date(&self) -> Result<Date, DumpDayError> {
+        snafu::ensure!(
+            self.date.len() == DATE_BYTES
+                && self.date.as_bytes()[YEAR_SEPARATOR] == b'-'
+                && self.date.as_bytes()[MONTH_SEPARATOR] == b'-'
+                && self
+                    .date
+                    .bytes()
+                    .enumerate()
+                    .all(|(index, byte)| index == YEAR_SEPARATOR
+                        || index == MONTH_SEPARATOR
+                        || byte.is_ascii_digit()),
+            DateFormatSnafu
+        );
+        self.date.parse().context(DateSnafu)
+    }
+    #[cfg(any(windows, test))]
+    pub(crate) fn write_pipe<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        &self,
+        connection: Result<CoreClient<T>, CallCoreError>,
+        zone: &TimeZone,
+        output: &mut impl Write,
+    ) -> Result<(), DumpDayError> {
+        let mut client = connection.context(CoreSnafu)?;
+        let mut request = quartz_protocol::QueryFactsRequest {
+            local_date: self.local_date()?,
+            cursor: None,
+        };
+        loop {
+            let response = client.facts(&request).context(CoreSnafu)?;
+            for fact in response.facts {
+                self.write_fact(&fact, zone, output)?;
+            }
+            match response.next_cursor {
+                Some(cursor) => request.cursor = Some(cursor),
+                None => return Ok(()),
+            }
+        }
     }
     fn local(value: i64, zone: &TimeZone) -> Result<String, DumpDayError> {
         Ok(jiff::Timestamp::from_millisecond(value)
@@ -124,31 +184,22 @@ impl<'date> DumpDay<'date> {
     }
     fn write_fact(
         &self,
-        fact: &Fact,
+        fact: &FactRecord,
         zone: &TimeZone,
         output: &mut impl Write,
     ) -> Result<(), DumpDayError> {
         let start = Self::local(fact.start_utc_ms, zone)?;
-        let end = Self::local(fact.endpoint(), zone)?;
+        let end = Self::local(fact.endpoint().context(InvalidShapeSnafu)?, zone)?;
         let mut value = serde_json::to_value(fact).context(JsonSnafu)?;
-        // Keep nullable columns present on the row kinds that own them.
-        match fact.kind {
-            FactKind::Foreground | FactKind::NoForeground => {
-                value["no_foreground_reason"] = serde_json::json!(fact.no_foreground_reason);
-            }
-            FactKind::Availability => value["exception"] = serde_json::json!(fact.exception),
-            FactKind::TimedPolicy => value["privacy_mode"] = serde_json::json!(fact.privacy_mode),
-            FactKind::Run | FactKind::ClockSegment | FactKind::CaptureGap => {}
-        }
         match self.format {
             DumpFormat::Json => {
                 value["start_local"] = start.into();
-                value["end_local"] = if matches!(fact.end, FactEnd::Closed(_)) {
+                value["end_local"] = if fact.end_utc_ms.is_some() {
                     end.clone().into()
                 } else {
                     serde_json::Value::Null
                 };
-                value["confirmed_local"] = if matches!(fact.end, FactEnd::Open { .. }) {
+                value["confirmed_local"] = if fact.confirmed_utc_ms.is_some() {
                     end.into()
                 } else {
                     serde_json::Value::Null
@@ -160,14 +211,26 @@ impl<'date> DumpDay<'date> {
                 write!(
                     output,
                     "{} id={} start={} ({}) end=",
-                    fact.kind, fact.id, start, fact.start_utc_ms
+                    fact.fields.label(),
+                    fact.id.0,
+                    start,
+                    fact.start_utc_ms
                 )
                 .context(OutputSnafu)?;
-                if matches!(fact.end, FactEnd::Closed(_)) {
-                    write!(output, "{end} ({})", fact.endpoint()).context(OutputSnafu)?;
+                if fact.end_utc_ms.is_some() {
+                    write!(
+                        output,
+                        "{end} ({})",
+                        fact.endpoint().context(InvalidShapeSnafu)?
+                    )
+                    .context(OutputSnafu)?;
                 } else {
-                    write!(output, "open (confirmed {end} ({}))", fact.endpoint())
-                        .context(OutputSnafu)?;
+                    write!(
+                        output,
+                        "open (confirmed {end} ({}))",
+                        fact.endpoint().context(InvalidShapeSnafu)?
+                    )
+                    .context(OutputSnafu)?;
                 }
                 write!(
                     output,
@@ -499,6 +562,106 @@ mod tests {
                 empty.is_empty(),
                 "local date {date} must have no intersecting records"
             );
+        }
+        #[cfg(windows)]
+        SelfContainedPipe::assert_identity(store, temporary, &mut reader);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn paged_pipe_dump_matches_offline_bytes() {
+        let fixture = crate::store::query::test_support::QueryFixture::new(800);
+        let mut reader =
+            ReadOnlyStore::open_facts(&DataDirectory::new(fixture.directory.path()).database())
+                .expect("temporary offline reader");
+        SelfContainedPipe::assert_identity(fixture.store, fixture.directory, &mut reader);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_core_fails_with_explicit_offline_hint_and_no_output() {
+        use crate::platform::windows::ipc::{CoreClient, OpenCorePipeError, PipeName};
+        let name = PipeName::for_test(windows::core::GUID::new().expect("absent test pipe"));
+        let mut output = Vec::new();
+        let error = DumpDay::new("2025-01-02", DumpFormat::Text)
+            .write_pipe(
+                CoreClient::connect_named(&name, quartz_protocol::HelloRole::Cli),
+                &TimeZone::UTC,
+                &mut output,
+            )
+            .expect_err("missing core must fail");
+        assert!(error.to_string().contains("--offline"));
+        assert!(
+            matches!(error, DumpDayError::Core { source: CallCoreError::Connect { source } } if matches!(source.downcast_ref::<OpenCorePipeError>(), Some(OpenCorePipeError::CoreNotRunning { .. })))
+        );
+        assert!(output.is_empty(), "failed pipe connection writes no facts");
+    }
+
+    #[cfg(windows)]
+    struct SelfContainedPipe;
+    #[cfg(windows)]
+    impl SelfContainedPipe {
+        fn assert_identity(
+            mut store: Store,
+            directory: tempfile::TempDir,
+            reader: &mut ReadOnlyStore,
+        ) {
+            use crate::platform::windows::ipc::{
+                CoreClient, PipeName, PipeServer, PipeServerConfig, ProcessIdentity,
+            };
+            store
+                .seed_categories()
+                .expect("builtin categories for query server");
+            let database = crate::query::dispatch::test_support::TestDatabase::with_fixture(
+                crate::store::query::test_support::QueryFixture {
+                    store,
+                    directory,
+                    start: 0,
+                    count: 0,
+                },
+            );
+            let status =
+                crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("dump-test".into()));
+            let name =
+                PipeName::for_test(windows::core::GUID::new().expect("unique dump test pipe"));
+            let server = PipeServer::start(PipeServerConfig {
+                shutdown_timeout: crate::core::app::SHUTDOWN_TIMEOUT,
+                owner: ProcessIdentity::current().expect("test identity"),
+                name: name.clone(),
+                timeouts: Default::default(),
+                services: crate::ipc::Services {
+                    summary: None,
+                    queries: database.port.clone(),
+                    versions: database.versions.clone(),
+                    writes: crate::ipc::WriteChannel::new().port,
+                    status: status.subscribe(),
+                    ui: std::sync::Arc::new(|_| Ok(())),
+                    timed: crate::ipc::TimedPolicyPort::unavailable(),
+                },
+            })
+            .expect("in-process pipe server");
+            let zone = TimeZone::try_system().expect("system test zone");
+            let mut row_count = 0;
+            for format in [DumpFormat::Text, DumpFormat::Json] {
+                for date in ["2025-01-01", "2025-01-02", "2025-01-03"] {
+                    let dump = DumpDay::new(date, format);
+                    let mut offline = Vec::new();
+                    dump.write(reader, &zone, &mut offline)
+                        .expect("offline dump");
+                    let mut pipe = Vec::new();
+                    dump.write_pipe(
+                        CoreClient::connect_named(&name, quartz_protocol::HelloRole::Cli),
+                        &zone,
+                        &mut pipe,
+                    )
+                    .expect("pipe dump");
+                    assert_eq!(pipe, offline, "byte identity for {date} {format:?}");
+                    if format == DumpFormat::Json {
+                        row_count += offline.iter().filter(|byte| **byte == b'\n').count();
+                    }
+                }
+            }
+            assert!(row_count > 0, "rich fixture must be dumped");
+            server.shutdown().expect("stop test pipe");
         }
     }
 }

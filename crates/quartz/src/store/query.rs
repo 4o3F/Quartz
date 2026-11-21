@@ -26,6 +26,7 @@ use std::{
     sync::Arc,
 };
 
+mod facts;
 mod input;
 pub(crate) use input::{InputRow, QueryAnnotation};
 
@@ -41,7 +42,7 @@ impl ReadOnlyStore {
         ReadSnapshot {
             reader: Some(self),
             transaction: SnapshotTransaction::Pending,
-            cursor: ScanCursor::Clock(StartCursor::initial(ClockSegmentId(i64::from(i32::MIN)))),
+            cursor: ScanCursor::initial(),
             applications: BTreeMap::new(),
         }
     }
@@ -85,7 +86,7 @@ enum SnapshotTransaction {
     Started,
 }
 #[derive(Debug, Clone, Copy)]
-struct StartCursor<Id> {
+pub(super) struct StartCursor<Id> {
     start_utc_ms: i64,
     id: Id,
 }
@@ -98,14 +99,16 @@ impl<Id> StartCursor<Id> {
     }
 }
 #[derive(Debug, Clone, Copy)]
-struct StoredRunId(i64);
+pub(super) struct StoredRunId(i64);
 #[derive(Debug, Clone, Copy)]
-struct AvailabilityCursor {
+pub(super) struct AvailabilityCursor {
     run: StoredRunId,
     reason: Option<enums::AvailabilityReason>,
 }
 #[derive(Debug, Clone, Copy)]
-enum ScanCursor {
+pub(super) enum ScanCursor {
+    Runs(StartCursor<FactId>),
+    TimedPolicies,
     Clock(StartCursor<ClockSegmentId>),
     ForegroundClosed(StartCursor<FactId>),
     ForegroundOpen(StoredRunId),
@@ -116,8 +119,14 @@ enum ScanCursor {
     Done,
 }
 impl ScanCursor {
+    pub(super) fn initial() -> Self {
+        Self::Runs(StartCursor::initial(FactId(i64::MIN)))
+    }
+
     fn next(self) -> Self {
         match self {
+            Self::Runs(_) => Self::Clock(StartCursor::initial(ClockSegmentId(i64::MIN))),
+            Self::TimedPolicies => Self::Done,
             Self::Clock(_) => {
                 Self::ForegroundClosed(StartCursor::initial(FactId(i64::from(i32::MIN))))
             }
@@ -133,7 +142,8 @@ impl ScanCursor {
                 Self::Gaps(StartCursor::initial(FactId(i64::from(i32::MIN))))
             }
             Self::Gaps(_) => Self::Annotations(StartCursor::initial(FactId(i64::MIN))),
-            Self::Annotations(_) | Self::Done => Self::Done,
+            Self::Annotations(_) => Self::TimedPolicies,
+            Self::Done => Self::Done,
         }
     }
 }
@@ -215,15 +225,43 @@ impl ReadSnapshot {
         &mut self,
         range: QueryRange,
     ) -> Result<Option<Vec<InputRow>>, ReadQueryError> {
+        let connection = &mut self
+            .reader
+            .as_mut()
+            .expect("live snapshot reader")
+            .connection;
         let result = match self.cursor {
-            ScanCursor::Clock(cursor) => self.read_clock(range, cursor)?,
-            ScanCursor::ForegroundClosed(cursor) => self.read_foreground_closed(range, cursor)?,
-            ScanCursor::ForegroundOpen(cursor) => self.read_foreground_open(range, cursor)?,
-            ScanCursor::AvailabilityClosed(cursor) => {
-                self.read_availability_closed(range, cursor)?
+            ScanCursor::Runs(_) | ScanCursor::TimedPolicies => Vec::new(),
+            ScanCursor::Clock(cursor) => {
+                Self::decode_clock(self.cursor.load_clock(connection, range, cursor)?)?
             }
-            ScanCursor::AvailabilityOpen(cursor) => self.read_availability_open(range, cursor)?,
-            ScanCursor::Gaps(cursor) => self.read_gaps(range, cursor)?,
+            ScanCursor::ForegroundClosed(cursor) => {
+                let rows = self
+                    .cursor
+                    .load_foreground_closed(connection, range, cursor)?;
+                self.decode_foreground(rows)?
+            }
+            ScanCursor::ForegroundOpen(cursor) => {
+                let rows = self
+                    .cursor
+                    .load_foreground_open(connection, range, cursor)?;
+                self.decode_foreground(rows)?
+            }
+            ScanCursor::AvailabilityClosed(cursor) => {
+                let rows = self
+                    .cursor
+                    .load_availability_closed(connection, range, cursor)?;
+                self.decode_availability(rows)?
+            }
+            ScanCursor::AvailabilityOpen(cursor) => {
+                let rows = self
+                    .cursor
+                    .load_availability_open(connection, range, cursor)?;
+                self.decode_availability(rows)?
+            }
+            ScanCursor::Gaps(cursor) => {
+                Self::decode_gaps(self.cursor.load_gaps(connection, range, cursor)?)?
+            }
             ScanCursor::Annotations(cursor) => self.read_annotations(range, cursor)?,
             ScanCursor::Done => return Ok(None),
         };
@@ -231,6 +269,19 @@ impl ReadSnapshot {
             self.cursor = self.cursor.next();
         }
         Ok(Some(result))
+    }
+    pub(crate) fn read_fact_batch(
+        &mut self,
+        range: QueryRange,
+    ) -> Result<Option<Vec<super::facts::Fact>>, ReadQueryError> {
+        Ok(self.cursor.read_facts(
+            &mut self
+                .reader
+                .as_mut()
+                .expect("live snapshot reader")
+                .connection,
+            range,
+        )?)
     }
     fn read_annotations(
         &mut self,
@@ -278,45 +329,12 @@ impl ReadSnapshot {
         }
         Ok(result)
     }
-    fn read_clock(
-        &mut self,
-        range: QueryRange,
-        cursor: StartCursor<ClockSegmentId>,
-    ) -> Result<Vec<InputRow>, ReadQueryError> {
-        let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
-        let after_start = cursor.start_utc_ms;
-        let after_id = cursor.id.0;
-        let mut result = Vec::new();
-
-        let rows = clock_segments::table
-            .inner_join(
-                capture_runs::table.on(clock_segments::run_id.nullable().eq(capture_runs::id)),
-            )
-            .filter(clock_segments::start_utc_ms.lt(range.end))
-            .filter(
-                clock_segments::end_utc_ms
-                    .gt(range.start)
-                    .or(clock_segments::confirmed_utc_ms.gt(range.start)),
-            )
-            .filter(
-                clock_segments::start_utc_ms
-                    .gt(after_start)
-                    .or(clock_segments::start_utc_ms
-                        .eq(after_start)
-                        .and(clock_segments::id.gt(after_id))),
-            )
-            .order((clock_segments::start_utc_ms, clock_segments::id))
-            .limit(limit)
-            .select((ClockSegmentsRow::as_select(), CaptureRunsRow::as_select()))
-            .load::<ClockDetails>(self.connection())?;
+    fn decode_clock(rows: Vec<ClockDetails>) -> Result<Vec<InputRow>, ReadQueryError> {
+        let mut result = Vec::with_capacity(rows.len());
         for details in rows {
             let row = details.clock;
             let run_end = Self::endpoint(details.run.ended_utc_ms, details.run.confirmed_utc_ms)?;
             let id = row.id.ok_or(ReadQueryError::InvalidFacts)?;
-            self.cursor = ScanCursor::Clock(StartCursor {
-                start_utc_ms: row.start_utc_ms,
-                id: ClockSegmentId(id),
-            });
             result.push(InputRow::Clock(ClockSegment {
                 id: ClockSegmentId(id),
                 start_utc_ms: row.start_utc_ms,
@@ -329,6 +347,7 @@ impl ReadSnapshot {
 
         Ok(result)
     }
+
     fn decode_foreground(
         &mut self,
         rows: Vec<ForegroundDetails>,
@@ -372,70 +391,7 @@ impl ReadSnapshot {
 
         Ok(result)
     }
-    fn read_foreground_closed(
-        &mut self,
-        range: QueryRange,
-        cursor: StartCursor<FactId>,
-    ) -> Result<Vec<InputRow>, ReadQueryError> {
-        let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
-        let after_start = cursor.start_utc_ms;
-        let after_id = cursor.id.0;
 
-        let mut query = intervals::table
-            .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
-            .into_boxed();
-        query = query
-            .filter(
-                intervals::start_utc_ms.ge(range.start.saturating_sub(UTC_DAY_MS).max(after_start)),
-            )
-            .filter(intervals::end_utc_ms.gt(range.start))
-            .filter(
-                intervals::start_utc_ms
-                    .gt(after_start)
-                    .or(intervals::start_utc_ms
-                        .eq(after_start)
-                        .and(intervals::id.gt(after_id))),
-            )
-            .order((intervals::start_utc_ms, intervals::id));
-        let rows = query
-            .filter(intervals::start_utc_ms.lt(range.end))
-            .limit(limit)
-            .select((IntervalsRow::as_select(), titles::text.nullable()))
-            .load::<ForegroundDetails>(self.connection())?;
-        if let Some(row) = rows.last() {
-            self.cursor = ScanCursor::ForegroundClosed(StartCursor {
-                start_utc_ms: row.fact.start_utc_ms,
-                id: FactId(row.fact.id.ok_or(ReadQueryError::InvalidFacts)?),
-            });
-        }
-        self.decode_foreground(rows)
-    }
-    fn read_foreground_open(
-        &mut self,
-        range: QueryRange,
-        cursor: StoredRunId,
-    ) -> Result<Vec<InputRow>, ReadQueryError> {
-        let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
-        let after_id = cursor.0;
-
-        let mut query = intervals::table
-            .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
-            .into_boxed();
-        query = query
-            .filter(intervals::end_utc_ms.is_null())
-            .filter(intervals::confirmed_utc_ms.gt(range.start))
-            .filter(intervals::run_id.gt(after_id))
-            .order(intervals::run_id);
-        let rows = query
-            .filter(intervals::start_utc_ms.lt(range.end))
-            .limit(limit)
-            .select((IntervalsRow::as_select(), titles::text.nullable()))
-            .load::<ForegroundDetails>(self.connection())?;
-        if let Some(row) = rows.last() {
-            self.cursor = ScanCursor::ForegroundOpen(StoredRunId(row.fact.run_id));
-        }
-        self.decode_foreground(rows)
-    }
     fn decode_availability(
         &mut self,
         rows: Vec<AvailabilityIntervalsRow>,
@@ -469,11 +425,158 @@ impl ReadSnapshot {
 
         Ok(result)
     }
-    fn read_availability_closed(
+
+    fn decode_gaps(rows: Vec<CaptureGapsRow>) -> Result<Vec<InputRow>, ReadQueryError> {
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = row.id.ok_or(ReadQueryError::InvalidFacts)?;
+            result.push(InputRow::Gap {
+                span: FactSpan {
+                    id: FactId(id),
+                    segment: ClockSegmentId(row.clock_segment_id),
+                    start_utc_ms: row.start_utc_ms,
+                    end_utc_ms: row.end_utc_ms,
+                    start_mono_ms: row.start_mono_ms,
+                    end_mono_ms: row.end_mono_ms,
+                },
+                reason: match row.reason {
+                    enums::GapReason::EventOverload => GapReason::EventOverload,
+                    enums::GapReason::WriteQueueOverload => GapReason::WriteQueueOverload,
+                    enums::GapReason::DatabaseError => GapReason::DatabaseError,
+                },
+            });
+        }
+
+        Ok(result)
+    }
+
+    fn endpoint(end: Option<i64>, confirmed: Option<i64>) -> Result<i64, ReadQueryError> {
+        match (end, confirmed) {
+            (Some(end), None) => Ok(end),
+            (None, Some(confirmed)) => Ok(confirmed),
+            _ => Err(ReadQueryError::InvalidFacts),
+        }
+    }
+}
+
+impl ScanCursor {
+    fn load_clock(
         &mut self,
+        connection: &mut diesel::SqliteConnection,
+        range: QueryRange,
+        cursor: StartCursor<ClockSegmentId>,
+    ) -> Result<Vec<ClockDetails>, super::facts::ReadFactsError> {
+        let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
+        let after_start = cursor.start_utc_ms;
+        let after_id = cursor.id.0;
+
+        let rows = clock_segments::table
+            .inner_join(
+                capture_runs::table.on(clock_segments::run_id.nullable().eq(capture_runs::id)),
+            )
+            .filter(clock_segments::start_utc_ms.lt(range.end))
+            .filter(
+                clock_segments::end_utc_ms
+                    .gt(range.start)
+                    .or(clock_segments::confirmed_utc_ms.gt(range.start)),
+            )
+            .filter(
+                clock_segments::start_utc_ms
+                    .gt(after_start)
+                    .or(clock_segments::start_utc_ms
+                        .eq(after_start)
+                        .and(clock_segments::id.gt(after_id))),
+            )
+            .order((clock_segments::start_utc_ms, clock_segments::id))
+            .limit(limit)
+            .select((ClockSegmentsRow::as_select(), CaptureRunsRow::as_select()))
+            .load::<ClockDetails>(connection)?;
+        if let Some(row) = rows.last() {
+            *self = Self::Clock(StartCursor {
+                start_utc_ms: row.clock.start_utc_ms,
+                id: ClockSegmentId(row.clock.id.ok_or(
+                    super::facts::ReadFactsError::MissingId {
+                        kind: super::facts::FactKind::ClockSegment,
+                    },
+                )?),
+            });
+        }
+        Ok(rows)
+    }
+    fn load_foreground_closed(
+        &mut self,
+        connection: &mut diesel::SqliteConnection,
         range: QueryRange,
         cursor: StartCursor<FactId>,
-    ) -> Result<Vec<InputRow>, ReadQueryError> {
+    ) -> Result<Vec<ForegroundDetails>, super::facts::ReadFactsError> {
+        let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
+        let after_start = cursor.start_utc_ms;
+        let after_id = cursor.id.0;
+
+        let mut query = intervals::table
+            .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
+            .into_boxed();
+        query = query
+            .filter(
+                intervals::start_utc_ms.ge(range.start.saturating_sub(UTC_DAY_MS).max(after_start)),
+            )
+            .filter(intervals::end_utc_ms.gt(range.start))
+            .filter(
+                intervals::start_utc_ms
+                    .gt(after_start)
+                    .or(intervals::start_utc_ms
+                        .eq(after_start)
+                        .and(intervals::id.gt(after_id))),
+            )
+            .order((intervals::start_utc_ms, intervals::id));
+        let rows = query
+            .filter(intervals::start_utc_ms.lt(range.end))
+            .limit(limit)
+            .select((IntervalsRow::as_select(), titles::text.nullable()))
+            .load::<ForegroundDetails>(connection)?;
+        if let Some(row) = rows.last() {
+            *self = ScanCursor::ForegroundClosed(StartCursor {
+                start_utc_ms: row.fact.start_utc_ms,
+                id: FactId(row.fact.id.ok_or(super::facts::ReadFactsError::MissingId {
+                    kind: super::facts::FactKind::Foreground,
+                })?),
+            });
+        }
+        Ok(rows)
+    }
+    fn load_foreground_open(
+        &mut self,
+        connection: &mut diesel::SqliteConnection,
+        range: QueryRange,
+        cursor: StoredRunId,
+    ) -> Result<Vec<ForegroundDetails>, super::facts::ReadFactsError> {
+        let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
+        let after_id = cursor.0;
+
+        let mut query = intervals::table
+            .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
+            .into_boxed();
+        query = query
+            .filter(intervals::end_utc_ms.is_null())
+            .filter(intervals::confirmed_utc_ms.gt(range.start))
+            .filter(intervals::run_id.gt(after_id))
+            .order(intervals::run_id);
+        let rows = query
+            .filter(intervals::start_utc_ms.lt(range.end))
+            .limit(limit)
+            .select((IntervalsRow::as_select(), titles::text.nullable()))
+            .load::<ForegroundDetails>(connection)?;
+        if let Some(row) = rows.last() {
+            *self = ScanCursor::ForegroundOpen(StoredRunId(row.fact.run_id));
+        }
+        Ok(rows)
+    }
+    fn load_availability_closed(
+        &mut self,
+        connection: &mut diesel::SqliteConnection,
+        range: QueryRange,
+        cursor: StartCursor<FactId>,
+    ) -> Result<Vec<AvailabilityIntervalsRow>, super::facts::ReadFactsError> {
         let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
         let after_start = cursor.start_utc_ms;
         let after_id = cursor.id.0;
@@ -500,20 +603,23 @@ impl ReadSnapshot {
             .filter(availability_intervals::start_utc_ms.lt(range.end))
             .limit(limit)
             .select(AvailabilityIntervalsRow::as_select())
-            .load::<AvailabilityIntervalsRow>(self.connection())?;
+            .load::<AvailabilityIntervalsRow>(connection)?;
         if let Some(row) = rows.last() {
-            self.cursor = ScanCursor::AvailabilityClosed(StartCursor {
+            *self = ScanCursor::AvailabilityClosed(StartCursor {
                 start_utc_ms: row.start_utc_ms,
-                id: FactId(row.id.ok_or(ReadQueryError::InvalidFacts)?),
+                id: FactId(row.id.ok_or(super::facts::ReadFactsError::MissingId {
+                    kind: super::facts::FactKind::Availability,
+                })?),
             });
         }
-        self.decode_availability(rows)
+        Ok(rows)
     }
-    fn read_availability_open(
+    fn load_availability_open(
         &mut self,
+        connection: &mut diesel::SqliteConnection,
         range: QueryRange,
         cursor: AvailabilityCursor,
-    ) -> Result<Vec<InputRow>, ReadQueryError> {
+    ) -> Result<Vec<AvailabilityIntervalsRow>, super::facts::ReadFactsError> {
         let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
         let after_start = cursor.run.0;
         let after_id = cursor.reason.map_or(i32::MIN, IntegerCode::code);
@@ -537,24 +643,24 @@ impl ReadSnapshot {
             .filter(availability_intervals::start_utc_ms.lt(range.end))
             .limit(limit)
             .select(AvailabilityIntervalsRow::as_select())
-            .load::<AvailabilityIntervalsRow>(self.connection())?;
+            .load::<AvailabilityIntervalsRow>(connection)?;
         if let Some(row) = rows.last() {
-            self.cursor = ScanCursor::AvailabilityOpen(AvailabilityCursor {
+            *self = ScanCursor::AvailabilityOpen(AvailabilityCursor {
                 run: StoredRunId(row.run_id),
                 reason: Some(row.reason),
             });
         }
-        self.decode_availability(rows)
+        Ok(rows)
     }
-    fn read_gaps(
+    fn load_gaps(
         &mut self,
+        connection: &mut diesel::SqliteConnection,
         range: QueryRange,
         cursor: StartCursor<FactId>,
-    ) -> Result<Vec<InputRow>, ReadQueryError> {
+    ) -> Result<Vec<CaptureGapsRow>, super::facts::ReadFactsError> {
         let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
         let after_start = cursor.start_utc_ms;
         let after_id = cursor.id.0;
-        let mut result = Vec::new();
 
         let rows = capture_gaps::table
             .filter(capture_gaps::start_utc_ms.lt(range.end))
@@ -569,38 +675,16 @@ impl ReadSnapshot {
             .order((capture_gaps::start_utc_ms, capture_gaps::id))
             .limit(limit)
             .select(CaptureGapsRow::as_select())
-            .load::<CaptureGapsRow>(self.connection())?;
-        for row in rows {
-            let id = row.id.ok_or(ReadQueryError::InvalidFacts)?;
-            self.cursor = ScanCursor::Gaps(StartCursor {
+            .load::<CaptureGapsRow>(connection)?;
+        if let Some(row) = rows.last() {
+            *self = Self::Gaps(StartCursor {
                 start_utc_ms: row.start_utc_ms,
-                id: FactId(id),
-            });
-            result.push(InputRow::Gap {
-                span: FactSpan {
-                    id: FactId(id),
-                    segment: ClockSegmentId(row.clock_segment_id),
-                    start_utc_ms: row.start_utc_ms,
-                    end_utc_ms: row.end_utc_ms,
-                    start_mono_ms: row.start_mono_ms,
-                    end_mono_ms: row.end_mono_ms,
-                },
-                reason: match row.reason {
-                    enums::GapReason::EventOverload => GapReason::EventOverload,
-                    enums::GapReason::WriteQueueOverload => GapReason::WriteQueueOverload,
-                    enums::GapReason::DatabaseError => GapReason::DatabaseError,
-                },
+                id: FactId(row.id.ok_or(super::facts::ReadFactsError::MissingId {
+                    kind: super::facts::FactKind::CaptureGap,
+                })?),
             });
         }
-
-        Ok(result)
-    }
-    fn endpoint(end: Option<i64>, confirmed: Option<i64>) -> Result<i64, ReadQueryError> {
-        match (end, confirmed) {
-            (Some(end), None) => Ok(end),
-            (None, Some(confirmed)) => Ok(confirmed),
-            _ => Err(ReadQueryError::InvalidFacts),
-        }
+        Ok(rows)
     }
 }
 

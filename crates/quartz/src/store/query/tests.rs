@@ -1,5 +1,6 @@
 use super::*;
 use crate::query::{QueryJob, QueryRequest, QueryResponse, RunQueryError};
+use crate::store::{rows::TimedPoliciesRow, schema::timed_policies};
 use quartz_protocol::{Activity, ErrorKind, QUERY_PAGE_BYTES, QueryCursor};
 use test_support::{FIXTURE_DATE, QueryFixture};
 
@@ -936,4 +937,116 @@ fn annotations_written_after_query_start_do_not_enter_the_pinned_snapshot() {
     assert_eq!(before.metrics.expect("old metrics").active_ms, 1000);
     assert_eq!(after.metrics.expect("new metrics").active_ms, 2000);
     assert_ne!(before.versions, after.versions);
+}
+
+#[test]
+fn facts_pages_reassemble_dump_range_and_reject_stale_and_mismatched_cursors() {
+    use quartz_protocol::{CursorQuery, QueryFactsRequest};
+    let mut fixture = QueryFixture::new(2000);
+    fixture.collapse_foreground_times();
+    fixture.open_last_fact(5000);
+    fixture.mask_idle(0, 1000);
+    let mut reader = ReadOnlyStore::open_facts(
+        &crate::data_directory::DataDirectory::new(fixture.directory.path()).database(),
+    )
+    .expect("offline reader");
+    let calendar = crate::query::calendar::DayCalendar::new(FIXTURE_DATE.parse().expect("date"), 0)
+        .expect("calendar");
+    let expected: Vec<_> = reader
+        .dump_range(calendar.range.start, calendar.range.end)
+        .expect("dump range")
+        .iter()
+        .map(|fact| fact.record().expect("wire fact"))
+        .collect();
+    let mut request = QueryFactsRequest {
+        local_date: FIXTURE_DATE.parse().expect("date"),
+        cursor: None,
+    };
+    let mut all = Vec::new();
+    let mut first_cursor = None;
+    let mut pages = 0;
+    loop {
+        let response = fixture
+            .run(QueryRequest::Facts(request.clone()))
+            .expect("facts page");
+        assert!(serde_json::to_vec(&response).expect("page JSON").len() <= QUERY_PAGE_BYTES);
+        let QueryResponse::Facts(page) = response else {
+            panic!("facts response")
+        };
+        pages += 1;
+        all.extend(page.facts);
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        first_cursor.get_or_insert_with(|| cursor.clone());
+        request.cursor = Some(cursor);
+    }
+    assert!(pages > 1, "fixture must exceed a page");
+    assert_eq!(all, expected);
+    let cursor = first_cursor.expect("continuation");
+    request.cursor = Some(QueryCursor::new(
+        cursor.versions().clone(),
+        CursorQuery::Day {
+            local_date: request.local_date,
+        },
+        cursor.position(),
+    ));
+    assert!(matches!(
+        fixture.run(QueryRequest::Facts(request.clone())),
+        Err(RunQueryError::InvalidCursor)
+    ));
+    request.cursor = Some(cursor);
+    fixture.append_fact();
+    assert!(matches!(
+        fixture.run(QueryRequest::Facts(request)),
+        Err(RunQueryError::StaleCursor)
+    ));
+}
+
+#[test]
+fn facts_cursor_tracks_full_run_endpoints_and_timed_policies() {
+    use quartz_protocol::QueryFactsRequest;
+    let mut fixture = QueryFixture::new(600);
+    let mut request = QueryFactsRequest {
+        local_date: FIXTURE_DATE.parse().expect("date"),
+        cursor: None,
+    };
+    let QueryResponse::Facts(page) = fixture
+        .run(QueryRequest::Facts(request.clone()))
+        .expect("facts")
+    else {
+        panic!("facts response")
+    };
+    request.cursor = page.next_cursor;
+    assert!(request.cursor.is_some(), "fixture exceeds one page");
+    diesel::update(capture_runs::table)
+        .set(capture_runs::ended_utc_ms.eq(fixture.start + UTC_DAY_MS + 1000))
+        .execute(&mut fixture.store.writer)
+        .expect("change full run endpoint");
+    assert!(matches!(
+        fixture.run(QueryRequest::Facts(request.clone())),
+        Err(RunQueryError::StaleCursor)
+    ));
+    request.cursor = None;
+    let QueryResponse::Facts(page) = fixture
+        .run(QueryRequest::Facts(request.clone()))
+        .expect("fresh facts")
+    else {
+        panic!("facts response")
+    };
+    request.cursor = page.next_cursor;
+    diesel::insert_into(timed_policies::table)
+        .values(TimedPoliciesRow {
+            kind: enums::TimedPolicyKind::KeepTiming,
+            privacy_mode: None,
+            application_id: None,
+            started_utc_ms: fixture.start,
+            until_utc_ms: fixture.start + 1000,
+        })
+        .execute(&mut fixture.store.writer)
+        .expect("timed policy write");
+    assert!(matches!(
+        fixture.run(QueryRequest::Facts(request)),
+        Err(RunQueryError::StaleCursor)
+    ));
 }

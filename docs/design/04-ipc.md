@@ -137,6 +137,7 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 
 | op | 参数 | 返回 |
 |---|---|---|
+| `query.facts` | `local_date`、可选 `cursor`（本地日历日午夜至次日午夜） | 原始事实 `facts`、`versions`、`next_cursor`，按开始 UTC 毫秒、类型和主键排序 |
 | `query.day` | `local_date`、可选 `cursor`（日起点偏移取自设置，见 03 第 1 节） | 状态行指标、每小时分类堆叠、排行（应用、域名、文档，完整列表分页）、未分类时长 |
 | `query.timeline` | UTC 毫秒范围 `start_utc_ms` / `end_utc_ms`、`detail`（`category` / `app` / `raw`）、正整数 `ms_per_pixel`、可选 `cursor` | 时间轴片段；小于一个像素对应时长的相邻片段由核心合并，界面传入"每像素毫秒数" |
 | `query.range` | 起止逻辑日期、时区、维度 | 按天或按周聚合 |
@@ -144,6 +145,8 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 | `query.entity_detail` | 应用、域名或文档 | 近 7 天每日时长、常见标题、命中的规则 |
 | `query.unclassified` | 时间范围 | 未分类的条目，按时长降序 |
 | `query.pending_away` | `local_date`、可选 `cursor`，与 `query.day` 使用相同的时区和日起点设置 | 未标注且至少 15 分钟的连续 idle 片段 |
+
+`query.facts` 在数据库线程的查询快照中读取与 `dump_range` 相同的运行、时钟段、前台与无前台事实、可用状态、采集缺口及限时策略，保留完整存储端点及行采集等级下已存储的标题，沿用 200 KiB 版本化分页并将原始事实内容加入版本摘要。
 
 查询使用核心执行时的当前系统时区。
 

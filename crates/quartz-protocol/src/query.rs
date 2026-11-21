@@ -40,6 +40,8 @@ impl QueryCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CursorQuery {
+    /// A calendar date, from local midnight to the next local midnight.
+    Facts { local_date: LocalDate },
     /// A logical date in the core's current system time zone.
     Day { local_date: LocalDate },
     /// Pending idle pieces in a logical day.
@@ -75,6 +77,27 @@ impl From<&QueryPendingAwayRequest> for CursorQuery {
             local_date: request.local_date,
         }
     }
+}
+impl From<&QueryFactsRequest> for CursorQuery {
+    fn from(request: &QueryFactsRequest) -> Self {
+        Self::Facts {
+            local_date: request.local_date,
+        }
+    }
+}
+/// Raw stored facts intersecting a calendar day in the core's system time zone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryFactsRequest {
+    pub local_date: LocalDate,
+    #[serde(default)]
+    pub cursor: Option<QueryCursor>,
+}
+/// One chronological page of full stored facts and its input versions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryFactsResponse {
+    pub facts: Vec<crate::facts::FactRecord>,
+    pub versions: QueryVersions,
+    pub next_cursor: Option<QueryCursor>,
 }
 /// Pending idle query in the core's current system time zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +384,38 @@ pub struct DayChanged {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn facts_request_response_and_cursor_preserve_raw_wire_fields() {
+        let request: QueryFactsRequest =
+            serde_json::from_value(serde_json::json!({"local_date":"2025-01-02"}))
+                .expect("facts request");
+        assert!(request.cursor.is_none());
+        let cursor = QueryCursor::new(
+            QueryVersions("facts-version".into()),
+            CursorQuery::from(&request),
+            1,
+        );
+        let cursor_json = serde_json::json!({"versions":"facts-version","query":{"kind":"facts","local_date":"2025-01-02"},"position":1});
+        assert_eq!(
+            serde_json::to_value(&cursor).expect("cursor JSON"),
+            cursor_json
+        );
+        assert_eq!(
+            serde_json::from_value::<QueryCursor>(cursor_json).expect("cursor round trip"),
+            cursor
+        );
+        let body = serde_json::json!({
+            "facts":[{"kind":"run","id":1,"run_id":1,"segment_id":null,
+            "start_utc_ms":0,"end_utc_ms":null,"confirmed_utc_ms":1000,
+            "start_mono_ms":null,"end_mono_ms":null,"confirmed_mono_ms":null,
+            "duration_ms":1000,"end_reason":null,"device_id":"test-device",
+            "win_session_id":1,"app_version":"test"}],
+            "versions":"facts-version","next_cursor":cursor
+        });
+        let page: QueryFactsResponse =
+            serde_json::from_value(body.clone()).expect("typed facts response");
+        assert_eq!(serde_json::to_value(page).expect("facts round trip"), body);
+    }
     fn golden_category() -> CategoryRef {
         CategoryRef::Classified {
             category: Category {

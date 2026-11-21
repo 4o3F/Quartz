@@ -2,6 +2,10 @@
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module)]
 pub(crate) enum ReadQueryError {
+    #[snafu(display("{source}"))]
+    Facts {
+        source: crate::store::facts::ReadFactsError,
+    },
     #[snafu(display("query reader is unavailable"))]
     ReaderUnavailable,
     #[snafu(display("could not read SQLite query snapshot: {source}"))]
@@ -28,5 +32,11 @@ impl From<super::settings::AccessSettingError> for ReadQueryError {
             | super::settings::AccessSettingError::DayStartOffset
             | super::settings::AccessSettingError::MetadataVersion => Self::InvalidSettings,
         }
+    }
+}
+
+impl From<crate::store::facts::ReadFactsError> for ReadQueryError {
+    fn from(source: crate::store::facts::ReadFactsError) -> Self {
+        Self::Facts { source }
     }
 }

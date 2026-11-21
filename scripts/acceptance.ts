@@ -1,5 +1,10 @@
 import { run } from "./common.ts";
 
+export const usage =
+  `Usage: deno task acceptance [dump.jsonl|-] [--before pre-crash.jsonl]
+Export running-core data with quartz dump --date YYYY-MM-DD --format json.
+Use quartz dump --offline for a stopped or suspended core and frozen pre-crash dumps.`;
+
 const dayMs = 86_400_000;
 const kinds = [
   "run",
@@ -176,7 +181,7 @@ export function uniqueRows(rows: readonly Fact[]): Fact[] {
       throw new Error(
         `conflicting snapshots for ${
           key(row)
-        }; dump all dates while the core is stopped or suspended`,
+        }; dump all dates with quartz dump --offline while the core is stopped or suspended`,
       );
     }
     found.set(key(row), row);
@@ -614,15 +619,15 @@ async function main(): Promise<void> {
   if (beforeIndex >= 0) {
     const path = args[beforeIndex + 1];
     if (!path || path.startsWith("--")) {
-      throw new Error("--before requires a frozen pre-crash dump path");
+      throw new Error(
+        "--before requires a frozen pre-crash dump path exported with quartz dump --offline",
+      );
     }
     before = await Deno.readTextFile(path);
     args.splice(beforeIndex, 2);
   }
   if (args.length > 1 || args.some((arg) => arg.startsWith("--"))) {
-    throw new Error(
-      "Usage: deno task acceptance [dump.jsonl|-] [--before pre-crash.jsonl]",
-    );
+    throw new Error(usage);
   }
   const input = args[0] && args[0] !== "-"
     ? await Deno.readTextFile(args[0])

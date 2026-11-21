@@ -4,17 +4,13 @@ use super::super::{
     ReadOnlyStore, enums,
     enums::IntegerCode,
     rows::{CaptureRunsRow, ClockSegmentsRow, TimedPoliciesRow},
-    schema::{
-        applications, capture_runs, clock_segments, intervals, timed_policies, titles,
-        window_instances,
-    },
+    schema::{applications, intervals, titles, window_instances},
 };
 use super::{
     Fact, FactDetails, FactEnd, FactEndReason, FactKind, FactReason, ReadFactsError, WindowDetails,
 };
 use diesel::{
-    BoolExpressionMethods, Connection, ExpressionMethods, JoinOnDsl, NullableExpressionMethods,
-    QueryDsl, RunQueryDsl, SelectableHelper,
+    Connection, ExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl, RunQueryDsl,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -35,134 +31,129 @@ struct IntervalDetails {
     pid: Option<i64>,
     window_class: Option<String>,
 }
-
 impl ReadOnlyStore {
-    /// Adds stored dictionaries and enclosing run/clock/policy rows within the same snapshot.
+    /// Reads the same bounded SQL scans as the query pipeline inside one WAL snapshot.
     pub(crate) fn dump_range(&mut self, from: i64, to: i64) -> Result<Vec<Fact>, ReadFactsError> {
         self.connection.transaction(|connection| {
-            let mut range = Self::load_range(connection, from, to)?;
-            let ids: Vec<_> = range.foreground.iter().map(|fact| fact.id).collect();
-            let mut details = BTreeMap::new();
-            for chunk in ids.chunks(SQLITE_BIND_LIMIT) {
-                let rows = intervals::table
-                    .left_join(applications::table.on(intervals::app_id.eq(applications::id)))
-                    .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
-                    .left_join(
-                        window_instances::table
-                            .on(intervals::window_instance_id.eq(window_instances::id)),
-                    )
-                    .filter(intervals::id.eq_any(chunk))
-                    .select((
-                        intervals::id.assume_not_null(),
-                        applications::display_name.nullable(),
-                        applications::exe_path.nullable(),
-                        applications::exe_name.nullable(),
-                        titles::text.nullable(),
-                        window_instances::hwnd.nullable(),
-                        window_instances::generation.nullable(),
-                        window_instances::pid.nullable(),
-                        window_instances::window_class.nullable(),
-                    ))
-                    .load::<IntervalDetails>(connection)?;
-                details.extend(rows.into_iter().map(|row| (row.id, row)));
+            let mut cursor = super::super::query::ScanCursor::initial();
+            let mut facts = Vec::new();
+            while let Some(batch) = cursor.read_facts(
+                connection,
+                quartz_domain::facts::QueryRange {
+                    start: from,
+                    end: to,
+                },
+            )? {
+                facts.extend(batch);
             }
-            for fact in &mut range.foreground {
-                if let Some(row) = details.remove(&fact.id) {
-                    fact.window = Some(WindowDetails {
-                        display_name: row.display_name,
-                        exe_path: row.exe_path,
-                        exe_name: row.exe_name,
-                        title: row.title,
-                        hwnd: row.hwnd,
-                        generation: row.generation,
-                        pid: row.pid,
-                        window_class: row.window_class,
-                    });
-                }
-            }
-            let mut facts = range.into_rows();
-            let runs = capture_runs::table
-                .filter(capture_runs::started_utc_ms.lt(to))
-                .filter(
-                    capture_runs::ended_utc_ms
-                        .gt(from)
-                        .or(capture_runs::ended_utc_ms
-                            .is_null()
-                            .and(capture_runs::confirmed_utc_ms.gt(from))),
-                )
-                .select(CaptureRunsRow::as_select())
-                .load::<CaptureRunsRow>(connection)?;
-            for row in runs {
-                let mut fact = Fact::new(
-                    FactKind::Run,
-                    row.id,
-                    row.started_utc_ms,
-                    row.ended_utc_ms,
-                    row.confirmed_utc_ms,
-                )?;
-                fact.run_id = row.id;
-                fact.end_reason = row.end_reason.map(FactEndReason::Run);
-                fact.details = Some(FactDetails::Run {
-                    device_id: row.device_id,
-                    win_session_id: row.win_session_id,
-                    app_version: row.app_version,
-                });
-                facts.push(fact);
-            }
-            let segments = clock_segments::table
-                .filter(clock_segments::start_utc_ms.lt(to))
-                .filter(
-                    clock_segments::end_utc_ms
-                        .gt(from)
-                        .or(clock_segments::end_utc_ms
-                            .is_null()
-                            .and(clock_segments::confirmed_utc_ms.gt(from))),
-                )
-                .select(ClockSegmentsRow::as_select())
-                .load::<ClockSegmentsRow>(connection)?;
-            for row in segments {
-                let mut fact = Fact::new(
-                    FactKind::ClockSegment,
-                    row.id,
-                    row.start_utc_ms,
-                    row.end_utc_ms,
-                    row.confirmed_utc_ms,
-                )?;
-                fact.run_id = Some(row.run_id);
-                fact.segment_id = row.id;
-                fact.start_mono_ms = Some(row.start_mono_ms);
-                fact.end_mono_ms = row.end_mono_ms;
-                fact.confirmed_mono_ms = row.confirmed_mono_ms;
-                fact.duration_ms = Some(fact.monotonic_duration()?);
-                fact.end_reason = row.end_reason.map(FactEndReason::Clock);
-                facts.push(fact);
-            }
-            let policies = timed_policies::table
-                .filter(timed_policies::started_utc_ms.lt(to))
-                .filter(timed_policies::until_utc_ms.gt(from))
-                .select(TimedPoliciesRow::as_select())
-                .load::<TimedPoliciesRow>(connection)?;
-            for row in policies {
-                let mut fact = Fact::new(
-                    FactKind::TimedPolicy,
-                    Some(i64::from(row.kind.code())),
-                    row.started_utc_ms,
-                    Some(row.until_utc_ms),
-                    None,
-                )?;
-                fact.policy_kind = Some(row.kind);
-                fact.privacy_mode = row.privacy_mode;
-                fact.details = Some(FactDetails::TimedPolicy {
-                    application_id: row.application_id,
-                });
-                facts.push(fact);
-            }
-            facts.sort_by_key(|fact| (fact.start_utc_ms, fact.kind.label(), fact.id));
+            facts.sort_by(crate::store::facts::Fact::chronological_cmp);
             Ok(facts)
         })
     }
 }
+impl Fact {
+    pub(in crate::store) fn enrich(
+        connection: &mut diesel::SqliteConnection,
+        facts: &mut [Fact],
+    ) -> Result<(), ReadFactsError> {
+        let ids: Vec<_> = facts.iter().map(|fact| fact.id).collect();
+        let mut details = BTreeMap::new();
+        for chunk in ids.chunks(SQLITE_BIND_LIMIT) {
+            let rows = intervals::table
+                .left_join(applications::table.on(intervals::app_id.eq(applications::id)))
+                .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
+                .left_join(
+                    window_instances::table
+                        .on(intervals::window_instance_id.eq(window_instances::id)),
+                )
+                .filter(intervals::id.eq_any(chunk))
+                .select((
+                    intervals::id.assume_not_null(),
+                    applications::display_name.nullable(),
+                    applications::exe_path.nullable(),
+                    applications::exe_name.nullable(),
+                    titles::text.nullable(),
+                    window_instances::hwnd.nullable(),
+                    window_instances::generation.nullable(),
+                    window_instances::pid.nullable(),
+                    window_instances::window_class.nullable(),
+                ))
+                .load::<IntervalDetails>(connection)?;
+            details.extend(rows.into_iter().map(|row| (row.id, row)));
+        }
+        for fact in facts {
+            if let Some(row) = details.remove(&fact.id) {
+                fact.window = Some(WindowDetails {
+                    display_name: row.display_name,
+                    exe_path: row.exe_path,
+                    exe_name: row.exe_name,
+                    title: row.title,
+                    hwnd: row.hwnd,
+                    generation: row.generation,
+                    pid: row.pid,
+                    window_class: row.window_class,
+                });
+            }
+        }
 
+        Ok(())
+    }
+}
+impl CaptureRunsRow {
+    pub(in crate::store) fn into_fact(self) -> Result<Fact, ReadFactsError> {
+        let mut fact = Fact::new(
+            FactKind::Run,
+            self.id,
+            self.started_utc_ms,
+            self.ended_utc_ms,
+            self.confirmed_utc_ms,
+        )?;
+        fact.run_id = self.id;
+        fact.end_reason = self.end_reason.map(FactEndReason::Run);
+        fact.details = Some(FactDetails::Run {
+            device_id: self.device_id,
+            win_session_id: self.win_session_id,
+            app_version: self.app_version,
+        });
+        Ok(fact)
+    }
+}
+impl ClockSegmentsRow {
+    pub(in crate::store) fn into_fact(self) -> Result<Fact, ReadFactsError> {
+        let mut fact = Fact::new(
+            FactKind::ClockSegment,
+            self.id,
+            self.start_utc_ms,
+            self.end_utc_ms,
+            self.confirmed_utc_ms,
+        )?;
+        fact.run_id = Some(self.run_id);
+        fact.segment_id = self.id;
+        fact.start_mono_ms = Some(self.start_mono_ms);
+        fact.end_mono_ms = self.end_mono_ms;
+        fact.confirmed_mono_ms = self.confirmed_mono_ms;
+        fact.duration_ms = Some(fact.monotonic_duration()?);
+        fact.end_reason = self.end_reason.map(FactEndReason::Clock);
+        Ok(fact)
+    }
+}
+impl TimedPoliciesRow {
+    pub(in crate::store) fn into_fact(self) -> Result<Fact, ReadFactsError> {
+        let mut fact = Fact::new(
+            FactKind::TimedPolicy,
+            Some(i64::from(self.kind.code())),
+            self.started_utc_ms,
+            Some(self.until_utc_ms),
+            None,
+        )?;
+        fact.policy_kind = Some(self.kind);
+        fact.privacy_mode = self.privacy_mode;
+        fact.details = Some(FactDetails::TimedPolicy {
+            application_id: self.application_id,
+        });
+        Ok(fact)
+    }
+}
 impl Serialize for FactKind {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.label())

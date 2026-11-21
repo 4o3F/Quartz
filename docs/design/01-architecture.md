@@ -57,8 +57,8 @@ enum Command {
         #[arg(long, requires = "core_error", required_if_eq("core_error", "migration_failed"))]
         backup_path: Vec<PathBuf>,
     },
-    /// 打印某天的区间（经管道以 cli 角色查询核心；M1 可直接只读打开数据库）
-    Dump { #[arg(long)] date: String },
+    /// 打印日历日事实：默认经管道以 cli 角色查询核心；--offline 直接只读打开数据库
+    Dump { #[arg(long)] date: String, #[arg(long)] offline: bool },
     /// 核心状态
     Status,
     /// 向独立模拟库写入一年模拟数据，不触碰生产数据库
@@ -90,6 +90,8 @@ enum RulesCommand {
 | `ui [--prewarm]` | 界面 |
 | `dump`、`status`、`gen-data`、`bench-query`、`restore-backup`、`rules check/preview/diff/explain/tree` | 命令行 |
 | 解析失败 | 报错退出，不进入核心 |
+
+`dump` 默认通过管道请求 `query.facts` 并读取全部分页；核心未运行时以非零状态退出并提示 `--offline`，核心停止或挂起时可显式使用 `dump --offline` 直接只读导出。
 
 解析失败时退出码为 2，不启动核心。这样，浏览器或其他调用方传入未预料的参数时，不会误启动第二个核心。`ui` 在帮助中隐藏，它是核心拉起界面时使用的进程间约定。
 

@@ -674,6 +674,20 @@ fn cli_queries_temporary_database_over_pipe_and_host_cannot_query() {
     assert!(quartz_protocol::Role::Host.authorize(Op::QueryDay).is_err());
     assert!(
         quartz_protocol::Role::Host
+            .authorize(Op::QueryFacts)
+            .is_err()
+    );
+    for mut client in [fixture.cli(), fixture.ui()] {
+        let facts = client
+            .facts(&quartz_protocol::QueryFactsRequest {
+                local_date: "2025-01-02".parse().expect("date"),
+                cursor: None,
+            })
+            .expect("facts query");
+        assert_eq!(facts.facts.len(), 6, "run, clock and four foreground rows");
+    }
+    assert!(
+        quartz_protocol::Role::Host
             .authorize(Op::QueryTimeline)
             .is_err()
     );

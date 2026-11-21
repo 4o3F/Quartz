@@ -21,9 +21,9 @@ use input::QueryRange;
 use paging::{PageBudget, PagePosition};
 use pipeline::{DayAccumulator, DerivedSegment, Pipeline, QUERY_BATCH_ROWS, TimelineProjection};
 use quartz_protocol::{
-    CursorQuery, ErrorKind, QueryCursor, QueryDayRequest, QueryDayResponse,
-    QueryPendingAwayRequest, QueryPendingAwayResponse, QueryTimelineRequest, QueryTimelineResponse,
-    QueryVersions,
+    CursorQuery, ErrorKind, QueryCursor, QueryDayRequest, QueryDayResponse, QueryFactsRequest,
+    QueryFactsResponse, QueryPendingAwayRequest, QueryPendingAwayResponse, QueryTimelineRequest,
+    QueryTimelineResponse, QueryVersions,
 };
 use serde::Serialize;
 use timing::{QueryStage, QueryTimer, QueryTimings};
@@ -90,6 +90,7 @@ impl RunQueryError {
 }
 #[derive(Debug, Clone)]
 pub(crate) enum QueryRequest {
+    Facts(QueryFactsRequest),
     Day(QueryDayRequest),
     PendingAway(QueryPendingAwayRequest),
     Timeline(QueryTimelineRequest),
@@ -101,6 +102,7 @@ impl QueryRequest {
         body: serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
         match op {
+            quartz_protocol::Op::QueryFacts => serde_json::from_value(body).map(Self::Facts),
             quartz_protocol::Op::QueryDay => serde_json::from_value(body).map(Self::Day),
             quartz_protocol::Op::QueryPendingAway => {
                 serde_json::from_value(body).map(Self::PendingAway)
@@ -114,6 +116,7 @@ impl QueryRequest {
 
     fn parameters(&self) -> CursorQuery {
         match self {
+            Self::Facts(facts) => CursorQuery::from(facts),
             Self::Day(day) => CursorQuery::from(day),
             Self::PendingAway(away) => CursorQuery::from(away),
             Self::Timeline(timeline) => CursorQuery::from(timeline),
@@ -123,12 +126,14 @@ impl QueryRequest {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum QueryResponse {
+    Facts(QueryFactsResponse),
     Day(QueryDayResponse),
     PendingAway(QueryPendingAwayResponse),
     Timeline(QueryTimelineResponse),
 }
 #[derive(Debug)]
 enum Stage {
+    Facts(Vec<crate::store::facts::Fact>),
     Read(Pipeline),
     Sweep(Pipeline),
     Aggregate {
@@ -168,16 +173,20 @@ impl QueryJob {
         match Self::prepare(&mut snapshot, &request, &rules.hashes().classification) {
             Ok(prepared) => Ok(Self {
                 snapshot,
-                request,
                 range: prepared.range,
                 versions: prepared.versions,
                 parameters: prepared.parameters,
                 position: prepared.position,
                 calendar: prepared.calendar,
-                stage: Stage::Read(Pipeline::new(
-                    prepared.range,
-                    classification::Classifier::new(rules, prepared.categories),
-                )),
+                stage: if matches!(request, QueryRequest::Facts(_)) {
+                    Stage::Facts(Vec::new())
+                } else {
+                    Stage::Read(Pipeline::new(
+                        prepared.range,
+                        classification::Classifier::new(rules, prepared.categories),
+                    ))
+                },
+                request,
             }),
             Err(error) => {
                 *reader = Some(snapshot.finish()?);
@@ -193,6 +202,7 @@ impl QueryJob {
         snapshot.begin()?;
         let settings = snapshot.settings()?;
         let calendar = match request {
+            QueryRequest::Facts(_) => None,
             QueryRequest::Day(day) => Some(DayCalendar::new(
                 day.local_date,
                 settings.day_start_offset_min,
@@ -206,6 +216,22 @@ impl QueryJob {
         let range = match request {
             QueryRequest::Day(_) | QueryRequest::PendingAway(_) => {
                 calendar.as_ref().expect("day calendar").range
+            }
+            QueryRequest::Facts(facts) => {
+                let zone = jiff::tz::TimeZone::try_system()?;
+                QueryRange {
+                    start: facts
+                        .local_date
+                        .to_zoned_datetime(zone.clone())?
+                        .timestamp()
+                        .as_millisecond(),
+                    end: facts
+                        .local_date
+                        .tomorrow()?
+                        .to_zoned_datetime(zone)?
+                        .timestamp()
+                        .as_millisecond(),
+                }
             }
             QueryRequest::Timeline(timeline) => QueryRange {
                 start: timeline.start_utc_ms,
@@ -234,11 +260,17 @@ impl QueryJob {
         .digest(range);
         let parameters = request.parameters();
         let cursor = match request {
+            QueryRequest::Facts(facts) => facts.cursor.as_ref(),
             QueryRequest::Day(day) => day.cursor.as_ref(),
             QueryRequest::PendingAway(away) => away.cursor.as_ref(),
             QueryRequest::Timeline(timeline) => timeline.cursor.as_ref(),
         };
-        let position = PagePosition::from_cursor(cursor, &versions, &parameters)?;
+        let position = if matches!(request, QueryRequest::Facts(_)) {
+            // Raw run endpoints and timed policies are included after the staged scan.
+            PagePosition::First
+        } else {
+            PagePosition::from_cursor(cursor, &versions, &parameters)?
+        };
         let categories = snapshot.categories()?;
         Ok(PreparedQuery {
             categories,
@@ -259,6 +291,50 @@ impl QueryJob {
     ) -> Result<Option<QueryResponse>, RunQueryError> {
         let stage = std::mem::replace(&mut self.stage, Stage::Complete);
         match stage {
+            Stage::Facts(mut facts) => {
+                match timer.measure(QueryStage::Read, || {
+                    self.snapshot.read_fact_batch(self.range)
+                })? {
+                    Some(batch) => {
+                        facts.extend(batch);
+                        self.stage = Stage::Facts(facts);
+                        Ok(None)
+                    }
+                    None => {
+                        facts.sort_by(crate::store::facts::Fact::chronological_cmp);
+                        let records = facts
+                            .iter()
+                            .map(crate::store::facts::Fact::record)
+                            .collect::<Result<Vec<_>, _>>()?;
+                        use sha2::{Digest, Sha256};
+                        let mut digest = Sha256::new();
+                        digest.update(self.versions.0.as_bytes());
+                        for record in &records {
+                            digest.update(serde_json::to_vec(record)?);
+                        }
+                        self.versions =
+                            QueryVersions(quartz_domain::text::encode_hex(&digest.finalize()));
+                        let QueryRequest::Facts(request) = &self.request else {
+                            unreachable!("facts stage")
+                        };
+                        self.position = PagePosition::from_cursor(
+                            request.cursor.as_ref(),
+                            &self.versions,
+                            &self.parameters,
+                        )?;
+                        timer
+                            .measure(QueryStage::PageEncode, || {
+                                self.page_response(QueryResponse::Facts(QueryFactsResponse {
+                                    facts: records,
+                                    versions: self.versions.clone(),
+                                    next_cursor: None,
+                                }))
+                            })
+                            .map(Some)
+                    }
+                }
+            }
+
             Stage::Read(mut pipeline) => {
                 match timer.measure(QueryStage::Read, || {
                     self.snapshot
@@ -289,6 +365,7 @@ impl QueryJob {
                     return Ok(None);
                 }
                 let output = match &self.request {
+                    QueryRequest::Facts(_) => unreachable!("raw facts bypass aggregation"),
                     QueryRequest::Day(_) => Aggregation::Day(DayAccumulator::new(
                         self.calendar.take().expect("day calendar retained"),
                     )),
@@ -377,6 +454,15 @@ impl QueryJob {
     }
     fn page_response(&self, mut response: QueryResponse) -> Result<QueryResponse, RunQueryError> {
         match &mut response {
+            QueryResponse::Facts(facts) => {
+                let items = std::mem::take(&mut facts.facts);
+                let page = PageBudget::new(facts)?.page(items, self.position)?;
+                facts.facts = page.items;
+                facts.next_cursor = page.next.map(|position| {
+                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
+                });
+            }
+
             QueryResponse::Day(day) => {
                 let items = std::mem::take(&mut day.applications);
                 let page = PageBudget::new(day)?.page(items, self.position)?;

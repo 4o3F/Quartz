@@ -1,4 +1,10 @@
-import { type Fact, inspectDump, parseDump, type Rule } from "./acceptance.ts";
+import {
+  type Fact,
+  inspectDump,
+  parseDump,
+  type Rule,
+  usage,
+} from "./acceptance.ts";
 
 function row(
   kind: Fact["kind"],
@@ -644,4 +650,24 @@ Deno.test("sleep resume can also open a backwards UTC segment", () => {
     }),
   ];
   passes(rows);
+});
+
+Deno.test("export guidance requires explicit offline for frozen and stopped snapshots", () => {
+  const findings = inspectDump(
+    jsonl([...fixture(), { ...fixture()[2], title: "changed" }]),
+  );
+  if (
+    !findings.some((finding) =>
+      finding.detail.includes("quartz dump --offline")
+    )
+  ) {
+    throw new Error("conflicting snapshots must explain offline export");
+  }
+  if (
+    !usage.includes("quartz dump --date YYYY-MM-DD --format json") ||
+    !usage.includes("quartz dump --offline") ||
+    !usage.includes("frozen pre-crash")
+  ) {
+    throw new Error("usage must distinguish running and frozen exports");
+  }
 });

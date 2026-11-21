@@ -163,6 +163,18 @@ pub(crate) struct Fact {
     window: Option<WindowDetails>,
 }
 impl Fact {
+    /// Reuses the existing stored-fact representation for the typed wire record.
+    pub(crate) fn record(&self) -> Result<quartz_protocol::facts::FactRecord, serde_json::Error> {
+        serde_json::from_value(serde_json::to_value(self)?)
+    }
+
+    pub(crate) fn chronological_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.start_utc_ms
+            .cmp(&other.start_utc_ms)
+            .then_with(|| self.kind.label().cmp(other.kind.label()))
+            .then_with(|| self.id.cmp(&other.id))
+    }
+
     fn new(
         kind: FactKind,
         id: Option<i64>,
@@ -324,13 +336,6 @@ impl FactRange {
             availability: self.availability.len(),
             gaps: self.gaps.len(),
         }
-    }
-    fn into_rows(self) -> Vec<Fact> {
-        self.foreground
-            .into_iter()
-            .chain(self.availability)
-            .chain(self.gaps)
-            .collect()
     }
 }
 

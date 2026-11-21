@@ -90,12 +90,15 @@ enum Command {
 #[derive(Debug, PartialEq, Eq, Subcommand, strum::IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
 enum CliCommand {
-    /// Print intervals for a date.
+    /// Print stored facts for a calendar date through the core pipe.
     Dump {
         #[arg(long)]
         date: String,
         #[arg(long, value_enum, default_value_t = dump::DumpFormat::Text)]
         format: dump::DumpFormat,
+        /// Read the database directly, including when the core is stopped or suspended.
+        #[arg(long)]
+        offline: bool,
     },
     /// Show core status.
     Status,
@@ -205,6 +208,14 @@ enum DispatchCommandError {
     },
 }
 
+impl DispatchCommandError {
+    fn report(self) -> ExitCode {
+        tracing::debug!(error = %self, "command failed");
+        eprintln!("{self}");
+        ExitCode::FAILURE
+    }
+}
+
 impl CliCommand {
     fn dispatch(self) -> Result<(), DispatchCommandError> {
         use snafu::ResultExt as _;
@@ -216,8 +227,19 @@ impl CliCommand {
                 )
                 .context(StatusSnafu);
             }
-            Self::Dump { date, format } => {
-                return dump::DumpDay::new(&date, format).run().context(DumpSnafu);
+            Self::Dump {
+                date,
+                format,
+                offline,
+            } => {
+                let source = if offline {
+                    dump::DumpSource::Offline
+                } else {
+                    dump::DumpSource::Pipe
+                };
+                return dump::DumpDay::new(&date, format)
+                    .run(source)
+                    .context(DumpSnafu);
             }
             Self::GenData {
                 db,
@@ -312,11 +334,7 @@ fn main() -> ExitCode {
             }
             match command.dispatch() {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(error) => {
-                    tracing::debug!(error = %error, "command failed");
-                    eprintln!("{error}");
-                    ExitCode::FAILURE
-                }
+                Err(error) => error.report(),
             }
         }
     }
@@ -371,6 +389,25 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_core_dump_reports_nonzero_with_offline_hint() {
+        use platform::windows::ipc::{CoreClient, PipeName};
+        let name = PipeName::for_test(windows::core::GUID::new().expect("absent test pipe"));
+        let mut output = Vec::new();
+        let error = dump::DumpDay::new("2025-01-02", dump::DumpFormat::Text)
+            .write_pipe(
+                CoreClient::connect_named(&name, quartz_protocol::HelloRole::Cli),
+                &jiff::tz::TimeZone::UTC,
+                &mut output,
+            )
+            .map_err(|source| DispatchCommandError::Dump { source })
+            .expect_err("missing core fails dump");
+        assert!(error.to_string().contains("--offline"));
+        assert_eq!(error.report(), ExitCode::FAILURE);
+        assert!(output.is_empty());
+    }
 
     #[test]
     fn unsupported_command_error_keeps_the_subcommand_and_display_name() {
@@ -495,6 +532,7 @@ mod tests {
                 CliCommand::Dump {
                     date: "2026-11-16".into(),
                     format: dump::DumpFormat::Text,
+                    offline: false,
                 },
             ),
             (vec!["status"], CliCommand::Status),
@@ -755,6 +793,12 @@ mod tests {
                 format: dump::DumpFormat::Json,
                 ..
             }))
+        ));
+        let parsed = Args::try_parse_from(["quartz", "dump", "--date", "2025-01-02", "--offline"])
+            .expect("explicit offline dump");
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Cli(CliCommand::Dump { offline: true, .. }))
         ));
         for args in [
             vec!["gen-data", "--db", "simulation.db", "--profile", "invalid"],

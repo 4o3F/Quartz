@@ -19,7 +19,9 @@ pub(crate) struct TestDatabase {
 }
 impl TestDatabase {
     pub(crate) fn start() -> Self {
-        let mut fixture = QueryFixture::new(4);
+        Self::with_fixture(QueryFixture::new(4))
+    }
+    pub(crate) fn with_fixture(mut fixture: QueryFixture) -> Self {
         let channel = QueryChannel::new();
         let snapshots = crate::rules::registry::RegistryShell::open(
             &mut fixture.store,

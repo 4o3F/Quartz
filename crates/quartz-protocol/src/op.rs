@@ -66,6 +66,9 @@ pub enum Op {
     /// The `ui.first_frame` request.
     #[serde(rename = "ui.first_frame")]
     UiFirstFrame,
+    /// The `query.facts` request.
+    #[serde(rename = "query.facts")]
+    QueryFacts,
     /// The `query.day` request.
     #[serde(rename = "query.day")]
     QueryDay,
@@ -224,7 +227,8 @@ impl Op {
             Self::Subscribe => OpFamily::Subscribe,
             Self::CoreStatus => OpFamily::Core,
             Self::UiOpen | Self::UiFirstFrame => OpFamily::Ui,
-            Self::QueryDay
+            Self::QueryFacts
+            | Self::QueryDay
             | Self::QueryTimeline
             | Self::QueryRange
             | Self::QuerySegmentDetail

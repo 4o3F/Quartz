@@ -3,6 +3,7 @@
 mod annotations;
 mod envelope;
 mod error;
+pub mod facts;
 mod frame;
 mod handshake;
 mod op;
@@ -48,9 +49,9 @@ pub use query::{
     CategoryDuration, CategoryId, CategoryRef, CategorySource, CategoryTendency, CategoryUuid,
     ClassificationRuleId, ClockSegmentId, CursorQuery, DayChanged, DayMetrics, HourStack,
     MillisecondsPerPixel, ParseClassificationRuleIdError, PendingAway, QUERY_PAGE_BYTES,
-    QueryCursor, QueryDayRequest, QueryDayResponse, QueryGapReason, QueryPendingAwayRequest,
-    QueryPendingAwayResponse, QueryStopReason, QueryTimelineRequest, QueryTimelineResponse,
-    QueryVersions, TimelineDetail, TimelineSegment,
+    QueryCursor, QueryDayRequest, QueryDayResponse, QueryFactsRequest, QueryFactsResponse,
+    QueryGapReason, QueryPendingAwayRequest, QueryPendingAwayResponse, QueryStopReason,
+    QueryTimelineRequest, QueryTimelineResponse, QueryVersions, TimelineDetail, TimelineSegment,
 };
 
 pub use annotations::{

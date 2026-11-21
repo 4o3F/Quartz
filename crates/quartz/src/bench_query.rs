@@ -296,6 +296,7 @@ impl<'path> BenchQuery<'path> {
         snafu::ensure!(self.runs > 0, RunsSnafu);
         for query in queries {
             let name = match &query {
+                QueryRequest::Facts(_) => unreachable!("benchmark workloads use derived queries"),
                 QueryRequest::Day(_) => "pipeline.day",
                 QueryRequest::PendingAway(_) => "pipeline.pending_away",
                 QueryRequest::Timeline(query)

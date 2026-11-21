@@ -106,6 +106,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
         serde_json::from_value(self.request(Op::CoreStatus, &CoreStatusRequest {}).await?)
             .map_err(CallCoreError::decode)
     }
+    pub(crate) async fn facts(
+        &mut self,
+        request: &quartz_protocol::QueryFactsRequest,
+    ) -> Result<quartz_protocol::QueryFactsResponse, CallCoreError> {
+        serde_json::from_value(self.request(Op::QueryFacts, request).await?)
+            .map_err(CallCoreError::decode)
+    }
     pub(crate) async fn open_ui(&mut self) -> Result<AcceptedBody, CallCoreError> {
         serde_json::from_value(self.request(Op::UiOpen, &UiOpenRequest {}).await?)
             .map_err(CallCoreError::decode)
@@ -185,6 +192,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> CoreClient<T> {
     }
     pub(crate) fn status(&mut self) -> Result<CoreStatusResponse, CallCoreError> {
         self.runtime.block_on(self.client.status())
+    }
+    pub(crate) fn facts(
+        &mut self,
+        request: &quartz_protocol::QueryFactsRequest,
+    ) -> Result<quartz_protocol::QueryFactsResponse, CallCoreError> {
+        self.runtime.block_on(self.client.facts(request))
     }
     pub(crate) fn open_ui(&mut self) -> Result<AcceptedBody, CallCoreError> {
         self.runtime.block_on(self.client.open_ui())

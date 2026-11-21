@@ -48,12 +48,12 @@
 **交付**
 
 - 命名管道服务：分帧、握手、DACL、客户端身份检查、角色权限（04）。
-- `query.day`、`query.timeline`、`query.pending_away`、`core.status`、订阅 `state`。
+- `query.day`、`query.timeline`、`query.pending_away`、`query.facts`、`core.status`、订阅 `state`。
 - 最小查询管线：裁剪、保留空闲掩码、可用状态、规则分类与人工覆盖语义，暂不做文档提取。交付默认分类与基于已有事实字段的预置规则。
 - 标注存储、UUID 去重、同类重叠覆盖裁剪、dismissed_away；供托盘快速标注使用。 M2-D2 提供创建、最终值更新、删除及其原子事务、字段校验和日版本更新；四种覆盖类型裁剪同类旧标注，note 保留重叠。M2-D3 在同一只读快照内读取标注，按边界切片应用分类覆盖、有效活动覆盖与离线活动，接入日指标、小时堆叠、时间轴和版本化 `query.pending_away`。托盘入口在 M2-E 实现。
 - 数据库写连接与只读快照连接、版本化分页；bench-query 接入最小查询管线。
 - 托盘：通过 `quartz-i18n` 本地化（zh-CN、en），语言设置切换后立即生效；提示文字、摘要菜单、暂停、保持计时、隐私模式、空闲结束后的快速标注。
-- 生产数据的命令行查询改为通过管道；gen-data 与 bench-query 保持独立模拟库的离线测试入口。
+- 生产数据的命令行查询默认通过管道；`quartz dump --offline` 显式直接只读打开数据库，供核心停止或挂起时导出；gen-data 与 bench-query 保持独立模拟库的离线测试入口。
 
 **验收**
 

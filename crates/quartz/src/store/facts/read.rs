@@ -135,7 +135,7 @@ impl ReadOnlyStore {
     }
 }
 impl IntervalsRow {
-    fn into_fact(self) -> Result<Fact, ReadFactsError> {
+    pub(in crate::store) fn into_fact(self) -> Result<Fact, ReadFactsError> {
         let kind = match self.kind {
             enums::IntervalKind::Window => FactKind::Foreground,
             enums::IntervalKind::NoForeground => FactKind::NoForeground,
@@ -177,7 +177,7 @@ impl IntervalsRow {
     }
 }
 impl AvailabilityIntervalsRow {
-    fn into_fact(self) -> Result<Fact, ReadFactsError> {
+    pub(in crate::store) fn into_fact(self) -> Result<Fact, ReadFactsError> {
         let mut fact = Fact::new(
             FactKind::Availability,
             self.id,
@@ -204,7 +204,7 @@ impl AvailabilityIntervalsRow {
     }
 }
 impl CaptureGapsRow {
-    fn into_fact(self) -> Result<Fact, ReadFactsError> {
+    pub(in crate::store) fn into_fact(self) -> Result<Fact, ReadFactsError> {
         let mut fact = Fact::new(
             FactKind::CaptureGap,
             self.id,

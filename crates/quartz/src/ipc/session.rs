@@ -201,10 +201,12 @@ impl ConnectionSession {
                         };
                         Action::Subscribe { id, subscription }
                     }
-                    Op::QueryDay | Op::QueryTimeline | Op::QueryPendingAway => Action::from_query(
-                        id,
-                        crate::query::QueryRequest::decode(request.op, request.body),
-                    ),
+                    Op::QueryFacts | Op::QueryDay | Op::QueryTimeline | Op::QueryPendingAway => {
+                        Action::from_query(
+                            id,
+                            crate::query::QueryRequest::decode(request.op, request.body),
+                        )
+                    }
                     Op::SettingsGet
                     | Op::SettingsSet
                     | Op::AnnotationsCreate
