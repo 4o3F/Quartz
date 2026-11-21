@@ -8,14 +8,17 @@ use super::{
     },
 };
 use quartz_protocol::{
-    Activity, ApplicationId, ApplicationRank, CategoryRef, CategorySource, DayMetrics,
-    QueryStopReason, TimelineDetail, TimelineSegment,
+    ApplicationId, ApplicationRank, CategoryRef, DayMetrics, QueryStopReason, TimelineDetail,
+    TimelineSegment,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Bounds each compute turn independently of the size of the query range.
 pub(crate) use crate::store::query::READ_BATCH_ROWS as QUERY_BATCH_ROWS;
-use quartz_domain::facts::ClockSegmentId;
+use quartz_domain::{
+    capture::{GapReason, StopReason},
+    facts::{ClockSegmentId, Foreground, SpanDuration},
+};
 const HOUR_MS: f64 = 3_600_000.0;
 #[derive(Debug, snafu::Snafu)]
 pub(crate) enum DeriveSegmentsError {
@@ -30,15 +33,84 @@ struct ClockOrder {
     id: ClockSegmentId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Activity {
+    Active,
+    Idle,
+    NoForeground,
+    Excluded,
+    Stopped { reasons: Vec<StopReason> },
+    CoreOffline,
+    Gap { reason: GapReason },
+}
+#[derive(Debug, Clone)]
+pub(crate) enum CategorySource {
+    Rule(std::sync::Arc<quartz_domain::rules::ExplanationId>),
+    Unclassified,
+}
+#[derive(Debug, Clone, Copy)]
+struct ForegroundIndex(usize);
 #[derive(Debug, Clone)]
 pub(crate) struct DerivedSegment {
-    pub display: TimelineSegment,
+    pub span: SpanDuration,
+    pub clock_segment_id: Option<ClockSegmentId>,
+    foreground: Option<ForegroundIndex>,
+    classification: ClassificationId,
+    pub activity: Activity,
+    category_source: CategorySource,
     pub interval_id: Option<FactId>,
 }
 #[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
+pub(crate) struct SegmentFacts {
+    rows: Vec<ClassifiedInput>,
+    classifier: Classifier,
+}
+impl SegmentFacts {
+    #[cfg(test)]
+    pub(super) fn rename_category(&mut self, segment: &DerivedSegment, name: &str) {
+        if let CategoryRef::Classified { category } =
+            &mut self.classifier.result_mut(segment.classification).category
+        {
+            std::sync::Arc::make_mut(category).name = Some(name.into());
+        }
+    }
+    fn foreground(&self, segment: &DerivedSegment) -> Option<&Foreground> {
+        segment
+            .foreground
+            .map(|index| match &self.rows[index.0].input {
+                InputRow::Foreground(row) => row,
+                _ => unreachable!("foreground index references foreground fact"),
+            })
+    }
+    pub(super) fn category(&self, segment: &DerivedSegment) -> &CategoryRef {
+        &self.classifier.result(segment.classification).category
+    }
+    fn app(&self, segment: &DerivedSegment) -> Option<&quartz_domain::facts::ApplicationRef> {
+        self.foreground(segment)
+            .and_then(|row| row.visible_app().map(std::convert::AsRef::as_ref))
+    }
+    fn project_app(app: &quartz_domain::facts::ApplicationRef) -> quartz_protocol::ApplicationRef {
+        quartz_protocol::ApplicationRef {
+            id: ApplicationId(app.id.0),
+            exe_name: app.exe_name.clone(),
+            display_name: app.display_name.clone(),
+            aumid: app.aumid.clone(),
+        }
+    }
+}
+#[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
+pub(crate) struct DerivedSegments {
+    pub segments: Vec<DerivedSegment>,
+    pub facts: SegmentFacts,
+}
+#[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
 pub(super) struct ClassifiedInput {
     input: InputRow,
     classification: ClassificationId,
+    source: CategorySource,
 }
 #[derive(Debug)]
 enum BoundaryEdge {
@@ -97,11 +169,17 @@ impl Pipeline {
     }
     pub(super) fn classify_rows(&mut self, rows: Vec<InputRow>) -> Vec<ClassifiedInput> {
         rows.into_iter()
-            .map(|input| ClassifiedInput {
-                classification: self.classify_row(&input),
-                input,
-            })
+            .map(|input| self.classified(input))
             .collect()
+    }
+    fn classified(&mut self, input: InputRow) -> ClassifiedInput {
+        let classification = self.classify_row(&input);
+        let source = self.classifier.result(classification).source.clone();
+        ClassifiedInput {
+            input,
+            classification,
+            source,
+        }
     }
     fn classify_row(&mut self, row: &InputRow) -> ClassificationId {
         match row {
@@ -111,11 +189,8 @@ impl Pipeline {
     }
     #[cfg(test)]
     pub(crate) fn ingest(&mut self, input: InputRow) -> Result<(), DeriveSegmentsError> {
-        let classification = self.classify_row(&input);
-        self.ingest_classified(ClassifiedInput {
-            input,
-            classification,
-        })
+        let row = self.classified(input);
+        self.ingest_classified(row)
     }
     pub(super) fn ingest_classified(
         &mut self,
@@ -216,19 +291,16 @@ impl Pipeline {
                 .pop_front_if(|range| order.is_none_or(|clock| range.start < clock.start))
             {
                 self.segments.push(DerivedSegment {
-                    display: TimelineSegment {
+                    span: SpanDuration {
                         start_utc_ms: range.start,
                         end_utc_ms: range.end,
                         duration_ms: range.end - range.start,
-                        clock_segment_id: None,
-                        activity: Activity::Stopped {
-                            reasons: vec![QueryStopReason::CoreOffline],
-                        },
-                        category: CategoryRef::Unclassified,
-                        category_source: CategorySource::Unclassified,
-                        app: None,
-                        title: None,
                     },
+                    clock_segment_id: None,
+                    foreground: None,
+                    classification: ClassificationId::UNCLASSIFIED,
+                    activity: Activity::CoreOffline,
+                    category_source: CategorySource::Unclassified,
                     interval_id: None,
                 });
                 continue;
@@ -247,13 +319,8 @@ impl Pipeline {
             if let Some(start) = sweep.previous
                 && boundary.at > start
             {
-                self.segments.push(Self::derive(
-                    &self.rows,
-                    sweep,
-                    start,
-                    boundary.at,
-                    &self.classifier,
-                ));
+                self.segments
+                    .push(Self::derive(&self.rows, sweep, start, boundary.at));
             }
             for index in boundary.leaving {
                 sweep.active.remove(&index);
@@ -265,14 +332,9 @@ impl Pipeline {
         }
         false
     }
-    fn derive(
-        rows: &[ClassifiedInput],
-        sweep: &Sweep,
-        start: i64,
-        end: i64,
-        classifier: &Classifier,
-    ) -> DerivedSegment {
+    fn derive(rows: &[ClassifiedInput], sweep: &Sweep, start: i64, end: i64) -> DerivedSegment {
         let mut foreground = None;
+        let mut foreground_index = None;
         let mut classification = ClassificationId::UNCLASSIFIED;
         let mut idle = false;
         let mut reasons = BTreeSet::new();
@@ -286,6 +348,7 @@ impl Pipeline {
                         .is_none_or(|old: &super::input::Foreground| old.span.id < row.span.id)
                     {
                         foreground = Some(row);
+                        foreground_index = Some(ForegroundIndex(index));
                         classification = rows[index].classification;
                     }
                 }
@@ -297,14 +360,7 @@ impl Pipeline {
                     state: Availability::Stopped(reason),
                     span,
                 } => {
-                    reasons.insert(match reason {
-                        quartz_domain::capture::StopReason::Locked => QueryStopReason::Locked,
-                        quartz_domain::capture::StopReason::Disconnected => {
-                            QueryStopReason::Disconnected
-                        }
-                        quartz_domain::capture::StopReason::Suspended => QueryStopReason::Suspended,
-                        quartz_domain::capture::StopReason::Paused => QueryStopReason::Paused,
-                    });
+                    reasons.insert(*reason);
                     stopped_span = Some(span);
                 }
                 InputRow::Gap { reason, span } => {
@@ -316,19 +372,7 @@ impl Pipeline {
         }
         // TODO(M2-D): Apply annotation category and activity overrides before aggregation.
         let activity = if let Some(reason) = gap {
-            Activity::Gap {
-                reason: match reason {
-                    quartz_domain::capture::GapReason::EventOverload => {
-                        quartz_protocol::QueryGapReason::EventOverload
-                    }
-                    quartz_domain::capture::GapReason::WriteQueueOverload => {
-                        quartz_protocol::QueryGapReason::WriteQueueOverload
-                    }
-                    quartz_domain::capture::GapReason::DatabaseError => {
-                        quartz_protocol::QueryGapReason::DatabaseError
-                    }
-                },
-            }
+            Activity::Gap { reason }
         } else if !reasons.is_empty() {
             Activity::Stopped {
                 reasons: reasons.into_iter().collect(),
@@ -352,33 +396,30 @@ impl Pipeline {
             Some(span) => span.duration_within(range),
             None => sweep.clock.duration_within(range),
         };
-        let classification = classifier.result(classification);
-        let start_utc_ms = start;
-        let end_utc_ms = end;
         DerivedSegment {
-            display: TimelineSegment {
-                start_utc_ms,
-                end_utc_ms,
+            span: SpanDuration {
+                start_utc_ms: start,
+                end_utc_ms: end,
                 duration_ms,
-                clock_segment_id: Some(quartz_protocol::ClockSegmentId(sweep.clock.id.0)),
-                activity,
-                category: classification.category.clone(),
-                category_source: classification.source.clone(),
-                app: foreground.and_then(|row| row.visible_app()).map(|app| {
-                    quartz_protocol::ApplicationRef {
-                        id: ApplicationId(app.id.0),
-                        exe_name: app.exe_name.clone(),
-                        display_name: app.display_name.clone(),
-                        aumid: app.aumid.clone(),
-                    }
-                }),
-                title: foreground.and_then(|row| row.visible_title().map(str::to_owned)),
             },
+            clock_segment_id: Some(sweep.clock.id),
+            foreground: foreground_index,
+            classification,
+            activity,
+            category_source: foreground_index.map_or(CategorySource::Unclassified, |index| {
+                rows[index.0].source.clone()
+            }),
             interval_id: foreground.map(|row| row.span.id),
         }
     }
-    pub(crate) fn into_segments(self) -> Vec<DerivedSegment> {
-        self.segments
+    pub(crate) fn into_segments(self) -> DerivedSegments {
+        DerivedSegments {
+            segments: self.segments,
+            facts: SegmentFacts {
+                rows: self.rows,
+                classifier: self.classifier,
+            },
+        }
     }
 }
 #[derive(Debug)]
@@ -389,17 +430,17 @@ pub(crate) struct DayAggregation {
 }
 #[cfg(test)]
 impl DayAggregation {
-    pub(crate) fn new(calendar: DayCalendar, segments: &[DerivedSegment]) -> Self {
+    pub(crate) fn new(calendar: DayCalendar, segments: &DerivedSegments) -> Self {
         let mut builder = DayAccumulator::new(calendar);
-        for segment in segments {
-            builder.push(segment);
+        for segment in &segments.segments {
+            builder.push(segment, &segments.facts);
         }
         builder.finish()
     }
 }
 #[derive(Debug)]
 struct PreviousActive {
-    segment: Option<quartz_protocol::ClockSegmentId>,
+    segment: Option<ClockSegmentId>,
     end: i64,
     app: Option<ApplicationId>,
 }
@@ -431,9 +472,10 @@ impl DayAccumulator {
             longest_focus_ms: 0,
         }
     }
-    pub(crate) fn push(&mut self, segment: &DerivedSegment) {
-        let current = &segment.display;
-        if current.activity != Activity::Active {
+    pub(crate) fn push(&mut self, segment: &DerivedSegment, facts: &SegmentFacts) {
+        let current = &segment.span;
+        let category = facts.category(segment);
+        if segment.activity != Activity::Active {
             self.previous = None;
             self.focus_run_ms = 0;
             return;
@@ -443,9 +485,9 @@ impl DayAccumulator {
         }
         self.active_ms += current.duration_ms;
         let adjacent = self.previous.as_ref().is_some_and(|previous| {
-            previous.segment == current.clock_segment_id && previous.end == current.start_utc_ms
+            previous.segment == segment.clock_segment_id && previous.end == current.start_utc_ms
         });
-        match current.category.tendency() {
+        match category.tendency() {
             quartz_protocol::CategoryTendency::Focus => {
                 self.focus_ms += current.duration_ms;
                 if !adjacent {
@@ -460,28 +502,29 @@ impl DayAccumulator {
             }
             quartz_protocol::CategoryTendency::Neutral => self.focus_run_ms = 0,
         }
-        if current.category == CategoryRef::Unclassified {
+        if *category == CategoryRef::Unclassified {
             self.unclassified_ms += current.duration_ms;
         }
-        if let Some(app) = &current.app {
+        if let Some(app) = facts.app(segment) {
+            let id = ApplicationId(app.id.0);
             self.ranking
-                .entry(app.id)
+                .entry(id)
                 .or_insert_with(|| ApplicationRank {
-                    app: app.clone(),
+                    app: SegmentFacts::project_app(app),
                     active_ms: 0,
                 })
                 .active_ms += current.duration_ms;
         }
-        let app = current.app.as_ref().map(|app| app.id);
+        let app = facts.app(segment).map(|app| ApplicationId(app.id.0));
         if self.previous.as_ref().is_some_and(|old| {
-            old.segment == current.clock_segment_id
+            old.segment == segment.clock_segment_id
                 && old.end == current.start_utc_ms
                 && old.app != app
         }) {
             self.switches += 1;
         }
         self.previous = Some(PreviousActive {
-            segment: current.clock_segment_id,
+            segment: segment.clock_segment_id,
             end: current.end_utc_ms,
             app,
         });
@@ -495,11 +538,11 @@ impl DayAccumulator {
                 match hour
                     .categories
                     .iter_mut()
-                    .find(|bucket| bucket.category == current.category)
+                    .find(|bucket| bucket.category == *category)
                 {
                     Some(bucket) => bucket.duration_ms += duration_ms,
                     None => hour.categories.push(quartz_protocol::CategoryDuration {
-                        category: current.category.clone(),
+                        category: category.clone(),
                         duration_ms,
                     }),
                 }
@@ -552,16 +595,80 @@ pub(crate) struct TimelineProjection {
     last_interval: Option<FactId>,
 }
 impl TimelineProjection {
-    pub(crate) fn push(&mut self, segment: &DerivedSegment, detail: TimelineDetail, pixel_ms: u64) {
-        let mut current = segment.display.clone();
-        match detail {
-            TimelineDetail::Category => {
-                current.app = None;
-                current.title = None;
-            }
-            TimelineDetail::App => current.title = None,
-            TimelineDetail::Raw => {}
+    pub(crate) fn project(
+        segment: &DerivedSegment,
+        facts: &SegmentFacts,
+        detail: TimelineDetail,
+    ) -> TimelineSegment {
+        TimelineSegment {
+            start_utc_ms: segment.span.start_utc_ms,
+            end_utc_ms: segment.span.end_utc_ms,
+            duration_ms: segment.span.duration_ms,
+            clock_segment_id: segment
+                .clock_segment_id
+                .map(|id| quartz_protocol::ClockSegmentId(id.0)),
+            activity: match &segment.activity {
+                Activity::Active => quartz_protocol::Activity::Active,
+                Activity::Idle => quartz_protocol::Activity::Idle,
+                Activity::NoForeground => quartz_protocol::Activity::NoForeground,
+                Activity::Excluded => quartz_protocol::Activity::Excluded,
+                Activity::CoreOffline => quartz_protocol::Activity::Stopped {
+                    reasons: vec![QueryStopReason::CoreOffline],
+                },
+                Activity::Stopped { reasons } => quartz_protocol::Activity::Stopped {
+                    reasons: reasons
+                        .iter()
+                        .map(|reason| match reason {
+                            StopReason::Locked => QueryStopReason::Locked,
+                            StopReason::Disconnected => QueryStopReason::Disconnected,
+                            StopReason::Suspended => QueryStopReason::Suspended,
+                            StopReason::Paused => QueryStopReason::Paused,
+                        })
+                        .collect(),
+                },
+                Activity::Gap { reason } => quartz_protocol::Activity::Gap {
+                    reason: match reason {
+                        GapReason::EventOverload => quartz_protocol::QueryGapReason::EventOverload,
+                        GapReason::WriteQueueOverload => {
+                            quartz_protocol::QueryGapReason::WriteQueueOverload
+                        }
+                        GapReason::DatabaseError => quartz_protocol::QueryGapReason::DatabaseError,
+                    },
+                },
+            },
+            category: facts.category(segment).clone(),
+            category_source: match &segment.category_source {
+                CategorySource::Unclassified => quartz_protocol::CategorySource::Unclassified,
+                CategorySource::Rule(rule) => quartz_protocol::CategorySource::Rule {
+                    rule: rule
+                        .as_str()
+                        .parse()
+                        .expect("domain revision satisfies wire grammar"),
+                },
+            },
+            app: if detail == TimelineDetail::Category {
+                None
+            } else {
+                facts.app(segment).map(SegmentFacts::project_app)
+            },
+            title: if detail == TimelineDetail::Raw {
+                facts
+                    .foreground(segment)
+                    .and_then(|row| row.visible_title())
+                    .map(str::to_owned)
+            } else {
+                None
+            },
         }
+    }
+    pub(crate) fn push(
+        &mut self,
+        segment: &DerivedSegment,
+        facts: &SegmentFacts,
+        detail: TimelineDetail,
+        pixel_ms: u64,
+    ) {
+        let current = Self::project(segment, facts, detail);
         if let Some(last) = self.segments.last_mut()
             && (detail != TimelineDetail::Raw || self.last_interval == segment.interval_id)
             && last.end_utc_ms == current.start_utc_ms
@@ -576,7 +683,7 @@ impl TimelineProjection {
                 .is_ok_and(|width| width < pixel_ms)
         {
             if last.category_source != current.category_source {
-                last.category_source = CategorySource::Mixed;
+                last.category_source = quartz_protocol::CategorySource::Mixed;
             }
             last.end_utc_ms = current.end_utc_ms;
             last.duration_ms = last

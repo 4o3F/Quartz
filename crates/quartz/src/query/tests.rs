@@ -63,7 +63,7 @@ fn edit_foreground(
     edit(&mut content);
     *row = Foreground::new(row.span.clone(), row.kind.clone(), level, content);
 }
-fn derive(rows: Vec<InputRow>, range: QueryRange) -> Vec<pipeline::DerivedSegment> {
+fn derive(rows: Vec<InputRow>, range: QueryRange) -> pipeline::DerivedSegments {
     let mut pipeline = Pipeline::new(
         range,
         super::classification::Classifier::new(
@@ -102,22 +102,26 @@ fn idle_masks_window_and_overlapping_stop_reasons_slice_boundaries() {
     let segments = derive(rows, QueryRange { start: 0, end: 100 });
     assert_eq!(
         segments
+            .segments
             .iter()
-            .map(|segment| segment.display.duration_ms)
+            .map(|segment| segments.project(segment).duration_ms)
             .sum::<i64>(),
         100
     );
     let idle = segments
+        .segments
         .iter()
-        .find(|segment| segment.display.activity == Activity::Idle)
+        .find(|segment| segments.project(segment).activity == Activity::Idle)
         .expect("idle slice");
     assert_eq!(idle.interval_id, Some(FactId(1)));
-    assert_eq!(idle.display.start_utc_ms, 20);
-    assert_eq!(idle.display.end_utc_ms, 40);
-    assert!(segments.iter().any(|segment| segment.display.activity
-        == Activity::Stopped {
-            reasons: vec![QueryStopReason::Locked, QueryStopReason::Paused]
-        }));
+    assert_eq!(segments.project(idle).start_utc_ms, 20);
+    assert_eq!(segments.project(idle).end_utc_ms, 40);
+    assert!(segments.segments.iter().any(|segment| {
+        segments.project(segment).activity
+            == Activity::Stopped {
+                reasons: vec![QueryStopReason::Locked, QueryStopReason::Paused],
+            }
+    }));
     let calendar = DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("calendar");
     let aggregate = DayAggregation::new(calendar, &segments);
     assert_eq!(aggregate.metrics.active_ms, 40);
@@ -141,16 +145,18 @@ fn active_union_does_not_double_count_overlapping_windows_and_clock_utc_repeats(
     let segments = derive(rows, QueryRange { start: 0, end: 100 });
     assert_eq!(
         segments
+            .segments
             .iter()
-            .filter(|segment| segment.display.activity == Activity::Active)
-            .map(|segment| segment.display.duration_ms)
+            .filter(|segment| segments.project(segment).activity == Activity::Active)
+            .map(|segment| segments.project(segment).duration_ms)
             .sum::<i64>(),
         200
     );
     assert!(
         segments
+            .segments
             .iter()
-            .all(|segment| segment.display.clock_segment_id.is_some())
+            .all(|segment| { segments.project(segment).clock_segment_id.is_some() })
     );
 }
 #[test]
@@ -183,9 +189,19 @@ fn timeline_merge_is_strictly_subpixel_and_respects_projection_and_activity() {
     );
     let mut category = TimelineProjection::default();
     let mut app = TimelineProjection::default();
-    for segment in &segments {
-        category.push(segment, quartz_protocol::TimelineDetail::Category, 30);
-        app.push(segment, quartz_protocol::TimelineDetail::App, 30);
+    for segment in &segments.segments {
+        category.push(
+            segment,
+            &segments.facts,
+            quartz_protocol::TimelineDetail::Category,
+            30,
+        );
+        app.push(
+            segment,
+            &segments.facts,
+            quartz_protocol::TimelineDetail::App,
+            30,
+        );
     }
     assert_eq!(
         category.into_segments().len(),
@@ -224,14 +240,14 @@ fn gaps_excluded_and_no_foreground_preserve_all_state_boundaries() {
         no_foreground,
     ];
     let segments = derive(rows, QueryRange { start: 10, end: 90 });
-    assert_eq!(segments.len(), 5);
-    assert_eq!(segments[0].display.start_utc_ms, 10);
-    assert!(matches!(segments[1].display.activity, Activity::Gap { .. }));
-    assert_eq!(segments[2].display.activity, Activity::Excluded);
-    assert!(segments[2].display.app.is_none());
-    assert!(segments[2].display.title.is_none());
-    assert_eq!(segments[3].display.activity, Activity::NoForeground);
-    assert_eq!(segments[4].display.end_utc_ms, 90);
+    assert_eq!(segments.segments.len(), 5);
+    assert_eq!(segments.display(0).start_utc_ms, 10);
+    assert!(matches!(segments.display(1).activity, Activity::Gap { .. }));
+    assert_eq!(segments.display(2).activity, Activity::Excluded);
+    assert!(segments.display(2).app.is_none());
+    assert!(segments.display(2).title.is_none());
+    assert_eq!(segments.display(3).activity, Activity::NoForeground);
+    assert_eq!(segments.display(4).end_utc_ms, 90);
 }
 #[test]
 fn zero_monotonic_sleep_retains_its_stopped_wall_range() {
@@ -251,12 +267,12 @@ fn zero_monotonic_sleep_retains_its_stopped_wall_range() {
         },
     ];
     let segments = derive(rows, QueryRange { start: 10, end: 90 });
-    assert_eq!(segments.len(), 1);
-    assert_eq!(segments[0].display.start_utc_ms, 10);
-    assert_eq!(segments[0].display.end_utc_ms, 90);
-    assert_eq!(segments[0].display.duration_ms, 0);
+    assert_eq!(segments.segments.len(), 1);
+    assert_eq!(segments.display(0).start_utc_ms, 10);
+    assert_eq!(segments.display(0).end_utc_ms, 90);
+    assert_eq!(segments.display(0).duration_ms, 0);
     assert_eq!(
-        segments[0].display.activity,
+        segments.display(0).activity,
         Activity::Stopped {
             reasons: vec![QueryStopReason::Suspended]
         }
@@ -276,16 +292,26 @@ fn timeline_merge_never_crosses_activity_gaps_or_clock_segments() {
         QueryRange { start: 0, end: 30 },
     );
     let mut projection = TimelineProjection::default();
-    for segment in &segments {
-        projection.push(segment, quartz_protocol::TimelineDetail::Category, 100);
+    for segment in &segments.segments {
+        projection.push(
+            segment,
+            &segments.facts,
+            quartz_protocol::TimelineDetail::Category,
+            100,
+        );
     }
     assert_eq!(projection.into_segments().len(), 3);
-    segments[1].display.activity = Activity::Active;
-    segments[1].display.start_utc_ms += 1;
-    segments[2].display.clock_segment_id = Some(quartz_protocol::ClockSegmentId(2));
+    segments.segments[1].activity = pipeline::Activity::Active;
+    segments.segments[1].span.start_utc_ms += 1;
+    segments.segments[2].clock_segment_id = Some(ClockSegmentId(2));
     let mut projection = TimelineProjection::default();
-    for segment in &segments {
-        projection.push(segment, quartz_protocol::TimelineDetail::Category, 100);
+    for segment in &segments.segments {
+        projection.push(
+            segment,
+            &segments.facts,
+            quartz_protocol::TimelineDetail::Category,
+            100,
+        );
     }
     assert_eq!(projection.into_segments().len(), 3);
 }
@@ -296,14 +322,14 @@ fn newly_opened_zero_length_clock_and_foreground_do_not_fail_the_query() {
         vec![clock(1, 10, 10, 0), window(1, 10, 10)],
         QueryRange { start: 0, end: 20 },
     );
-    assert_eq!(segments.len(), 1);
+    assert_eq!(segments.segments.len(), 1);
     assert_eq!(
-        segments[0].display.activity,
+        segments.display(0).activity,
         Activity::Stopped {
             reasons: vec![QueryStopReason::CoreOffline]
         }
     );
-    assert_eq!(segments[0].display.duration_ms, 20);
+    assert_eq!(segments.display(0).duration_ms, 20);
 }
 
 fn categories() -> Vec<quartz_domain::categories::Category> {
@@ -396,7 +422,7 @@ fn derive_classified(
     rows: Vec<InputRow>,
     range: QueryRange,
     classifier: classification::Classifier,
-) -> Vec<pipeline::DerivedSegment> {
+) -> pipeline::DerivedSegments {
     let mut pipeline = Pipeline::new(range, classifier);
     for row in rows {
         pipeline.ingest(row).expect("row");
@@ -445,30 +471,30 @@ when=[{field='title.raw',op='equals',value='document'}]
         classifier(&[]),
     );
     assert!(
-        matches!(&segments[0].display.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Development))
+        matches!(&segments.display(0).category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Development))
     );
     assert!(
-        matches!(&segments[0].display.category_source, CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@1")
+        matches!(&segments.display(0).category_source, CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@1")
     );
-    assert_eq!(segments[1].display.category, CategoryRef::Unclassified);
-    assert_eq!(segments[2].display.category, CategoryRef::Unclassified);
-    assert_eq!(segments[2].display.activity, Activity::Excluded);
+    assert_eq!(segments.display(1).category, CategoryRef::Unclassified);
+    assert_eq!(segments.display(2).category, CategoryRef::Unclassified);
+    assert_eq!(segments.display(2).activity, Activity::Excluded);
     let titled = derive_classified(
         rows,
         QueryRange { start: 0, end: 60 },
         classifier(&[TITLE_RULE]),
     );
     assert_eq!(
-        titled[3].display.category,
+        titled.display(3).category,
         CategoryRef::Unclassified,
         "hidden title cannot match"
     );
     assert!(
-        matches!(&titled[4].display.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Learning)),
+        matches!(&titled.display(4).category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Learning)),
         "same app/title ids at full capture have a separate cache entry"
     );
     assert!(
-        matches!(&titled[5].display.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Development)),
+        matches!(&titled.display(5).category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Development)),
         "application rules still apply to TitleHidden"
     );
     let mut title_only = window(1, 0, 10);
@@ -481,7 +507,7 @@ when=[{field='title.raw',op='equals',value='document'}]
         classifier(&[TITLE_RULE]),
     );
     assert!(
-        matches!(&title_only[0].display.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Learning)),
+        matches!(&title_only.display(0).category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Learning)),
         "a window can match its available title without application metadata"
     );
     const CHILD: &str = r"format='quartz-rules/1'
@@ -503,7 +529,7 @@ when=[{field='app.exe_name',op='equals',value='code.exe'}]
         classifier(&[CHILD]),
     );
     assert!(
-        matches!(&child[0].display.category_source, CategorySource::Rule { rule } if rule.as_str() == "user.child/code@1"),
+        matches!(&child.display(0).category_source, CategorySource::Rule { rule } if rule.as_str() == "user.child/code@1"),
         "deeper rule wins equal priority"
     );
 }
@@ -545,20 +571,20 @@ when=[{field='title.raw',op='equals',value='document'}]
         QueryRange { start: 0, end: 20 },
         classifier(&[TITLE_RULE]),
     );
-    assert_eq!(segments.len(), 4);
-    for segment in &segments[..3] {
+    assert_eq!(segments.segments.len(), 4);
+    for segment in &segments.segments[..3] {
         assert!(matches!(
-            &segment.display.category,
+            &segments.project(segment).category,
             CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Learning)
         ));
         assert!(matches!(
-            &segment.display.category_source,
+            &segments.project(segment).category_source,
             CategorySource::Rule { rule } if rule.as_str() == "user.titles/read@1"
         ));
     }
     assert!(
         matches!(
-            &segments[3].display.category_source,
+            &segments.display(3).category_source,
             CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@1"
         ),
         "a new title for the same application must be evaluated against the overlay"
@@ -609,8 +635,13 @@ fn day_tendencies_and_focus_continuity_and_category_projection_use_classificatio
         classifier(&[]),
     );
     let mut projection = TimelineProjection::default();
-    for segment in &split {
-        projection.push(segment, quartz_protocol::TimelineDetail::Category, 30);
+    for segment in &split.segments {
+        projection.push(
+            segment,
+            &split.facts,
+            quartz_protocol::TimelineDetail::Category,
+            30,
+        );
     }
     let merged = projection.into_segments();
     assert_eq!(
@@ -624,14 +655,17 @@ fn day_tendencies_and_focus_continuity_and_category_projection_use_classificatio
     );
     assert_eq!(merged[0].duration_ms, 20);
     let mut changed_metadata = split.clone();
-    if let quartz_protocol::CategoryRef::Classified { category } =
-        &mut changed_metadata[1].display.category
-    {
-        std::sync::Arc::make_mut(category).name = Some("Same category identity".into());
-    }
+    changed_metadata
+        .facts
+        .rename_category(&changed_metadata.segments[1], "Same category identity");
     let mut identity_projection = TimelineProjection::default();
-    for segment in &changed_metadata {
-        identity_projection.push(segment, quartz_protocol::TimelineDetail::Category, 30);
+    for segment in &changed_metadata.segments {
+        identity_projection.push(
+            segment,
+            &changed_metadata.facts,
+            quartz_protocol::TimelineDetail::Category,
+            30,
+        );
     }
     assert_eq!(
         identity_projection.into_segments().len(),
@@ -639,7 +673,7 @@ fn day_tendencies_and_focus_continuity_and_category_projection_use_classificatio
         "category identity controls merging"
     );
     let mut separated = split;
-    separated[1].display.clock_segment_id = Some(quartz_protocol::ClockSegmentId(2));
+    separated.segments[1].clock_segment_id = Some(ClockSegmentId(2));
     let aggregate = DayAggregation::new(test_day_calendar(), &separated);
     assert_eq!(
         aggregate.metrics.longest_focus_ms, 10,
@@ -687,4 +721,17 @@ fn read_errors_day_offsets_and_missing_readers_keep_internal_protocol_codes() {
     };
     assert!(matches!(error, RunQueryError::ReaderUnavailable));
     assert_eq!(error.kind(), quartz_protocol::ErrorKind::Internal);
+}
+
+impl pipeline::DerivedSegments {
+    fn project(&self, segment: &pipeline::DerivedSegment) -> quartz_protocol::TimelineSegment {
+        TimelineProjection::project(segment, &self.facts, quartz_protocol::TimelineDetail::Raw)
+    }
+    fn display(&self, index: usize) -> quartz_protocol::TimelineSegment {
+        TimelineProjection::project(
+            &self.segments[index],
+            &self.facts,
+            quartz_protocol::TimelineDetail::Raw,
+        )
+    }
 }

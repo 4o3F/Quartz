@@ -818,3 +818,99 @@ fn core_runtime_shutdown_clock_failure_still_settles_and_joins_workers() {
             .expect("clock failure leaves no open database handles");
     });
 }
+
+#[test]
+fn io_write_replies_publish_committed_versions_and_rollback_keeps_versions() {
+    use crate::persistence::dispatch::{TestCommit, WriteRequest};
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("write-test".into()));
+    let services = crate::ipc::Services {
+        queries: runtime.workers.queries.clone(),
+        writes: runtime.workers.writes.clone(),
+        versions: runtime.workers.versions.clone(),
+        status: status.subscribe(),
+        ui: Arc::new(|_| Ok(())),
+    };
+    let mut versions = runtime.workers.versions.clone();
+    let io = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("I/O runtime");
+    let date = "1970-01-01".parse().expect("date");
+    let before = io
+        .block_on(versions.set_days(BTreeSet::from([date])))
+        .expect("subscribe");
+    versions.updates.borrow_and_update();
+    let mut reader =
+        crate::store::ReadOnlyStore::open(&DataDirectory::new(runtime.directory.path()).database())
+            .expect("inspection reader");
+    let metadata = reader
+        .query_settings()
+        .expect("initial metadata")
+        .metadata_version;
+    io.block_on(async {
+        assert!(
+            runtime
+                .workers
+                .writes
+                .call(WriteRequest::BumpMetadata {
+                    outcome: TestCommit::Rollback
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            !versions.updates.has_changed().expect("publisher open"),
+            "rolled back transaction must not publish"
+        );
+        assert_eq!(
+            reader
+                .query_settings()
+                .expect("rollback metadata")
+                .metadata_version,
+            metadata
+        );
+        services
+            .writes
+            .call(WriteRequest::BumpMetadata {
+                outcome: TestCommit::Commit,
+            })
+            .await
+            .expect("I/O to database reply");
+        assert!(
+            versions.updates.has_changed().expect("publisher open"),
+            "versions must be published before success reply"
+        );
+        assert_ne!(
+            versions.updates.borrow().days[&date].versions,
+            before.days[&date].versions
+        );
+        assert_eq!(
+            reader
+                .query_settings()
+                .expect("committed metadata")
+                .metadata_version,
+            metadata + 1,
+            "reply follows SQLite commit"
+        );
+    });
+    runtime
+        .workers
+        .writes
+        .submit(WriteRequest::BumpMetadata {
+            outcome: TestCommit::Commit,
+        })
+        .expect("main-thread admission")
+        .blocking_recv()
+        .expect("database reply")
+        .expect("main-thread reply");
+    assert_eq!(
+        reader
+            .query_settings()
+            .expect("main-thread metadata")
+            .metadata_version,
+        metadata + 2
+    );
+    drop(reader);
+    runtime.shutdown();
+}

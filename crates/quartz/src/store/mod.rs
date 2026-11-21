@@ -570,7 +570,7 @@ impl From<diesel::result::Error> for LoadDeviceIdError {
 }
 #[cfg(any(windows, test))]
 impl Store {
-    /// Bound SQLite lock waits by the remaining worker shutdown budget.
+    /// Bound SQLite lock waits by the current operation or shutdown budget.
     pub(crate) fn limit_write_wait(&mut self, remaining: std::time::Duration) {
         const NORMAL_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
         self.writer

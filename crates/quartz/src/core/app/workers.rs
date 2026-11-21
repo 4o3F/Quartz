@@ -74,6 +74,7 @@ pub(crate) enum JoinWorkersError {
 pub(crate) struct Workers {
     pub sender: CaptureSender,
     pub commands: Receiver<MainCommand>,
+    pub writes: crate::persistence::dispatch::WritePort,
     pub queries: crate::query::dispatch::QueryPort,
     pub versions: crate::query::versions::VersionPort,
     shutdown: Sender<Shutdown>,
@@ -236,6 +237,7 @@ impl Workers {
             clock,
         } = startup;
         let queries = crate::query::dispatch::QueryChannel::new();
+        let user_writes = crate::persistence::dispatch::WriteChannel::new();
         let crate::query::versions::VersionChannel {
             publisher: versions,
             port: version_updates,
@@ -261,6 +263,7 @@ impl Workers {
             persistence,
             registry,
             queries: queries.receiver,
+            user_writes: user_writes.receiver,
             versions,
             writes: channels.database.receiver.clone(),
             feedback: channels.feedback.sender.clone(),
@@ -275,6 +278,7 @@ impl Workers {
             },
             commands: channels.main.receiver.clone(),
             queries: queries.port,
+            writes: user_writes.port,
             versions: version_updates,
             shutdown: channels.shutdown.sender.clone(),
             finished: channels.finished.receiver.clone(),

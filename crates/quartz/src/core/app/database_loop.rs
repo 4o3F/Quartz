@@ -13,7 +13,7 @@ use crate::{
     rules::registry::{RegistryResult, RegistryShell, RunRegistryCommandError},
     store::Store,
 };
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use quartz_domain::{
     capture::{AdvanceTimeError, MonoInstant, Timestamp},
     rules::registry::RegistryCommand,
@@ -81,6 +81,7 @@ pub(super) struct DatabaseLoop {
     pub registry: RegistryShell,
     pub persistence: Persistence,
     pub writes: Receiver<DatabaseCommand>,
+    pub user_writes: Receiver<crate::persistence::dispatch::WriteCommand>,
     pub queries: Receiver<crate::query::dispatch::QueryCommand>,
     pub versions: crate::query::versions::VersionPublisher,
     pub feedback: Sender<Feedback>,
@@ -90,6 +91,7 @@ pub(super) struct DatabaseLoop {
 enum DatabaseInput {
     Write(Option<DatabaseCommand>),
     Query(crate::query::dispatch::QueryCommand),
+    UserWrite(crate::persistence::dispatch::WriteCommand),
     Versions(crate::query::versions::VersionCommand),
 }
 enum DatabaseProgress {
@@ -175,6 +177,10 @@ impl DatabaseLoop {
                 }
                 continue;
             }
+            if let Ok(command) = self.user_writes.try_recv() {
+                self.write_command(command)?;
+                continue;
+            }
             if let Ok(command) = self.versions.requests.try_recv() {
                 self.versions.receive(command);
                 continue;
@@ -196,6 +202,7 @@ impl DatabaseLoop {
                         .start(&mut self.store, command, self.registry.snapshots().load())
                 }
                 DatabaseInput::Versions(command) => self.versions.receive(command),
+                DatabaseInput::UserWrite(command) => self.write_command(command)?,
             }
         }
     }
@@ -232,23 +239,22 @@ impl DatabaseLoop {
         };
         crossbeam_channel::select_biased! {
             recv(self.writes) -> command => command.map(|command| DatabaseInput::Write(Some(command))).map_err(|_| RunDatabaseLoopError::Receive),
+            recv(self.user_writes) -> command => command.map(DatabaseInput::UserWrite).map_err(|_| RunDatabaseLoopError::Receive),
             recv(self.versions.requests) -> command => command.map(DatabaseInput::Versions).map_err(|_| RunDatabaseLoopError::Receive),
             recv(self.queries) -> command => match command { Ok(command) => Ok(DatabaseInput::Query(command)), Err(_) => self.wait_for_writes() },
             default(wait) => Ok(DatabaseInput::Write(None)),
         }
     }
     fn wait_for_writes(&self) -> Result<DatabaseInput, RunDatabaseLoopError> {
-        let received = match self.persistence.next_deadline() {
-            Some(deadline) => self.writes.recv_timeout(self.wait_duration(deadline)?),
-            None => self
-                .writes
-                .recv()
-                .map_err(|_| RecvTimeoutError::Disconnected),
+        let wait = match self.persistence.next_deadline() {
+            Some(deadline) => self.wait_duration(deadline)?,
+            None => Duration::MAX,
         };
-        match received {
-            Ok(command) => Ok(DatabaseInput::Write(Some(command))),
-            Err(RecvTimeoutError::Timeout) => Ok(DatabaseInput::Write(None)),
-            Err(RecvTimeoutError::Disconnected) => Err(RunDatabaseLoopError::Receive),
+        crossbeam_channel::select_biased! {
+            recv(self.writes) -> command => command.map(|command| DatabaseInput::Write(Some(command))).map_err(|_| RunDatabaseLoopError::Receive),
+            recv(self.user_writes) -> command => command.map(DatabaseInput::UserWrite).map_err(|_| RunDatabaseLoopError::Receive),
+            recv(self.versions.requests) -> command => command.map(DatabaseInput::Versions).map_err(|_| RunDatabaseLoopError::Receive),
+            default(wait) => Ok(DatabaseInput::Write(None)),
         }
     }
     fn wait_duration(&self, deadline: MonoInstant) -> Result<Duration, RunDatabaseLoopError> {
@@ -291,6 +297,51 @@ impl DatabaseLoop {
             }
         }
         Ok(DatabaseProgress::Continue)
+    }
+    fn write_command(
+        &mut self,
+        command: crate::persistence::dispatch::WriteCommand,
+    ) -> Result<(), RunDatabaseLoopError> {
+        // Commit queued capture prefixes, checking shutdown between transactions.
+        loop {
+            if self.persistence.writer().shutdown().is_some()
+                || matches!(self.persistence.state(), PersistenceState::Failed { .. })
+            {
+                let _ = command.reply.send(Err(quartz_protocol::ProtocolError::new(
+                    quartz_protocol::ErrorKind::Busy,
+                )));
+                return Ok(());
+            }
+            if self.persistence.state() == PersistenceState::Ready {
+                break;
+            }
+            let now = self
+                .now()
+                .map_err(|source| RunDatabaseLoopError::Clock { source })?;
+            self.flush_and_publish(now)?;
+        }
+        // Lock contention must return to capture settlement within its commit headroom.
+        self.store.limit_write_wait(COMMIT_HEADROOM);
+        let result = self.execute_write(command.request);
+        self.store.limit_write_wait(Duration::MAX);
+        if result.is_ok() {
+            self.versions.publish(&mut self.store);
+        }
+        let _ = command.reply.send(result);
+        Ok(())
+    }
+    fn execute_write(
+        &mut self,
+        request: crate::persistence::dispatch::WriteRequest,
+    ) -> Result<(), quartz_protocol::ProtocolError> {
+        match request {
+            #[cfg(test)]
+            crate::persistence::dispatch::WriteRequest::BumpMetadata { outcome } => {
+                self.store.test_metadata_write(outcome).map_err(|_| {
+                    quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::Internal)
+                })
+            }
+        }
     }
     fn registry_command(
         &mut self,
@@ -439,6 +490,7 @@ mod tests {
                 database: DatabaseLoop {
                     registry,
                     queries: crossbeam_channel::never(),
+                    user_writes: crossbeam_channel::never(),
                     versions,
                     store,
                     runner: Default::default(),
@@ -650,5 +702,89 @@ mod tests {
                     .expect("publish successful commit");
             });
         }
+    }
+    #[test]
+    fn user_write_flushes_capture_before_commit_and_reply() {
+        use crate::persistence::dispatch::{TestCommit, WriteCommand, WriteRequest};
+        use quartz_domain::capture::{CaptureCore, RunId};
+        let mut fixture = Fixture::new();
+        let at = fixture.database.now().expect("clock");
+        let run = RunId::new(1);
+        let started = CaptureCore::start(run, at).expect("capture");
+        let _ = fixture
+            .database
+            .persistence
+            .accept(started.step.into_parts(run), at);
+        assert!(matches!(
+            fixture.database.persistence.state(),
+            PersistenceState::Buffered { .. }
+        ));
+        let (reply, received) = tokio::sync::oneshot::channel();
+        fixture
+            .database
+            .write_command(WriteCommand {
+                request: WriteRequest::BumpMetadata {
+                    outcome: TestCommit::Commit,
+                },
+                reply,
+            })
+            .expect("dispatch write");
+        received
+            .blocking_recv()
+            .expect("reply channel")
+            .expect("committed");
+        assert_eq!(
+            fixture.database.persistence.state(),
+            PersistenceState::Ready,
+            "capture commits before user reply"
+        );
+        assert!(matches!(
+            fixture
+                ._commands
+                .try_recv()
+                .expect("capture commit published"),
+            MainCommand::Persistence(PersistenceState::Ready)
+        ));
+    }
+    #[test]
+    fn shutdown_rejects_user_write_before_draining_capture() {
+        use crate::persistence::dispatch::{TestCommit, WriteCommand, WriteRequest};
+        use quartz_domain::capture::{CaptureCore, RunId};
+        let mut fixture = Fixture::new();
+        let at = fixture.database.now().expect("clock");
+        let run = RunId::new(1);
+        let started = CaptureCore::start(run, at).expect("capture");
+        let _ = fixture
+            .database
+            .persistence
+            .accept(started.step.into_parts(run), at);
+        let request = fixture.shutdown_request(Instant::now() + SHUTDOWN_TIMEOUT);
+        fixture.database.persistence.writer().finish(request);
+        let (reply, received) = tokio::sync::oneshot::channel();
+        fixture
+            .database
+            .write_command(WriteCommand {
+                request: WriteRequest::BumpMetadata {
+                    outcome: TestCommit::Commit,
+                },
+                reply,
+            })
+            .expect("reject write");
+        assert_eq!(
+            received
+                .blocking_recv()
+                .expect("reply")
+                .expect_err("shutdown wins")
+                .kind,
+            quartz_protocol::ErrorKind::Busy
+        );
+        assert!(
+            matches!(
+                fixture.database.persistence.state(),
+                PersistenceState::Buffered { .. }
+            ),
+            "shutdown owns the final capture drain"
+        );
+        assert!(fixture._commands.is_empty());
     }
 }

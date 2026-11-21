@@ -193,6 +193,7 @@ mod tests {
         Connection {
             services: Services {
                 queries: database.port.clone(),
+                writes: crate::ipc::WriteChannel::new().port,
                 versions: database.versions.clone(),
                 status: status.subscribe(),
                 ui: Arc::new(|_| Ok(())),

@@ -11,6 +11,12 @@ use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, Select
 use quartz_domain::{capture::limits::UTC_DAY_MS, facts::QueryRange};
 use std::{collections::BTreeMap, ops::RangeInclusive};
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TestCommit {
+    Commit,
+    Rollback,
+}
 /// Failure to persist a fact-day or metadata version in the current transaction.
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module)]
@@ -239,6 +245,19 @@ pub(crate) struct CommittedVersions {
     pub metadata_version: Option<i64>,
 }
 impl Store {
+    #[cfg(test)]
+    pub(crate) fn test_metadata_write(
+        &mut self,
+        outcome: TestCommit,
+    ) -> Result<(), BumpVersionError> {
+        self.write(|tx| {
+            tx.effects.bump_metadata(tx.connection)?;
+            match outcome {
+                TestCommit::Commit => Ok(()),
+                TestCommit::Rollback => Err(diesel::result::Error::RollbackTransaction.into()),
+            }
+        })
+    }
     #[cfg(any(windows, test))]
     pub(crate) fn take_committed_versions(&mut self) -> CommittedVersions {
         let effects = std::mem::take(&mut self.pending_effects);

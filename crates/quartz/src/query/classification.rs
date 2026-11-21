@@ -1,12 +1,13 @@
 //! Per-query classification using the retained rule and SQLite snapshots.
 
+use super::pipeline::CategorySource;
 use quartz_domain::{
     categories::{Category, CategoryUuid},
     facts::{ApplicationId, CaptureLevel, Foreground, ForegroundKind, TitleId},
     rules::{Field, FieldSnapshot, registry::RuleSnapshot},
     text::NfcText,
 };
-use quartz_protocol::{CategoryRef, CategorySource};
+use quartz_protocol::CategoryRef;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
@@ -67,6 +68,7 @@ impl QueryCategoryRef for CategoryRef {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(test, derive(Clone))]
 struct MatchKey {
     app: Option<ApplicationId>,
     title: Option<TitleId>,
@@ -93,6 +95,7 @@ impl Classification {
     }
 }
 #[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct Classifier {
     rules: Arc<RuleSnapshot>,
     categories: BTreeMap<CategoryUuid, Arc<quartz_protocol::Category>>,
@@ -115,6 +118,10 @@ impl Classifier {
             cache: HashMap::new(),
             results: vec![Classification::unclassified()],
         }
+    }
+    #[cfg(test)]
+    pub(super) fn result_mut(&mut self, id: ClassificationId) -> &mut Classification {
+        &mut self.results[id.0]
     }
     pub(super) fn result(&self, id: ClassificationId) -> &Classification {
         &self.results[id.0]
@@ -179,13 +186,7 @@ impl Classifier {
                     category: CategoryRef::Classified {
                         category: category.clone(),
                     },
-                    source: CategorySource::Rule {
-                        rule: matched
-                            .rule
-                            .as_str()
-                            .parse()
-                            .expect("domain rule revision satisfies the wire grammar"),
-                    },
+                    source: CategorySource::Rule(std::sync::Arc::new(matched.rule)),
                 },
                 None => {
                     tracing::debug!(rule = matched.rule.as_str(), category = %matched.category.0, "classification rule references a missing or archived category");

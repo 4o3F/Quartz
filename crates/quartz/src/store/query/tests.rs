@@ -56,8 +56,14 @@ fn unpaged_timeline(
     pipeline.finish_input();
     while !pipeline.advance() {}
     let mut projection = crate::query::pipeline::TimelineProjection::default();
-    for segment in pipeline.into_segments() {
-        projection.push(&segment, request.detail, request.ms_per_pixel.0.get());
+    let derived = pipeline.into_segments();
+    for segment in &derived.segments {
+        projection.push(
+            segment,
+            &derived.facts,
+            request.detail,
+            request.ms_per_pixel.0.get(),
+        );
     }
     fixture
         .store

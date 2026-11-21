@@ -180,6 +180,7 @@ impl CoreRuntime {
             shutdown_timeout: SHUTDOWN_TIMEOUT,
             services: Services {
                 queries: workers.queries.clone(),
+                writes: workers.writes.clone(),
                 versions: workers.versions.clone(),
                 status: status.subscribe(),
                 ui: ui_port,
@@ -196,6 +197,10 @@ impl CoreRuntime {
         runtime.pipe =
             Some((ports.pipe)(pipe_ports).map_err(|source| StartCoreError::StartPipe { source })?);
         Ok(runtime)
+    }
+    #[expect(dead_code, reason = "tray annotation actions are added next")]
+    pub(crate) fn writes(&self) -> crate::persistence::dispatch::WritePort {
+        self.workers().writes.clone()
     }
     pub(crate) fn sender(&self) -> CaptureSender {
         self.workers().sender.clone()

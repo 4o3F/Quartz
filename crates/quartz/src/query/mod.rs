@@ -125,6 +125,7 @@ enum Stage {
     Sweep(Pipeline),
     Aggregate {
         segments: std::vec::IntoIter<DerivedSegment>,
+        facts: pipeline::SegmentFacts,
         output: Aggregation,
     },
     Complete,
@@ -279,9 +280,10 @@ impl QueryJob {
                         Aggregation::Timeline(TimelineProjection::default())
                     }
                 };
+                let derived = timer.measure(QueryStage::Slice, || pipeline.into_segments());
                 self.stage = Stage::Aggregate {
-                    segments: timer
-                        .measure(QueryStage::Slice, || pipeline.into_segments().into_iter()),
+                    segments: derived.segments.into_iter(),
+                    facts: derived.facts,
                     output,
                 };
                 Ok(None)
@@ -289,17 +291,19 @@ impl QueryJob {
             Stage::Aggregate {
                 mut segments,
                 mut output,
+                facts,
             } => {
                 timer.measure(QueryStage::Aggregate, || {
                     for segment in segments.by_ref().take(QUERY_BATCH_ROWS) {
                         match &mut output {
-                            Aggregation::Day(day) => day.push(&segment),
+                            Aggregation::Day(day) => day.push(&segment, &facts),
                             Aggregation::Timeline(timeline) => {
                                 let QueryRequest::Timeline(request) = &self.request else {
                                     unreachable!("timeline aggregation")
                                 };
                                 timeline.push(
                                     &segment,
+                                    &facts,
                                     request.detail,
                                     request.ms_per_pixel.0.get(),
                                 );
@@ -308,7 +312,11 @@ impl QueryJob {
                     }
                 });
                 if segments.len() > 0 {
-                    self.stage = Stage::Aggregate { segments, output };
+                    self.stage = Stage::Aggregate {
+                        segments,
+                        facts,
+                        output,
+                    };
                     return Ok(None);
                 }
                 let response =

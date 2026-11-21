@@ -524,6 +524,7 @@ mod tests {
                 registry: RegistryHandle::start(publisher.subscribe(), received.clone()),
                 services: Services {
                     queries: channel.port,
+                    writes: crate::ipc::WriteChannel::new().port,
                     versions: received,
                     status: publisher.subscribe(),
                     ui: Arc::new(|_| Ok(())),
