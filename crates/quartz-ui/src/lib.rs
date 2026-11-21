@@ -28,6 +28,8 @@ mod app;
 pub mod failure;
 #[cfg(any(windows, test))]
 mod format;
+#[cfg(any(windows, test))]
+mod instance;
 #[cfg(windows)]
 mod launch;
 #[cfg(any(windows, test))]

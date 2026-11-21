@@ -36,6 +36,11 @@ mod tests {
     fn production_name_uses_canonical_sid_and_tests_are_isolated() {
         let sid = UserSid::from_token_string("S-1-5-21-1001".into());
         let production = PipeName::from_sid(&sid);
+        assert_eq!(sid.ui_mutex_name(), r"Local\Quartz.S-1-5-21-1001.ui");
+        assert_eq!(
+            production.readiness_name(),
+            std::ffi::OsString::from(r"Local\Quartz.S-1-5-21-1001.v1.ready")
+        );
         assert_eq!(
             production.as_ref(),
             OsStr::new(r"\\.\pipe\Quartz.S-1-5-21-1001.v1")

@@ -8,6 +8,24 @@ fn transport_disconnect_and_shutdown_map_to_application_exit() {
     assert!(!LinkEvent::Connection(ConnectionState::Connecting).exits_ui());
 }
 
+#[test]
+fn show_and_activate_select_window_restore_activation_and_frame_acknowledgement() {
+    for op in [ControlOp::UiShow, ControlOp::UiActivate] {
+        assert_eq!(
+            LinkEvent::Control(op).window_action(),
+            WindowAction::Activate
+        );
+    }
+    assert_eq!(
+        LinkEvent::Control(ControlOp::UiShutdown).window_action(),
+        WindowAction::Quit
+    );
+    assert_eq!(
+        LinkEvent::Control(ControlOp::BrowserAck).window_action(),
+        WindowAction::Observe
+    );
+}
+
 #[tokio::test]
 async fn closed_bridge_reports_a_typed_start_error() {
     let (commands, receive) = mpsc::channel(BRIDGE_CAPACITY);
@@ -343,12 +361,13 @@ mod pipe {
             panic!("state snapshot");
         };
         assert!(snapshot.recording);
-        core.event(Topic::Control, serde_json::json!({"op":"ui.show"}))
-            .await;
-        assert!(matches!(
-            ui.events.recv().await,
-            Some(LinkEvent::Control(ControlOp::UiShow))
-        ));
+        for op in [ControlOp::UiShow, ControlOp::UiActivate] {
+            core.event(Topic::Control, serde_json::json!({"op":op}))
+                .await;
+            let event = ui.events.recv().await.expect("UI control");
+            assert!(matches!(&event, LinkEvent::Control(received) if *received == op));
+            assert_eq!(event.window_action(), WindowAction::Activate);
+        }
         ui.link.first_frame().await.expect("frame hook");
         let frame = core.request(Op::UiFirstFrame).await;
         core.ok(frame, serde_json::json!({"accepted":true})).await;

@@ -41,6 +41,10 @@ const SHUTDOWN_FLUSH_POLL: Duration = Duration::from_millis(10);
 
 enum ServerMessage {
     Control(quartz_protocol::ControlOp),
+    TargetControl {
+        connection: crate::ipc::registry::ConnectionId,
+        op: quartz_protocol::ControlOp,
+    },
     #[cfg(test)]
     Inspect {
         reply: crossbeam_channel::Sender<Vec<OutboxMetric>>,
@@ -165,6 +169,18 @@ impl PipeServer {
             }
             Ok(Err(error)) => Err(error),
             Err(_) => Err(StartPipeServerError::Startup),
+        }
+    }
+    pub(crate) fn target_control(
+        &self,
+        connection: crate::ipc::registry::ConnectionId,
+        op: quartz_protocol::ControlOp,
+    ) {
+        if let Err(error) = self
+            .control
+            .try_send(ServerMessage::TargetControl { connection, op })
+        {
+            tracing::warn!(%error, "could not queue targeted UI control");
         }
     }
     pub(crate) fn control(&self, op: quartz_protocol::ControlOp) {
@@ -344,6 +360,11 @@ impl IoThread {
     }
     async fn server_message(message: ServerMessage, registry: &RegistryHandle) {
         match message {
+            ServerMessage::TargetControl { connection, op } => {
+                if let Err(error) = registry.target_control(connection, op) {
+                    tracing::warn!(%error, "targeted UI control unavailable");
+                }
+            }
             ServerMessage::Control(message) => {
                 if let Err(error) = registry.control(message) {
                     tracing::warn!(%error, "control fan-out unavailable");
@@ -473,6 +494,7 @@ impl Slot {
                     services: self.services.clone(),
                     registry: self.registry.clone(),
                     timeouts: self.timeouts,
+                    peer_pid: crate::ipc::ProcessId::new(pid),
                 })
                 .run(read, write, &mut session, hello_deadline)
                 .await
@@ -540,7 +562,11 @@ mod tests {
             _queries: channel.receiver,
             _database: database,
             slot: Slot {
-                registry: RegistryHandle::start(publisher.subscribe(), received.clone()),
+                registry: RegistryHandle::start(
+                    publisher.subscribe(),
+                    received.clone(),
+                    Arc::new(|_| Ok(())),
+                ),
                 services: Services {
                     summary: None,
                     timed: crate::ipc::TimedPolicyPort::unavailable(),

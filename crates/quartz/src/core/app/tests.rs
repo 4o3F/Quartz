@@ -538,6 +538,13 @@ struct TestPipe {
     log: LifecycleLog,
 }
 impl super::CorePipe for TestPipe {
+    fn target_control(
+        &self,
+        _: crate::ipc::registry::ConnectionId,
+        op: quartz_protocol::ControlOp,
+    ) {
+        self.control(op);
+    }
     fn control(&self, op: quartz_protocol::ControlOp) {
         assert_eq!(op, quartz_protocol::ControlOp::UiShutdown);
         self.log.record(LifecycleEvent::UiShutdown);
@@ -933,6 +940,7 @@ impl AnnotationClient {
     ) -> Self {
         let connection = crate::ipc::connection::Connection {
             registry,
+            peer_pid: crate::ipc::ProcessId::new(std::process::id()),
             services,
             timeouts: crate::ipc::connection::ConnectionTimeouts::default(),
         };

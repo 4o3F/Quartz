@@ -38,13 +38,32 @@ pub enum LinkEvent {
     Connection(ConnectionState),
     Disconnected,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowAction {
+    Observe,
+    Activate,
+    Quit,
+}
 impl LinkEvent {
+    pub(crate) fn window_action(&self) -> WindowAction {
+        match self {
+            Self::Disconnected | Self::Control(ControlOp::UiShutdown) => WindowAction::Quit,
+            Self::Control(ControlOp::UiShow | ControlOp::UiActivate) => WindowAction::Activate,
+            Self::State(_)
+            | Self::Day(_)
+            | Self::Connection(_)
+            | Self::Control(
+                ControlOp::BrowserAck
+                | ControlOp::BrowserPolicy
+                | ControlOp::BrowserPurge
+                | ControlOp::CoreOffline,
+            ) => WindowAction::Observe,
+        }
+    }
     /// The application closes its windows for transport loss or an explicit core shutdown.
+    #[cfg(test)]
     pub(crate) fn exits_ui(&self) -> bool {
-        matches!(
-            self,
-            Self::Disconnected | Self::Control(ControlOp::UiShutdown)
-        )
+        self.window_action() == WindowAction::Quit
     }
 }
 

@@ -41,6 +41,10 @@ pub enum RunOptions {
 /// Failures that prevent creating any UI window.
 #[derive(Debug, Snafu)]
 pub enum RunUiError {
+    #[snafu(display("could not acquire UI instance"))]
+    AcquireInstance {
+        source: quartz_pipe::AcquireUiInstanceError,
+    },
     #[snafu(display("could not select the interface language"))]
     SelectLanguage { source: ParseLanguageError },
     #[snafu(display("could not load the embedded theme"))]
@@ -241,9 +245,20 @@ impl LaunchWindow {
         self.connection = state;
     }
     fn receive(&mut self, event: LinkEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.exits_ui() {
-            Self::quit(cx);
-            return;
+        match event.window_action() {
+            crate::link::WindowAction::Quit => {
+                Self::quit(cx);
+                return;
+            }
+            crate::link::WindowAction::Activate => {
+                // GPUI restores minimized Windows windows before requesting foreground activation.
+                window.activate_window();
+                cx.activate(true);
+                self.acknowledge_frame(window, cx);
+                cx.notify();
+                return;
+            }
+            crate::link::WindowAction::Observe => {}
         }
         match event {
             LinkEvent::Connection(state) => {
@@ -269,11 +284,6 @@ impl LaunchWindow {
                 gpui_kit::component::set_locale(language.code());
                 self.snapshot = Some(snapshot);
             }
-            LinkEvent::Control(ControlOp::UiShow | ControlOp::UiActivate) => {
-                window.activate_window();
-                cx.activate(true);
-                self.acknowledge_frame(window, cx);
-            }
             LinkEvent::Day(changed) => {
                 tracing::debug!(date = %changed.date, "UI day data changed");
                 // TODO(M3-D1): Invalidate and re-request the displayed day's snapshots.
@@ -285,11 +295,19 @@ impl LaunchWindow {
     }
 }
 impl RunOptions {
+    fn instance_policy(&self) -> crate::instance::InstancePolicy {
+        match self {
+            Self::CoreError { .. } => crate::instance::InstancePolicy::CoreError,
+            Self::Open { .. } | Self::Prewarm => crate::instance::InstancePolicy::Required,
+        }
+    }
+
     /// Runs one visible window until the last window closes or its established pipe disconnects.
     ///
     /// # Errors
-    /// Returns language, theme, text-scale or GPUI window failures.
+    /// Returns mutex, language, theme, text-scale or GPUI window failures.
     pub fn run(self) -> Result<(), RunUiError> {
+        let policy = self.instance_policy();
         let (code, failure) = match self {
             Self::Open { language } => (language, None),
             Self::CoreError { language, error } => (language, Some(Failure::from_startup(error))),
@@ -297,6 +315,19 @@ impl RunOptions {
             Self::Prewarm => return Ok(()),
         };
         let language: Language = code.parse().context(SelectLanguageSnafu)?;
+        // Startup error windows must be shown even while a normal UI holds the session mutex.
+        let _instance = if matches!(policy, crate::instance::InstancePolicy::CoreError) {
+            None
+        } else {
+            let outcome = quartz_pipe::UiInstance::acquire().context(AcquireInstanceSnafu)?;
+            if crate::instance::InstanceDecision::from(&outcome).forward(|| {
+                quartz_pipe::CoreClient::connect().and_then(|mut client| client.open_ui())
+            }) == crate::instance::InstanceDecision::ForwardAndExit
+            {
+                return Ok(());
+            }
+            Some(outcome)
+        };
         let formatter = Formatter::new(language);
         let bridge = match &failure {
             None => Some(LinkBridge::start()),
@@ -398,6 +429,26 @@ impl RunOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn core_error_window_is_exempt_from_normal_ui_mutex() {
+        use crate::instance::InstancePolicy;
+        assert_eq!(
+            RunOptions::Open { language: "en" }.instance_policy(),
+            InstancePolicy::Required
+        );
+        assert_eq!(
+            RunOptions::Prewarm.instance_policy(),
+            InstancePolicy::Required
+        );
+        assert_eq!(
+            RunOptions::CoreError {
+                language: "en",
+                error: CoreError::new(quartz_protocol::CoreErrorCode::CoreStartFailed, vec![])
+            }
+            .instance_policy(),
+            InstancePolicy::CoreError
+        );
+    }
     #[test]
     fn prewarm_exits_without_starting_a_window_loop() {
         RunOptions::Prewarm

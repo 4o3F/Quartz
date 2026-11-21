@@ -11,6 +11,7 @@ use windows::{
 };
 
 use super::handle::OwnedHandle;
+use crate::process_id::ProcessId;
 
 /// Failures while resolving the executable and creating the UI child.
 #[derive(Debug, Snafu)]
@@ -34,6 +35,7 @@ pub(super) enum LaunchCoreErrorUiError {
 #[derive(Debug)]
 pub(super) struct UiProcess {
     handle: OwnedHandle,
+    pid: ProcessId,
 }
 impl UiProcess {
     /// Creates the UI child from the absolute path of the running executable.
@@ -75,26 +77,56 @@ impl UiProcess {
         }
         .context(CreateProcessSnafu)?;
         // SAFETY: CreateProcessW succeeded and transferred ownership of both returned kernel handles.
-        let (process, _thread) = unsafe {
-            (
-                OwnedHandle::from_raw(information.hProcess),
-                OwnedHandle::from_raw(information.hThread),
+        let process = unsafe { OwnedHandle::from_raw(information.hProcess) };
+        // SAFETY: CreateProcessW transferred the separate thread handle as well.
+        let _thread = unsafe { OwnedHandle::from_raw(information.hThread) };
+        let pid = ProcessId::new(information.dwProcessId);
+        tracing::info!(%pid, "UI child started");
+        Ok(Self {
+            handle: process,
+            pid,
+        })
+    }
+    /// Opens the access needed for exit observation and exit-code logging.
+    pub(super) fn adopt(pid: ProcessId) -> Result<Self, AdoptUiError> {
+        // SAFETY: The PID was verified by the pipe transport; the handle is not inherited.
+        let handle = unsafe {
+            Threading::OpenProcess(
+                Threading::PROCESS_SYNCHRONIZE | Threading::PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                pid.raw(),
             )
-        };
-        tracing::info!(pid = information.dwProcessId, "UI child started");
-        Ok(Self { handle: process })
+        }
+        .context(AdoptUiSnafu)?;
+        // SAFETY: OpenProcess transferred unique ownership of a valid process handle.
+        let handle = unsafe { OwnedHandle::from_raw(handle) };
+        Ok(Self { handle, pid })
     }
     pub(super) fn log_exit(&self) {
-        let mut code = 0;
-        // SAFETY: The owned process handle is live; code points to writable DWORD storage.
-        match unsafe { Threading::GetExitCodeProcess(self.raw(), &mut code) } {
-            Ok(()) => tracing::info!(exit_code = code, "UI child exited"),
-            Err(error) => tracing::error!(%error, "could not read UI child exit code"),
+        let mut exit_code = 0;
+        // SAFETY: The owned process handle includes query access and exit_code is writable storage.
+        match unsafe { Threading::GetExitCodeProcess(self.raw(), &mut exit_code) } {
+            Ok(()) => tracing::info!(pid = %self.pid, exit_code, "UI process exited"),
+            Err(error) => {
+                tracing::error!(pid = %self.pid, %error, "could not read UI process exit code")
+            }
         }
     }
     pub(super) fn raw(&self) -> windows::Win32::Foundation::HANDLE {
         self.handle.raw()
     }
+}
+
+impl crate::ui_state::UiProcess for UiProcess {
+    fn pid(&self) -> ProcessId {
+        self.pid
+    }
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("could not open UI process for exit observation (OpenProcess)"))]
+pub(super) struct AdoptUiError {
+    source: windows::core::Error,
 }
 
 /// Borrows the startup failure passed to a standalone error UI process.

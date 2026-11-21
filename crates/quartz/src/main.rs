@@ -32,6 +32,8 @@ mod store;
 #[cfg(any(windows, test))]
 mod instance_name;
 #[cfg(any(windows, test))]
+mod process_id;
+#[cfg(any(windows, test))]
 mod tray_summary;
 #[cfg(any(windows, test))]
 mod tray_tooltip;

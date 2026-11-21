@@ -9,8 +9,9 @@ pub use client::{AsyncCoreClient, CallCoreError, CoreClient, IncomingFrame, RESP
 pub use user_sid::UserSid;
 #[cfg(windows)]
 pub use windows::{
-    CONNECT_TIMEOUT, CORE_START_TIMEOUT, CheckPeerError, CoreReadySignal, CoreReadyWaiter,
-    OpenCorePipeError, PeerExecutable, PipeClient, PipeName, ProcessIdentity, WaitCorePipeError,
+    AcquireUiInstance, AcquireUiInstanceError, CONNECT_TIMEOUT, CORE_START_TIMEOUT, CheckPeerError,
+    CoreReadySignal, CoreReadyWaiter, OpenCorePipeError, PeerExecutable, PipeClient, PipeName,
+    ProcessIdentity, UiInstance, WaitCorePipeError,
 };
 
 #[cfg(all(windows, feature = "test-util"))]

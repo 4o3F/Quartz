@@ -115,10 +115,10 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 |---|---|---|
 | `core.status` | 请求 | 参数 `{}`；返回 `recording`、`stop_reason`、`database`、`browser_streams`、`instance_id`、`core_version` |
 | `ui.open` | UI、CLI 请求 | 参数 `{}`；按托盘“打开”动作打开或激活界面，入主线程队列后返回 `{accepted:true}` |
-| `ui.show` | 核心 → 预热中的界面 | 显示主窗口 |
-| `ui.activate` | 核心 → 界面 | 把已有窗口提到前台 |
-| `ui.shutdown` | 核心 → 界面 | 用户退出 Quartz 时通知界面关闭 |
-| `ui.first_frame` | UI 请求 | 参数 `{}`；每次显示或激活请求后的首帧完成时发送，返回 `{accepted:true}`，核心清除 `show_requested` |
+| `ui.show` | 核心 → 已登记的启动或预热界面 | 向登记连接发送控制事件，显示主窗口 |
+| `ui.activate` | 核心 → 已登记的可见界面 | 向登记连接发送控制事件，还原最小化窗口并请求前台激活 |
+| `ui.shutdown` | 核心 → 全部 UI 连接 | 用户退出 Quartz 时广播关闭控制事件 |
+| `ui.first_frame` | UI 请求 | 参数 `{}`；每次显示或激活请求后的首帧完成时发送，返回 `{accepted:true}`，登记连接的首帧通知使核心设为可见并清除 `show_requested` |
 
 `core.status` 从主线程发布的不可变快照读取，不访问 SQLite。`database` 为 `ok | persistence_failed`，`stop_reason` 在记录时为 `null`，停止时为稳定枚举：`persistence_failed`、`starting`、`session_unavailable`、`capture_gap`、`suspended`、`disconnected`、`locked`、`paused`、`no_foreground`、`ended`。`awaiting_browser_context` 随 M5 浏览器扩展加入。多个条件重叠时按上述顺序选择；`ended` 表示已结束的采集运行，运行结束的历史原因保留在采集记录中。`browser_streams` 是类型化连接列表，条目包含 `browser_stream` 标识，M5 前为空。`instance_id` 每次核心启动重新生成，`core_version` 为核心的 crate 版本。
 
@@ -134,7 +134,7 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 UI 首次连接失败后等待显式操作；已连接后的管道断开使 UI 关闭窗口并退出，生命周期见 01 第 4 节。启动核心时通过命名就绪事件等待管道监听实例创建，不进行自动重连。
 
-UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到 `ui.first_frame`。预热 TTL 从握手完成时起算，显式打开优先于 TTL（01 第 4 节）。
+UI 在握手中登记当前状态；主线程取得类型化连接标识、经身份校验的进程标识和 `ui.state`。有待处理的 `show_requested` 时，`prewarming` 重放 `ui.show`，`visible` 重放 `ui.activate`，`starting` 自行创建窗口。登记连接的 `ui.first_frame` 完成显示请求；注销清除旧请求并保留进程句柄直到退出；关闭期间的新打开请求在旧进程退出后执行一次。预热 TTL 从握手完成时起算，显式打开优先于 TTL（01 第 4 节）。
 
 ### 6.2 查询
 
@@ -300,7 +300,7 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 | `ui_language` | 与托盘采用相同的 Windows 首选语言协商，生产值为 `zh-CN` 或 `en`；调试伪语言使用 `en` 的协议身份 |
 | `locale` | `{hour_cycle, first_day_of_week}`，值分别为 `h12` 或 `h24`，以及 `monday` 至 `sunday` 的英文星期名；分别解析用户区域的 `LOCALE_STIMEFORMAT`、`LOCALE_IFIRSTDAYOFWEEK`；读取失败时记录警告并发送 `null` |
 
-主线程通过 watch 发布已清洗的区间和状态；有 state 订阅者时，注册表在每次变化后构造一份状态快照并立即转发到各连接的最新值槽，day 变化也立即转发到对应槽。每个连接的 outbox 从实际写入完成时计时，按上述间隔限流，并仅保留各槽的最新值。托盘退出先向注册表投递 `ui.shutdown`，停止管道前在现有关闭期限内尽力写出控制消息；显示与激活的 UI 连接选择留待 M3。
+主线程通过 watch 发布已清洗的区间和状态；有 state 订阅者时，注册表在每次变化后构造一份状态快照并立即转发到各连接的最新值槽，day 变化也立即转发到对应槽。每个连接的 outbox 从实际写入完成时计时，按上述间隔限流，并仅保留各槽的最新值。主线程将 `ui.show`、`ui.activate` 连同首个已登记 UI 的连接标识非阻塞地投递给注册表，注册表仅向该连接的 outbox 发送；后续 UI 登记不替换首个连接。托盘退出向全部 UI 连接广播 `ui.shutdown`，停止管道前在现有关闭期限内尽力写出控制消息。控制事件不要求显式订阅 `control`。
 
 ## 8. 其他客户端的连接恢复
 

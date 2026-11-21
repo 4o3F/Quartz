@@ -34,7 +34,7 @@ use windows::Win32::{
 use crate::{
     data_directory::{self, DataDirectory},
     logging,
-    ui_state::UiState,
+    ui_state::{ExitUi, RegisterUi, UiControl, UiState},
 };
 pub(crate) use instance::{AcquireInstance, AcquireInstanceError};
 use tray::{CreateTrayError, Tray, TrayCommand, TrayIconState, TrayState, TrayTooltip};
@@ -286,10 +286,10 @@ impl CoreProcess {
                 }
             }
             if let Some(effective) = runtime.ui_commands.take_settings_change() {
-                self.handle_ui_command(UiCommand::SettingsChanged(effective), tray, status);
+                self.handle_ui_command(UiCommand::SettingsChanged(effective), tray, runtime);
             }
             while let Ok(command) = runtime.ui_commands.try_recv() {
-                self.handle_ui_command(command, tray, status);
+                self.handle_ui_command(command, tray, runtime);
             }
             while let Ok(command) = runtime.commands().try_recv() {
                 self.handle_main_command(command, tray, status, sources)?;
@@ -328,14 +328,49 @@ impl CoreProcess {
                 if let Some(process) = self.ui.process() {
                     process.log_exit();
                 }
-                self.ui.exited();
-                self.refresh_tray(tray, status, TrayRefresh::UiExited);
+                let outcome = self.ui.exited();
+                outcome.log_ui_exit();
+                if outcome == ExitUi::OpenRequested {
+                    self.open_ui(tray, status, runtime);
+                } else {
+                    self.refresh_tray(tray, status, TrayRefresh::UiExited);
+                }
             }
         }
     }
-    fn handle_ui_command(&mut self, command: UiCommand, tray: &mut Tray, status: &StatusPublisher) {
+    fn handle_ui_command(&mut self, command: UiCommand, tray: &mut Tray, runtime: &CoreRuntime) {
+        let status = &runtime.status;
         match command {
-            UiCommand::Open => self.open_ui(tray, status),
+            UiCommand::Open => self.open_ui(tray, status, runtime),
+            UiCommand::Registered {
+                connection,
+                pid,
+                state,
+            } => {
+                match self.ui.register(
+                    connection,
+                    crate::ipc::registry::UiPeer { pid, state },
+                    process::UiProcess::adopt,
+                ) {
+                    Ok(RegisterUi::Accepted { replay }) => {
+                        if let Some(control) = replay {
+                            Self::send_ui(control, runtime);
+                        }
+                    }
+                    Ok(RegisterUi::Ignored) => tracing::warn!(
+                        ?connection,
+                        %pid,
+                        "ignored UI registration while another UI process is tracked"
+                    ),
+                    Err(error) => tracing::warn!(%error, %pid, "could not adopt registered UI"),
+                }
+                self.refresh_tray(tray, status, TrayRefresh::Capture);
+            }
+            UiCommand::Unregistered { connection } => {
+                let outcome = self.ui.unregister(connection);
+                outcome.log_ui_exit();
+                self.refresh_tray(tray, status, TrayRefresh::UiExited);
+            }
             UiCommand::SettingsChanged(effective) => {
                 status.apply_ui_settings(effective, |language| {
                     if let Err(error) = tray.set_language(language) {
@@ -344,8 +379,8 @@ impl CoreProcess {
                 });
                 self.refresh_tray(tray, status, TrayRefresh::Capture);
             }
-            UiCommand::FirstFrame => {
-                self.ui.first_frame();
+            UiCommand::FirstFrame { connection } => {
+                self.ui.first_frame(connection);
                 self.refresh_tray(tray, status, TrayRefresh::FirstFrame);
             }
         }
@@ -454,7 +489,7 @@ impl CoreProcess {
             TrayCommand::Exit => return Ok(Some(CoreExit::UserExit)),
             TrayCommand::EndSession => return Ok(Some(CoreExit::SessionEnded)),
             TrayCommand::Deadline(at) => sources.fired(at).context(wait_error::ObserveSnafu)?,
-            TrayCommand::OpenUi => self.open_ui(tray, status),
+            TrayCommand::OpenUi => self.open_ui(tray, status, runtime),
             TrayCommand::Annotate(choice) => self.submit_annotation(choice, runtime),
             TrayCommand::Timed(command) => {
                 if let Err(error) = runtime.timed.call(command) {
@@ -526,12 +561,10 @@ impl CoreProcess {
                 None
             },
         });
-        let tooltip = match refresh {
-            TrayRefresh::UiOpening => TrayTooltip::Opening,
-            TrayRefresh::Startup
-            | TrayRefresh::FirstFrame
-            | TrayRefresh::Capture
-            | TrayRefresh::UiExited => TrayTooltip::Ready,
+        let tooltip = if self.ui.opening() {
+            TrayTooltip::Opening
+        } else {
+            TrayTooltip::Ready
         };
         if let Err(error) = tray.update(
             TrayState::from_status(status.stop_reason(), tooltip)
@@ -550,10 +583,21 @@ impl CoreProcess {
             }
         }
     }
-    fn open_ui(&mut self, tray: &mut Tray, status: &StatusPublisher) {
-        if let Err(error) = self.ui.open(process::UiProcess::launch) {
-            tracing::error!(?error, "could not launch UI");
-            return;
+    fn send_ui(control: UiControl, runtime: &CoreRuntime) {
+        // SAFETY: The PID belongs to the registered authenticated UI. Failure leaves normal
+        // Windows foreground restrictions in place and does not prevent control delivery.
+        let permission =
+            unsafe { WindowsAndMessaging::AllowSetForegroundWindow(control.pid.raw()) };
+        if let Err(error) = permission {
+            tracing::warn!(%error, pid = %control.pid, "could not grant UI foreground permission");
+        }
+        runtime.target_ui(control.connection, control.op);
+    }
+    fn open_ui(&mut self, tray: &mut Tray, status: &StatusPublisher, runtime: &CoreRuntime) {
+        match self.ui.open(process::UiProcess::launch) {
+            Ok(Some(control)) => Self::send_ui(control, runtime),
+            Ok(None) => {}
+            Err(error) => tracing::error!(?error, "could not launch UI"),
         }
         self.refresh_tray(tray, status, TrayRefresh::UiOpening);
     }

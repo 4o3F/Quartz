@@ -99,7 +99,7 @@ enum RulesCommand {
 
 1. 不能靠“核心是否已在运行”推断。核心重启、更新或崩溃恢复期间，数据目录锁会短暂空出；按推断启动的界面子进程会拿到锁，变成第二个核心，开始采集。显式子命令让模式只取决于调用方意图，与时序无关。
 2. 预热进程（`ui --prewarm`）不开窗口，它的行为本来就需要用参数区分。
-3. 用户双击 exe 或从开始菜单启动时不带参数，走核心路径：核心已在运行时，把“打开界面”转发给核心后退出（第 3 节），由核心按第 4 节拉起界面。所以界面进程始终由核心创建，UI 状态机（`starting`、`prewarming`、`visible`）只有核心这一个所有者，不会和用户直接启动的界面实例竞争。
+3. 用户双击 exe 或从开始菜单启动时不带参数，走核心路径：核心已在运行时，把“打开界面”转发给核心后退出（第 3 节），由核心按第 4 节拉起界面。用户直接运行 `quartz ui` 时，界面通过握手登记到核心，由核心接管其进程退出观察和显示路由。
 
 **控制台输出。** `quartz.exe` 使用 `windows` 子系统，启动时没有控制台。`Args::try_parse()` 返回帮助、版本或解析错误时，先调用 `AttachConsole(ATTACH_PARENT_PROCESS)`，再由 clap 输出并选择退出码。解析成功后，仅用户命令行子命令附加父控制台，核心和界面均不附加。没有父控制台时（例如被双击后解析失败），错误写入日志文件。GUI 子系统进程附加控制台后，cmd 不会等它退出，输出可能和下一个提示符交错。
 
@@ -110,18 +110,18 @@ enum RulesCommand {
 - 同一用户只允许一个采集会话。核心在初始化数据库与管道前，用 `LockFileEx` 独占数据目录的 `quartz.lock`，并在整个生命周期持有；锁文件跨 Windows 会话生效。
 - `Local\Quartz.<SID>.core` 互斥量只用于会话内快速转发。同会话的普通重复启动通过管道发送 `ui.open` 后退出；`--autostart` 重复启动直接退出。另一会话启动时，核心以 `other_session` 错误码启动 UI 错误窗口并返回失败退出码。
 - 首个管道实例使用 `FILE_FLAG_FIRST_PIPE_INSTANCE`，防止其他进程抢先创建同名管道。
-- 界面进程用互斥量 `Local\Quartz.<SID>.ui` 保证唯一。重复启动时，通过核心转发"激活窗口"请求后退出。
+- 普通界面进程在启动时持有互斥量 `Local\Quartz.<SID>.ui`。重复启动通过管道向核心发送 `ui.open`，由核心显示或激活已登记的界面，然后以 0 退出；核心不可达时记录警告并以 0 退出。`--core-error` 错误窗口不取得此互斥量，以便已有界面运行时仍能展示核心启动错误。
 
 ## 4. 界面生命周期
 
 ### 4.1 打开
 
-1. 用户左键点击托盘，或选择菜单里的"打开"，触发打开。
-2. 核心维护 UI 状态 `none | starting | prewarming | visible` 和 `show_requested`。打开请求置 `show_requested = true`；已可见时发 `ui.activate`，已预热且完成握手时发 `ui.show`，启动中则等待握手。
-3. 状态为 `none` 时，核心用 `CreateProcessW` 以 `current_exe()` 的绝对路径和 `ui` 子命令启动界面，不经过 shell。
-   - 设置 `STARTF_FORCEONFEEDBACK`，让鼠标显示"后台运行"指针。
-   - 托盘提示改为"正在打开…"。
-4. 核心保存子进程句柄并设为 `starting`，防止连续点击重复启动。界面在 `hello` 中登记 `starting` 或 `prewarming`；核心在握手完成后重放尚未完成的显示请求。收到 `ui.first_frame` 后设为 `visible` 并清除 `show_requested`。
+1. 用户左键点击托盘、选择“打开 Quartz”或“设置…”，以及管道收到 `ui.open`，均进入同一打开路径。
+2. 核心维护 `None`、`Starting { process }`、`Registered { process, connection, phase }`、`Closing { process }` 和 `show_requested: DisplayRequest`；登记后的阶段为 `Starting | Prewarming | Visible`，显示请求为 `Idle | Pending`。打开请求置 `show_requested = Pending`：`None` 时启动界面，`Starting` 时等待握手，已登记且阶段为 `Starting` 或 `Prewarming` 时向该连接发送 `ui.show`，`Visible` 时发送 `ui.activate`。核心在发送前以登记的进程标识调用 `AllowSetForegroundWindow`；界面通过 GPUI 还原最小化窗口并请求前台激活。
+3. 核心用 `CreateProcessW` 以 `current_exe()` 的绝对路径和 `ui` 子命令启动界面，不经过 shell，设置 `STARTF_FORCEONFEEDBACK`。保存进程句柄后进入 `Starting`，防止连续点击重复启动。托盘提示从启动起保持“正在打开…”，直到首帧或界面退出。
+4. UI 完成 `hello` 后，注册表非阻塞地将连接标识、经管道身份校验的进程标识和 `ui.state` 交给主线程。核心保留同一子进程的句柄；其他进程通过 `OpenProcess` 取得同步和有限查询权限，接管退出观察与退出码日志。已登记界面存在时保留首个连接，对后续登记记录警告。
+5. 握手时若仍有显示请求，`Prewarming` 重放 `ui.show`，`Visible` 重放 `ui.activate`；`Starting` 会自行创建窗口，无需重放。核心只保留预热阶段和握手映射，当前不启动预热进程。
+6. 仅登记连接的 `ui.first_frame` 将阶段改为 `Visible`、清除 `show_requested` 并恢复普通托盘提示。该连接注销后进入 `Closing` 并保留进程句柄，关闭期间的新打开请求记为 `Pending`，等旧进程退出后启动一次。注销或进程退出会清除未完成的旧显示请求并记录警告；仅所跟踪的进程退出才回到 `None`。
 
 ### 4.2 悬停预热
 
@@ -138,7 +138,7 @@ GPUI 在 `Application::run` 内部、启动回调之前创建 D3D 设备（`conn
 ### 4.3 关闭
 
 - 最后一个窗口关闭时，界面进程调用 `cx.quit()`，整个进程退出，GPU 驱动占用随之释放。
-- 已成功连接的界面在管道断开后关闭所有窗口并退出，释放界面互斥量。核心确认界面进程退出后设为 `none`；重新启动的核心从托盘打开新的界面进程。
+- 已成功连接的界面在管道断开后关闭所有窗口并退出，释放界面互斥量。核心在连接注销后以 `Closing` 保留进程句柄，收到退出信号后才回到 `None`，并执行关闭期间新收到的打开请求。
 - 用户在托盘选择"退出 Quartz"时，核心先通知界面关闭，再结算当前区间、关闭数据库，最后退出。
 
 ### 4.4 核心不在时的界面

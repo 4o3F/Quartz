@@ -1,9 +1,14 @@
 //! Pure connection state and request decisions, independent of named pipes.
 
+use super::{
+    ProcessId,
+    registry::{ConnectionPeer, UiPeer},
+};
+
 use quartz_protocol::{
-    CoreStatusRequest, CoreStatusResponse, Envelope, ErrorKind, Hello, HelloResponse, Op,
-    PROTOCOL_VERSION, ProtoRange, ProtocolError, RequestId, Response, ResponseOutcome, Role,
-    Subscribe, UiFirstFrameRequest, UiOpenRequest,
+    CoreStatusRequest, CoreStatusResponse, Envelope, ErrorKind, Hello, HelloResponse, HelloRole,
+    Op, PROTOCOL_VERSION, ProtoRange, ProtocolError, RequestId, Response, ResponseOutcome, Role,
+    Subscribe, UiFirstFrameRequest, UiOpenRequest, UiState,
 };
 
 /// Roles permitted by the authenticated executable path.
@@ -23,13 +28,54 @@ impl AllowedRoles {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UiCommand {
     Open,
-    FirstFrame,
+    FirstFrame {
+        connection: super::registry::ConnectionId,
+    },
+    Registered {
+        connection: super::registry::ConnectionId,
+        pid: ProcessId,
+        state: quartz_protocol::UiState,
+    },
+    Unregistered {
+        connection: super::registry::ConnectionId,
+    },
     SettingsChanged(quartz_protocol::EffectiveUiSettings),
+}
+#[derive(Debug, Clone, Copy)]
+enum ReadyRole {
+    Ui { state: UiState },
+    Cli,
+    Host,
+}
+impl ReadyRole {
+    fn role(self) -> Role {
+        match self {
+            Self::Ui { .. } => Role::Ui,
+            Self::Cli => Role::Cli,
+            Self::Host => Role::Host,
+        }
+    }
+    fn peer(self, pid: ProcessId) -> ConnectionPeer {
+        match self {
+            Self::Ui { state } => ConnectionPeer::Ui(UiPeer { pid, state }),
+            Self::Cli => ConnectionPeer::Cli,
+            Self::Host => ConnectionPeer::Host,
+        }
+    }
+}
+impl From<HelloRole> for ReadyRole {
+    fn from(role: HelloRole) -> Self {
+        match role {
+            HelloRole::Ui { ui } => Self::Ui { state: ui.state },
+            HelloRole::Cli => Self::Cli,
+            HelloRole::Host { .. } => Self::Host,
+        }
+    }
 }
 #[derive(Debug)]
 enum State {
     HelloPending,
-    Ready(Role),
+    Ready(ReadyRole),
     Closing,
 }
 #[derive(Debug)]
@@ -40,6 +86,9 @@ pub(crate) struct ConnectionSession {
 #[derive(Debug)]
 pub(crate) enum Action {
     Reply(Response),
+    FirstFrame {
+        id: RequestId,
+    },
     Timed {
         id: RequestId,
         command: super::TimedCommand,
@@ -111,9 +160,9 @@ impl ConnectionSession {
     pub(crate) fn hello_pending(&self) -> bool {
         matches!(self.state, State::HelloPending)
     }
-    pub(crate) fn role(&self) -> Option<Role> {
+    pub(crate) fn peer(&self, pid: ProcessId) -> Option<ConnectionPeer> {
         match self.state {
-            State::Ready(role) => Some(role),
+            State::Ready(role) => Some(role.peer(pid)),
             State::HelloPending | State::Closing => None,
         }
     }
@@ -157,7 +206,7 @@ impl ConnectionSession {
                 if !self.allowed.permits(role) || role == Role::Host {
                     return Action::error(Some(id), ErrorKind::Forbidden);
                 }
-                self.state = State::Ready(role);
+                self.state = State::Ready(hello.role.into());
                 Action::success(
                     id,
                     HelloResponse {
@@ -169,6 +218,7 @@ impl ConnectionSession {
                 )
             }
             State::Ready(role) => {
+                let role = role.role();
                 if request.op == Op::Unknown {
                     return Action::error(Some(id), ErrorKind::UnknownOp);
                 }
@@ -202,7 +252,7 @@ impl ConnectionSession {
                             {
                                 return Action::error(Some(id), ErrorKind::BadRequest);
                             }
-                            UiCommand::FirstFrame
+                            return Action::FirstFrame { id };
                         };
                         Action::Ui { id, command }
                     }
@@ -455,7 +505,7 @@ mod tests {
         ));
         let receiver = publisher.subscribe();
         let status = receiver.borrow();
-        for role in [Role::Cli, Role::Host] {
+        for role in [ReadyRole::Cli, ReadyRole::Host] {
             let mut session = ConnectionSession {
                 state: State::Ready(role),
                 allowed: AllowedRoles::Quartz,
@@ -473,7 +523,9 @@ mod tests {
             }
         }
         let mut ui = ConnectionSession {
-            state: State::Ready(Role::Ui),
+            state: State::Ready(ReadyRole::Ui {
+                state: UiState::Starting,
+            }),
             allowed: AllowedRoles::Quartz,
         };
         for body in [
@@ -513,7 +565,7 @@ mod tests {
             Op::TrackingKeepAlive,
             Op::PrivacyModeSet,
         ];
-        for role in [Role::Cli, Role::Host] {
+        for role in [ReadyRole::Cli, ReadyRole::Host] {
             let mut session = ConnectionSession {
                 state: State::Ready(role),
                 allowed: AllowedRoles::Quartz,
@@ -531,7 +583,9 @@ mod tests {
             }
         }
         let mut ui = ConnectionSession {
-            state: State::Ready(Role::Ui),
+            state: State::Ready(ReadyRole::Ui {
+                state: UiState::Starting,
+            }),
             allowed: AllowedRoles::Quartz,
         };
         for op in [Op::TrackingPause, Op::TrackingKeepAlive, Op::PrivacyModeSet] {

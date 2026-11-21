@@ -69,6 +69,23 @@ impl Fixture {
     fn cli(&self) -> CoreClient {
         CoreClient::connect_named(&self.name, HelloRole::Cli).expect("cli handshake")
     }
+    fn ui_registration(&self) -> crate::ipc::registry::ConnectionId {
+        let UiCommand::Registered {
+            connection, pid, ..
+        } = self
+            .commands
+            .recv_timeout(CONNECT_TIMEOUT)
+            .expect("UI registration")
+        else {
+            panic!("expected UI registration")
+        };
+        assert_eq!(
+            pid,
+            crate::ipc::ProcessId::new(std::process::id()),
+            "pipe transport reports verified peer PID"
+        );
+        connection
+    }
     fn ui(&self) -> CoreClient {
         CoreClient::connect_named(
             &self.name,
@@ -144,6 +161,19 @@ fn handshake_status_and_ui_open_delivery() {
         UiCommand::Open
     );
     let mut ui = fixture.ui();
+    let UiCommand::Registered {
+        connection,
+        pid,
+        state,
+    } = fixture
+        .commands
+        .recv_timeout(CONNECT_TIMEOUT)
+        .expect("registration")
+    else {
+        panic!("expected UI registration")
+    };
+    assert_eq!(pid, crate::ipc::ProcessId::new(std::process::id()));
+    assert_eq!(state, quartz_protocol::UiState::Starting);
     assert_eq!(
         ui.request(Op::UiFirstFrame, &json!({}))
             .expect("first frame"),
@@ -154,7 +184,7 @@ fn handshake_status_and_ui_open_delivery() {
             .commands
             .recv_timeout(CONNECT_TIMEOUT)
             .expect("first frame command"),
-        UiCommand::FirstFrame
+        UiCommand::FirstFrame { connection }
     );
     fixture.stop();
     assert_closed(&mut cli);
@@ -1069,6 +1099,7 @@ fn core_runtime_with_fake_ports_flushes_shutdown_over_test_pipe() {
 fn unsubscribe_stops_state_pushes_and_keeps_implicit_controls() {
     let fixture = Fixture::new();
     let mut ui = fixture.ui();
+    let connection = fixture.ui_registration();
     ui.request(Op::Subscribe, &json!({"topics":["state"]}))
         .expect("subscribe state");
     state_event(&mut ui);
@@ -1077,7 +1108,9 @@ fn unsubscribe_stops_state_pushes_and_keeps_implicit_controls() {
             .expect("idempotent unsubscribe");
     }
     publish_change(&fixture.status, 1);
-    fixture.server.control(quartz_protocol::ControlOp::UiShow);
+    fixture
+        .server
+        .target_control(connection, quartz_protocol::ControlOp::UiShow);
     let Envelope::Event(event) = ui.read_envelope().expect("implicit show") else {
         panic!("control event");
     };
@@ -1098,6 +1131,7 @@ fn unsubscribe_stops_state_pushes_and_keeps_implicit_controls() {
 fn unsubscribe_removes_state_and_preserves_implicit_ui_control() {
     let fixture = Fixture::new();
     let mut ui = fixture.ui();
+    let connection = fixture.ui_registration();
     ui.request(Op::Subscribe, &json!({"topics":["state"]}))
         .expect("subscribe state");
     state_event(&mut ui);
@@ -1106,7 +1140,9 @@ fn unsubscribe_removes_state_and_preserves_implicit_ui_control() {
     ui.request(Op::Unsubscribe, &json!({"topics":["state"]}))
         .expect("idempotent removal");
     publish_change(&fixture.status, 1);
-    fixture.server.control(quartz_protocol::ControlOp::UiShow);
+    fixture
+        .server
+        .target_control(connection, quartz_protocol::ControlOp::UiShow);
     let Envelope::Event(event) = ui.read_envelope().expect("implicit show control") else {
         panic!("control event");
     };

@@ -1,7 +1,7 @@
 //! Connection registry actor; fan-out never awaits a client writer.
 
 use super::{
-    PublishedStatus,
+    ProcessId, PublishedStatus, UiCommand, UiPort,
     outbox::{OutboxHandle, QueueFrameError},
 };
 use quartz_protocol::{ControlBody, ControlOp, Response, Role, Subscribe, Topic};
@@ -19,11 +19,41 @@ const REGISTRY_MAILBOX_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ConnectionId(u64);
+impl ConnectionId {
+    #[cfg(test)]
+    pub(crate) const fn for_test(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Kernel-authenticated identity and the UI phase declared in hello.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UiPeer {
+    pub pid: ProcessId,
+    pub state: quartz_protocol::UiState,
+}
+
+/// Authenticated role metadata; a UI registration always includes its PID and hello phase.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ConnectionPeer {
+    Ui(UiPeer),
+    Cli,
+    Host,
+}
+impl ConnectionPeer {
+    fn role(self) -> Role {
+        match self {
+            Self::Ui(_) => Role::Ui,
+            Self::Cli => Role::Cli,
+            Self::Host => Role::Host,
+        }
+    }
+}
 
 enum RegistryMessage {
     Register {
         id: ConnectionId,
-        role: Role,
+        peer: ConnectionPeer,
         outbox: OutboxHandle,
     },
     Unregister {
@@ -41,6 +71,10 @@ enum RegistryMessage {
         reply: oneshot::Sender<()>,
     },
     Control(ControlOp),
+    TargetControl {
+        connection: ConnectionId,
+        op: ControlOp,
+    },
     Outboxes {
         reply: oneshot::Sender<Vec<OutboxHandle>>,
     },
@@ -59,6 +93,7 @@ impl RegistryHandle {
     pub(crate) fn start(
         status: watch::Receiver<PublishedStatus>,
         versions: crate::query::versions::VersionPort,
+        ui: UiPort,
     ) -> Self {
         let (mailbox, receiver) = mpsc::channel(REGISTRY_MAILBOX_CAPACITY);
         let handle = Self {
@@ -68,6 +103,7 @@ impl RegistryHandle {
         tokio::spawn(
             ConnectionRegistry {
                 receiver,
+                ui,
                 status,
                 versions,
                 connections: BTreeMap::new(),
@@ -84,7 +120,7 @@ impl RegistryHandle {
     }
     pub(crate) fn register(
         &self,
-        role: Role,
+        peer: ConnectionPeer,
         outbox: OutboxHandle,
     ) -> Result<Registration, QueueRegistryError> {
         let id = ConnectionId(
@@ -95,7 +131,7 @@ impl RegistryHandle {
                         .expect("u64 counter cannot overflow in practice")
                 }),
         );
-        self.send(RegistryMessage::Register { id, role, outbox })?;
+        self.send(RegistryMessage::Register { id, peer, outbox })?;
         Ok(Registration {
             id,
             registry: self.clone(),
@@ -129,6 +165,13 @@ impl RegistryHandle {
         })
         .map_err(|_| QueueFrameError::Closed)?;
         received.await.map_err(|_| QueueFrameError::Closed)?
+    }
+    pub(crate) fn target_control(
+        &self,
+        connection: ConnectionId,
+        op: ControlOp,
+    ) -> Result<(), QueueRegistryError> {
+        self.send(RegistryMessage::TargetControl { connection, op })
     }
     pub(crate) fn control(&self, op: ControlOp) -> Result<(), QueueRegistryError> {
         self.send(RegistryMessage::Control(op))
@@ -172,7 +215,20 @@ struct Connection {
     days: BTreeMap<quartz_protocol::LocalDate, quartz_protocol::DayChanged>,
     outbox: OutboxHandle,
 }
+impl Connection {
+    fn deliver_control(&self, op: ControlOp) {
+        let body = ControlBody {
+            op,
+            fields: serde_json::Map::new(),
+        };
+        if let Err(error) = self.outbox.control(body) {
+            tracing::debug!(%error, "control delivery closed slow connection");
+            self.outbox.close();
+        }
+    }
+}
 struct ConnectionRegistry {
+    ui: UiPort,
     receiver: mpsc::Receiver<RegistryMessage>,
     status: watch::Receiver<PublishedStatus>,
     versions: crate::query::versions::VersionPort,
@@ -183,8 +239,13 @@ impl ConnectionRegistry {
         let mut publisher = VersionPublisher::Active;
         loop {
             let mut removed_days = std::collections::BTreeSet::new();
-            self.connections.retain(|_, connection| {
+            self.connections.retain(|id, connection| {
                 if connection.outbox.is_closed() {
+                    if connection.role == Role::Ui
+                        && let Err(error) = (self.ui)(UiCommand::Unregistered { connection: *id })
+                    {
+                        tracing::warn!(%error, "could not report UI disconnection");
+                    }
                     removed_days.extend(connection.days.keys().copied());
                     false
                 } else {
@@ -232,11 +293,21 @@ impl ConnectionRegistry {
     }
     async fn receive(&mut self, message: RegistryMessage) {
         match message {
-            RegistryMessage::Register { id, role, outbox } => {
+            RegistryMessage::Register { id, peer, outbox } => {
+                if let ConnectionPeer::Ui(ui) = peer
+                    && let Err(error) = (self.ui)(UiCommand::Registered {
+                        connection: id,
+                        pid: ui.pid,
+                        state: ui.state,
+                    })
+                {
+                    tracing::warn!(%error, "could not report UI registration");
+                    outbox.close();
+                }
                 self.connections.insert(
                     id,
                     Connection {
-                        role,
+                        role: peer.role(),
                         state: StateSubscription::Absent,
                         days: BTreeMap::new(),
                         outbox,
@@ -245,6 +316,11 @@ impl ConnectionRegistry {
             }
             RegistryMessage::Unregister { id } => {
                 if let Some(connection) = self.connections.remove(&id) {
+                    if connection.role == Role::Ui
+                        && let Err(error) = (self.ui)(UiCommand::Unregistered { connection: id })
+                    {
+                        tracing::warn!(%error, "could not report UI disconnection");
+                    }
                     self.prune_days(connection.days.into_keys().collect()).await;
                 }
             }
@@ -283,32 +359,34 @@ impl ConnectionRegistry {
                     tracing::debug!("unsubscribe caller left");
                 }
             }
-            RegistryMessage::Control(op) => {
-                match op {
-                    ControlOp::UiShutdown | ControlOp::UiShow | ControlOp::UiActivate => {}
-                    ControlOp::BrowserAck
-                    | ControlOp::BrowserPolicy
-                    | ControlOp::CoreOffline
-                    | ControlOp::BrowserPurge => {
-                        // TODO(M5): Route browser control by its authenticated stream.
-                        tracing::warn!("browser control fan-out awaits M5 routing");
-                        return;
-                    }
+            RegistryMessage::TargetControl { connection, op } => {
+                if !matches!(op, ControlOp::UiShow | ControlOp::UiActivate) {
+                    tracing::warn!(?op, "rejected unsupported targeted control");
+                    return;
                 }
-                // UI lifecycle control is implicit for every UI hello (04 §6.1).
+                match self
+                    .connections
+                    .get(&connection)
+                    .filter(|peer| peer.role == Role::Ui)
+                {
+                    Some(peer) => peer.deliver_control(op),
+                    None => tracing::warn!(
+                        ?connection,
+                        "UI control destination is no longer registered"
+                    ),
+                }
+            }
+            RegistryMessage::Control(op) => {
+                if op != ControlOp::UiShutdown {
+                    tracing::warn!(?op, "rejected unsupported broadcast control");
+                    return;
+                }
                 for connection in self
                     .connections
                     .values()
-                    .filter(|connection| connection.role == Role::Ui)
+                    .filter(|peer| peer.role == Role::Ui)
                 {
-                    let body = ControlBody {
-                        op,
-                        fields: serde_json::Map::new(),
-                    };
-                    if let Err(error) = connection.outbox.control(body) {
-                        tracing::debug!(%error, "control delivery closed slow connection");
-                        connection.outbox.close();
-                    }
+                    connection.deliver_control(op);
                 }
             }
             RegistryMessage::Outboxes { reply } => {
@@ -452,10 +530,11 @@ mod tests {
             let channel =
                 crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
                     .expect("versions");
-            let registry = RegistryHandle::start(status.subscribe(), channel.port);
+            let registry =
+                RegistryHandle::start(status.subscribe(), channel.port, Arc::new(|_| Ok(())));
             let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
             let cli = registry
-                .register(Role::Cli, writer.handle.clone())
+                .register(ConnectionPeer::Cli, writer.handle.clone())
                 .expect("register cli");
             assert_eq!(
                 registry.outboxes().await.expect("register barrier").len(),
@@ -473,7 +552,7 @@ mod tests {
             );
 
             let _cli = registry
-                .register(Role::Cli, writer.handle.clone())
+                .register(ConnectionPeer::Cli, writer.handle.clone())
                 .expect("register closed cli");
             registry.outboxes().await.expect("register barrier");
             writer.handle.close();
@@ -517,11 +596,12 @@ mod tests {
             let (_sender, receiver) = mpsc::channel(REGISTRY_MAILBOX_CAPACITY);
             let mut registry = ConnectionRegistry {
                 receiver,
+                ui: Arc::new(|_| Ok(())),
                 status: status.subscribe(),
                 versions: channel.port,
                 connections: BTreeMap::new(),
             };
-            for id in [ConnectionId(1), ConnectionId(2)] {
+            for id in [ConnectionId::for_test(1), ConnectionId::for_test(2)] {
                 registry.connections.insert(
                     id,
                     Connection {
@@ -535,7 +615,7 @@ mod tests {
             tokio::time::timeout(
                 TEST_BARRIER_TIMEOUT,
                 registry.receive(RegistryMessage::Unregister {
-                    id: ConnectionId(1),
+                    id: ConnectionId::for_test(1),
                 }),
             )
             .await
@@ -544,7 +624,7 @@ mod tests {
             let removal = tokio::spawn(async move {
                 registry
                     .receive(RegistryMessage::Unregister {
-                        id: ConnectionId(2),
+                        id: ConnectionId::for_test(2),
                     })
                     .await;
             });
@@ -575,10 +655,20 @@ mod tests {
             .set_summary_day(today)
             .await
             .expect("tray day");
-        let registry = RegistryHandle::start(status.subscribe(), database.versions.clone());
+        let registry = RegistryHandle::start(
+            status.subscribe(),
+            database.versions.clone(),
+            Arc::new(|_| Ok(())),
+        );
         let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
         let registration = registry
-            .register(Role::Ui, writer.handle.clone())
+            .register(
+                ConnectionPeer::Ui(UiPeer {
+                    pid: ProcessId::new(std::process::id()),
+                    state: quartz_protocol::UiState::Starting,
+                }),
+                writer.handle.clone(),
+            )
             .expect("register");
         registry
             .subscribe(
@@ -619,10 +709,17 @@ mod tests {
                 crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("registry".into()));
             let database = crate::query::dispatch::test_support::TestDatabase::start();
             let versions = database.versions.clone();
-            let registry = RegistryHandle::start(publisher.subscribe(), versions);
+            let registry =
+                RegistryHandle::start(publisher.subscribe(), versions, Arc::new(|_| Ok(())));
             let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
             let registration = registry
-                .register(Role::Ui, writer.handle.clone())
+                .register(
+                    ConnectionPeer::Ui(UiPeer {
+                        pid: ProcessId::new(std::process::id()),
+                        state: quartz_protocol::UiState::Starting,
+                    }),
+                    writer.handle.clone(),
+                )
                 .expect("register");
             assert_eq!(registry.outboxes().await.expect("barrier").len(), 1);
             drop(registration);

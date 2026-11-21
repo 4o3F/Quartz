@@ -1,5 +1,7 @@
 //! Windows named-pipe discovery and mutual identity checks.
 mod client;
+mod ui_instance;
+pub use ui_instance::{AcquireUiInstance, AcquireUiInstanceError, UiInstance};
 mod identity;
 mod pipe_name;
 mod readiness;

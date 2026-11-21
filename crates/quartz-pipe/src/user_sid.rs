@@ -5,6 +5,11 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UserSid(String);
 impl UserSid {
+    /// Names this user's UI mutex within the caller's Windows session.
+    pub fn ui_mutex_name(&self) -> String {
+        format!("Local\\Quartz.{self}.ui")
+    }
+
     #[cfg(windows)]
     pub(crate) fn from_token_string(value: String) -> Self {
         Self(value)

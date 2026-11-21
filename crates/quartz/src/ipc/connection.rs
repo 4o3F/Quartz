@@ -1,6 +1,7 @@
 //! Framed protocol sessions over arbitrary asynchronous transport halves.
 use super::{
-    ConnectionSession, Services, outbox::OutboxTask, registry::RegistryHandle, session::Action,
+    ConnectionSession, ProcessId, Services, outbox::OutboxTask, registry::RegistryHandle,
+    session::Action,
 };
 use futures_util::StreamExt;
 use quartz_protocol::{Envelope, ErrorKind, ProtocolError, decode_json, frame_codec};
@@ -33,6 +34,7 @@ pub(crate) struct Connection {
     pub services: Services,
     pub registry: RegistryHandle,
     pub timeouts: ConnectionTimeouts,
+    pub peer_pid: ProcessId,
 }
 impl Connection {
     pub(crate) async fn run<R, W>(
@@ -82,16 +84,32 @@ impl Connection {
                 Some(Err(error)) => return Err(error),
             };
             if registration.is_none()
-                && let Some(role) = session.role()
+                && let Some(peer) = session.peer(self.peer_pid)
             {
                 registration = Some(
                     self.registry
-                        .register(role, outbox.clone())
+                        .register(peer, outbox.clone())
                         .map_err(io::Error::other)?,
                 );
             }
             let response = match action {
                 Action::Reply(response) => Some(response),
+                Action::FirstFrame { id } => {
+                    let connection = registration.as_ref().expect("first frame follows hello").id;
+                    Some(
+                        match (self.services.ui)(super::UiCommand::FirstFrame { connection }) {
+                            Ok(()) => Action::success_response(id, quartz_protocol::AcceptedBody),
+                            Err(error) => {
+                                tracing::warn!(%error, "could not queue UI first frame");
+                                Action::error_response(
+                                    Some(id),
+                                    ProtocolError::new(ErrorKind::Internal),
+                                )
+                            }
+                        },
+                    )
+                }
+
                 Action::Timed { id, command } => Some(match self.services.timed.call(command) {
                     Ok(response) => Action::success_response(id, response),
                     Err(error) => Action::error_response(Some(id), error),
@@ -221,7 +239,12 @@ mod tests {
                 status: status.subscribe(),
                 ui: Arc::new(|_| Ok(())),
             },
-            registry: RegistryHandle::start(status.subscribe(), database.versions.clone()),
+            registry: RegistryHandle::start(
+                status.subscribe(),
+                database.versions.clone(),
+                Arc::new(|_| Ok(())),
+            ),
+            peer_pid: ProcessId::new(std::process::id()),
             timeouts: ConnectionTimeouts {
                 hello: HELLO_TIMEOUT,
                 close_flush: TEST_CLOSE_TIMEOUT,
@@ -322,5 +345,207 @@ mod tests {
                 .expect("connection task")
                 .expect("connection close");
         });
+    }
+    /// Real session/registry/outbox actors with in-memory pipes and no processes or windows.
+    struct MemoryClient {
+        frames: Framed<tokio::io::DuplexStream, LengthDelimitedCodec>,
+        task: tokio::task::JoinHandle<io::Result<()>>,
+    }
+    impl MemoryClient {
+        async fn connect(connection: Connection, role: HelloRole) -> Self {
+            let (server, client) = tokio::io::duplex(TEST_BUFFER_BYTES);
+            let task = tokio::spawn(async move {
+                let (read, write) = split(server);
+                connection
+                    .run(
+                        read,
+                        write,
+                        &mut ConnectionSession::new(AllowedRoles::Quartz),
+                        tokio::time::Instant::now() + HELLO_TIMEOUT,
+                    )
+                    .await
+            });
+            let mut client = Self {
+                frames: Framed::new(client, frame_codec()),
+                task,
+            };
+            let hello = quartz_protocol::Hello {
+                proto: quartz_protocol::ProtoRange::new(PROTOCOL_VERSION, PROTOCOL_VERSION)
+                    .expect("range"),
+                client_version: quartz_protocol::ClientVersion("memory".into()),
+                role,
+            };
+            client
+                .request(
+                    1,
+                    quartz_protocol::Op::Hello,
+                    serde_json::to_value(hello).expect("hello"),
+                )
+                .await;
+            client
+        }
+        async fn next(&mut self) -> Envelope {
+            let payload = tokio::time::timeout(HELLO_TIMEOUT, self.frames.next())
+                .await
+                .expect("frame deadline")
+                .expect("connected")
+                .expect("frame");
+            decode_json(&payload).expect("envelope")
+        }
+        async fn request(&mut self, id: u64, op: quartz_protocol::Op, body: serde_json::Value) {
+            let payload =
+                quartz_protocol::encode_json(&Envelope::Request(quartz_protocol::Request {
+                    id: RequestId(id),
+                    op,
+                    body,
+                }))
+                .expect("encode request");
+            self.frames.send(payload.as_slice()).await.expect("send");
+            let Envelope::Response(response) = self.next().await else {
+                panic!("request response")
+            };
+            assert_eq!(response.id, Some(RequestId(id)));
+            assert!(
+                matches!(response.outcome, ResponseOutcome::Ok { .. }),
+                "{response:?}"
+            );
+        }
+        async fn control(&mut self, expected: quartz_protocol::ControlOp) {
+            let Envelope::Event(event) = self.next().await else {
+                panic!("control event")
+            };
+            assert_eq!(event.topic, quartz_protocol::Topic::Control);
+            let body: quartz_protocol::ControlBody =
+                serde_json::from_value(event.body).expect("control body");
+            assert_eq!(body.op, expected);
+        }
+        async fn quiet(&mut self) {
+            assert!(
+                tokio::time::timeout(TEST_CLOSE_TIMEOUT, self.frames.next())
+                    .await
+                    .is_err(),
+                "unselected connection must receive no control"
+            );
+        }
+        async fn close(self) {
+            drop(self.frames);
+            self.task
+                .await
+                .expect("connection task")
+                .expect("connection close");
+        }
+    }
+    #[tokio::test]
+    async fn ui_hello_close_and_targeted_control_use_the_same_connection_identity() {
+        use crate::ipc::{UiCommand, registry::ConnectionId};
+        use quartz_protocol::{ControlOp, UiHello, UiState};
+        let database = TestDatabase::start();
+        let status = StatusPublisher::new(quartz_protocol::InstanceId("ui-lifecycle".into()));
+        let (send, mut commands) = tokio::sync::mpsc::channel(crate::ipc::MAIN_COMMAND_CAPACITY);
+        let mut services = connection(&database, &status).services;
+        services.ui =
+            Arc::new(move |command| send.try_send(command).map_err(|_| crate::ipc::QueueUiError));
+        let registry = services.start_registry();
+        const VERIFIED_PID: ProcessId = ProcessId::new(42);
+        let make_connection = || Connection {
+            services: services.clone(),
+            registry: registry.clone(),
+            timeouts: ConnectionTimeouts::default(),
+            peer_pid: VERIFIED_PID,
+        };
+        let mut cli = MemoryClient::connect(make_connection(), HelloRole::Cli).await;
+        assert!(
+            commands.try_recv().is_err(),
+            "CLI hello emits no UI registration"
+        );
+        for phase in [UiState::Starting, UiState::Prewarming, UiState::Visible] {
+            let mut first = MemoryClient::connect(
+                make_connection(),
+                HelloRole::Ui {
+                    ui: UiHello { state: phase },
+                },
+            )
+            .await;
+            let UiCommand::Registered {
+                connection: registered,
+                pid,
+                state,
+            } = commands.recv().await.expect("UI registration")
+            else {
+                panic!("registered command")
+            };
+            assert_eq!(pid, VERIFIED_PID, "verified transport PID is reported");
+            assert_eq!(state, phase);
+            let mut second = MemoryClient::connect(
+                make_connection(),
+                HelloRole::Ui {
+                    ui: UiHello {
+                        state: UiState::Visible,
+                    },
+                },
+            )
+            .await;
+            let UiCommand::Registered {
+                connection: other, ..
+            } = commands.recv().await.expect("second registration")
+            else {
+                panic!("registered command")
+            };
+            assert_ne!(registered, other);
+            for op in [ControlOp::UiShow, ControlOp::UiActivate] {
+                registry
+                    .target_control(registered, op)
+                    .expect("target control");
+                first.control(op).await;
+                second.quiet().await;
+                cli.quiet().await;
+            }
+            first
+                .request(2, quartz_protocol::Op::UiFirstFrame, serde_json::json!({}))
+                .await;
+            assert_eq!(
+                commands.recv().await,
+                Some(UiCommand::FirstFrame {
+                    connection: registered
+                })
+            );
+            registry
+                .control(ControlOp::UiShutdown)
+                .expect("broadcast shutdown");
+            first.control(ControlOp::UiShutdown).await;
+            second.control(ControlOp::UiShutdown).await;
+            cli.quiet().await;
+            first.close().await;
+            assert_eq!(
+                commands.recv().await,
+                Some(UiCommand::Unregistered {
+                    connection: registered
+                })
+            );
+            registry
+                .target_control(registered, ControlOp::UiActivate)
+                .expect("stale target");
+            registry
+                .target_control(ConnectionId::for_test(u64::MAX), ControlOp::UiShow)
+                .expect("unknown target");
+            registry
+                .target_control(other, ControlOp::UiShutdown)
+                .expect("reject targeted shutdown");
+            registry
+                .control(ControlOp::UiActivate)
+                .expect("reject broadcast activation");
+            second.quiet().await;
+            second.close().await;
+            assert_eq!(
+                commands.recv().await,
+                Some(UiCommand::Unregistered { connection: other })
+            );
+        }
+        cli.close().await;
+        registry.outboxes().await.expect("cleanup barrier");
+        assert!(
+            commands.try_recv().is_err(),
+            "no duplicate unregister notifications"
+        );
     }
 }

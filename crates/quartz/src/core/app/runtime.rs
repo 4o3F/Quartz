@@ -30,6 +30,11 @@ pub(crate) struct PipePorts {
 
 pub(crate) trait CorePipe: Send {
     fn control(&self, op: quartz_protocol::ControlOp);
+    fn target_control(
+        &self,
+        connection: crate::ipc::registry::ConnectionId,
+        op: quartz_protocol::ControlOp,
+    );
     /// Flushes pending control messages within the transport's shutdown budget and joins I/O.
     fn shutdown(self: Box<Self>) -> Result<(), CallPlatformPortError>;
 }
@@ -140,6 +145,18 @@ impl DataDirectory {
     }
 }
 impl CoreRuntime {
+    pub(crate) fn target_ui(
+        &self,
+        connection: crate::ipc::registry::ConnectionId,
+        op: quartz_protocol::ControlOp,
+    ) {
+        if let Some(pipe) = &self.pipe {
+            pipe.target_control(connection, op);
+        } else {
+            tracing::warn!("UI control requested after pipe shutdown");
+        }
+    }
+
     pub(crate) fn start(
         directory: &DataDirectory,
         ports: PlatformPorts,

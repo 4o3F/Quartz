@@ -13,6 +13,7 @@ pub(crate) use timed::{TimedCommand, TimedDeadline, TimedPolicyPort};
 #[cfg(test)]
 pub(crate) use crate::persistence::dispatch::WriteChannel;
 
+pub(crate) use crate::process_id::ProcessId;
 pub(crate) use session::{AllowedRoles, ConnectionSession, UiCommand};
 pub(crate) use status::{PublishedStatus, StatusPublisher};
 
@@ -35,7 +36,7 @@ impl Services {
             task.clone()
                 .start(self.queries.clone(), self.versions.clone());
         }
-        registry::RegistryHandle::start(self.status.clone(), self.versions.clone())
+        registry::RegistryHandle::start(self.status.clone(), self.versions.clone(), self.ui.clone())
     }
 }
 
@@ -63,12 +64,13 @@ impl UiCommands {
                 UiCommand::SettingsChanged(effective) => {
                     settings_sender.send_replace(Some(effective));
                 }
-                UiCommand::Open | UiCommand::FirstFrame => {
-                    sender.try_send(command).map_err(|error| {
-                        tracing::warn!(%error, "could not queue IPC command for main thread");
-                        QueueUiError
-                    })?
-                }
+                UiCommand::Open
+                | UiCommand::FirstFrame { .. }
+                | UiCommand::Registered { .. }
+                | UiCommand::Unregistered { .. } => sender.try_send(command).map_err(|error| {
+                    tracing::warn!(%error, "could not queue IPC command for main thread");
+                    QueueUiError
+                })?,
             }
             wake(command)
         });

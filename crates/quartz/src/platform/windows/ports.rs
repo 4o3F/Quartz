@@ -42,10 +42,14 @@ impl PlatformPorts {
             ui_wake: Arc::new(move |command| {
                 let message = match command {
                     crate::ipc::UiCommand::Open => tray::window::AppMessage::OpenUi,
-                    crate::ipc::UiCommand::SettingsChanged(_) => {
+                    crate::ipc::UiCommand::Registered { .. }
+                    | crate::ipc::UiCommand::Unregistered { .. }
+                    | crate::ipc::UiCommand::SettingsChanged(_) => {
                         tray::window::AppMessage::WakeWorkers
                     }
-                    crate::ipc::UiCommand::FirstFrame => tray::window::AppMessage::UiFirstFrame,
+                    crate::ipc::UiCommand::FirstFrame { .. } => {
+                        tray::window::AppMessage::UiFirstFrame
+                    }
                 };
                 // SAFETY: The main thread owns an existing queue; the typed message has no pointers.
                 unsafe { PostThreadMessageW(main_thread, u32::from(message), WPARAM(0), LPARAM(0)) }
@@ -76,6 +80,14 @@ impl PlatformPorts {
     }
 }
 impl CorePipe for ipc::PipeServer {
+    fn target_control(
+        &self,
+        connection: crate::ipc::registry::ConnectionId,
+        op: quartz_protocol::ControlOp,
+    ) {
+        self.target_control(connection, op);
+    }
+
     fn control(&self, op: quartz_protocol::ControlOp) {
         self.control(op);
     }
