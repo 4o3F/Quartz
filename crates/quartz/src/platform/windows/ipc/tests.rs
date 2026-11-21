@@ -2,8 +2,9 @@
 
 use super::server::StartPipeServerError;
 use super::*;
-use crate::ipc::{StatusPublisher, UiCommand, client::CallCoreError};
+use crate::ipc::{StatusPublisher, UiCommand};
 use crossbeam_channel::{Receiver, bounded};
+use quartz_pipe::CallCoreError;
 use quartz_protocol::{
     CoreStatusResponse, Envelope, ErrorKind, HelloRole, MAX_FRAME_LEN, Op, PROTOCOL_VERSION,
     ProtocolError, RequestId, Response, ResponseOutcome, UiHello, UiState,
@@ -121,9 +122,7 @@ fn assert_closed(client: &mut CoreClient) {
     assert!(
         match client.read_envelope() {
             Err(CallCoreError::Io { source }) => source.kind() != std::io::ErrorKind::TimedOut,
-            Err(CallCoreError::Decode { source }) => source
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() != std::io::ErrorKind::TimedOut),
+            Err(CallCoreError::Frame { source }) => source.kind() != std::io::ErrorKind::TimedOut,
             _ => false,
         },
         "server must close after final error"
@@ -186,6 +185,7 @@ fn incompatible_protocol_reports_supported_range_and_closes() {
         ErrorKind::ProtoMismatch {
             supported: quartz_protocol::ProtoRange::new(PROTOCOL_VERSION, PROTOCOL_VERSION)
                 .expect("range"),
+            core_version: quartz_protocol::CoreVersion(env!("CARGO_PKG_VERSION").into()),
         },
     );
     assert_closed(&mut client);
@@ -271,7 +271,7 @@ fn eight_clients_hold_all_slots_and_disconnect_releases_one() {
     let mut clients: Vec<_> = (0..8).map(|_| fixture.cli()).collect();
     assert!(matches!(
         CoreClient::open_named(&fixture.name),
-        Err(CallCoreError::Connect { source }) if matches!(source.downcast_ref::<OpenCorePipeError>(), Some(OpenCorePipeError::Busy { .. }))
+        Err(CallCoreError::Open { source }) if matches!(source, OpenCorePipeError::Busy { .. })
     ));
     drop(clients.pop());
     assert!(fixture.cli().status().is_ok());
@@ -308,6 +308,16 @@ fn first_instance_refuses_an_occupied_name() {
         Err(StartPipeServerError::NameOccupied { .. })
     ));
     assert!(fixture.cli().status().is_ok());
+    let waiter =
+        quartz_pipe::CoreReadyWaiter::new(&fixture.name).expect("existing server readiness");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .max_blocking_threads(1)
+        .build()
+        .expect("readiness test runtime")
+        .block_on(async { tokio::time::timeout(CONNECT_TIMEOUT, waiter.wait()).await })
+        .expect("failed duplicate startup must preserve readiness")
+        .expect("existing server remains ready");
 }
 
 #[test]
@@ -325,7 +335,7 @@ fn missing_pipe_is_a_typed_core_not_running_error() {
     let name = PipeName::for_test(suffix);
     assert!(matches!(
         CoreClient::open_named(&name),
-        Err(CallCoreError::Connect { source }) if matches!(source.downcast_ref::<OpenCorePipeError>(), Some(OpenCorePipeError::CoreNotRunning { .. }))
+        Err(CallCoreError::Open { source }) if matches!(source, OpenCorePipeError::CoreNotRunning { .. })
     ));
 }
 
@@ -752,14 +762,22 @@ fn flooding_unread_responses_closes_only_the_slow_connection() {
         }
         match slow.write_bytes(&requests) {
             Ok(()) => {}
-            Err(CallCoreError::Io { .. } | CallCoreError::ResponseTimeout { .. }) => {}
+            Err(
+                CallCoreError::Io { .. }
+                | CallCoreError::ResponseTimeout { .. }
+                | CallCoreError::WriteTimeout { .. },
+            ) => {}
             Err(error) => panic!("unexpected flood failure: {error}"),
         }
         // A forced server disconnect discards unread responses; drain any frame already buffered locally.
         loop {
             match slow.read_envelope() {
                 Ok(_) => {}
-                Err(CallCoreError::Io { .. } | CallCoreError::Decode { .. }) => break,
+                Err(
+                    CallCoreError::Io { .. }
+                    | CallCoreError::Decode { .. }
+                    | CallCoreError::Frame { .. },
+                ) => break,
                 Err(error) => panic!("slow connection must close: {error}"),
             }
         }
@@ -1045,4 +1063,68 @@ fn core_runtime_with_fake_ports_flushes_shutdown_over_test_pipe() {
     let mut stored = Inspection::open(temporary.path());
     assert_eq!(stored.run(1).end_reason, Some(RunEndReason::UserExit));
     assert_eq!(stored.open_clock_count(), 0);
+}
+
+#[test]
+fn unsubscribe_stops_state_pushes_and_keeps_implicit_controls() {
+    let fixture = Fixture::new();
+    let mut ui = fixture.ui();
+    ui.request(Op::Subscribe, &json!({"topics":["state"]}))
+        .expect("subscribe state");
+    state_event(&mut ui);
+    for _ in 0..2 {
+        ui.request(Op::Unsubscribe, &json!({"topics":["state","control"]}))
+            .expect("idempotent unsubscribe");
+    }
+    publish_change(&fixture.status, 1);
+    fixture.server.control(quartz_protocol::ControlOp::UiShow);
+    let Envelope::Event(event) = ui.read_envelope().expect("implicit show") else {
+        panic!("control event");
+    };
+    assert_eq!(event.topic, quartz_protocol::Topic::Control);
+    let control: quartz_protocol::ControlBody =
+        serde_json::from_value(event.body).expect("control body");
+    assert_eq!(control.op, quartz_protocol::ControlOp::UiShow);
+    assert!(
+        matches!(
+            ui.read_envelope(),
+            Err(CallCoreError::ResponseTimeout { .. })
+        ),
+        "state remains unsubscribed"
+    );
+}
+
+#[test]
+fn unsubscribe_removes_state_and_preserves_implicit_ui_control() {
+    let fixture = Fixture::new();
+    let mut ui = fixture.ui();
+    ui.request(Op::Subscribe, &json!({"topics":["state"]}))
+        .expect("subscribe state");
+    state_event(&mut ui);
+    ui.request(Op::Unsubscribe, &json!({"topics":["state","control"]}))
+        .expect("unsubscribe state and explicit control");
+    ui.request(Op::Unsubscribe, &json!({"topics":["state"]}))
+        .expect("idempotent removal");
+    publish_change(&fixture.status, 1);
+    fixture.server.control(quartz_protocol::ControlOp::UiShow);
+    let Envelope::Event(event) = ui.read_envelope().expect("implicit show control") else {
+        panic!("control event");
+    };
+    assert_eq!(event.topic, quartz_protocol::Topic::Control);
+    let control: quartz_protocol::ControlBody =
+        serde_json::from_value(event.body).expect("typed control");
+    assert_eq!(control.op, quartz_protocol::ControlOp::UiShow);
+    assert!(
+        matches!(
+            ui.read_envelope(),
+            Err(CallCoreError::ResponseTimeout { .. })
+        ),
+        "unsubscribed state must not be pushed"
+    );
+    ui.request(Op::Subscribe, &json!({"topics":["state"]}))
+        .expect("subscribe again");
+    assert_eq!(
+        state_event(&mut ui),
+        fixture.status.subscribe().borrow().snapshot()
+    );
 }

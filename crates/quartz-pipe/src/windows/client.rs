@@ -10,13 +10,14 @@ use windows::Win32::{
 };
 
 /// Bounds CLI discovery and second-launch forwarding (04 §1, 01 §3).
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Retry busy instances using Tokio's named-pipe client pattern (04 §1).
 const RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub(crate) enum OpenCorePipeError {
+/// Discovery, transport, or peer authentication failure.
+pub enum OpenCorePipeError {
     #[snafu(display("Quartz core is not running"))]
     CoreNotRunning { source: io::Error },
     #[snafu(display("could not connect to Quartz core"))]
@@ -28,16 +29,25 @@ pub(crate) enum OpenCorePipeError {
 }
 
 #[derive(Debug)]
-pub(crate) struct PipeClient {
+/// Authenticated Windows client transport owned by its runtime thread.
+pub struct PipeClient {
     pipe: NamedPipeClient,
 }
 impl PipeClient {
-    pub(crate) async fn connect() -> Result<Self, OpenCorePipeError> {
+    /// Discovers the current user's core and verifies its process identity.
+    ///
+    /// # Errors
+    /// Returns absent, busy, transport or server identity failures.
+    pub async fn connect() -> Result<Self, OpenCorePipeError> {
         let owner =
             ProcessIdentity::current().context(open_core_pipe_error::ServerIdentitySnafu)?;
         Self::open_named(&owner.pipe_name()).await
     }
-    pub(crate) async fn open_named(name: &PipeName) -> Result<Self, OpenCorePipeError> {
+    /// Opens a named endpoint with the same authentication and deadlines as discovery.
+    ///
+    /// # Errors
+    /// Returns absent, busy, transport or server identity failures.
+    pub async fn open_named(name: &PipeName) -> Result<Self, OpenCorePipeError> {
         let owner =
             ProcessIdentity::current().context(open_core_pipe_error::ServerIdentitySnafu)?;
         let pipe = tokio::time::timeout(CONNECT_TIMEOUT, async {
@@ -74,49 +84,97 @@ impl PipeClient {
             .context(open_core_pipe_error::ServerIdentitySnafu)?;
         Ok(Self { pipe })
     }
-    pub(crate) fn into_inner(self) -> NamedPipeClient {
+    /// Transfers the authenticated pipe to the protocol client.
+    pub fn into_inner(self) -> NamedPipeClient {
         self.pipe
     }
 }
 
-pub(crate) type CoreClient = crate::ipc::client::CoreClient<NamedPipeClient>;
+pub type CoreClient = crate::CoreClient<NamedPipeClient>;
 impl CoreClient {
-    pub(crate) fn connect() -> Result<Self, crate::ipc::client::CallCoreError> {
+    /// Connects and handshakes as a CLI client on a caller-thread runtime.
+    ///
+    /// # Errors
+    /// Returns runtime, discovery, authentication or handshake failures.
+    pub fn connect() -> Result<Self, crate::CallCoreError> {
         Self::open(
             async {
                 PipeClient::connect()
                     .await
                     .map(PipeClient::into_inner)
-                    .map_err(crate::ipc::client::CallCoreError::connect)
+                    .map_err(|source| crate::CallCoreError::Open { source })
             },
             Some(quartz_protocol::HelloRole::Cli),
         )
     }
-    #[cfg(test)]
-    pub(crate) fn connect_named(
+    #[cfg(any(test, feature = "test-util"))]
+    /// Connects to an isolated test endpoint and declares the supplied role.
+    pub fn connect_named(
         name: &PipeName,
         role: quartz_protocol::HelloRole,
-    ) -> Result<Self, crate::ipc::client::CallCoreError> {
+    ) -> Result<Self, crate::CallCoreError> {
         Self::open(
             async {
                 PipeClient::open_named(name)
                     .await
                     .map(PipeClient::into_inner)
-                    .map_err(crate::ipc::client::CallCoreError::connect)
+                    .map_err(|source| crate::CallCoreError::Open { source })
             },
             Some(role),
         )
     }
-    #[cfg(test)]
-    pub(crate) fn open_named(name: &PipeName) -> Result<Self, crate::ipc::client::CallCoreError> {
+    #[cfg(any(test, feature = "test-util"))]
+    /// Opens an isolated test endpoint without a protocol handshake.
+    pub fn open_named(name: &PipeName) -> Result<Self, crate::CallCoreError> {
         Self::open(
             async {
                 PipeClient::open_named(name)
                     .await
                     .map(PipeClient::into_inner)
-                    .map_err(crate::ipc::client::CallCoreError::connect)
+                    .map_err(|source| crate::CallCoreError::Open { source })
             },
             None,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    #[tokio::test(start_paused = true)]
+    async fn busy_pipe_retries_until_a_slot_is_available_and_honors_discovery_deadline() {
+        let name = PipeName::for_test(windows::core::GUID::new().expect("isolated pipe"));
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&name)
+            .expect("first instance");
+        let first = PipeClient::open_named(&name)
+            .await
+            .expect("occupy first slot");
+        server.connect().await.expect("first connection");
+        let retry_name = name.clone();
+        let retrying = tokio::spawn(async move { PipeClient::open_named(&retry_name).await });
+        tokio::time::sleep(RETRY_INTERVAL * 2).await;
+        assert!(!retrying.is_finished(), "busy pipe must remain pending");
+        let next = ServerOptions::new()
+            .reject_remote_clients(true)
+            .create(&name)
+            .expect("new slot");
+        let second = retrying
+            .await
+            .expect("retry task")
+            .expect("busy retry discovers new slot");
+        next.connect().await.expect("second connection");
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            PipeClient::open_named(&name).await,
+            Err(OpenCorePipeError::Busy { .. })
+        ));
+        assert_eq!(started.elapsed(), CONNECT_TIMEOUT);
+        drop(second);
+        drop(first);
     }
 }

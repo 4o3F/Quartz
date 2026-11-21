@@ -18,23 +18,23 @@ tray.session_unavailable:
 tray.capture_gap:
   zh-CN: "部分时段未能记录"
 ui.core_error.newer_database.title:
-  zh-CN: "数据库版本较新"
+  zh-CN: "数据库版本高于当前 Quartz"
 ui.core_error.newer_database.message:
-  zh-CN: "此数据库已由更新版本的 Quartz 升级。请使用更新版本，或恢复迁移前备份后再启动当前版本。"
+  zh-CN: "此数据库由更新版本的 Quartz 创建，当前版本无法安全打开。请退出并更新 Quartz 后再试。"
 ui.core_error.migration_failed.title:
-  zh-CN: "数据库升级失败"
+  zh-CN: "无法升级数据库"
 ui.core_error.migration_failed.message:
-  zh-CN: "升级未能完成。请恢复下列迁移前备份后重新启动 Quartz，或安装修复版本。"
+  zh-CN: "数据库升级未完成，原有数据未被修改。请退出 Quartz，再使用下面的命令恢复升级前的备份。"
 ui.core_error.other_session.title:
-  zh-CN: "Quartz 已在另一个 Windows 会话中运行"
+  zh-CN: "Quartz 已在另一个会话中运行"
 ui.core_error.other_session.message:
-  zh-CN: "请先在另一个 Windows 会话中退出 Quartz，然后在此会话重新启动。"
+  zh-CN: "同一用户一次只能在一个 Windows 会话中运行 Quartz。请先在那个会话中退出 Quartz，再返回此处打开。"
 ui.core_error.start_failed.title:
-  zh-CN: "无法启动 Quartz"
+  zh-CN: "无法启动 Quartz 核心"
 ui.core_error.start_failed.message:
-  zh-CN: "请检查数据目录和核心日志，处理问题后重新启动 Quartz。"
+  zh-CN: "核心在启动过程中退出。可以重试；如果反复失败，请查看日志或把详细信息附在问题报告中。"
 ui.core_error.backups:
-  zh-CN: "迁移前备份"
+  zh-CN: "升级前备份"
 ui.core_error.restore_warning:
   zh-CN: "恢复会替换当前数据库，并丢失备份之后的记录。"
 ui.core_error.restore_manually:
@@ -293,3 +293,77 @@ tray.duration_h:
   zh-CN: "%{hours}h"
 tray.duration_m:
   zh-CN: "%{minutes}m"
+ui.link.connecting:
+  zh-CN: "正在连接 Quartz 核心…"
+ui.link.connected:
+  zh-CN: "已连接 Quartz 核心"
+ui.link.offline:
+  zh-CN: "Quartz 核心未运行"
+ui.link.mismatch:
+  zh-CN: "核心与界面版本不一致"
+ui.link.rejected:
+  zh-CN: "核心拒绝了连接"
+ui.link.failed:
+  zh-CN: "无法连接 Quartz 核心"
+ui.link.core_version:
+  zh-CN: "核心版本：%{version}"
+ui.link.start_core:
+  zh-CN: "启动核心"
+ui.link.recording:
+  zh-CN: "正在记录"
+ui.link.stopped:
+  zh-CN: "记录已停止"
+ui.link.foreground:
+  zh-CN: "前台应用：%{app}"
+ui.link.no_foreground:
+  zh-CN: "当前没有前台应用"
+ui.failure.retry:
+  zh-CN: "重试"
+ui.failure.copy_details:
+  zh-CN: "复制详细信息"
+ui.failure.exit:
+  zh-CN: "退出"
+ui.failure.code:
+  zh-CN: "错误代码"
+ui.failure.offline_message:
+  zh-CN: "界面需要核心提供数据。启动核心后，窗口会自动连接。"
+ui.failure.busy_message:
+  zh-CN: "请重试连接核心。"
+ui.failure.timeout_message:
+  zh-CN: "核心正在运行，但未在 2 秒内响应。请稍后重试。"
+ui.failure.io_message:
+  zh-CN: "连接未能建立，请重试连接。"
+ui.failure.mismatch_message:
+  zh-CN: "这通常发生在更新之后。请退出 Quartz 并重新启动，使核心与界面使用同一版本。"
+ui.failure.identity_title:
+  zh-CN: "无法验证 Quartz 核心身份"
+ui.failure.identity_message:
+  zh-CN: "请退出此窗口，检查 Quartz 安装和 Windows 会话后重新启动 Quartz。"
+ui.failure.rejected_message:
+  zh-CN: "请退出此窗口，处理核心握手拒绝的原因后重新启动 Quartz。"
+ui.failure.invalid_title:
+  zh-CN: "Quartz 核心响应无效"
+ui.failure.invalid_message:
+  zh-CN: "请退出此窗口并重新启动 Quartz。"
+ui.failure.interface_title:
+  zh-CN: "Quartz 界面暂不可用"
+ui.failure.interface_message:
+  zh-CN: "请退出此窗口并重新启动 Quartz。"
+ui.failure.details:
+  zh-CN: "详细信息"
+ui.failure.recoverable:
+  zh-CN: "需要操作"
+ui.failure.unrecoverable:
+  zh-CN: "无法继续"
+ui.failure.starting:
+  zh-CN: "正在启动核心…"
+ui.failure.copy_command:
+  zh-CN: "复制"
+ui.failure.restore_command:
+  zh-CN: "恢复命令"
+ui.failure.core_version:
+  zh-CN: "核心版本"
+ui.failure.ui_version:
+  zh-CN: "界面版本"
+ui.failure.protocol:
+  zh-CN: "协议范围"

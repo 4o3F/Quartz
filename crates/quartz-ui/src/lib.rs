@@ -1,10 +1,10 @@
 //! The GPUI interface: display, interaction, rule editing and labeling. Within the workspace it
-//! depends only on quartz-protocol and quartz-i18n; data comes from the core over the protocol, so
+//! depends only on quartz-protocol, quartz-pipe and quartz-i18n; data comes from the core over the protocol, so
 //! it never opens the database or matches rules itself.
 //!
 //! The view models, text formatting and timeline geometry have no GPUI dependency, so their tests
-//! run on every platform; the windows themselves are Windows-only. The only public items are what
-//! the `quartz` binary and the preview example call.
+//! run on every platform; the windows themselves are Windows-only. The link API supplies typed
+//! requests and ordered events to views through a dedicated pipe thread.
 #![cfg_attr(
     all(test, not(windows)),
     expect(
@@ -18,20 +18,22 @@
     expect(
         dead_code,
         unused_imports,
-        reason = "nothing builds a day until the protocol mapping exists; only the preview opens the main window"
+        reason = "Today view models and widgets are used by the preview until M3-D1 connects the page"
     )
 )]
 
 #[cfg(windows)]
 mod app;
 #[cfg(any(windows, test))]
-mod core_error;
+pub mod failure;
 #[cfg(any(windows, test))]
 mod format;
 #[cfg(windows)]
 mod launch;
 #[cfg(any(windows, test))]
 mod layout;
+#[cfg(any(windows, test))]
+pub mod link;
 #[cfg(any(windows, test))]
 mod model;
 #[cfg(all(feature = "preview", any(windows, test)))]
@@ -45,8 +47,9 @@ mod timeline_scale;
 pub use app::{Appearance, GpuiError, LoadPaletteError, LoadThemeError};
 #[cfg(all(windows, feature = "preview"))]
 pub use app::{
-    ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError, PlaceWindowError,
-    PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, PreviewTheme, RunPreviewError,
+    ErrorPreviewState, ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError,
+    PlaceWindowError, PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, PreviewTheme,
+    RunPreviewError,
 };
 #[cfg(windows)]
 pub use launch::{RunOptions, RunUiError};

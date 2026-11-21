@@ -1,9 +1,9 @@
 //! Mutual pipe peer authentication using token, session, and canonical image paths.
 
-use super::super::handle::OwnedHandle;
 use super::win32_error::Win32ErrorCode;
-use crate::{instance_name::UserSid, ipc::AllowedRoles};
+use crate::UserSid;
 use snafu::{ResultExt, Snafu};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::{
     ffi::OsString,
     os::windows::ffi::{OsStrExt, OsStringExt},
@@ -24,12 +24,22 @@ use windows::{
     core::PWSTR,
 };
 
+/// Executable family authenticated before checking the declared protocol role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerExecutable {
+    /// The same executable as the core: UI and CLI roles.
+    Quartz,
+    /// The adjacent native messaging host.
+    Host,
+}
+
 /// Maximum extended Windows path length, including its terminator (04 §1).
 const IMAGE_PATH_CAPACITY: usize = 32768;
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub(crate) enum CheckPeerError {
+/// Failure to inspect or authenticate a pipe peer.
+pub enum CheckPeerError {
     #[snafu(display("could not inspect peer ({call})"))]
     Windows {
         call: &'static str,
@@ -61,23 +71,34 @@ impl Drop for LocalAllocation {
 }
 
 #[derive(Debug)]
-pub(crate) struct ProcessIdentity {
+/// Token user, Windows session and executable image read from a process.
+pub struct ProcessIdentity {
     sid: UserSid,
     session: u32,
     image: PathBuf,
 }
 impl ProcessIdentity {
-    pub(crate) fn current() -> Result<Self, CheckPeerError> {
+    /// Reads the current process token, session and image path.
+    ///
+    /// # Errors
+    /// Returns a failed Windows query, SID conversion or path operation.
+    pub fn current() -> Result<Self, CheckPeerError> {
         // SAFETY: GetCurrentProcessId takes no pointers or ownership.
         Self::read(unsafe { Threading::GetCurrentProcessId() })
     }
-    pub(crate) fn sid(&self) -> &UserSid {
+    /// The canonical token user used by pipe naming and the explicit DACL.
+    pub fn sid(&self) -> &UserSid {
         &self.sid
     }
-    pub(crate) fn pipe_name(&self) -> super::PipeName {
+    /// Derives the versioned per-user endpoint from this token identity.
+    pub fn pipe_name(&self) -> super::PipeName {
         super::PipeName::from_sid(&self.sid)
     }
-    pub(crate) fn read(pid: u32) -> Result<Self, CheckPeerError> {
+    /// Reads a kernel-reported pipe peer without inheriting its process handle.
+    ///
+    /// # Errors
+    /// Returns a failed Windows query or SID conversion.
+    pub fn read(pid: u32) -> Result<Self, CheckPeerError> {
         // SAFETY: Query-only access, no inheritance, and a PID supplied by the kernel.
         let process =
             unsafe { Threading::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
@@ -85,20 +106,28 @@ impl ProcessIdentity {
                     call: "OpenProcess",
                 })?;
         // SAFETY: OpenProcess transferred a uniquely owned valid process handle.
-        let process = unsafe { OwnedHandle::from_raw(process) };
+        let process = unsafe { OwnedHandle::from_raw_handle(process.0) };
         let mut token = HANDLE::default();
         // SAFETY: The process handle is live and token is writable output storage.
-        unsafe { Threading::OpenProcessToken(process.raw(), TOKEN_QUERY, &mut token) }.context(
-            check_peer_error::WindowsSnafu {
-                call: "OpenProcessToken",
-            },
-        )?;
+        unsafe {
+            Threading::OpenProcessToken(HANDLE(process.as_raw_handle()), TOKEN_QUERY, &mut token)
+        }
+        .context(check_peer_error::WindowsSnafu {
+            call: "OpenProcessToken",
+        })?;
         // SAFETY: OpenProcessToken transferred a uniquely owned valid token handle.
-        let token = unsafe { OwnedHandle::from_raw(token) };
+        let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
         let mut bytes = 0;
         // SAFETY: A null buffer queries the TOKEN_USER allocation size.
-        let queried =
-            unsafe { Security::GetTokenInformation(token.raw(), TokenUser, None, 0, &mut bytes) };
+        let queried = unsafe {
+            Security::GetTokenInformation(
+                HANDLE(token.as_raw_handle()),
+                TokenUser,
+                None,
+                0,
+                &mut bytes,
+            )
+        };
         if let Err(source) = queried
             && !source.is_win32(ERROR_INSUFFICIENT_BUFFER)
         {
@@ -116,7 +145,7 @@ impl ProcessIdentity {
         // SAFETY: usize storage supplies TOKEN_USER alignment and at least the requested byte capacity.
         unsafe {
             Security::GetTokenInformation(
-                token.raw(),
+                HANDLE(token.as_raw_handle()),
                 TokenUser,
                 Some(buffer.as_mut_ptr().cast()),
                 bytes,
@@ -149,7 +178,7 @@ impl ProcessIdentity {
         // SAFETY: The live process has query rights and image has the declared writable capacity.
         unsafe {
             Threading::QueryFullProcessImageNameW(
-                process.raw(),
+                HANDLE(process.as_raw_handle()),
                 PROCESS_NAME_WIN32,
                 PWSTR(image.as_mut_ptr()),
                 &mut length,
@@ -165,7 +194,11 @@ impl ProcessIdentity {
             image: PathBuf::from(OsString::from_wide(&image)),
         })
     }
-    pub(crate) fn check(&self, pid: u32) -> Result<AllowedRoles, CheckPeerError> {
+    /// Authenticates user and session, then selects the allowed executable family.
+    ///
+    /// # Errors
+    /// Rejects a different user, session or image, including identity query failures.
+    pub fn check(&self, pid: u32) -> Result<PeerExecutable, CheckPeerError> {
         let peer = Self::read(pid)?;
         if peer.sid != self.sid {
             return Err(CheckPeerError::User);
@@ -175,12 +208,12 @@ impl ProcessIdentity {
         }
         let own = std::env::current_exe().context(check_peer_error::PathSnafu)?;
         if same_image(&peer.image, &own)? {
-            return Ok(AllowedRoles::Quartz);
+            return Ok(PeerExecutable::Quartz);
         }
         let host = own.with_file_name("quartz-host.exe");
         // A missing host is a normal installation state before M5. Other errors remain failures.
         match same_image(&peer.image, &host) {
-            Ok(true) => Ok(AllowedRoles::Host),
+            Ok(true) => Ok(PeerExecutable::Host),
             Ok(false) => Err(CheckPeerError::Executable),
             Err(CheckPeerError::Path { source })
                 if source.kind() == std::io::ErrorKind::NotFound =>
@@ -190,8 +223,12 @@ impl ProcessIdentity {
             Err(error) => Err(error),
         }
     }
-    pub(crate) fn check_server(&self, pid: u32) -> Result<(), CheckPeerError> {
-        if self.check(pid)? == AllowedRoles::Quartz {
+    /// Requires a server with the same user, session and executable as this client.
+    ///
+    /// # Errors
+    /// Rejects identity query failures, foreign images and the host executable.
+    pub fn check_server(&self, pid: u32) -> Result<(), CheckPeerError> {
+        if self.check(pid)? == PeerExecutable::Quartz {
             Ok(())
         } else {
             Err(CheckPeerError::Executable)
@@ -228,5 +265,47 @@ mod tests {
         );
         let other = tempfile::NamedTempFile::new().expect("different executable path");
         assert!(!same_image(&own, other.path()).expect("different paths"));
+    }
+    #[test]
+    fn server_must_have_the_same_user_session_and_executable() {
+        let mut owner = ProcessIdentity::current().expect("own identity");
+        let pid = std::process::id();
+        owner.check_server(pid).expect("same executable");
+        let sid = owner.sid.clone();
+        owner.sid = UserSid::from_token_string("S-1-0-0".into());
+        assert!(matches!(owner.check_server(pid), Err(CheckPeerError::User)));
+        owner.sid = sid;
+        owner.session = owner.session.checked_add(1).expect("different session");
+        assert!(matches!(
+            owner.check_server(pid),
+            Err(CheckPeerError::Session)
+        ));
+
+        struct PeerProcess(std::process::Child);
+        impl Drop for PeerProcess {
+            fn drop(&mut self) {
+                self.0.kill().expect("stop test peer");
+                self.0.wait().expect("reap test peer");
+            }
+        }
+        use std::os::windows::process::CommandExt;
+        let peer = PeerProcess(
+            std::process::Command::new(
+                PathBuf::from(std::env::var_os("SystemRoot").expect("Windows directory"))
+                    .join("System32/WindowsPowerShell/v1.0/powershell.exe"),
+            )
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 20"])
+            .creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start non-Quartz peer"),
+        );
+        let owner = ProcessIdentity::current().expect("own identity");
+        assert!(matches!(
+            owner.check_server(peer.0.id()),
+            Err(CheckPeerError::Executable)
+        ));
     }
 }

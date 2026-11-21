@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{NegotiateProtoError, ProtoRange};
+use crate::ProtoRange;
 
 /// A persisted rule-set version used for optimistic concurrency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -27,6 +27,8 @@ pub enum ErrorKind {
     ProtoMismatch {
         /// Core-supported inclusive protocol range.
         supported: ProtoRange,
+        /// Core release version to show with the incompatible protocol range.
+        core_version: crate::CoreVersion,
     },
     /// The declared role may not perform this operation.
     Forbidden,
@@ -73,14 +75,6 @@ impl ErrorKind {
     }
 }
 
-impl From<NegotiateProtoError> for ErrorKind {
-    fn from(value: NegotiateProtoError) -> Self {
-        Self::ProtoMismatch {
-            supported: value.supported,
-        }
-    }
-}
-
 /// IPC failure body with optional diagnostic text for logs only.
 ///
 /// No code may branch on `msg`; behavior and presentation use the typed error kind.
@@ -123,7 +117,7 @@ mod tests {
             "internal",
             "busy",
         ] {
-            let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7});
+            let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "core_version": "test-core"});
             let kind: ErrorKind = serde_json::from_value(wire).expect("known error kind");
             assert_eq!(kind.code(), name);
             assert_eq!(
@@ -147,12 +141,22 @@ mod tests {
     #[test]
     fn structured_error_fields_are_required_and_flat() {
         let range = ProtoRange::new(crate::ProtoVersion(1), crate::ProtoVersion(3)).expect("range");
-        let mismatch = ProtocolError::new(ErrorKind::ProtoMismatch { supported: range });
-        let wire = serde_json::json!({"code":"proto_mismatch","supported":{"min":1,"max":3}});
+        let mismatch = ProtocolError::new(ErrorKind::ProtoMismatch {
+            supported: range,
+            core_version: crate::CoreVersion("test-core".into()),
+        });
+        let wire = serde_json::json!({"code":"proto_mismatch","supported":{"min":1,"max":3},"core_version":"test-core"});
         assert_eq!(serde_json::to_value(&mismatch).expect("serialize"), wire);
         assert_eq!(
             serde_json::from_value::<ProtocolError>(wire).expect("deserialize"),
             mismatch
+        );
+        assert!(
+            serde_json::from_value::<ProtocolError>(
+                serde_json::json!({"code":"proto_mismatch", "supported":{"min":1,"max":3}})
+            )
+            .is_err(),
+            "core_version is required before protocol release"
         );
         let stale = ProtocolError::new(ErrorKind::RuleSetStale {
             current_version: RuleSetVersion(7),

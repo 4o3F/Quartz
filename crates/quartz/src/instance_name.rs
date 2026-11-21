@@ -7,12 +7,6 @@ use std::fmt::{self, Write};
 pub(crate) struct UserSid(String);
 
 impl UserSid {
-    /// Takes the canonical SID string returned by ConvertSidToStringSidW.
-    #[cfg(windows)]
-    pub(crate) fn from_token_string(value: String) -> Self {
-        Self(value)
-    }
-
     /// Constructs the canonical SID, including hexadecimal authorities above 32 bits.
     pub(crate) fn from_components(
         revision: u8,

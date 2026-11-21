@@ -38,6 +38,44 @@ macro_rules! messages {
 }
 
 messages! {
+    FailureDetails => "ui.failure.details",
+    FailureRecoverable => "ui.failure.recoverable",
+    FailureUnrecoverable => "ui.failure.unrecoverable",
+    FailureStarting => "ui.failure.starting",
+    FailureCopyCommand => "ui.failure.copy_command",
+    FailureRestoreCommand => "ui.failure.restore_command",
+    FailureCoreVersion => "ui.failure.core_version",
+    FailureUiVersion => "ui.failure.ui_version",
+    FailureProtocol => "ui.failure.protocol",
+
+    FailureRetry => "ui.failure.retry",
+    FailureCopyDetails => "ui.failure.copy_details",
+    FailureExit => "ui.failure.exit",
+    FailureCode => "ui.failure.code",
+    FailureOfflineMessage => "ui.failure.offline_message",
+    FailureBusyMessage => "ui.failure.busy_message",
+    FailureTimeoutMessage => "ui.failure.timeout_message",
+    FailureIoMessage => "ui.failure.io_message",
+    FailureMismatchMessage => "ui.failure.mismatch_message",
+    FailureIdentityTitle => "ui.failure.identity_title",
+    FailureIdentityMessage => "ui.failure.identity_message",
+    FailureRejectedMessage => "ui.failure.rejected_message",
+    FailureInvalidTitle => "ui.failure.invalid_title",
+    FailureInvalidMessage => "ui.failure.invalid_message",
+    FailureInterfaceTitle => "ui.failure.interface_title",
+    FailureInterfaceMessage => "ui.failure.interface_message",
+    LinkConnecting => "ui.link.connecting",
+    LinkConnected => "ui.link.connected",
+    LinkOffline => "ui.link.offline",
+    LinkMismatch => "ui.link.mismatch",
+    LinkRejected => "ui.link.rejected",
+    LinkFailed => "ui.link.failed",
+    LinkCoreVersion => "ui.link.core_version" [Version],
+    LinkStartCore => "ui.link.start_core",
+    LinkRecording => "ui.link.recording",
+    LinkStopped => "ui.link.stopped",
+    LinkForeground => "ui.link.foreground" [App],
+    LinkNoForeground => "ui.link.no_foreground",
     AppName => "app.name",
     CoreErrorNewerDatabaseTitle => "ui.core_error.newer_database.title",
     CoreErrorNewerDatabaseMessage => "ui.core_error.newer_database.message",
@@ -146,6 +184,8 @@ messages! {
 /// A named placeholder, written `%{name}` in the catalogs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Arg {
+    Version,
+    App,
     Category,
     Command,
     Condition,
@@ -184,6 +224,8 @@ impl Arg {
     #[must_use]
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            Self::Version => "version",
+            Self::App => "app",
             Self::Category => "category",
             Self::Command => "command",
             Self::Condition => "condition",
@@ -248,7 +290,7 @@ mod tests {
 
     #[test]
     fn every_message_exists_in_english_and_chinese_with_its_placeholders() {
-        for language in [Language::English, Language::SimplifiedChinese] {
+        for &language in Language::ALL {
             for msg in Msg::ALL {
                 assert!(
                     language.has_message(msg.key()),

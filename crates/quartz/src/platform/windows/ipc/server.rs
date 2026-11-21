@@ -93,6 +93,10 @@ pub(crate) enum StartPipeServerError {
     NameOccupied { source: io::Error },
     #[snafu(display("pipe startup did not complete before its deadline"))]
     Startup,
+    #[snafu(display("could not publish pipe readiness"))]
+    Readiness {
+        source: quartz_pipe::WaitCorePipeError,
+    },
 }
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -104,6 +108,7 @@ pub(crate) enum StopPipeServerError {
 }
 #[derive(Debug)]
 pub(crate) struct PipeServer {
+    readiness: Option<quartz_pipe::CoreReadySignal>,
     shutdown_timeout: Duration,
     control: mpsc::Sender<ServerMessage>,
     stop: Option<oneshot::Sender<()>>,
@@ -112,6 +117,7 @@ pub(crate) struct PipeServer {
 }
 impl PipeServer {
     pub(crate) fn start(config: PipeServerConfig) -> Result<Self, StartPipeServerError> {
+        let readiness_name = config.name.clone();
         let (stop, stopping) = oneshot::channel();
         let (control, controls) = mpsc::channel(CONTROL_MAILBOX_CAPACITY);
         let (ready, startup) = bounded(LIFECYCLE_CAPACITY);
@@ -139,7 +145,8 @@ impl PipeServer {
                 }
             })
             .context(start_pipe_server_error::IoSnafu)?;
-        let server = Self {
+        let mut server = Self {
+            readiness: None,
             shutdown_timeout: config.shutdown_timeout,
             control,
             stop: Some(stop),
@@ -147,7 +154,15 @@ impl PipeServer {
             thread: Some(thread),
         };
         match startup.recv_timeout(config.shutdown_timeout) {
-            Ok(Ok(())) => Ok(server),
+            Ok(Ok(())) => {
+                let readiness = quartz_pipe::CoreReadySignal::create(&readiness_name)
+                    .context(start_pipe_server_error::ReadinessSnafu)?;
+                readiness
+                    .signal()
+                    .context(start_pipe_server_error::ReadinessSnafu)?;
+                server.readiness = Some(readiness);
+                Ok(server)
+            }
             Ok(Err(error)) => Err(error),
             Err(_) => Err(StartPipeServerError::Startup),
         }
@@ -445,7 +460,11 @@ impl Slot {
                 call: "GetNamedPipeClientProcessId",
                 source,
             })
-            .and_then(|()| self.listener.owner.check(pid));
+            .and_then(|()| self.listener.owner.check(pid))
+            .map(|peer| match peer {
+                quartz_pipe::PeerExecutable::Quartz => crate::ipc::AllowedRoles::Quartz,
+                quartz_pipe::PeerExecutable::Host => crate::ipc::AllowedRoles::Host,
+            });
         match peer {
             Ok(allowed) => {
                 let mut session = ConnectionSession::new(allowed);

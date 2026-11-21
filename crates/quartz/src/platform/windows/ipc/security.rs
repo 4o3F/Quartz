@@ -1,13 +1,10 @@
 //! Explicit per-user DACL applied to every pipe instance.
 
-use super::{
-    super::{WideString, structure_size},
-    identity::LocalAllocation,
-};
+use super::super::{WideString, structure_size};
 use snafu::{ResultExt, Snafu};
 use windows::{
     Win32::{
-        Foundation::HLOCAL,
+        Foundation::{HLOCAL, LocalFree},
         Security::{
             Authorization::{
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -17,6 +14,19 @@ use windows::{
     },
     core::PCWSTR,
 };
+
+/// Owns a LocalAlloc allocation returned by the Windows security APIs.
+#[derive(Debug)]
+pub(super) struct LocalAllocation(pub HLOCAL);
+impl Drop for LocalAllocation {
+    fn drop(&mut self) {
+        // SAFETY: The allocation was returned by a LocalAlloc-based API and is uniquely owned.
+        let remaining = unsafe { LocalFree(Some(self.0)) };
+        if !remaining.0.is_null() {
+            tracing::warn!("could not free Windows security allocation");
+        }
+    }
+}
 
 #[derive(Debug, Snafu)]
 #[snafu(display(
@@ -30,9 +40,7 @@ pub(super) struct PipeSecurity {
     descriptor: LocalAllocation,
 }
 impl PipeSecurity {
-    pub(super) fn new(
-        sid: &crate::instance_name::UserSid,
-    ) -> Result<Self, CreatePipeSecurityError> {
+    pub(super) fn new(sid: &quartz_pipe::UserSid) -> Result<Self, CreatePipeSecurityError> {
         let text = WideString::new(&format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})"));
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         // SAFETY: text is terminated and descriptor is writable output; ownership transfers on success.

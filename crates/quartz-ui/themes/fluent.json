@@ -118,6 +118,16 @@
             "color": "key"
           }
         ]
+      },
+      "failure": {
+        "card_width": 560,
+        "tile_size": 48,
+        "glyph_size": 28,
+        "badge_dot": 6,
+        "command_line_height": 18,
+        "status_border_opacity": 0.2,
+        "busy_opacity": 0.86,
+        "busy_track_opacity": 0.32
       }
     },
     "palette": {
@@ -176,7 +186,10 @@
         "accent.selection": "#005FB833",
         "text.on_critical": "#FFFFFF",
         "text.on_success": "#FFFFFF",
-        "text.on_caution": "#FFFFFF"
+        "text.on_caution": "#FFFFFF",
+        "fill.control_disabled": "#F9F9F94D",
+        "status.caution_bg": "#FFF4CE",
+        "status.critical_bg": "#FDE7E9"
       },
       "dark": {
         "text.primary": "#FFFFFF",
@@ -233,7 +246,10 @@
         "accent.selection": "#60CDFF33",
         "text.on_critical": "#000000",
         "text.on_success": "#000000",
-        "text.on_caution": "#000000"
+        "text.on_caution": "#000000",
+        "fill.control_disabled": "#FFFFFF0B",
+        "status.caution_bg": "#433519",
+        "status.critical_bg": "#442726"
       }
     },
     "component_mapping": {

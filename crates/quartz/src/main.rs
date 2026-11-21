@@ -184,7 +184,7 @@ impl std::fmt::Display for CliCommand {
 enum DispatchCommandError {
     #[cfg(windows)]
     #[snafu(display("{source}"))]
-    Status { source: ipc::client::CallCoreError },
+    Status { source: quartz_pipe::CallCoreError },
     #[snafu(display("{source}"))]
     Dump { source: dump::DumpDayError },
     #[snafu(display("{source}"))]
@@ -223,7 +223,7 @@ impl CliCommand {
             #[cfg(windows)]
             Self::Status => {
                 return ipc::client::print_status(
-                    platform::windows::ipc::CoreClient::connect().context(StatusSnafu)?,
+                    quartz_pipe::CoreClient::connect().context(StatusSnafu)?,
                 )
                 .context(StatusSnafu);
             }

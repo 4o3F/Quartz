@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Quartz — Error &amp; Connection Screen</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mockup.css">
+<!--
+  Unified error and connection screen for the Quartz Windows app.
+  Query parameters:
+    ?state=connecting | core-not-running | core-not-running-starting |
+           core-start-failed | connect-failed | migration-failed |
+           newer-database | version-mismatch | other-session
+    &theme=light | dark
+    &lang=zh-CN | en
+    &size=min          (optional: 640x480 minimum window preview; default 960x640)
+    &details=open|closed (optional: override default expander state)
+-->
+<style>
+html,body{width:960px;height:640px;overflow:hidden}
+.window{width:960px;height:640px;background:var(--bg-base)}
+html[data-size="min"],html[data-size="min"] body,html[data-size="min"] .window{width:640px;height:480px}
+
+.err-viewport{
+  position:relative;
+  flex:1;min-height:0;
+  display:flex;flex-direction:column;
+}
+
+.err-stage{
+  flex:1;min-height:0;
+  overflow-y:auto;overflow-x:hidden;
+  display:flex;flex-direction:column;
+  padding:var(--space-xxl);
+}
+
+/* Fluent 2 overlay scrollbar indicator (shown when content exceeds viewport height,
+   including under headless --hide-scrollbars captures). Uses text.tertiary per 11 §9.2. */
+.err-scroll-track{
+  display:none;
+  position:absolute;top:var(--space-xs);right:var(--space-xs);bottom:var(--space-xs);
+  width:6px;pointer-events:none;
+}
+.err-viewport.scrollable .err-scroll-track{display:block}
+.err-scroll-thumb{
+  position:absolute;left:1px;right:1px;top:0;
+  border-radius:var(--radius-control);
+  background:var(--text-tertiary);
+}
+
+/* Connecting (progress) state: calm, weightless directly on Mica/bg.base */
+.err-progress{
+  margin:auto;flex:none;
+  display:flex;flex-direction:column;align-items:center;gap:var(--space-m);
+  text-align:center;
+}
+.err-progress .label{font:var(--type-body);color:var(--text-secondary)}
+.ring-lg{width:28px;height:28px;display:block}
+.ring-sm{width:16px;height:16px;display:block;flex:none}
+
+/* One unified failure card on Mica/bg.base for both recoverable & unrecoverable */
+.err-card{
+  margin:auto;flex:none;
+  width:560px;max-width:100%;
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  border-radius:var(--radius-overlay);
+  overflow:hidden;
+  display:flex;flex-direction:column;
+}
+
+.err-head{
+  display:flex;align-items:flex-start;gap:var(--space-l);
+  padding:var(--space-xxl) var(--space-xxl) 0;
+}
+
+/* Status icon tile: 48x48 rounded-square with 28px Fluent icon.
+   Status color is confined strictly to the icon tile and badge. */
+.err-icon{
+  width:48px;height:48px;flex:none;margin-top:2px;
+  border-radius:var(--radius-overlay);
+  display:grid;place-items:center;
+}
+.err-icon svg{
+  width:28px;height:28px;display:block;
+  fill:none;stroke:currentColor;stroke-width:1.75;
+  stroke-linecap:round;stroke-linejoin:round;
+}
+.err-card.recoverable .err-icon{
+  background:var(--status-caution-bg);
+  color:var(--status-caution);
+  border:1px solid color-mix(in srgb,var(--status-caution) 20%,transparent);
+}
+.err-card.unrecoverable .err-icon{
+  background:var(--status-critical-bg);
+  color:var(--status-critical);
+  border:1px solid color-mix(in srgb,var(--status-critical) 20%,transparent);
+}
+
+.err-title-col{
+  flex:1;min-width:0;
+  display:flex;flex-direction:column;gap:var(--space-xs);
+}
+.err-badge{
+  align-self:flex-start;
+  display:inline-flex;align-items:center;gap:6px;
+  height:20px;padding:0 var(--space-s);
+  border-radius:var(--radius-control);
+  font:var(--type-caption);
+}
+.err-badge i{
+  width:6px;height:6px;border-radius:50%;flex:none;background:currentColor;
+}
+.err-card.recoverable .err-badge{
+  background:var(--status-caution-bg);
+  color:var(--status-caution);
+}
+.err-card.unrecoverable .err-badge{
+  background:var(--status-critical-bg);
+  color:var(--status-critical);
+}
+
+.err-title{
+  font:var(--type-subtitle);
+  color:var(--text-primary);
+}
+
+/* Message & primary/secondary actions aligned on the text-column axis */
+.err-main{
+  padding:var(--space-s) var(--space-xxl) var(--space-xxl) calc(var(--space-xxl) + 48px + var(--space-l));
+  display:flex;flex-direction:column;gap:var(--space-l);
+}
+
+.err-msg{
+  font:var(--type-body);
+  color:var(--text-secondary);
+}
+
+.err-actions{
+  display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap;
+}
+.err-actions .btn{padding:0 var(--space-l);cursor:pointer}
+.err-actions .btn.disabled{
+  background:var(--fill-control-disabled);
+  border-color:var(--stroke-control);
+  border-bottom-color:var(--stroke-control);
+  color:var(--text-disabled);
+  cursor:default;
+}
+.err-actions .btn.accent.busy{
+  background:color-mix(in srgb,var(--accent-fill) 86%,transparent);
+  border-color:color-mix(in srgb,var(--accent-fill) 86%,transparent);
+  cursor:default;
+}
+
+/* Collapsible details footer: identical placement & styling for all failure states */
+.err-exp{
+  background:var(--fill-card-secondary);
+  border-top:1px solid var(--stroke-divider);
+}
+.err-exp-head{
+  min-height:var(--h-row-standard);
+  padding:var(--space-xs) var(--space-xxl);
+  display:flex;align-items:center;gap:var(--space-s);
+  cursor:pointer;
+}
+.err-exp-head .exp-label{
+  flex:1;min-width:0;
+  font:var(--type-body);
+  color:var(--text-secondary);
+}
+.err-exp.open .err-exp-head .exp-label{color:var(--text-primary)}
+.err-exp-head .exp-chev{color:var(--text-secondary)}
+.err-exp-head .btn.subtle{color:var(--text-secondary);padding:0 var(--space-s)}
+.err-exp-head .btn.subtle:hover{background:var(--fill-subtle-hover);color:var(--text-primary)}
+
+.err-exp-body{
+  display:none;
+  border-top:1px solid var(--stroke-divider);
+  padding:var(--space-m) var(--space-xxl) var(--space-l);
+  flex-direction:column;gap:var(--space-m);
+}
+.err-exp.open .err-exp-body{display:flex}
+
+.err-kv{
+  display:grid;
+  grid-template-columns:max-content minmax(0,1fr);
+  column-gap:var(--space-l);
+  row-gap:var(--space-xs);
+  align-items:baseline;
+  font:var(--type-caption);
+}
+.err-kv dt{color:var(--text-secondary);white-space:nowrap}
+.err-kv dd{
+  color:var(--text-primary);
+  min-width:0;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+  user-select:text;
+}
+
+.err-cmd-wrap{display:flex;flex-direction:column;gap:var(--space-xs)}
+.err-cmd-label{font:var(--type-caption);color:var(--text-secondary)}
+.err-cmd{
+  display:flex;align-items:flex-start;gap:var(--space-s);
+  background:var(--bg-base);
+  border:1px solid var(--stroke-control);
+  border-radius:var(--radius-control);
+  padding:var(--space-s) var(--space-s) var(--space-s) var(--space-m);
+}
+.err-cmd code{
+  flex:1;min-width:0;
+  font-family:var(--font-mono);font-size:12px;line-height:18px;
+  color:var(--text-primary);
+  overflow-wrap:anywhere;word-break:break-word;
+  user-select:text;
+}
+.err-cmd .btn.compact{
+  flex:none;
+  padding:0 var(--space-s);
+  gap:var(--space-xs);
+  font:var(--type-caption);
+}
+</style>
+<script>
+const __p = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = __p.get('theme') || 'light';
+if (__p.get('size') === 'min') document.documentElement.dataset.size = 'min';
+</script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="logo" viewBox="0 0 24 24">
+    <path d="M12 2.5l8 4.5v10l-8 4.5-8-4.5V7z" fill="var(--accent-fill)" stroke="none"/>
+    <path d="M12 2.5v19M4 7l16 10M20 7L4 17" stroke="var(--text-on-accent)" stroke-width="1" opacity=".7"/>
+  </symbol>
+  <!-- Fluent 28px Warning (caution / recoverable) -->
+  <symbol id="ic-caution" viewBox="0 0 28 28">
+    <path d="M12.26 4.78a2 2 0 0 1 3.48 0l8.42 14.9A2 2 0 0 1 22.42 22.7H5.58a2 2 0 0 1-1.74-3.02z"/>
+    <path d="M14 10.5v5.5"/>
+    <circle cx="14" cy="19.1" r=".8" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- Fluent 28px DismissCircle (critical / unrecoverable) -->
+  <symbol id="ic-critical" viewBox="0 0 28 28">
+    <circle cx="14" cy="14" r="10.25"/>
+    <path d="M10.5 10.5l7 7M17.5 10.5l-7 7"/>
+  </symbol>
+  <symbol id="chev-r" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+  <symbol id="chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
+  <symbol id="copy" viewBox="0 0 24 24">
+    <rect x="8" y="8" width="12" height="12" rx="2"/>
+    <path d="M5 15V6a2 2 0 0 1 2-2h8"/>
+  </symbol>
+</defs></svg>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="app"><svg class="ic s16"><use href="#logo"/></svg><span>Quartz</span></div>
+    <div class="btns">
+      <div><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></div>
+    </div>
+  </div>
+  <div class="err-viewport" id="viewport">
+    <main class="err-stage" id="stage"></main>
+    <div class="err-scroll-track" aria-hidden="true"><div class="err-scroll-thumb" id="scroll-thumb"></div></div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const lang = params.get('lang') === 'en' ? 'en' : 'zh-CN';
+const stateKey = params.get('state') || 'core-not-running';
+const detailsOverride = params.get('details');
+document.documentElement.lang = lang;
+
+const COPY = {
+  'zh-CN': {
+    badge: { recoverable: '需要操作', unrecoverable: '无法继续' },
+    ui: {
+      details: '详细信息',
+      copyDetails: '复制详细信息',
+      copyCmd: '复制',
+      copied: '已复制',
+      quit: '退出',
+      retry: '重试',
+      start: '启动核心',
+      starting: '正在启动核心…',
+      code: '错误代码',
+    },
+    kv: {
+      log: '日志目录',
+      timeout: '等待超时',
+      backup: '升级前备份',
+      restore: '恢复命令',
+      dbSchema: '数据库架构',
+      supported: '当前支持',
+      coreVer: '核心版本',
+      uiVer: '界面版本',
+      proto: '协议范围',
+    },
+    states: {
+      connecting: {
+        title: '正在连接 Quartz 核心…',
+        body: '',
+      },
+      'core-not-running': {
+        title: 'Quartz 核心未运行',
+        body: '界面需要核心提供数据。启动核心后，窗口会自动连接。',
+      },
+      'core-start-failed': {
+        title: '无法启动 Quartz 核心',
+        body: '核心在启动过程中退出。可以重试；如果反复失败，请查看日志或把详细信息附在问题报告中。',
+      },
+      'connect-failed': {
+        title: '无法连接 Quartz 核心',
+        body: '核心正在运行，但未在 2 秒内响应。请稍后重试。',
+      },
+      'migration-failed': {
+        title: '无法升级数据库',
+        body: '数据库升级未完成，原有数据未被修改。请退出 Quartz，再使用下面的命令恢复升级前的备份。',
+      },
+      'newer-database': {
+        title: '数据库版本高于当前 Quartz',
+        body: '此数据库由更新版本的 Quartz 创建，当前版本无法安全打开。请退出并更新 Quartz 后再试。',
+      },
+      'version-mismatch': {
+        title: '核心与界面版本不一致',
+        body: '这通常发生在更新之后。请退出 Quartz 并重新启动，使核心与界面使用同一版本。',
+      },
+      'other-session': {
+        title: 'Quartz 已在另一个会话中运行',
+        body: '同一用户一次只能在一个 Windows 会话中运行 Quartz。请先在那个会话中退出 Quartz，再返回此处打开。',
+      },
+    },
+  },
+  en: {
+    badge: { recoverable: 'Action needed', unrecoverable: 'Cannot continue' },
+    ui: {
+      details: 'Details',
+      copyDetails: 'Copy details',
+      copyCmd: 'Copy',
+      copied: 'Copied',
+      quit: 'Quit',
+      retry: 'Retry',
+      start: 'Start core',
+      starting: 'Starting core…',
+      code: 'Error code',
+    },
+    kv: {
+      log: 'Log folder',
+      timeout: 'Timeout',
+      backup: 'Backup path',
+      restore: 'Restore command',
+      dbSchema: 'Database schema',
+      supported: 'Supported',
+      coreVer: 'Core version',
+      uiVer: 'Window version',
+      proto: 'Protocol',
+    },
+    states: {
+      connecting: {
+        title: 'Connecting to the Quartz core…',
+        body: '',
+      },
+      'core-not-running': {
+        title: 'Quartz core is not running',
+        body: 'This window gets its data from the core. Start the core and it will connect automatically.',
+      },
+      'core-start-failed': {
+        title: 'Quartz core failed to start',
+        body: 'The core exited while starting. Try again; if it keeps failing, check the logs or attach the details to a bug report.',
+      },
+      'connect-failed': {
+        title: 'Can’t reach the Quartz core',
+        body: 'The core is running, but it did not answer within 2 seconds. Try again in a moment.',
+      },
+      'migration-failed': {
+        title: 'Couldn’t upgrade the database',
+        body: 'The database upgrade did not finish and your existing data was not changed. Quit Quartz, then restore the pre-upgrade backup with the command below.',
+      },
+      'newer-database': {
+        title: 'Database is from a newer Quartz',
+        body: 'This database was created by a newer version of Quartz and can’t be opened safely here. Quit and update Quartz before trying again.',
+      },
+      'version-mismatch': {
+        title: 'Core and window versions don’t match',
+        body: 'This usually happens after an update. Quit Quartz and start it again so the core and window run the same version.',
+      },
+      'other-session': {
+        title: 'Quartz is running in another session',
+        body: 'Quartz can run in only one Windows session per user at a time. Quit Quartz in the other session before opening it here.',
+      },
+    },
+  },
+};
+
+const LOG_PATH = 'C:\\Users\\alice\\AppData\\Local\\Quartz\\logs';
+const BACKUP_PATH = 'C:\\Users\\alice\\AppData\\Local\\Quartz\\backups\\quartz-2026-11-21T093012Z-before-v4.db';
+const RESTORE_CMD = `quartz restore-backup --confirm "${BACKUP_PATH}"`;
+
+const STATES = {
+  connecting: { kind: 'progress' },
+  'core-not-running': {
+    kind: 'recoverable',
+    actions: [{ id: 'start', primary: true }, { id: 'retry' }],
+    code: 'core_not_running',
+    open: false,
+  },
+  'core-not-running-starting': {
+    base: 'core-not-running',
+    kind: 'recoverable',
+    actions: [{ id: 'starting', primary: true, busy: true }, { id: 'retry', disabled: true }],
+    code: 'core_not_running',
+    open: false,
+  },
+  'core-start-failed': {
+    kind: 'recoverable',
+    actions: [{ id: 'retry', primary: true }, { id: 'quit' }],
+    code: 'core_start_failed',
+    open: true,
+    kv: [['log', LOG_PATH, true]],
+  },
+  'connect-failed': {
+    kind: 'recoverable',
+    actions: [{ id: 'retry', primary: true }],
+    code: 'connect_timeout',
+    open: false,
+    kv: [['timeout', '2000 ms', true]],
+  },
+  'migration-failed': {
+    kind: 'unrecoverable',
+    actions: [{ id: 'copyDetails', primary: true, icon: 'copy' }, { id: 'quit' }],
+    code: 'migration_failed',
+    open: true,
+    kv: [['backup', BACKUP_PATH, true], ['log', LOG_PATH, true]],
+    restore: RESTORE_CMD,
+  },
+  'newer-database': {
+    kind: 'unrecoverable',
+    actions: [{ id: 'copyDetails', primary: true, icon: 'copy' }, { id: 'quit' }],
+    code: 'database_too_new',
+    open: true,
+    kv: [['dbSchema', 'v5', true], ['supported', 'v4 (Quartz 0.2.0)', true]],
+  },
+  'version-mismatch': {
+    kind: 'unrecoverable',
+    actions: [{ id: 'copyDetails', primary: true, icon: 'copy' }, { id: 'quit' }],
+    code: 'version_mismatch',
+    open: true,
+    kv: [['coreVer', '0.2.0', true], ['uiVer', '0.1.0', true], ['proto', 'core 2–2 · window 1–1', true]],
+  },
+  'other-session': {
+    kind: 'unrecoverable',
+    actions: [{ id: 'copyDetails', primary: true, icon: 'copy' }, { id: 'quit' }],
+    code: 'other_session',
+    open: false,
+  },
+};
+
+function ringSvg(cls, trackVar, arcVar) {
+  return `<svg class="${cls}" viewBox="0 0 28 28" aria-hidden="true">` +
+    `<circle cx="14" cy="14" r="10.5" fill="none" stroke="${trackVar}" stroke-width="2.75"/>` +
+    `<path d="M14 3.5 A10.5 10.5 0 0 1 24.5 14" fill="none" stroke="${arcVar}" stroke-width="2.75" stroke-linecap="round"/>` +
+    `</svg>`;
+}
+
+const T = COPY[lang];
+const S = STATES[stateKey] || STATES['core-not-running'];
+const copy = T.states[S.base || stateKey] || T.states['core-not-running'];
+const viewport = document.getElementById('viewport');
+const stage = document.getElementById('stage');
+const scrollThumb = document.getElementById('scroll-thumb');
+
+function syncScrollIndicator() {
+  const overflow = stage.scrollHeight > stage.clientHeight + 1;
+  viewport.classList.toggle('scrollable', overflow);
+  if (!overflow) return;
+  const trackH = viewport.clientHeight - 8;
+  const ratio = stage.clientHeight / stage.scrollHeight;
+  const thumbH = Math.max(32, Math.round(trackH * ratio));
+  const maxScroll = stage.scrollHeight - stage.clientHeight;
+  const top = maxScroll > 0 ? Math.round((stage.scrollTop / maxScroll) * (trackH - thumbH)) : 0;
+  scrollThumb.style.height = thumbH + 'px';
+  scrollThumb.style.top = top + 'px';
+}
+
+if (S.kind === 'progress') {
+  stage.innerHTML =
+    `<div class="err-progress">` +
+      ringSvg('ring-lg', 'var(--stroke-control-strong)', 'var(--accent-fill)') +
+      `<div class="label">${copy.title}</div>` +
+    `</div>`;
+} else {
+  const isOpen = detailsOverride === 'open' ? true : detailsOverride === 'closed' ? false : !!S.open;
+  const iconId = S.kind === 'recoverable' ? 'ic-caution' : 'ic-critical';
+  const hasPrimaryCopy = S.actions.some(a => a.id === 'copyDetails');
+
+  const actionHtml = S.actions.map(a => {
+    const cls = ['btn'];
+    if (a.primary) cls.push('accent');
+    if (a.busy) cls.push('busy');
+    if (a.disabled) cls.push('disabled');
+    let leading = '';
+    if (a.busy) {
+      leading = ringSvg('ring-sm', 'color-mix(in srgb,var(--text-on-accent) 32%,transparent)', 'var(--text-on-accent)');
+    } else if (a.icon) {
+      leading = `<svg class="ic s16"><use href="#${a.icon}"/></svg>`;
+    }
+    return `<div class="${cls.join(' ')}" role="button">${leading}<span>${T.ui[a.id]}</span></div>`;
+  }).join('');
+
+  const kvRows = [
+    `<dt>${T.ui.code}</dt><dd class="mono">${S.code}</dd>`,
+    ...(S.kv || []).map(([k, v, mono]) =>
+      `<dt>${T.kv[k]}</dt><dd${mono ? ' class="mono"' : ''}>${v}</dd>`
+    ),
+  ].join('');
+
+  const restoreHtml = S.restore
+    ? `<div class="err-cmd-wrap">` +
+        `<div class="err-cmd-label">${T.kv.restore}</div>` +
+        `<div class="err-cmd">` +
+          `<code>${S.restore}</code>` +
+          `<div class="btn compact" role="button" data-copy-cmd>` +
+            `<svg class="ic s16"><use href="#copy"/></svg><span>${T.ui.copyCmd}</span>` +
+          `</div>` +
+        `</div>` +
+      `</div>`
+    : '';
+
+  // Consistent rule: show "Copy details" in the details footer header only when
+  // the primary action bar does not already include "Copy details".
+  const footerCopyHtml = hasPrimaryCopy
+    ? ''
+    : `<div class="btn subtle compact" role="button" data-copy-details>` +
+        `<svg class="ic s16"><use href="#copy"/></svg><span>${T.ui.copyDetails}</span>` +
+      `</div>`;
+
+  stage.innerHTML =
+    `<section class="err-card ${S.kind}">` +
+      `<div class="err-head">` +
+        `<div class="err-icon"><svg viewBox="0 0 28 28"><use href="#${iconId}"/></svg></div>` +
+        `<div class="err-title-col">` +
+          `<div class="err-badge"><i></i><span>${T.badge[S.kind]}</span></div>` +
+          `<h1 class="err-title">${copy.title}</h1>` +
+        `</div>` +
+      `</div>` +
+      `<div class="err-main">` +
+        `<p class="err-msg">${copy.body}</p>` +
+        `<div class="err-actions">${actionHtml}</div>` +
+      `</div>` +
+      `<div class="err-exp${isOpen ? ' open' : ''}" id="expander">` +
+        `<div class="err-exp-head" id="exp-toggle">` +
+          `<svg class="ic s16 exp-chev"><use href="#${isOpen ? 'chev-d' : 'chev-r'}"/></svg>` +
+          `<span class="exp-label">${T.ui.details}</span>` +
+          footerCopyHtml +
+        `</div>` +
+        `<div class="err-exp-body">` +
+          `<dl class="err-kv">${kvRows}</dl>` +
+          restoreHtml +
+        `</div>` +
+      `</div>` +
+    `</section>`;
+
+  const exp = document.getElementById('expander');
+  const toggle = document.getElementById('exp-toggle');
+  toggle.addEventListener('click', e => {
+    if (e.target.closest('[data-copy-details]')) return;
+    const open = exp.classList.toggle('open');
+    toggle.querySelector('.exp-chev use').setAttribute('href', open ? '#chev-d' : '#chev-r');
+    syncScrollIndicator();
+  });
+}
+
+stage.addEventListener('scroll', syncScrollIndicator);
+syncScrollIndicator();
+</script>
+</body>
+</html>

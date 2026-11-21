@@ -35,6 +35,11 @@ enum RegistryMessage {
         response: Response,
         reply: oneshot::Sender<Result<(), QueueFrameError>>,
     },
+    Unsubscribe {
+        id: ConnectionId,
+        subscription: quartz_protocol::Unsubscribe,
+        reply: oneshot::Sender<()>,
+    },
     Control(ControlOp),
     Outboxes {
         reply: oneshot::Sender<Vec<OutboxHandle>>,
@@ -95,6 +100,19 @@ impl RegistryHandle {
             id,
             registry: self.clone(),
         })
+    }
+    pub(crate) async fn unsubscribe(
+        &self,
+        id: ConnectionId,
+        subscription: quartz_protocol::Unsubscribe,
+    ) -> Result<(), QueueRegistryError> {
+        let (reply, receive) = oneshot::channel();
+        self.send(RegistryMessage::Unsubscribe {
+            id,
+            subscription,
+            reply,
+        })?;
+        receive.await.map_err(|_| QueueRegistryError)
     }
     pub(crate) async fn subscribe(
         &self,
@@ -241,14 +259,33 @@ impl ConnectionRegistry {
                     tracing::debug!("subscriber left before registry acknowledgement");
                 }
             }
+            RegistryMessage::Unsubscribe {
+                id,
+                subscription,
+                reply,
+            } => {
+                let mut removed = std::collections::BTreeSet::new();
+                if let Some(connection) = self.connections.get_mut(&id) {
+                    for topic in subscription.topics {
+                        match topic {
+                            Topic::State => connection.state = StateSubscription::Absent,
+                            Topic::Day(date) => {
+                                connection.days.remove(&date);
+                                removed.insert(date);
+                            }
+                            Topic::Control => {}
+                        }
+                        connection.outbox.unsubscribe(topic);
+                    }
+                }
+                self.prune_days(removed).await;
+                if reply.send(()).is_err() {
+                    tracing::debug!("unsubscribe caller left");
+                }
+            }
             RegistryMessage::Control(op) => {
                 match op {
-                    ControlOp::UiShutdown => {}
-                    ControlOp::UiShow | ControlOp::UiActivate => {
-                        // TODO(M3): Route to the UI selected by the main-thread lifecycle.
-                        tracing::debug!("UI show/activate routing awaits M3");
-                        return;
-                    }
+                    ControlOp::UiShutdown | ControlOp::UiShow | ControlOp::UiActivate => {}
                     ControlOp::BrowserAck
                     | ControlOp::BrowserPolicy
                     | ControlOp::CoreOffline

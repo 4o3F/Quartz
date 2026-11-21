@@ -57,6 +57,9 @@ pub enum Op {
     /// The `subscribe` request.
     #[serde(rename = "subscribe")]
     Subscribe,
+    /// Removes topics from this connection.
+    #[serde(rename = "unsubscribe")]
+    Unsubscribe,
     /// The `core.status` request.
     #[serde(rename = "core.status")]
     CoreStatus,
@@ -224,7 +227,7 @@ impl Op {
     pub const fn family(self) -> OpFamily {
         match self {
             Self::Hello => OpFamily::Hello,
-            Self::Subscribe => OpFamily::Subscribe,
+            Self::Subscribe | Self::Unsubscribe => OpFamily::Subscribe,
             Self::CoreStatus => OpFamily::Core,
             Self::UiOpen | Self::UiFirstFrame => OpFamily::Ui,
             Self::QueryFacts

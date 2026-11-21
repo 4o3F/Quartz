@@ -18,23 +18,23 @@ tray.session_unavailable:
 tray.capture_gap:
   en: "Some activity wasn't recorded"
 ui.core_error.newer_database.title:
-  en: "Database version is newer"
+  en: "Database is from a newer Quartz"
 ui.core_error.newer_database.message:
-  en: "This database was upgraded by a newer version of Quartz. Use the newer program, or restore a migration backup before starting this version."
+  en: "This database was created by a newer version of Quartz and can’t be opened safely here. Quit and update Quartz before trying again."
 ui.core_error.migration_failed.title:
-  en: "Database upgrade failed"
+  en: "Couldn’t upgrade the database"
 ui.core_error.migration_failed.message:
-  en: "The upgrade could not finish. Restore the migration backup below, then restart Quartz, or install a fixed version."
+  en: "The database upgrade did not finish and your existing data was not changed. Quit Quartz, then restore the pre-upgrade backup with the command below."
 ui.core_error.other_session.title:
-  en: "Quartz is running in another Windows session"
+  en: "Quartz is running in another session"
 ui.core_error.other_session.message:
-  en: "Exit Quartz in the other Windows session, then start it again in this session."
+  en: "Quartz can run in only one Windows session per user at a time. Quit Quartz in the other session before opening it here."
 ui.core_error.start_failed.title:
-  en: "Could not start Quartz"
+  en: "Quartz core failed to start"
 ui.core_error.start_failed.message:
-  en: "Check the data directory and core log, resolve the problem, then restart Quartz."
+  en: "The core exited while starting. Try again; if it keeps failing, check the logs or attach the details to a bug report."
 ui.core_error.backups:
-  en: "Migration backups"
+  en: "Backup path"
 ui.core_error.restore_warning:
   en: "Restoring replaces the current database. All records written after the backup will be lost."
 ui.core_error.restore_manually:
@@ -293,3 +293,77 @@ tray.duration_h:
   en: "%{hours}h"
 tray.duration_m:
   en: "%{minutes}m"
+ui.link.connecting:
+  en: "Connecting to the Quartz core…"
+ui.link.connected:
+  en: "Connected to Quartz core"
+ui.link.offline:
+  en: "Quartz core is not running"
+ui.link.mismatch:
+  en: "Core and window versions don’t match"
+ui.link.rejected:
+  en: "The core rejected the connection"
+ui.link.failed:
+  en: "Can’t reach the Quartz core"
+ui.link.core_version:
+  en: "Core version: %{version}"
+ui.link.start_core:
+  en: "Start core"
+ui.link.recording:
+  en: "Recording"
+ui.link.stopped:
+  en: "Recording stopped"
+ui.link.foreground:
+  en: "Foreground application: %{app}"
+ui.link.no_foreground:
+  en: "No foreground application"
+ui.failure.retry:
+  en: "Retry"
+ui.failure.copy_details:
+  en: "Copy details"
+ui.failure.exit:
+  en: "Quit"
+ui.failure.code:
+  en: "Error code"
+ui.failure.offline_message:
+  en: "This window gets its data from the core. Start the core and it will connect automatically."
+ui.failure.busy_message:
+  en: "Retry when the core can accept a connection."
+ui.failure.timeout_message:
+  en: "The core is running, but it did not answer within 2 seconds. Try again in a moment."
+ui.failure.io_message:
+  en: "The connection could not be opened. Retry the connection."
+ui.failure.mismatch_message:
+  en: "This usually happens after an update. Quit Quartz and start it again so the core and window run the same version."
+ui.failure.identity_title:
+  en: "Quartz core identity could not be verified"
+ui.failure.identity_message:
+  en: "Exit this window and check the Quartz installation and Windows session before restarting Quartz."
+ui.failure.rejected_message:
+  en: "Exit this window and restart Quartz after resolving the core handshake rejection."
+ui.failure.invalid_title:
+  en: "Invalid response from Quartz core"
+ui.failure.invalid_message:
+  en: "Exit this window and restart Quartz."
+ui.failure.interface_title:
+  en: "Quartz interface is unavailable"
+ui.failure.interface_message:
+  en: "Exit this window and restart Quartz."
+ui.failure.details:
+  en: "Details"
+ui.failure.recoverable:
+  en: "Action needed"
+ui.failure.unrecoverable:
+  en: "Cannot continue"
+ui.failure.starting:
+  en: "Starting core…"
+ui.failure.copy_command:
+  en: "Copy"
+ui.failure.restore_command:
+  en: "Restore command"
+ui.failure.core_version:
+  en: "Core version"
+ui.failure.ui_version:
+  en: "Window version"
+ui.failure.protocol:
+  en: "Protocol"

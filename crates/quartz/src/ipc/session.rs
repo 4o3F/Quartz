@@ -52,6 +52,10 @@ pub(crate) enum Action {
         id: RequestId,
         subscription: Subscribe,
     },
+    Unsubscribe {
+        id: RequestId,
+        subscription: quartz_protocol::Unsubscribe,
+    },
     Write {
         id: RequestId,
         request: crate::persistence::dispatch::WriteRequest,
@@ -138,7 +142,15 @@ impl ConnectionSession {
                     .expect("single protocol version is valid");
                 let proto = match supported.negotiate(hello.proto) {
                     Ok(proto) => proto,
-                    Err(error) => return Action::error(Some(id), error.into()),
+                    Err(error) => {
+                        return Action::error(
+                            Some(id),
+                            ErrorKind::ProtoMismatch {
+                                supported: error.supported,
+                                core_version: status.core_version.clone(),
+                            },
+                        );
+                    }
                 };
                 let role = hello.role.role();
                 // TODO(M5): Authenticate registered host browser streams and enable host runtime.
@@ -200,6 +212,14 @@ impl ConnectionSession {
                             return Action::error(Some(id), ErrorKind::BadRequest);
                         };
                         Action::Subscribe { id, subscription }
+                    }
+                    Op::Unsubscribe => {
+                        let Ok(subscription) =
+                            serde_json::from_value::<quartz_protocol::Unsubscribe>(request.body)
+                        else {
+                            return Action::error(Some(id), ErrorKind::BadRequest);
+                        };
+                        Action::Unsubscribe { id, subscription }
                     }
                     Op::QueryFacts | Op::QueryDay | Op::QueryTimeline | Op::QueryPendingAway => {
                         Action::from_query(

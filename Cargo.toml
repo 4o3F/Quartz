@@ -4,6 +4,7 @@ members = [
     "crates/quartz-host",
     "crates/quartz-domain",
     "crates/quartz-protocol",
+    "crates/quartz-pipe",
     "crates/quartz-i18n",
     "crates/quartz-ui",
 ]
@@ -45,6 +46,7 @@ regex = "1.13.2"
 toml = { version = "1.2.2", default-features = false, features = ["std", "serde", "parse"] }
 quartz-protocol = { path = "crates/quartz-protocol" }
 quartz-i18n = { path = "crates/quartz-i18n" }
+quartz-pipe = { path = "crates/quartz-pipe" }
 quartz-ui = { path = "crates/quartz-ui" }
 raw-window-handle = { version = "0.6.2", default-features = false, features = ["std"] }
 rust-i18n = { version = "4.2.4", default-features = false }

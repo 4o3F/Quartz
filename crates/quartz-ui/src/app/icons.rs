@@ -70,6 +70,9 @@ fluent_icons! {
     Send,
     SquareTerminal,
     FileText,
+    Copy,
+    TriangleAlert,
+    CircleX,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +106,20 @@ impl IconAsset {
 }
 
 impl AppAssets {
+    pub(crate) fn progress_track_path() -> SharedString {
+        "quartz/ProgressTrack.svg".into()
+    }
+    pub(crate) fn progress_path() -> SharedString {
+        "quartz/ProgressRing.svg".into()
+    }
+    pub(crate) fn status_path(severity: crate::failure::Severity) -> SharedString {
+        match severity {
+            crate::failure::Severity::Recoverable => "fluent/TriangleAlert-28-regular.svg",
+            crate::failure::Severity::Unrecoverable => "fluent/CircleX-28-regular.svg",
+        }
+        .into()
+    }
+
     pub(crate) fn icon_path(
         name: IconName,
         density: Density,
@@ -118,6 +135,29 @@ impl AppAssets {
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        match path {
+            "quartz/ProgressTrack.svg" => {
+                return Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../../assets/icons/ProgressTrack.svg"
+                ))));
+            }
+            "quartz/ProgressRing.svg" => {
+                return Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../../assets/icons/ProgressRing.svg"
+                ))));
+            }
+            "fluent/TriangleAlert-28-regular.svg" => {
+                return Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../../assets/icons/TriangleAlert-28-regular.svg"
+                ))));
+            }
+            "fluent/CircleX-28-regular.svg" => {
+                return Ok(Some(Cow::Borrowed(include_bytes!(
+                    "../../assets/icons/CircleX-28-regular.svg"
+                ))));
+            }
+            _ => {}
+        }
         for asset in ICONS {
             // gpui-component's title bar resolves the same IconName paths at compact density.
             if asset.name.path().as_ref() == path {
@@ -138,7 +178,12 @@ impl AssetSource for AppAssets {
     }
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
-        let mut paths = Vec::new();
+        let mut paths = vec![
+            Self::progress_path(),
+            Self::progress_track_path(),
+            Self::status_path(crate::failure::Severity::Recoverable),
+            Self::status_path(crate::failure::Severity::Unrecoverable),
+        ];
         for asset in ICONS {
             paths.push(asset.name.path());
             for density in [Density::Compact, Density::Standard] {
@@ -185,6 +230,78 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_covers_every_embedded_svg_including_error_glyphs() {
+        #[derive(serde::Deserialize)]
+        struct Manifest {
+            icons: Vec<Entry>,
+            custom_icons: Vec<CustomEntry>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            name: String,
+            size: u16,
+            style: String,
+            file: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct CustomEntry {
+            file: String,
+            path: String,
+        }
+        let manifest: Manifest =
+            serde_json::from_str(include_str!("../../assets/icons/manifest.json"))
+                .expect("manifest");
+        let mut declared = std::collections::BTreeSet::new();
+        for entry in manifest.icons {
+            let path = format!("fluent/{}-{}-{}.svg", entry.name, entry.size, entry.style);
+            let embedded = AppAssets
+                .load(&path)
+                .expect("registered path")
+                .expect("SVG");
+            assert!(
+                declared.insert(entry.file.clone()),
+                "duplicate manifest entry"
+            );
+            assert_eq!(
+                embedded.as_ref(),
+                fs::read(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("assets/icons")
+                        .join(entry.file)
+                )
+                .expect("SVG file")
+            );
+        }
+        for entry in manifest.custom_icons {
+            let embedded = AppAssets
+                .load(&entry.path)
+                .expect("custom path")
+                .expect("SVG");
+            assert!(declared.insert(entry.file.clone()));
+            assert_eq!(
+                embedded.as_ref(),
+                fs::read(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("assets/icons")
+                        .join(entry.file)
+                )
+                .expect("custom SVG")
+            );
+        }
+        let files = fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons"))
+            .expect("icons");
+        for entry in files {
+            let path = entry.expect("entry").path();
+            if path.extension().is_some_and(|extension| extension == "svg") {
+                assert!(
+                    declared.contains(path.file_name().expect("filename").to_str().expect("UTF-8")),
+                    "undeclared {path:?}"
+                );
             }
         }
     }

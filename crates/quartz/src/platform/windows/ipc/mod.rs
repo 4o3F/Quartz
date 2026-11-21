@@ -1,23 +1,15 @@
-//! Windows named-pipe transport and peer authentication.
-
-mod client;
-mod identity;
-mod pipe_name;
+//! Windows pipe server, DACL and session integration.
 mod security;
 pub(super) mod server;
 mod win32_error;
 
-pub(crate) use identity::{CheckPeerError, ProcessIdentity};
+pub(crate) use quartz_pipe::{CheckPeerError, PipeName, ProcessIdentity};
+#[cfg(test)]
+pub(crate) type CoreClient =
+    quartz_pipe::CoreClient<tokio::net::windows::named_pipe::NamedPipeClient>;
+#[cfg(test)]
+pub(crate) use quartz_pipe::{CONNECT_TIMEOUT, OpenCorePipeError};
 pub(crate) use security::CreatePipeSecurityError;
 pub(crate) use server::{PipeServer, PipeServerConfig};
-
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-pub(crate) use client::CONNECT_TIMEOUT;
-pub(crate) use client::CoreClient;
-#[cfg(test)]
-pub(crate) use client::OpenCorePipeError;
-
-pub(crate) use pipe_name::PipeName;

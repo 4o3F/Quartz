@@ -1,5 +1,9 @@
 //! Opens the main window on the sample day.
 //!
+//! Error states: `connecting`, `core-not-running`, `core-not-running-starting`, `core-start-failed`,
+//! `connect-failed`, `migration-failed`, `newer-database`, `version-mismatch`, `other-session`,
+//! `identity-rejected`, `handshake-rejected`, `invalid-response`, `interface-unavailable`.
+//! These use the shared error component with sample diagnostics and never start a core or pipe.
 //! `QUARTZ_PREVIEW_THEME=system|light|dark`, `QUARTZ_PREVIEW_STATE=today|today-details|today-hover|today-full-day`,
 //! `QUARTZ_PREVIEW_LANG=zh-CN|en|en-XA`, `QUARTZ_PREVIEW_OFFSCREEN=0|1` (with 1 the window is
 //! created hidden, moved off every display and shown without activation),

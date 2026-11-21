@@ -170,10 +170,24 @@ pub(crate) struct Shadows {
     pub(crate) overlay: Vec<ShadowLayer>,
 }
 
+/// Fixed geometry of the approved error mockup (07 section 2.5).
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub(crate) struct FailureLayout {
+    pub(crate) card_width: Pixels,
+    pub(crate) tile_size: Pixels,
+    pub(crate) glyph_size: Pixels,
+    pub(crate) badge_dot: Pixels,
+    pub(crate) command_line_height: Pixels,
+    pub(crate) status_border_opacity: f32,
+    pub(crate) busy_opacity: f32,
+    pub(crate) busy_track_opacity: f32,
+}
+
 /// All theme-independent tokens.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct Metrics {
     pub(crate) radius: Radius,
+    pub(crate) failure: FailureLayout,
     pub(crate) space: Space,
     density: Densities,
     pub(crate) layout: Layout,

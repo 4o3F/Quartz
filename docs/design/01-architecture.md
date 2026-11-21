@@ -121,8 +121,7 @@ enum RulesCommand {
 3. 状态为 `none` 时，核心用 `CreateProcessW` 以 `current_exe()` 的绝对路径和 `ui` 子命令启动界面，不经过 shell。
    - 设置 `STARTF_FORCEONFEEDBACK`，让鼠标显示"后台运行"指针。
    - 托盘提示改为"正在打开…"。
-4. 核心保存子进程句柄并设为 `starting`，防止连续点击重复启动。界面在 `hello` 中登记 `starting`、`prewarming` 或 `visible`；核心在握手完成后重放尚未完成的显示请求。收到 `ui.first_frame` 后设为 `visible` 并清除 `show_requested`。
-5. 核心重启后，已有 UI 重连握手即重新登记；核心检测到会话内 UI 互斥量已被持有时，等待已有 UI 重连登记，再处理待完成的打开请求。
+4. 核心保存子进程句柄并设为 `starting`，防止连续点击重复启动。界面在 `hello` 中登记 `starting` 或 `prewarming`；核心在握手完成后重放尚未完成的显示请求。收到 `ui.first_frame` 后设为 `visible` 并清除 `show_requested`。
 
 ### 4.2 悬停预热
 
@@ -139,12 +138,14 @@ GPUI 在 `Application::run` 内部、启动回调之前创建 D3D 设备（`conn
 ### 4.3 关闭
 
 - 最后一个窗口关闭时，界面进程调用 `cx.quit()`，整个进程退出，GPU 驱动占用随之释放。
-- 核心确认 UI 进程退出后设为 `none`；仅管道断开时保留进程登记并等待重连。
+- 已成功连接的界面在管道断开后关闭所有窗口并退出，释放界面互斥量。核心确认界面进程退出后设为 `none`；重新启动的核心从托盘打开新的界面进程。
 - 用户在托盘选择"退出 Quartz"时，核心先通知界面关闭，再结算当前区间、关闭数据库，最后退出。
 
 ### 4.4 核心不在时的界面
 
-界面连接不上管道时，显示"Quartz 核心未运行"，并提供"启动核心"按钮（以无参数方式启动 `quartz.exe`）。界面不自行读取数据库。
+界面首次连接失败后停止尝试，按 07 第 2.5 节显示统一错误界面；核心未运行时提供“启动核心”和“重试”，点击“重试”只进行一次新连接。点击“启动核心”以 `current_exe()` 的绝对路径、无参数、不经过 shell 启动核心，先等待管道就绪通知，再连接一次；`CORE_START_TIMEOUT` 为 8 秒，沿用 04 第 6.1 节的管道线程启动预算。
+
+启动等待在创建子进程前登记 `Local\Quartz.<SID>.v1.ready` 内核事件；管道服务创建监听实例后置位，停止时清除。界面通过可取消的本机等待接收通知，等待期间不轮询管道；超时显示可重试的连接超时错误。界面不自行读取数据库。
 
 ## 5. crate 划分
 
@@ -154,8 +155,9 @@ crates/
 ├─ quartz-host     独立 Native Messaging 主机；浏览器 stdio 与核心管道转发，不链接 GPUI
 ├─ quartz-domain   纯逻辑：计时状态机、区间运算、可用状态裁剪、规则匹配、提取、隐私策略求值
 ├─ quartz-protocol 消息类型、分帧编解码、版本与错误码
+├─ quartz-pipe     共享命名管道客户端、进程身份校验、分帧与请求关联
 ├─ quartz-i18n     翻译资源、语言协商、复数、时长与日期格式化（10）
-└─ quartz-ui       GPUI 界面，只依赖 quartz-protocol 与 quartz-i18n
+└─ quartz-ui       GPUI 界面，在工作区内只依赖 quartz-protocol、quartz-pipe 与 quartz-i18n
 
 以后：quartz-protocols  自控协议的纯逻辑（12 第 4 节），依赖规则同 quartz-domain
 ```
@@ -163,7 +165,8 @@ crates/
 依赖规则：
 
 - `quartz-domain` 不依赖 Windows API、SQLite 和 GPUI，可以在任意平台跑单元测试。时间值由外壳读取后作为纯核心的输入传入。
-- `quartz-ui` 不依赖 `quartz-domain`，展示所需的一切都来自协议消息；文字翻译与格式化来自 `quartz-i18n`。
+- `quartz-pipe` 依赖 `quartz-protocol`、tokio、tokio-util、windows、snafu 与 tracing；Windows 项目受 `cfg(windows)` 保护，不依赖领域逻辑、Windows 界面、SQLite 或 GPUI。核心的服务端复用这里的进程身份校验，DACL、连接注册表与会话仍在 `quartz`。
+- `quartz-ui` 在工作区内仅依赖 `quartz-protocol`、`quartz-pipe` 与 `quartz-i18n`，展示所需的一切都来自协议消息；文字翻译与格式化来自 `quartz-i18n`。
 - `quartz-i18n` 不依赖 GPUI、Windows API 与 SQLite，核心和界面共用。界面里要显示"命中规则"或"预览命中"，都向核心请求。
 - `quartz` 不呈现窗口、对话框或错误文字，只保留 Shell 托盘；启动错误以 `quartz-protocol::CoreErrorCode` 和结构化参数交给 `quartz-ui` 本地化并展示，`quartz-i18n` 的文字查找仅用于托盘菜单和提示。托盘通过 `TrayState` 输入、`TrayCommand` 输出隔离，原生窗口、菜单和 Shell 调用集中在 `platform/windows/tray/`；以后可像 `quartz-host` 一样将该模块移到独立可执行文件。
 - `quartz` 对 `quartz-ui` 的依赖只出现在入口里一个函数调用：`quartz_ui::run(args)`。日后要拆成独立的 `quartz-ui.exe`，只需把这一行移到新的 bin crate。
@@ -180,12 +183,12 @@ crates/
 | `core::foreground` | 前台事件过滤、元数据选择与解析接口 |
 | `core::sources` | 系统采样的时间转换、会话重试与空闲状态处理 |
 | `platform::windows::{foreground, sources, tray, process}` | Win32 前台解析、系统观测源、托盘与进程信息；`sources` 读取空闲、会话与电源状态 |
-| `platform::windows::ipc` | 命名管道创建、对端身份验证与连接生命周期；传递 `ipc::Services` |
+| `platform::windows::ipc` | 命名管道创建、调用共享对端身份验证与连接生命周期；传递 `ipc::Services` |
 | `persistence` | 数据库线程的写入队列、批量事务、失败缓冲与采集反馈 |
 | `store` | schema 迁移、写入、读取、保留清理；`Store::write` 统一写事务，提交后合并版本变更，`store::versions` 管理版本行、UTC 日期范围和配置键 |
 | `rules::registry` | 规则注册表：规则状态的唯一写者，发布不可变规则快照（第 6.2 节） |
 | `query` | 查询调度、纯切片与聚合、版本摘要与分页；`query::runner` 持有分批查询任务并归还只读连接 |
-| `ipc` | 会话动作、角色权限、订阅和协议客户端；`ipc::Services` 汇集应用服务，`ipc::connection` 在异步读写流上执行会话动作 |
+| `ipc` | 会话动作、角色权限、订阅与 CLI 输出；`ipc::Services` 汇集应用服务，`ipc::connection` 在异步读写流上执行会话动作 |
 
 `query` 依赖 `store` 读取事实和版本值，`store` 通过 `quartz-domain` 的事实类型返回数据。`ipc` 依赖 `query` 的查询调度与版本发布接口。`core::app` 将查询端口、版本端口、状态接收端和界面命令端口组装为 `ipc::Services`。`platform::windows::ipc` 创建和验证命名管道，只通过 `ipc` 接口传递服务集合、启动订阅注册表并调用 `ipc::connection`。`core::app::CoreRuntime` 打开存储、取得安装标识、构造运行元数据与状态发布器，并启动采集线程、数据库线程和管道服务。`PlatformPorts` 提供时钟、主线程唤醒与界面命令通知、会话标识、安装标识候选值、核心实例标识、前台解析器工厂和管道工厂，以及语言与区域设置。前台解析器工厂在采集线程调用；Windows 实现持有该线程的 COM apartment，并在解析器释放后结束 COM。平台主线程持有托盘、系统观测源和消息循环，通过运行时取得观测入口、关闭端口和命令接收端。日志初始化由运行时提供，数据目录定位和实例锁仍使用 Windows 环境与系统接口。
 
@@ -305,15 +308,15 @@ RegistryCommand ─▶ RuleRegistry::decide(&self, cmd) ─▶ Decision { writes
 
 ### 7.2 tokio 使用范围
 
-tokio 只承担管道与 stdio 的异步 I/O，不接管 Win32 消息循环、SQLite 或 GPUI 的执行器。所有 runtime 都是 `Builder::new_current_thread()`，不使用 multi-thread runtime：它默认按 CPU 核数创建工作线程（测试机是 28 个逻辑核），会突破 08 的线程预算。
+tokio 只承担管道与 stdio 的异步 I/O，不接管 Win32 消息循环、SQLite 或 GPUI 的执行器。UI 的管道线程通过容量为 64 的命令与事件通道连接 GPUI，最多保留 64 个待响应请求；GPUI 前台任务异步等待事件接收器，由下一帧回调发送 `ui.first_frame`。所有 runtime 都是 `Builder::new_current_thread()`，不使用 multi-thread runtime：它默认按 CPU 核数创建工作线程（测试机是 28 个逻辑核），会突破 08 的线程预算。
 
 | 模式 | runtime 所在线程 | 负责 |
 |---|---|---|
 | 核心 | 独立的 I/O 线程 | 命名管道 accept、读写、订阅推送；与其他线程用 tokio `mpsc`、`oneshot` 通道通信。主线程与采集线程是同步代码，用 `blocking_send` 或 `try_send` 向 I/O 线程投递 |
 | host | 主线程 | 浏览器 stdin/stdout 与命名管道之间的双向转发 |
-| 界面 | 一个后台线程 | 管道客户端与重连；通过通道把消息交给 GPUI 的前台执行器，界面代码不直接 await tokio 的 future |
+| 界面 | 一个后台线程 | 管道客户端、显式连接操作和启动就绪等待；通过有界通道把消息交给 GPUI 的前台执行器；前台任务异步等待不需要 tokio runtime 的通道接收器，管道、请求超时与启动等待在后台 runtime 内执行 |
 
-`max_blocking_threads` 设为小值（核心 2、host 1）。`tokio::io::stdin` 等会使用 blocking 线程池，这些线程计入 08 的线程预算。数据库访问不用 `spawn_blocking`，仍由数据库线程处理（第 6 节）。
+`max_blocking_threads` 设为小值（核心 2、host 1、界面 1）。界面启动核心时的可取消内核事件等待使用这个单线程阻塞池，管道读写仍在 I/O 线程。`tokio::io::stdin` 等会使用 blocking 线程池，这些线程计入 08 的线程预算。数据库访问不用 `spawn_blocking`，仍由数据库线程处理（第 6 节）。
 
 release profile：`lto = "fat"`，`codegen-units = 1`，`panic = "abort"`，`strip = true`。`opt-level` 在 `"s"` 和 `3` 之间按实测决定。
 

@@ -115,6 +115,17 @@ impl Connection {
                         Err(error) => Action::error_response(Some(id), error),
                     })
                 }
+                Action::Unsubscribe { id, subscription } => {
+                    let connection = registration.as_ref().expect("unsubscribe follows hello").id;
+                    self.registry
+                        .unsubscribe(connection, subscription)
+                        .await
+                        .map_err(io::Error::other)?;
+                    Some(Action::success_response(
+                        id,
+                        quartz_protocol::SubscribeResponse {},
+                    ))
+                }
                 Action::Subscribe { id, subscription } => {
                     let connection = registration
                         .as_ref()

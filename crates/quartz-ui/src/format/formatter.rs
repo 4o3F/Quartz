@@ -51,6 +51,10 @@ pub(crate) enum SourceText<'a> {
 }
 
 impl Formatter {
+    #[cfg(debug_assertions)]
+    pub(crate) fn language(self) -> Language {
+        self.language
+    }
     /// Formats in `language`.
     #[must_use]
     pub(crate) const fn new(language: Language) -> Self {

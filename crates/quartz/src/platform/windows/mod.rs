@@ -213,7 +213,7 @@ impl CoreProcess {
             AcquireInstance::SameSession => {
                 if matches!(autostart, Autostart::Disabled)
                     && let Err(error) =
-                        ipc::CoreClient::connect().and_then(|mut client| client.open_ui())
+                        quartz_pipe::CoreClient::connect().and_then(|mut client| client.open_ui())
                 {
                     tracing::warn!(%error, "could not forward open request to existing core within timeout");
                 }

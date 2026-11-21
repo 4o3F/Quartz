@@ -334,6 +334,31 @@ impl<'a> Widgets<'a> {
         density: Density,
         content: ButtonContent,
     ) -> Stateful<Div> {
+        self.button_foreground(id, density, content, self.palette.text_primary)
+    }
+
+    /// Accent actions use the matching icon and label foreground, including high contrast.
+    pub(crate) fn accent_button(
+        &self,
+        id: impl Into<ElementId>,
+        density: Density,
+        content: ButtonContent,
+    ) -> Stateful<Div> {
+        let palette = self.palette;
+        self.button_foreground(id, density, content, palette.text_on_accent)
+            .bg(palette.accent_fill)
+            .border_color(palette.accent_fill)
+            .hover(move |style| style.bg(palette.accent_fill_hover))
+            .active(move |style| style.bg(palette.accent_fill))
+    }
+
+    fn button_foreground(
+        &self,
+        id: impl Into<ElementId>,
+        density: Density,
+        content: ButtonContent,
+        foreground: Hsla,
+    ) -> Stateful<Div> {
         let palette = self.palette;
         let space = &self.metrics.space;
         let (hover, pressed) = (palette.fill_control_hover, palette.fill_control_pressed);
@@ -355,17 +380,17 @@ impl<'a> Widgets<'a> {
             .border_1()
             .border_color(palette.stroke_control)
             .rounded(self.metrics.radius.control)
-            .text_color(palette.text_primary)
+            .text_color(foreground)
             .ramp(self, Ramp::Body)
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
             .active(move |style| style.bg(pressed))
             .when_some(icon, |button, name| {
-                button.child(div().flex_shrink_0().child(self.icon(
-                    name,
-                    density,
-                    palette.text_primary,
-                )))
+                button.child(
+                    div()
+                        .flex_shrink_0()
+                        .child(self.icon(name, density, foreground)),
+                )
             })
             .map(|button| match label {
                 Some(text) => button.min_w(px(0.)).child(

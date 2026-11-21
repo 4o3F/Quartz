@@ -4,7 +4,8 @@
 use std::{cell::Cell, num::ParseIntError, rc::Rc, str::FromStr};
 
 use gpui_kit::{
-    App, AppContext as _, Bounds, Pixels, Point, Window, WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Point,
+    Render, Styled as _, Window, WindowOptions, component::ActiveTheme as _, div, point, px, size,
 };
 use quartz_i18n::Language;
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
@@ -50,12 +51,73 @@ pub enum PreviewState {
     TodayHover,
     /// Today with the timeline showing the whole day, where short intervals become markers.
     TodayFullDay,
+    /// The shared failure/connecting screen, without a core or pipe.
+    Error(ErrorPreviewState),
+}
+
+/// Approved error mockup fixtures. All data and recovery actions stay inside the preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(test, derive(strum::VariantArray))]
+pub enum ErrorPreviewState {
+    Connecting,
+    CoreNotRunning,
+    CoreNotRunningStarting,
+    CoreStartFailed,
+    ConnectFailed,
+    MigrationFailed,
+    NewerDatabase,
+    VersionMismatch,
+    OtherSession,
+    IdentityRejected,
+    HandshakeRejected,
+    InvalidResponse,
+    InterfaceUnavailable,
+}
+impl ErrorPreviewState {
+    fn failure(self) -> Option<crate::failure::Failure> {
+        use crate::failure::{Failure, FailureKind};
+        use quartz_protocol::{CoreError, CoreErrorCode};
+        Some(match self {
+            Self::Connecting => return None,
+            Self::CoreNotRunning | Self::CoreNotRunningStarting => {
+                Failure::new(FailureKind::CoreNotRunning)
+            }
+            Self::CoreStartFailed => Failure::new(FailureKind::CoreStartFailed),
+            Self::ConnectFailed => Failure::new(FailureKind::ConnectTimeout),
+            Self::MigrationFailed => Failure::from_startup(CoreError::new(
+                CoreErrorCode::MigrationFailed,
+                vec![std::path::PathBuf::from(
+                    r"C:\Users\alice\AppData\Local\Quartz\backups\quartz-2026-11-21T093012Z-before-v4.db",
+                )],
+            )),
+            Self::NewerDatabase => Failure::new(FailureKind::NewerDatabase),
+            Self::VersionMismatch => {
+                Failure::from_connection(&quartz_pipe::CallCoreError::Protocol {
+                    kind: quartz_protocol::ErrorKind::ProtoMismatch {
+                        supported: quartz_protocol::ProtoRange::new(
+                            quartz_protocol::PROTOCOL_VERSION,
+                            quartz_protocol::PROTOCOL_VERSION,
+                        )
+                        .expect("current range"),
+                        core_version: quartz_protocol::CoreVersion(
+                            env!("CARGO_PKG_VERSION").into(),
+                        ),
+                    },
+                })
+            }
+            Self::OtherSession => Failure::new(FailureKind::OtherSession),
+            Self::IdentityRejected => Failure::new(FailureKind::IdentityRejected),
+            Self::HandshakeRejected => Failure::new(FailureKind::HandshakeRejected),
+            Self::InvalidResponse => Failure::new(FailureKind::InvalidResponse),
+            Self::InterfaceUnavailable => Failure::new(FailureKind::InterfaceUnavailable),
+        })
+    }
 }
 
 /// A preview state name is not one of `today`, `today-details`, `today-hover` or `today-full-day`.
 #[derive(Debug, Clone, PartialEq, Eq, Snafu)]
 #[snafu(display(
-    "unknown preview state {name:?}; expected today, today-details, today-hover or today-full-day"
+    "unknown preview state {name:?}; expected a Today or error-screen state from the mockups README"
 ))]
 pub struct ParsePreviewStateError {
     name: String,
@@ -70,6 +132,21 @@ impl FromStr for PreviewState {
             "today-details" => Ok(Self::TodayDetails),
             "today-hover" => Ok(Self::TodayHover),
             "today-full-day" => Ok(Self::TodayFullDay),
+            "connecting" => Ok(Self::Error(ErrorPreviewState::Connecting)),
+            "core-not-running" => Ok(Self::Error(ErrorPreviewState::CoreNotRunning)),
+            "core-not-running-starting" => {
+                Ok(Self::Error(ErrorPreviewState::CoreNotRunningStarting))
+            }
+            "core-start-failed" => Ok(Self::Error(ErrorPreviewState::CoreStartFailed)),
+            "connect-failed" => Ok(Self::Error(ErrorPreviewState::ConnectFailed)),
+            "migration-failed" => Ok(Self::Error(ErrorPreviewState::MigrationFailed)),
+            "newer-database" => Ok(Self::Error(ErrorPreviewState::NewerDatabase)),
+            "version-mismatch" => Ok(Self::Error(ErrorPreviewState::VersionMismatch)),
+            "other-session" => Ok(Self::Error(ErrorPreviewState::OtherSession)),
+            "identity-rejected" => Ok(Self::Error(ErrorPreviewState::IdentityRejected)),
+            "handshake-rejected" => Ok(Self::Error(ErrorPreviewState::HandshakeRejected)),
+            "invalid-response" => Ok(Self::Error(ErrorPreviewState::InvalidResponse)),
+            "interface-unavailable" => Ok(Self::Error(ErrorPreviewState::InterfaceUnavailable)),
             _ => ParsePreviewStateSnafu { name }.fail(),
         }
     }
@@ -249,14 +326,16 @@ impl PreviewState {
     const fn range(self) -> RangeChoice {
         match self {
             Self::TodayFullDay => RangeChoice::FullDay,
-            Self::Today | Self::TodayDetails | Self::TodayHover => RangeChoice::Activity,
+            Self::Today | Self::TodayDetails | Self::TodayHover | Self::Error(_) => {
+                RangeChoice::Activity
+            }
         }
     }
 
     /// The details subject and hovered segment this state opens on the sample day.
     fn initial_view(self, sample: &SampleDay) -> InitialView {
         match self {
-            Self::Today | Self::TodayFullDay => InitialView::default(),
+            Self::Today | Self::TodayFullDay | Self::Error(_) => InitialView::default(),
             Self::TodayDetails => InitialView {
                 details: Some(DetailsSubject::Segment(sample.details_segment)),
                 hover: None,
@@ -295,8 +374,84 @@ impl PreviewOptions {
                 range: self.state.range(),
                 text_scale: LiveTextScale::read(text_scale_source).context(ReadTextScaleSnafu)?,
             };
-            self.open_window(init, initial.hover, cx)
+            match self.state {
+                PreviewState::Error(state) => self.open_error_window(state, init.text_scale, cx),
+                PreviewState::Today
+                | PreviewState::TodayDetails
+                | PreviewState::TodayHover
+                | PreviewState::TodayFullDay => self.open_window(init, initial.hover, cx),
+            }
         })
+    }
+
+    fn open_error_window(
+        self,
+        state: ErrorPreviewState,
+        scale: LiveTextScale,
+        cx: &mut App,
+    ) -> Result<(), RunPreviewError> {
+        let window_size = self.size.content_size();
+        let visible = self.placement == PreviewPlacement::Visible;
+        let formatter = Formatter::new(self.language);
+        let options = WindowOptions {
+            focus: visible,
+            show: visible,
+            ..window_options(
+                formatter.text(Msg::AppName),
+                Bounds::centered(None, window_size, cx),
+                cx,
+            )
+        };
+        let placement: Rc<Cell<Option<PlaceWindowError>>> = Rc::new(Cell::new(None));
+        let placement_failure = Rc::clone(&placement);
+        let (handle, _) = gpui_kit::open_window(options, cx, move |window, cx| {
+            if !visible && let Err(error) = place_offscreen(window) {
+                placement_failure.set(Some(error));
+            }
+            self.appearance.observe(window, cx);
+            cx.new(|cx| {
+                let screen = cx.new(|cx| {
+                    let mut screen = super::failure_screen::FailureScreen::new(
+                        state.failure(),
+                        formatter,
+                        scale.current(),
+                    );
+                    if state == ErrorPreviewState::CoreNotRunningStarting {
+                        screen.set_activity(
+                            super::failure_screen::RecoveryActivity::StartingCore,
+                            cx,
+                        );
+                    }
+                    screen
+                });
+                cx.subscribe(&screen, |_, _, action, cx| {
+                    if *action == crate::failure::FailureAction::Exit {
+                        cx.quit();
+                    }
+                })
+                .detach();
+                ErrorPreviewWindow {
+                    screen,
+                    formatter,
+                    scale,
+                }
+            })
+        })
+        .context(GpuiSnafu)
+        .context(OpenWindowSnafu)?;
+        if let Some(error) = placement.take() {
+            return Err(RunPreviewError::PlaceWindow { source: error });
+        }
+        if !visible {
+            handle
+                .update(cx, |_, window, _| {
+                    window.resize(window_size);
+                    window.refresh();
+                })
+                .context(GpuiSnafu)
+                .context(ResizeWindowSnafu)?;
+        }
+        Ok(())
     }
 
     /// Opens the shell window, off-screen when asked, with the tooltip of `hover` showing.
@@ -353,9 +508,68 @@ impl PreviewOptions {
     }
 }
 
+#[derive(Debug)]
+struct ErrorPreviewWindow {
+    screen: Entity<super::failure_screen::FailureScreen>,
+    formatter: Formatter,
+    scale: LiveTextScale,
+}
+impl Render for ErrorPreviewWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = super::system_theme::SystemTheme::tokens(cx);
+        let ui = super::Widgets::new(&tokens, cx.theme().mode, self.scale.current());
+        self.screen.update(cx, |screen, cx| {
+            screen.set_format(self.formatter, self.scale.current(), cx)
+        });
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(ui.palette.window_background)
+            .text_color(ui.palette.text_primary)
+            .child(ui.title_bar(self.formatter.text(Msg::AppName), window))
+            .child(div().flex_1().min_h(px(0.)).child(self.screen.clone()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_error_fixture_uses_the_shared_model_without_creating_a_window() {
+        use strum::VariantArray as _;
+        let names = [
+            "connecting",
+            "core-not-running",
+            "core-not-running-starting",
+            "core-start-failed",
+            "connect-failed",
+            "migration-failed",
+            "newer-database",
+            "version-mismatch",
+            "other-session",
+            "identity-rejected",
+            "handshake-rejected",
+            "invalid-response",
+            "interface-unavailable",
+        ];
+        assert_eq!(names.len(), ErrorPreviewState::VARIANTS.len());
+        for (name, &state) in names.into_iter().zip(ErrorPreviewState::VARIANTS) {
+            assert_eq!(name.parse::<PreviewState>(), Ok(PreviewState::Error(state)));
+            match state.failure() {
+                None => assert_eq!(state, ErrorPreviewState::Connecting),
+                Some(failure) => {
+                    let text = crate::failure::FailurePresentation::new(
+                        &failure,
+                        Formatter::new(Language::English),
+                    );
+                    assert!(!text.title.is_empty());
+                    assert!(!text.details.is_empty());
+                }
+            }
+        }
+    }
 
     #[test]
     fn each_state_opens_its_sample_segment() {

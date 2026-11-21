@@ -5138,6 +5138,7 @@ dependencies = [
  "num_enum",
  "quartz-domain",
  "quartz-i18n",
+ "quartz-pipe",
  "quartz-protocol",
  "quartz-ui",
  "serde",
@@ -5183,6 +5184,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "quartz-pipe"
+version = "0.0.0"
+dependencies = [
+ "quartz-protocol",
+ "serde_json",
+ "snafu",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "quartz-protocol"
 version = "0.0.0"
 dependencies = [
@@ -5203,6 +5218,7 @@ dependencies = [
  "jiff",
  "num-traits",
  "quartz-i18n",
+ "quartz-pipe",
  "quartz-protocol",
  "quartz-ui",
  "raw-window-handle",
@@ -5210,6 +5226,7 @@ dependencies = [
  "serde_json",
  "snafu",
  "strum",
+ "tokio",
  "tracing",
  "windows 0.62.2",
 ]

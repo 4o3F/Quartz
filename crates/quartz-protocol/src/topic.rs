@@ -111,6 +111,13 @@ pub struct Subscribe {
     pub topics: Vec<Topic>,
 }
 
+/// Removes topics from this connection; UI lifecycle control remains implicit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unsubscribe {
+    /// Topics to remove idempotently.
+    pub topics: Vec<Topic>,
+}
+
 /// Empty acknowledgement for a successful subscription.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeResponse {}

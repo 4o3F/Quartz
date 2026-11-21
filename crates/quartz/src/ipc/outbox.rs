@@ -165,6 +165,15 @@ impl OutboxHandle {
         let reservation = self.reserve(payload.len())?;
         self.enqueue(OutboxMessage::Control { body, reservation })
     }
+    pub(crate) fn unsubscribe(&self, topic: Topic) {
+        self.latest.send_modify(|latest| match topic {
+            Topic::State => latest.state = None,
+            Topic::Day(date) => {
+                latest.days.remove(&date);
+            }
+            Topic::Control => {}
+        });
+    }
     pub(crate) fn state(&self, snapshot: StateSnapshot) {
         self.latest
             .send_modify(|latest| latest.state = Some(snapshot));

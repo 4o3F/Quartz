@@ -1,6 +1,10 @@
 //! Shared IPC data types, framing, permissions, and startup failures.
 
 mod annotations;
+mod client_request;
+pub use client_request::CoreRequest;
+/// Raw JSON at the protocol envelope boundary.
+pub use serde_json::{Error as JsonError, Value as JsonValue};
 mod envelope;
 mod error;
 pub mod facts;
@@ -33,7 +37,7 @@ pub use handshake::{
 pub use op::{ControlBody, ControlOp, Op, OpFamily};
 pub use role::{AuthorizeOpError, Role};
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};
-pub use topic::{LocalDate, ParseTopicError, Subscribe, SubscribeResponse, Topic};
+pub use topic::{LocalDate, ParseTopicError, Subscribe, SubscribeResponse, Topic, Unsubscribe};
 
 pub use state::{
     AppIdentity, ForegroundState, HourCycle, LocaleSettings, StateSnapshot, UiLanguage, Weekday,

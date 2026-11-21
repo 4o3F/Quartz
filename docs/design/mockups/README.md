@@ -38,3 +38,39 @@ The user accepted these answers to the questions above; 07-ui.md is authoritativ
 - Rules page: one tab row — 分类, 规则, 未分类队列 (with count), 文档提取规则, 隐私规则; explain panel and rule editor use the right-hand panel slot (07 §6).
 - Plot areas sit directly on `bg.base` (or Mica) in both light and dark, without card fill (07 §10). The light mockups still show a transparent plot area on the card; follow 07.
 - Data-integrity warnings may use `status.critical` / `status.caution`; "no red warnings" applies to judging user behaviour (07 §6).
+
+## Error screen (`errors.html`)
+
+Unified startup, connection, and fatal error screen for the 960×640 window (also verified at the 640×480 minimum via `?size=min`). Query parameters: `?state=<key>&theme=light|dark&lang=zh-CN|en[&size=min][&details=open|closed]`. Uses only `tokens.css` variables and shared controls from `mockup.css`.
+
+### Layout
+
+- **Surface & chrome**: Same 32 px custom title bar (`#logo` + Windows caption buttons) directly on the Mica/`bg.base` canvas — no sidebar or `fill.layer` shell.
+- **Scrollable viewport**: Below the title bar, the stage keeps a `24 px` (`space.xxl`) margin on all sides and centers short content via `margin: auto`. When an expanded card exceeds the window height (e.g., `migration-failed` at 640×480), the area below the title bar scrolls vertically (`overflow-y: auto`) with a subtle Fluent 2 overlay scroll thumb (`text.tertiary`, 11 §9.2) rather than clipping.
+- **Progress state (`connecting`)**: Weightless centered 28 px Fluent progress ring and `text.secondary` label directly on `bg.base`, with no card or actions.
+- **Failure states (all 8 errors — one identical structure)**: One centered `560 px` `fill.card` (`stroke.card`, `radius.overlay` 8 px) with no large tinted bands:
+  1. **Header + body in the card**: 48×48 status icon tile (28 px Fluent icon) on the left; status badge, left-aligned `type.subtitle` (20/28 Semibold) title, `type.body` (`text.secondary`) explanation, and action bar (primary `accent` button first, standard secondary buttons next) aligned on the title column's vertical axis.
+  2. **Collapsible details footer**: Subordinate `fill.card_secondary` band separated by `stroke.divider` in the same footer position for every failure. When expanded, it grows below inside the same card with a monospace diagnostic key-value list (always starting with `error_code`) and — for `migration-failed` — an inset `bg.base` command box with a dedicated copy button where long Windows paths wrap (`overflow-wrap: anywhere`) instead of truncating.
+
+### Recoverable vs. unrecoverable visual rules
+
+Both classes share the exact same card structure; status color is used **only** in the 48×48 icon tile and the 20 px badge (no tinted header bands or full-red areas):
+
+- **Recoverable (`caution`)** — `core-not-running`, `core-not-running-starting`, `core-start-failed`, `connect-failed`:
+  - 28 px Fluent warning triangle (`!`) in a `status.caution_bg` tile + `status.caution` badge (`需要操作` / `Action needed`).
+  - Action bar leads with the in-window recovery action (`启动核心` / `重试`). In `core-not-running-starting`, the primary button shows an inline 16 px progress ring (`正在启动核心…`) and `重试` is disabled (`fill.control_disabled` / `text.disabled`).
+- **Unrecoverable (`critical`)** — `migration-failed`, `newer-database`, `version-mismatch`, `other-session`:
+  - 28 px Fluent dismiss circle (`×`) in a `status.critical_bg` tile + `status.critical` badge (`无法继续` / `Cannot continue`). Distinct glyph shapes (`!` triangle vs. `×` circle) keep the two classes distinguishable without relying on color alone.
+  - Action bar offers only `复制详细信息` / `Copy details` (primary accent button, with copy icon) and `退出` / `Quit` (standard secondary button).
+- **Consistent copy-details placement rule**: Show the compact `复制详细信息` / `Copy details` action in the right side of the details footer header **only when `复制详细信息` is not already in the primary action bar** (so recoverable states have it in the footer header, while unrecoverable states promote it to the primary button without duplicating it below).
+
+### Design questions / choices made
+
+1. **Card on Mica vs. unboxed text on Mica**: Wrapping the failure block in a single `fill.card` with `fill.card_secondary` for the collapsible footer keeps visual hierarchy on the title and actions while leaving the outer canvas on Mica/`bg.base`.
+2. **Actions above details**: Placing the action bar directly under the explanation (above the collapsible `详细信息` footer) keeps primary actions at a fixed vertical position when details toggle and ensures they remain immediately visible above the fold even when tall expanded details scroll at 640×480.
+3. **Unrecoverable primary button**: Styled `复制详细信息` as the primary accent button (following Fluent's "primary accent first" rule and steering users to grab diagnostics before quitting) and `退出` as a standard secondary button. Confirm whether both should be standard buttons instead, or if `退出` should be primary in states like `other-session`.
+4. **Class badge labels**: Used `需要操作` / `Action needed` (recoverable) and `无法继续` / `Cannot continue` (unrecoverable) as calm, non-jargon labels.
+5. **Default details expansion**: Expanded by default on `core-start-failed`, `migration-failed`, `newer-database`, and `version-mismatch` (where paths, commands, or versions are immediately useful) and collapsed on `core-not-running`, `core-not-running-starting`, `connect-failed`, and `other-session`.
+6. **Restore command wrapping**: Long paths wrap cleanly across lines inside the command box rather than truncating with an ellipsis so the backup filename remains inspectable before copying.
+7. **Error code naming**: Used `connect_timeout` (`connect-failed`), `database_too_new` (`newer-database`), and `version_mismatch` (`version-mismatch`) as placeholder diagnostic codes; align with the final `quartz-ipc` / `quartz-core` error codes during implementation.
+

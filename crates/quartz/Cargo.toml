@@ -12,6 +12,7 @@ name = "quartz"
 path = "src/main.rs"
 
 [dependencies]
+quartz-pipe.workspace = true
 tempfile.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
@@ -68,6 +69,7 @@ windows = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+quartz-pipe = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util"] }
 quartz-domain = { workspace = true, features = ["test-support"] }
 

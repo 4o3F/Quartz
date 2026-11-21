@@ -1,13 +1,13 @@
 //! Local-calendar-day capture inspection for acceptance tooling.
 
-#[cfg(any(windows, test))]
-use crate::ipc::client::{CallCoreError, CoreClient};
 use crate::{
     data_directory::DataDirectory,
     store::{ReadOnlyStore, facts::ReadFactsError},
 };
 use clap::ValueEnum;
 use jiff::{civil::Date, tz::TimeZone};
+#[cfg(any(windows, test))]
+use quartz_pipe::{CallCoreError, CoreClient};
 use quartz_protocol::facts::FactRecord;
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::io::{self, Write};
@@ -94,7 +94,7 @@ impl<'date> DumpDay<'date> {
                 #[cfg(windows)]
                 {
                     self.write_pipe(
-                        crate::platform::windows::ipc::CoreClient::connect(),
+                        quartz_pipe::CoreClient::connect(),
                         &TimeZone::try_system().context(DateSnafu)?,
                         &mut io::stdout().lock(),
                     )
@@ -591,7 +591,7 @@ mod tests {
             .expect_err("missing core must fail");
         assert!(error.to_string().contains("--offline"));
         assert!(
-            matches!(error, DumpDayError::Core { source: CallCoreError::Connect { source } } if matches!(source.downcast_ref::<OpenCorePipeError>(), Some(OpenCorePipeError::CoreNotRunning { .. })))
+            matches!(error, DumpDayError::Core { source: CallCoreError::Open { source } } if matches!(source, OpenCorePipeError::CoreNotRunning { .. }))
         );
         assert!(output.is_empty(), "failed pipe connection writes no facts");
     }

@@ -6,25 +6,26 @@
 //! reads only these view models.
 
 mod data_pattern;
+pub(crate) mod failure_screen;
 mod icons;
 pub(crate) mod system_theme;
 #[cfg(feature = "preview")]
 pub use system_theme::PreviewTheme;
 mod measure;
-mod metrics;
+pub(crate) mod metrics;
 #[cfg(feature = "preview")]
 mod preview;
 mod runtime;
 mod shell;
 mod theme_mapping;
 mod tokens;
-mod widgets;
+pub(crate) mod widgets;
 
 pub(crate) use metrics::Ramp;
 #[cfg(feature = "preview")]
 pub use preview::{
-    ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError, PlaceWindowError,
-    PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, RunPreviewError,
+    ErrorPreviewState, ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError,
+    PlaceWindowError, PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, RunPreviewError,
 };
 pub use runtime::{Appearance, GpuiError, LoadThemeError};
 pub(crate) use runtime::{GpuiSnafu, ThemeBundle, run_gpui, window_options};

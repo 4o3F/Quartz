@@ -408,6 +408,74 @@
       "style": "regular",
       "file": "FileText-20-regular.svg",
       "source": "assets/Document Text/SVG/ic_fluent_document_text_20_regular.svg"
+    },
+    {
+      "name": "Copy",
+      "size": 16,
+      "style": "regular",
+      "file": "Copy-16-regular.svg",
+      "source": "assets/Copy/SVG/ic_fluent_copy_16_regular.svg"
+    },
+    {
+      "name": "Copy",
+      "size": 20,
+      "style": "regular",
+      "file": "Copy-20-regular.svg",
+      "source": "assets/Copy/SVG/ic_fluent_copy_20_regular.svg"
+    },
+    {
+      "name": "TriangleAlert",
+      "size": 16,
+      "style": "regular",
+      "file": "TriangleAlert-16-regular.svg",
+      "source": "assets/Warning/SVG/ic_fluent_warning_16_regular.svg"
+    },
+    {
+      "name": "TriangleAlert",
+      "size": 20,
+      "style": "regular",
+      "file": "TriangleAlert-20-regular.svg",
+      "source": "assets/Warning/SVG/ic_fluent_warning_20_regular.svg"
+    },
+    {
+      "name": "TriangleAlert",
+      "size": 28,
+      "style": "regular",
+      "file": "TriangleAlert-28-regular.svg",
+      "source": "assets/Warning/SVG/ic_fluent_warning_28_regular.svg"
+    },
+    {
+      "name": "CircleX",
+      "size": 16,
+      "style": "regular",
+      "file": "CircleX-16-regular.svg",
+      "source": "assets/Dismiss Circle/SVG/ic_fluent_dismiss_circle_16_regular.svg"
+    },
+    {
+      "name": "CircleX",
+      "size": 20,
+      "style": "regular",
+      "file": "CircleX-20-regular.svg",
+      "source": "assets/Dismiss Circle/SVG/ic_fluent_dismiss_circle_20_regular.svg"
+    },
+    {
+      "name": "CircleX",
+      "size": 28,
+      "style": "regular",
+      "file": "CircleX-28-regular.svg",
+      "source": "assets/Dismiss Circle/SVG/ic_fluent_dismiss_circle_28_regular.svg"
+    }
+  ],
+  "custom_icons": [
+    {
+      "file": "ProgressRing.svg",
+      "source": "docs/design/mockups/errors.html#ringSvg",
+      "path": "quartz/ProgressRing.svg"
+    },
+    {
+      "file": "ProgressTrack.svg",
+      "source": "docs/design/mockups/errors.html#ringSvg",
+      "path": "quartz/ProgressTrack.svg"
     }
   ]
 }
