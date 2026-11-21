@@ -99,6 +99,12 @@ impl Connection {
                         Action::error_response(Some(id), ProtocolError::new(ErrorKind::Internal))
                     }
                 }),
+                Action::Write { id, request } => {
+                    Some(match self.services.writes.call(request).await {
+                        Ok(response) => Action::success_response(id, response),
+                        Err(error) => Action::error_response(Some(id), error),
+                    })
+                }
                 Action::Query { id, request } => {
                     Some(match self.services.queries.call(request).await {
                         Ok(response) => Action::success_response(id, response),

@@ -1,5 +1,6 @@
 //! Shared IPC data types, framing, permissions, and startup failures.
 
+mod annotations;
 mod envelope;
 mod error;
 mod frame;
@@ -43,4 +44,10 @@ pub use query::{
     MillisecondsPerPixel, ParseClassificationRuleIdError, QUERY_PAGE_BYTES, QueryCursor,
     QueryDayRequest, QueryDayResponse, QueryGapReason, QueryStopReason, QueryTimelineRequest,
     QueryTimelineResponse, QueryVersions, TimelineDetail, TimelineSegment,
+};
+
+pub use annotations::{
+    Annotation, AnnotationCategory, AnnotationId, AnnotationKind, AnnotationValues,
+    AnnotationsCreateRequest, AnnotationsDeleteRequest, AnnotationsResponse,
+    AnnotationsUpdateRequest, CreateAnnotation, UpdateAnnotation,
 };

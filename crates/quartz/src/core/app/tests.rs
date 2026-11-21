@@ -914,3 +914,291 @@ fn io_write_replies_publish_committed_versions_and_rollback_keeps_versions() {
     drop(reader);
     runtime.shutdown();
 }
+
+/// Framed memory transport connected to the real database worker and IPC registry.
+struct AnnotationClient {
+    frames:
+        tokio_util::codec::Framed<tokio::io::DuplexStream, tokio_util::codec::LengthDelimitedCodec>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+impl AnnotationClient {
+    async fn connect(
+        services: crate::ipc::Services,
+        registry: crate::ipc::registry::RegistryHandle,
+        role: quartz_protocol::Role,
+    ) -> Self {
+        let connection = crate::ipc::connection::Connection {
+            registry,
+            services,
+            timeouts: crate::ipc::connection::ConnectionTimeouts::default(),
+        };
+        let (server, client) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            let (read, write) = tokio::io::split(server);
+            connection
+                .run(
+                    read,
+                    write,
+                    &mut crate::ipc::ConnectionSession::new(crate::ipc::AllowedRoles::Quartz),
+                    tokio::time::Instant::now() + Duration::from_secs(5),
+                )
+                .await
+        });
+        let mut client = Self {
+            frames: tokio_util::codec::Framed::new(client, quartz_protocol::frame_codec()),
+            task,
+        };
+        client.send(1, quartz_protocol::Op::Hello, serde_json::json!({"proto":{"min":1,"max":1},"role":role,"client_version":"test","ui":{"state":"starting"}})).await;
+        client.success(1).await;
+        client
+    }
+    async fn send(&mut self, id: u64, op: quartz_protocol::Op, body: serde_json::Value) {
+        use futures_util::SinkExt;
+        let request = quartz_protocol::Envelope::Request(quartz_protocol::Request {
+            id: quartz_protocol::RequestId(id),
+            op,
+            body,
+        });
+        let bytes = quartz_protocol::encode_json(&request).expect("request JSON");
+        self.frames
+            .send(bytes.as_slice())
+            .await
+            .expect("send request");
+    }
+    async fn receive(&mut self) -> quartz_protocol::Envelope {
+        use futures_util::StreamExt;
+        // Day events are throttled after the initial subscription event.
+        let deadline = crate::ipc::outbox::DAY_PUSH_INTERVAL + Duration::from_secs(5);
+        let bytes = tokio::time::timeout(deadline, self.frames.next())
+            .await
+            .expect("IPC response deadline")
+            .expect("response")
+            .expect("frame");
+        quartz_protocol::decode_json(&bytes).expect("envelope")
+    }
+    async fn response(&mut self, id: u64) -> quartz_protocol::ResponseOutcome {
+        let quartz_protocol::Envelope::Response(response) = self.receive().await else {
+            panic!("expected response")
+        };
+        assert_eq!(response.id, Some(quartz_protocol::RequestId(id)));
+        response.outcome
+    }
+    async fn success(&mut self, id: u64) -> serde_json::Value {
+        let quartz_protocol::ResponseOutcome::Ok { body } = self.response(id).await else {
+            panic!("expected success")
+        };
+        body
+    }
+    async fn close(self) {
+        drop(self.frames);
+        self.task
+            .await
+            .expect("connection task")
+            .expect("connection closed");
+    }
+}
+
+#[test]
+fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
+    use quartz_protocol::{ErrorKind, Op, ProtocolError, ResponseOutcome};
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(
+        "annotation-integration".into(),
+    ));
+    let services = crate::ipc::Services {
+        queries: runtime.workers.queries.clone(),
+        writes: runtime.workers.writes.clone(),
+        versions: runtime.workers.versions.clone(),
+        status: status.subscribe(),
+        ui: Arc::new(|_| Ok(())),
+    };
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("I/O runtime");
+    io.block_on(async {
+        let registry = services.start_registry();
+        let uuid = "00000000-0000-4000-8000-000000000001";
+        let date: quartz_protocol::LocalDate = "2025-01-02".parse().expect("date");
+        let range = crate::query::calendar::DayCalendar::new(date, 0)
+            .expect("day")
+            .range;
+        let body = serde_json::json!({
+            "entities": [{
+                "uuid": uuid,
+                "kind": "note",
+                "start_utc_ms": range.start,
+                "end_utc_ms": range.end,
+                "label": "休息"
+            }]
+        });
+        let mut cli = AnnotationClient::connect(
+            services.clone(),
+            registry.clone(),
+            quartz_protocol::Role::Cli,
+        )
+        .await;
+        for op in [
+            Op::AnnotationsCreate,
+            Op::AnnotationsUpdate,
+            Op::AnnotationsDelete,
+        ] {
+            cli.send(2, op, body.clone()).await;
+            assert_eq!(
+                cli.response(2).await,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::Forbidden)
+                }
+            );
+        }
+        cli.close().await;
+        let mut subscriber = AnnotationClient::connect(
+            services.clone(),
+            registry.clone(),
+            quartz_protocol::Role::Ui,
+        )
+        .await;
+        subscriber
+            .send(
+                2,
+                Op::Subscribe,
+                serde_json::json!({"topics": [format!("day:{date}")]}),
+            )
+            .await;
+        subscriber.success(2).await;
+        let quartz_protocol::Envelope::Event(initial) = subscriber.receive().await else {
+            panic!("initial day event")
+        };
+        let initial: quartz_protocol::DayChanged =
+            serde_json::from_value(initial.body).expect("initial version");
+        let mut ui = AnnotationClient::connect(
+            services.clone(),
+            registry.clone(),
+            quartz_protocol::Role::Ui,
+        )
+        .await;
+        ui.send(2, Op::AnnotationsCreate, body.clone()).await;
+        let created = ui.success(2).await;
+        let entities: quartz_protocol::AnnotationsResponse =
+            serde_json::from_value(created.clone()).expect("typed annotation response");
+        assert_eq!(entities.entities.len(), 1);
+        assert_eq!(entities.entities[0].uuid.0.to_string(), uuid);
+        assert_eq!(
+            entities.entities[0].created_utc_ms,
+            entities.entities[0].updated_utc_ms
+        );
+        assert_eq!(entities.entities[0].values.label.as_deref(), Some("休息"));
+        let quartz_protocol::Envelope::Event(changed) = subscriber.receive().await else {
+            panic!("changed day event")
+        };
+        assert_eq!(changed.topic, quartz_protocol::Topic::Day(date));
+        let changed: quartz_protocol::DayChanged =
+            serde_json::from_value(changed.body).expect("changed version");
+        assert_ne!(changed.versions, initial.versions);
+        ui.send(3, Op::AnnotationsCreate, body).await;
+        assert_eq!(ui.success(3).await, created);
+        // The final values clear omitted optional fields and preserve the stored kind.
+        ui.send(
+            4,
+            Op::AnnotationsUpdate,
+            serde_json::json!({
+                "entities": [{
+                    "uuid": uuid,
+                    "start_utc_ms": range.start,
+                    "end_utc_ms": range.end,
+                    "note": "text"
+                }]
+            }),
+        )
+        .await;
+        let updated = ui.success(4).await;
+        assert!(updated["entities"][0]["label"].is_null());
+        assert_eq!(updated["entities"][0]["note"], "text");
+        ui.send(
+            5,
+            Op::AnnotationsUpdate,
+            serde_json::json!({
+                "entities": [{
+                    "uuid": uuid,
+                    "kind": "active_override",
+                    "start_utc_ms": range.start,
+                    "end_utc_ms": range.end
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(
+            ui.response(5).await,
+            ResponseOutcome::Err {
+                error: ProtocolError::new(ErrorKind::BadRequest)
+            }
+        );
+        ui.send(
+            6,
+            Op::AnnotationsCreate,
+            serde_json::json!({
+                "entities": [{
+                    "uuid": "00000000-0000-4000-8000-000000000002",
+                    "kind": "note",
+                    "start_utc_ms": 0,
+                    "end_utc_ms": 0,
+                    "label": "invalid"
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(
+            ui.response(6).await,
+            ResponseOutcome::Err {
+                error: ProtocolError::new(ErrorKind::InvalidRange)
+            }
+        );
+        for request_id in [7, 8] {
+            ui.send(
+                request_id,
+                Op::AnnotationsDelete,
+                serde_json::json!({"uuids": [uuid]}),
+            )
+            .await;
+            assert_eq!(
+                ui.success(request_id).await,
+                serde_json::json!({"accepted": true})
+            );
+        }
+        let channel = crate::ipc::WriteChannel::new();
+        let mut pending = Vec::new();
+        for _ in 0..crate::persistence::dispatch::WRITE_CHANNEL_CAPACITY {
+            let request = crate::persistence::dispatch::WriteRequest::Annotations(
+                crate::persistence::dispatch::AnnotationWrite::Delete(
+                    quartz_protocol::AnnotationsDeleteRequest { uuids: Vec::new() },
+                ),
+            );
+            pending.push(channel.port.submit(request).expect("fill write channel"));
+        }
+        let mut busy_services = services;
+        busy_services.writes = channel.port;
+        let mut busy =
+            AnnotationClient::connect(busy_services, registry, quartz_protocol::Role::Ui).await;
+        busy.send(
+            2,
+            Op::AnnotationsCreate,
+            serde_json::json!({"entities": []}),
+        )
+        .await;
+        assert_eq!(
+            busy.response(2).await,
+            ResponseOutcome::Err {
+                error: ProtocolError::new(ErrorKind::Busy)
+            }
+        );
+        assert_eq!(
+            channel.receiver.len(),
+            crate::persistence::dispatch::WRITE_CHANNEL_CAPACITY
+        );
+        busy.close().await;
+        ui.close().await;
+        subscriber.close().await;
+    });
+    runtime.shutdown();
+}

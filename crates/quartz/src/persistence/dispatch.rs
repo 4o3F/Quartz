@@ -1,24 +1,101 @@
 //! Bounded I/O and main-thread admission to the database writer.
 
+use crate::store::{Store, annotations::ExecuteAnnotationWritesError};
 use crossbeam_channel::{Receiver, Sender, bounded};
+use quartz_domain::capture::UtcInstant;
 use quartz_protocol::{ErrorKind, ProtocolError};
 use tokio::sync::oneshot;
+
+/// Wire body selected by the write operation.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum WriteResponse {
+    Annotations(quartz_protocol::AnnotationsResponse),
+    Accepted(quartz_protocol::AcceptedBody),
+}
+impl WriteRequest {
+    pub(crate) fn decode(
+        op: quartz_protocol::Op,
+        body: serde_json::Value,
+    ) -> Result<Self, serde_json::Error> {
+        match op {
+            quartz_protocol::Op::AnnotationsCreate => serde_json::from_value(body)
+                .map(AnnotationWrite::Create)
+                .map(Self::Annotations),
+            quartz_protocol::Op::AnnotationsUpdate => serde_json::from_value(body)
+                .map(AnnotationWrite::Update)
+                .map(Self::Annotations),
+            quartz_protocol::Op::AnnotationsDelete => serde_json::from_value(body)
+                .map(AnnotationWrite::Delete)
+                .map(Self::Annotations),
+            _ => unreachable!("write decoding follows annotation operation dispatch"),
+        }
+    }
+    pub(crate) fn execute(
+        self,
+        store: &mut Store,
+        now: UtcInstant,
+    ) -> Result<WriteResponse, ProtocolError> {
+        let result = match self {
+            Self::Annotations(AnnotationWrite::Create(request)) => store
+                .create_annotations(request, now)
+                .map(WriteResponse::Annotations),
+            Self::Annotations(AnnotationWrite::Update(request)) => store
+                .update_annotations(request, now)
+                .map(WriteResponse::Annotations),
+            Self::Annotations(AnnotationWrite::Delete(request)) => store
+                .delete_annotations(request)
+                .map(|()| WriteResponse::Accepted(quartz_protocol::AcceptedBody)),
+            #[cfg(test)]
+            Self::BumpMetadata { outcome } => {
+                return store
+                    .test_metadata_write(outcome)
+                    .map(|()| WriteResponse::Accepted(quartz_protocol::AcceptedBody))
+                    .map_err(|_| ProtocolError::new(ErrorKind::Internal));
+            }
+        };
+        result.map_err(|error| {
+            let kind = match error {
+                ExecuteAnnotationWritesError::InvalidRange => ErrorKind::InvalidRange,
+                ExecuteAnnotationWritesError::InvalidFields
+                | ExecuteAnnotationWritesError::InvalidCategory
+                | ExecuteAnnotationWritesError::MissingAnnotation
+                | ExecuteAnnotationWritesError::ChangeKind
+                | ExecuteAnnotationWritesError::DuplicateIdentity => ErrorKind::BadRequest,
+                ExecuteAnnotationWritesError::Database { .. }
+                | ExecuteAnnotationWritesError::Version { .. }
+                | ExecuteAnnotationWritesError::Identity { .. } => ErrorKind::Internal,
+            };
+            ProtocolError::new(kind)
+        })
+    }
+}
 
 /// Limits pending user writes independently of capture persistence and queries.
 pub(crate) const WRITE_CHANNEL_CAPACITY: usize = 8;
 
-/// Production operations are added when their persistence implementation exists.
+/// User writes executed serially by the database loop after capture commits.
 #[derive(Debug)]
 pub(crate) enum WriteRequest {
+    Annotations(AnnotationWrite),
     #[cfg(test)]
-    BumpMetadata { outcome: TestCommit },
+    BumpMetadata {
+        outcome: TestCommit,
+    },
+}
+/// Annotation transaction selected by the three typed IPC operations.
+#[derive(Debug)]
+pub(crate) enum AnnotationWrite {
+    Create(quartz_protocol::AnnotationsCreateRequest),
+    Update(quartz_protocol::AnnotationsUpdateRequest),
+    Delete(quartz_protocol::AnnotationsDeleteRequest),
 }
 #[cfg(test)]
 pub(crate) use crate::store::versions::TestCommit;
 #[derive(Debug)]
 pub(crate) struct WriteCommand {
     pub request: WriteRequest,
-    pub reply: oneshot::Sender<Result<(), ProtocolError>>,
+    pub reply: oneshot::Sender<Result<WriteResponse, ProtocolError>>,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct WritePort {
@@ -38,14 +115,7 @@ impl WriteChannel {
     }
 }
 impl WritePort {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "annotation IPC operations use this admission path next"
-        )
-    )]
-    pub(crate) async fn call(&self, request: WriteRequest) -> Result<(), ProtocolError> {
+    pub(crate) async fn call(&self, request: WriteRequest) -> Result<WriteResponse, ProtocolError> {
         self.submit(request)?
             .await
             .map_err(|_| ProtocolError::new(ErrorKind::Internal))?
@@ -55,7 +125,7 @@ impl WritePort {
     pub(crate) fn submit(
         &self,
         request: WriteRequest,
-    ) -> Result<oneshot::Receiver<Result<(), ProtocolError>>, ProtocolError> {
+    ) -> Result<oneshot::Receiver<Result<WriteResponse, ProtocolError>>, ProtocolError> {
         let (reply, received) = oneshot::channel();
         self.sender
             .try_send(WriteCommand { request, reply })

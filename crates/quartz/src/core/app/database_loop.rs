@@ -333,15 +333,11 @@ impl DatabaseLoop {
     fn execute_write(
         &mut self,
         request: crate::persistence::dispatch::WriteRequest,
-    ) -> Result<(), quartz_protocol::ProtocolError> {
-        match request {
-            #[cfg(test)]
-            crate::persistence::dispatch::WriteRequest::BumpMetadata { outcome } => {
-                self.store.test_metadata_write(outcome).map_err(|_| {
-                    quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::Internal)
-                })
-            }
-        }
+    ) -> Result<crate::persistence::dispatch::WriteResponse, quartz_protocol::ProtocolError> {
+        let now = self.now().map_err(|_| {
+            quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::Internal)
+        })?;
+        request.execute(&mut self.store, now.utc)
     }
     fn registry_command(
         &mut self,

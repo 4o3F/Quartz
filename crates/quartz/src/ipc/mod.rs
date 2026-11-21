@@ -18,10 +18,6 @@ use std::sync::Arc;
 /// Application services shared by transport, registry, and connection tasks.
 #[derive(Clone)]
 pub(crate) struct Services {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "annotation IPC dispatch is added next")
-    )]
     pub writes: crate::persistence::dispatch::WritePort,
     pub queries: crate::query::dispatch::QueryPort,
     pub versions: crate::query::versions::VersionPort,

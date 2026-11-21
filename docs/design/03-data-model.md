@@ -6,7 +6,7 @@
 
 ## 1. 约定
 
-- 时间：UTC 毫秒整数，列名以 `_utc_ms` 结尾。区间统一为左闭右开 `[start, end)`。允许零时长，但零时长区间不计入统计。
+- 时间：UTC 毫秒整数，列名以 `_utc_ms` 结尾。区间统一为左闭右开 `[start, end)`。采集事实允许零时长，但零时长区间不计入统计；标注要求 `end_utc_ms > start_utc_ms`。
 - 时长：前台事实的 `duration_ms = end_mono_ms − start_mono_ms`；开放行用确认单调时间代替结束时间。统计按各时钟段中的实际长度累计，UTC 裁剪仅在同一时钟段内做。跨时钟段的重复 UTC 不相互抵消，时间轴标明时钟异常。`suspended` 的墙上时间边界见 02 第 5 节。
 - 取值固定的枚举列存小整数，编码从 1 开始，列注释写明编码。编码只追加，不改号、不复用；废弃的取值保留编码。名称记录在 `enum_labels` 表，排查时使用 `_v` 视图（第 2.9 节）。取值开放的列（浏览器种类、色板键）仍存文本。
 - 确认点列（`confirmed_utc_ms`、`confirmed_mono_ms`）只在开放行有值；行结束时置 NULL，因为此时它与结束时间相同。各表用 CHECK 约束保证“结束列为 NULL”与“确认点列非 NULL”同时成立。
@@ -275,6 +275,10 @@ CREATE TABLE settings (
 ) WITHOUT ROWID;
 ```
 
+标注的类型在创建后固定。`category_override` 必须指定分类，`label` 与 `note` 可选；`offline_activity` 与 `active_override` 的分类、标签和备注均可选；`dismissed_away` 的分类、标签和备注必须全部为空；`note` 的标签或备注至少有一个包含非空白文本。任何指定的分类都必须存在且未归档，支持用 UUID 或内置键引用。更新按最终值覆盖这些可选字段，省略即清空。`created_utc_ms`、`updated_utc_ms` 由数据库循环注入的时钟提供；裁剪保留行的创建时间，拆分出的右侧新行使用本次写入时间作为创建和更新时间。
+
+标注写入通过 `Store::write` 在一个立即事务中执行。每个新增、修改、裁剪、拆分或删除行的旧、新范围都通过 `UtcDays` 更新 `data_day_versions` 的 `annotations` 来源（编码 4）；版本变化在提交后发布，成功响应在发布后发送。创建 UUID 重试、最终值未变的更新和删除不存在的 UUID 不改变行或版本。
+
 `settings` 只保存配置值和其他需要持久化的调度截止时间。五种限时策略的状态和截止时间统一保存在 `timed_policies`，不在 `settings` 重复保存。
 
 ```sql
@@ -449,7 +453,7 @@ PRAGMA busy_timeout = 2000;
 - **只读快照。** 跨批次持有读事务时，用 diesel `TransactionManager` 的 `begin_transaction` / `commit_transaction` 包装成一个守卫类型，不使用闭包式 `transaction`。
 - **原始 SQL。** 只用于 PRAGMA、`wal_checkpoint`、`VACUUM INTO`、`PRAGMA optimize` 和 diesel DSL 难以表达的少量查询（`sql_query` + `QueryableByName`，值一律绑定）。原始 SQL 集中在 `store::raw`，测试在迁移后的空库上逐条准备，确认表名与列名有效。
 - **范围。** diesel 只出现在 `quartz` crate 的 `store` 模块。`quartz-domain` 与 `quartz-protocol` 不依赖 diesel；store 负责行类型与领域类型的转换。
-- **只做持久化。** store 不含业务判断。业务核心（规则注册表、采集状态机等，01 第 5 节）以领域层的写入描述（如 `RuleSetWrite`）表达要写什么；store 提供执行这些描述的方法，在调用方给定的事务中把它们转换为 SQL。业务核心不定义仓储接口，也不持有连接；读取由外壳调用 store 完成后把领域值交给核心。
+- **只做持久化。** 标注的字段校验与同类裁剪作为写入约束放在独立的 `store::annotations` 中，其中范围运算不访问数据库。其他业务判断留在领域层。业务核心（规则注册表、采集状态机等，01 第 5 节）以领域层的写入描述（如 `RuleSetWrite`）表达要写什么；store 提供执行这些描述的方法，在调用方给定的事务中把它们转换为 SQL。业务核心不定义仓储接口，也不持有连接；读取由外壳调用 store 完成后把领域值交给核心。
 
 diesel 不暴露 SQLite 原生句柄，所以备份不用 Backup API，改用 `VACUUM INTO '<路径>'`：它在一个读事务内写出一致且紧凑的副本，不阻塞写连接。
 
@@ -512,7 +516,11 @@ M1 用真实使用数据重测，结果记入 `docs/measurements.md`；`gen-data
 6. 按应用、文档、域名、分类、小时聚合，或输出时间轴片段
 ```
 
-同类型重叠覆盖采用后写入替换先写入，写入时裁剪旧标注；旧标注需要拆成两段时，核心在同一事务生成剩余片段。同一请求重试按原实体 UUID 返回已有结果，不再次裁剪。`active_override` 可以恢复被 idle 掩码覆盖的允许计时窗口；`excluded` 与 `no_foreground` 只参与覆盖检查和时间轴。`dismissed_away` 持久记录“忽略离开”，不改变时长，删除该标注即可撤销。
+`category_override`、`offline_activity`、`active_override` 与 `dismissed_away` 采用同类型后写入替换先写入：完全覆盖的旧标注删除，部分覆盖的旧标注裁剪；旧标注严格包含新范围时拆成左右两段。`note` 允许任意重叠，写入时不裁剪其他 note。不同类型之间保留重叠。范围使用左闭右开语义，端点相接不算重叠；同一请求内同一裁剪类型的最终范围不得重叠，违反时整个事务返回 `invalid_range`。
+
+裁剪保留原内容；仅有一个剩余片段时保留旧 UUID，拆成两段时左段保留旧 UUID，右段的 UUID 从旧标注 UUID、本次写入实体 UUID，以及拆分当时两行各自的范围确定生成。具体为 SHA-256 的输入依次拼接 UTF-8 前缀 `quartz.annotations.right.v1`、一个零字节、旧 UUID 的规范小写文本、写入实体 UUID 的规范小写文本，再依次拼接旧行的开始与结束 UTC 毫秒数、写入行的开始与结束 UTC 毫秒数（四个值均为小端序 i64 的 8 字节表示），取前 16 字节，按 RFC 9562 设置 UUIDv8 版本位与变体位，再编码为小写 UUID。批量写入按请求顺序裁剪，拆分身份冲突会回滚事务。裁剪运算与身份生成位于 `store::annotations::clipping`，直接以值测试；SQL 和版本更新位于 `store::annotations`，不依赖查询管线。
+
+创建遇到已有 UUID 时返回当前已有实体，不再次裁剪；更新按 UUID 设置最终值，最终值未变时保留时间戳；删除不存在的 UUID 也成功。删除标注不恢复此前被裁掉的部分。`active_override` 可以恢复被 idle 掩码覆盖的允许计时窗口；`excluded` 与 `no_foreground` 只参与覆盖检查和时间轴。`dismissed_away` 持久记录“忽略离开”，不改变时长，删除该标注即可撤销该忽略记录。
 
 活跃时长 = 允许计时的窗口事实中非空闲部分 + 有效活动覆盖新增的部分 + 离线活动标注补入的部分。按时钟段内的有效时间并集计算，避免重复累计；专注与分心占比以此活跃时长为分母。锁屏、睡眠、断开、暂停和核心离线显示停止原因集合；idle 保留为独立掩码。
 

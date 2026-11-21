@@ -1,5 +1,6 @@
 //! SQLite connections, schema migrations, and offline backup recovery.
 
+pub(crate) mod annotations;
 pub(crate) mod capture;
 pub(crate) mod categories;
 mod enums;

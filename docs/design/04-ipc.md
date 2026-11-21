@@ -184,6 +184,33 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 | `data.delete` | 按日期范围、应用、域名、标题关键词或隐私规则删除，见 03 第 6 节 |
 | `tracking.pause` / `tracking.resume` / `tracking.keep_alive` | 暂停、恢复、临时保持计时 |
 
+标注写操作只允许 `ui`。请求体与响应体如下，可选字段 `category`、`label`、`note` 缺省为 `null`：
+
+```json
+{
+  "entities": [
+    {
+      "uuid": "00000000-0000-4000-8000-000000000001",
+      "kind": "offline_activity",
+      "start_utc_ms": 1763683200000,
+      "end_utc_ms": 1763686800000,
+      "category": { "kind": "builtin", "key": "communication" },
+      "label": "会议",
+      "note": null
+    }
+  ]
+}
+```
+
+- `annotations.create` 使用上面的 `entities` 数组，每个实体必须提供 `uuid`、`kind` 和开始、结束 UTC 毫秒数。分类引用为 `{ "kind": "uuid", "uuid": "..." }` 或 `{ "kind": "builtin", "key": "communication" }`，内置键为 `development`、`learning`、`communication`、`entertainment`、`system`。
+- `annotations.update` 也使用 `entities` 数组，每项提供 `uuid` 和新的范围、分类、标签、备注；省略可选字段即清空。类型保持原值；允许附带 `kind` 断言，值与已存类型不同时返回 `bad_request`。不存在的 UUID 返回 `bad_request`。同一实体的最终值未变时返回当前实体。
+- 创建、更新成功返回 `{ "entities": [...] }`，每项包含 `uuid`、`kind`、范围、分类、标签、备注、`created_utc_ms` 和 `updated_utc_ms`，按请求顺序排列。分类统一返回 UUID 引用；响应仅包含请求实体，裁剪其他行产生的剩余片段不在响应中。创建遇到已有 UUID 时返回当前已有实体，并跳过该实体的字段校验和裁剪。
+- `annotations.delete` 使用 `{ "uuids": ["..."] }`，成功返回 `{ "accepted": true }`；不存在的 UUID 也成功，删除不恢复此前裁剪的范围。
+- 每个请求中的 UUID 必须是规范 UUID 文本，接受大写并统一为小写。同一创建或更新请求重复提交同一 UUID 返回 `bad_request`。空数组成功且不改变数据库。
+- 范围必须满足 `end_utc_ms > start_utc_ms`；同一请求中同一裁剪类型的最终范围不得重叠，违反时返回 `invalid_range`。创建重试的最终范围取已有实体。note 允许重叠，不同类型允许重叠。整个请求及其对其他行的裁剪在一个事务中完成，任一项失败全部回滚。
+- `category_override` 必须有分类；`offline_activity`、`active_override` 的分类可选；`dismissed_away` 不允许分类、标签或备注；`note` 的标签或备注至少一个包含非空白文本。分类不存在或已归档、字段不符合类型要求时返回 `bad_request`。当前 `bad_request` 是无附加结构字段的错误类型。
+- 写通道已满时返回 `busy`。数据库循环先提交待写采集事实，再处理标注事务；提交后发布受影响 UTC 日的版本，随后回复，`day:` 订阅据此推送变化。
+
 ### 6.4 浏览器
 
 | op | 方向与角色 | 参数 | 返回或影响 |

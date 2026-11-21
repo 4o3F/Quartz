@@ -609,3 +609,45 @@ fn store_read_projects_private_fields_before_returning_foreground_facts() {
             .return_query_reader(snapshot.finish().expect("finish snapshot"));
     }
 }
+
+#[test]
+fn annotation_commit_invalidates_an_existing_timeline_cursor() {
+    let mut fixture = QueryFixture::new(1000);
+    let QueryRequest::Timeline(mut request) = fixture.request_timeline() else {
+        panic!("timeline request")
+    };
+    let QueryResponse::Timeline(first) = fixture
+        .run(QueryRequest::Timeline(request.clone()))
+        .expect("first page")
+    else {
+        panic!("timeline response")
+    };
+    request.cursor = Some(first.next_cursor.expect("continuation"));
+    fixture
+        .store
+        .create_annotations(
+            quartz_protocol::AnnotationsCreateRequest {
+                entities: vec![quartz_protocol::CreateAnnotation {
+                    uuid: quartz_protocol::AnnotationId(
+                        "00000000-0000-4000-8000-000000000001"
+                            .parse()
+                            .expect("UUID"),
+                    ),
+                    kind: quartz_protocol::AnnotationKind::Note,
+                    values: quartz_protocol::AnnotationValues {
+                        start_utc_ms: fixture.start,
+                        end_utc_ms: fixture.start + 1000,
+                        category: None,
+                        label: Some("note".into()),
+                        note: None,
+                    },
+                }],
+            },
+            quartz_domain::capture::UtcInstant::try_from(0).expect("clock"),
+        )
+        .expect("annotation commit");
+    assert!(matches!(
+        fixture.run(QueryRequest::Timeline(request)),
+        Err(RunQueryError::StaleCursor)
+    ));
+}

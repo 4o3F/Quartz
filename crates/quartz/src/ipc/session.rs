@@ -47,6 +47,10 @@ pub(crate) enum Action {
         id: RequestId,
         subscription: Subscribe,
     },
+    Write {
+        id: RequestId,
+        request: crate::persistence::dispatch::WriteRequest,
+    },
     Query {
         id: RequestId,
         request: crate::query::QueryRequest,
@@ -187,6 +191,15 @@ impl ConnectionSession {
                         id,
                         crate::query::QueryRequest::decode(request.op, request.body),
                     ),
+                    Op::AnnotationsCreate | Op::AnnotationsUpdate | Op::AnnotationsDelete => {
+                        match crate::persistence::dispatch::WriteRequest::decode(
+                            request.op,
+                            request.body,
+                        ) {
+                            Ok(request) => Action::Write { id, request },
+                            Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
+                        }
+                    }
                     Op::Hello
                     | Op::QueryRange
                     | Op::QuerySegmentDetail
@@ -213,9 +226,6 @@ impl ConnectionSession {
                     | Op::CategoriesUpdate
                     | Op::CategoriesDelete
                     | Op::CategoriesReorder
-                    | Op::AnnotationsCreate
-                    | Op::AnnotationsUpdate
-                    | Op::AnnotationsDelete
                     | Op::SettingsGet
                     | Op::SettingsSet
                     | Op::DataDelete
