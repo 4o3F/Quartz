@@ -137,7 +137,7 @@ impl LayerCx<'_> {
         &self,
         build: impl FnOnce(&Widgets<'_>, &TextMeasure<'_>, ScaleFactor) -> R,
     ) -> R {
-        let tokens = Rc::clone(&self.shell.tokens);
+        let tokens = crate::app::system_theme::SystemTheme::tokens(self.app);
         let theme = self.app.theme();
         let ui = Widgets::new(&tokens, theme.mode, self.shell.text_scale.current());
         let measure = TextMeasure::new(self.window, ui, theme.font_family.clone());
@@ -239,8 +239,11 @@ impl AppShell {
     /// activated, since Windows has no notification the window can rely on while in the background.
     #[must_use]
     pub(crate) fn new(init: ShellInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe_window_activation(window, |this, _, cx| this.refresh_text_scale(cx))
-            .detach();
+        cx.observe_window_activation(window, |this, _, cx| {
+            crate::app::system_theme::SystemTheme::refresh(cx);
+            this.refresh_text_scale(cx);
+        })
+        .detach();
         let details = init
             .details
             .and_then(|subject| open_details(&init.day, subject));
@@ -385,7 +388,7 @@ impl Render for AppShell {
             let theme = cx.theme();
             (theme.font_family.clone(), theme.mode)
         };
-        let tokens = Rc::clone(&self.tokens);
+        let tokens = crate::app::system_theme::SystemTheme::tokens(cx);
         let ui = Widgets::new(&tokens, mode, self.text_scale.current());
         let layout = self.layout_in(window);
         self.enter_placement(layout.panel, window, cx);
@@ -422,11 +425,11 @@ impl Render for AppShell {
             .flex_col()
             .size_full()
             .track_focus(&self.root_focus)
-            .bg(ui.palette.bg_base)
+            .bg(ui.palette.window_background)
             .text_color(ui.palette.text_primary)
             .font_family(font_family)
             .ramp(&ui, Ramp::Body)
-            .child(ui.title_bar(self.formatter.text(Msg::AppName)))
+            .child(ui.title_bar(self.formatter.text(Msg::AppName), window))
             .child(
                 div()
                     .flex()

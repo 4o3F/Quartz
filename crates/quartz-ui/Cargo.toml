@@ -14,18 +14,18 @@ jiff.workspace = true
 num-traits.workspace = true
 quartz-i18n.workspace = true
 quartz-protocol.workspace = true
-raw-window-handle = { workspace = true, optional = true }
+raw-window-handle.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 tracing.workspace = true
-# `UI_ViewManagement` reads the "Text size" setting (07 section 2.4); the Win32 features are for
-# the preview window placement.
-windows = { workspace = true, features = ["UI_ViewManagement", "Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+# WinRT observes appearance, transparency and energy saver; Win32 supplies system colors,
+# high contrast and DWM backdrop support (11 sections 2 and 3.2).
+windows = { workspace = true, features = ["Foundation", "UI_ViewManagement", "System_Power", "Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Accessibility", "Win32_UI_Controls", "Wdk_System_SystemServices", "Win32_System_SystemInformation", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 # Mock data and the off-screen preview window, for screenshots and tests; never in release builds.
-preview = ["dep:raw-window-handle"]
+preview = []
 
 # The view models, text and timeline geometry have no GPUI dependency; they are tested on every
 # platform but only used by the Windows views, so other platforms need them for tests alone.

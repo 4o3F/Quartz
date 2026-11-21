@@ -236,7 +236,13 @@ impl AppShell {
                 div()
                     .flex_1()
                     .min_w(px(PROPORTION_BAR_MIN_WIDTH))
-                    .h(px(BAR_HEIGHT))
+                    .h(
+                        if palette.contrast == crate::app::tokens::ContrastMode::High {
+                            ui.metrics.space.s
+                        } else {
+                            px(BAR_HEIGHT)
+                        },
+                    )
                     .rounded_full()
                     .bg(palette.fill_subtle_hover)
                     .child(self.proportion_bar(ui, &bar)),
@@ -270,10 +276,10 @@ impl AppShell {
             .rounded_full()
             .overflow_hidden()
             .children(bar.parts.iter().map(|part| {
-                div()
-                    .h_full()
-                    .w(relative(part.share.fraction()))
-                    .bg(ui.palette.category(self.day.category(part.category).color))
+                ui.category_mark(
+                    div().h_full().w(relative(part.share.fraction())),
+                    self.day.category(part.category).color,
+                )
             }))
     }
 }

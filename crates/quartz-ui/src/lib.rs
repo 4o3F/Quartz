@@ -46,7 +46,7 @@ pub use app::{Appearance, GpuiError, LoadPaletteError, LoadThemeError};
 #[cfg(all(windows, feature = "preview"))]
 pub use app::{
     ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError, PlaceWindowError,
-    PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, RunPreviewError,
+    PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, PreviewTheme, RunPreviewError,
 };
 #[cfg(windows)]
 pub use launch::{RunOptions, RunUiError};

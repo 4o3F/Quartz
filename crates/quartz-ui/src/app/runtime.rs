@@ -13,41 +13,15 @@ use quartz_i18n::Language;
 use serde::Deserialize;
 use snafu::{ResultExt as _, Snafu};
 
-use super::tokens::{LoadPaletteError, Tokens};
+use super::{
+    icons::AppAssets,
+    system_theme::SystemTheme,
+    theme_mapping::ComponentMapping,
+    tokens::{LoadPaletteError, QuartzSection, Tokens},
+};
 use crate::layout::{MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
 
 const THEME_JSON: &str = include_str!("../../themes/fluent.json");
-
-gpui_kit::assets::icon_assets!(
-    pub(crate) AppAssets,
-    [
-        WindowMinimize,
-        WindowMaximize,
-        WindowRestore,
-        WindowClose,
-        Menu,
-        Calendar,
-        CalendarRange,
-        Tag,
-        Settings,
-        ChevronLeft,
-        ChevronRight,
-        ChevronDown,
-        Minus,
-        Plus,
-        Close,
-        Clock,
-        Check,
-        Shield,
-        Trash,
-        Code,
-        Globe,
-        MessageCircle,
-        Send,
-        SquareTerminal,
-        FileText
-    ]
-);
 
 /// The embedded theme could not be read.
 #[derive(Debug, Snafu)]
@@ -74,24 +48,32 @@ pub struct GpuiError {
 struct ComponentThemes {
     #[serde(flatten)]
     themes: ThemeSet,
+    quartz: QuartzSection,
 }
 
 /// The embedded theme: the gpui-component light and dark themes and the Quartz tokens.
 #[derive(Debug)]
 pub(crate) struct ThemeBundle {
-    components: ThemeSet,
-    tokens: Rc<Tokens>,
+    pub(super) components: ThemeSet,
+    pub(super) mapping: ComponentMapping,
+    #[cfg(feature = "preview")]
+    pub(super) preview: super::system_theme::PreviewTheme,
+    pub(super) tokens: Rc<Tokens>,
 }
 
 impl ThemeBundle {
     /// Reads the theme compiled into the executable (11 section 9.1).
     pub(crate) fn embedded() -> Result<Self, LoadThemeError> {
-        let components: ComponentThemes =
+        let file: ComponentThemes =
             serde_json::from_str(THEME_JSON).context(DecodeComponentsSnafu)?;
-        let tokens = Tokens::from_theme_json(THEME_JSON).context(LoadTokensSnafu)?;
+        let mapping = file.quartz.component_mapping.clone();
+        let tokens = Tokens::from_section(file.quartz).context(LoadTokensSnafu)?;
         Ok(Self {
-            components: components.themes,
+            components: file.themes,
+            mapping,
             tokens: Rc::new(tokens),
+            #[cfg(feature = "preview")]
+            preview: super::system_theme::PreviewTheme::System,
         })
     }
 
@@ -101,9 +83,9 @@ impl ThemeBundle {
     }
 
     /// Installs the component themes as gpui-component's light and dark themes.
-    fn install(self, cx: &mut App) {
-        for theme in self.components.themes {
-            let theme = Rc::new(theme);
+    pub(super) fn install(&self, cx: &mut App) {
+        for theme in &self.components.themes {
+            let theme = Rc::new(theme.clone());
             if theme.mode.is_dark() {
                 Theme::global_mut(cx).dark_theme = theme;
             } else {
@@ -133,21 +115,25 @@ impl Appearance {
     }
 
     /// Makes `window` follow later system appearance changes when the appearance is `System`.
-    pub(crate) fn observe(self, window: &mut Window) {
+    pub(crate) fn observe(self, window: &mut Window, cx: &mut App) {
         if self == Self::System {
             window
                 .observe_window_appearance(|window, cx| {
+                    SystemTheme::refresh(cx);
                     Theme::sync_system_appearance(Some(window), cx);
+                    SystemTheme::apply_components(cx);
                 })
                 .detach();
         }
+        SystemTheme::observe_window(window, cx);
     }
 }
 
 /// Options of a window with the custom Quartz title bar and the minimum window size of 07
 /// section 2.3.
-pub(crate) fn window_options(title: String, bounds: Bounds<Pixels>) -> WindowOptions {
+pub(crate) fn window_options(title: String, bounds: Bounds<Pixels>, cx: &App) -> WindowOptions {
     WindowOptions {
+        window_background: SystemTheme::window_appearance(cx),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
         titlebar: Some(TitlebarOptions {
@@ -178,8 +164,11 @@ pub(crate) fn run_gpui<E: 'static>(
         .run(move |cx| {
             gpui_kit::init(cx);
             LayoutDirection::from_locale(language.code()).set_global(cx);
-            theme.install(cx);
+            #[cfg(feature = "preview")]
+            cx.set_global(theme.preview);
+            SystemTheme::install(theme, cx);
             appearance.apply(cx);
+            SystemTheme::apply_components(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();

@@ -407,7 +407,7 @@ impl AppShell {
                 .bottom(px(0.))
                 .left(px(span.left))
                 .w(px(span.width))
-                .bg(accent.opacity(ui.metrics.opacity.selection))
+                .bg(ui.state_color(accent, ui.metrics.opacity.selection))
                 .border_l_1()
                 .border_r_1()
                 .border_color(accent),
@@ -494,9 +494,13 @@ impl AppShell {
         );
         block_text(
             ui,
-            body.bg(color),
+            ui.category_mark(body, category.color),
             measure.fit_block_label(block, BLOCK_TEXT_PADDING, &name, &full),
-            ui.palette.text_on(color),
+            if ui.palette.contrast == crate::app::tokens::ContrastMode::High {
+                ui.palette.text_primary
+            } else {
+                ui.palette.text_on(color)
+            },
         )
     }
 
@@ -516,12 +520,13 @@ impl AppShell {
                 let color = preceding.map_or(palette.status_neutral, |id| {
                     palette.category(self.day.category(id).color)
                 });
-                body.bg(color.opacity(metrics.opacity.idle))
-                    .child(div().absolute().size_full().bg(pattern_slash(
+                body.bg(ui.state_color(color, metrics.opacity.idle)).child(
+                    div().absolute().size_full().bg(pattern_slash(
                         palette.stroke_control_strong,
                         metrics.timeline.hatch_width,
                         metrics.timeline.hatch_spacing,
-                    )))
+                    )),
+                )
             }
             StateKind::Locked | StateKind::Sleep | StateKind::CoreStopped => {
                 body.bg(palette.fill_subtle_hover)
@@ -537,14 +542,38 @@ impl AppShell {
                 );
                 block_text(
                     ui,
-                    body.bg(palette
-                        .status_neutral
-                        .opacity(metrics.opacity.neutral_state)),
+                    body.bg(
+                        if palette.contrast == crate::app::tokens::ContrastMode::High {
+                            palette.status_neutral
+                        } else {
+                            ui.state_color(palette.status_neutral, metrics.opacity.neutral_state)
+                        },
+                    ),
                     measure.fit_block_label(block, BLOCK_TEXT_PADDING, &name, &full),
                     palette.text_primary,
                 )
             }
         };
+        let body = body.when(
+            palette.contrast == crate::app::tokens::ContrastMode::High,
+            |body| {
+                let foreground = palette.text_primary;
+                body.child(
+                    gpui_kit::canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            window.paint_quad(gpui_kit::outline(
+                                bounds,
+                                foreground,
+                                Default::default(),
+                            ))
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+            },
+        );
         body.when(state.clock == ClockAnomaly::Detected, |body| {
             body.child(
                 div()
@@ -574,15 +603,15 @@ impl AppShell {
             let pixels = geometry.grid.place(placement);
             let id = segment.id;
             let target = HoverTarget::Segment(id);
-            let color = ui
-                .palette
-                .category(self.day.category(segment.category).color);
             let tile = tile(("segment", id.get()), pixels)
                 .cursor_pointer()
                 .on_click(layer.listen(move |this, _: &ClickEvent, window, cx| {
                     this.select(DetailsSubject::Segment(id), window, cx);
                 }))
-                .child(block_body(ui, self.block_hover(target), pixels).bg(color));
+                .child(ui.category_mark(
+                    block_body(ui, self.block_hover(target), pixels),
+                    self.day.category(segment.category).color,
+                ));
             intervals.push(Interval {
                 placement: pixels,
                 duration: segment.span.duration(),
@@ -715,7 +744,10 @@ impl AppShell {
             .rounded(ui.metrics.radius.control)
             .bg(ui.palette.fill_control_hover)
             .ramp(ui, Ramp::Caption)
-            .child(ui.swatch(ui.palette.category(category.color)))
+            .child(ui.category_mark(
+                ui.swatch(ui.palette.category(category.color)),
+                category.color,
+            ))
             .child(self.formatter.category_name(&category.name))
     }
 }
@@ -762,6 +794,16 @@ fn block_text(ui: &Widgets<'_>, body: Div, label: Option<String>, color: Hsla) -
             div()
                 .px(px(BLOCK_TEXT_PADDING))
                 .h_full()
+                .when(
+                    ui.palette.contrast == crate::app::tokens::ContrastMode::High,
+                    |label| {
+                        label
+                            .bg(ui.palette.bg_base)
+                            .mt(ui.metrics.layout.divider)
+                            .ml(ui.metrics.layout.divider)
+                            .h(AppShell::track_height(ui) - 2. * ui.metrics.layout.divider)
+                    },
+                )
                 .flex()
                 .items_center()
                 .whitespace_nowrap()

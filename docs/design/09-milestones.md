@@ -168,7 +168,7 @@
 | H8 | 一年数据下，内存缓存就能满足查询性能 | M4 | 加持久日缓存表 |
 | H9 | diesel 的泛型代码对 release 体积、编译时间与核心内存的影响可以接受 | M1-B 已测：release +2.036 MiB；Windows debug 一行增量编译 9.028 s；短时 Private Bytes +0.754 MiB、线程数不变。[测量记录](../measurements.md)；10 分钟资源回归待 M1 完成 | 热路径写入改用 `sql_query`，或把 store 拆成独立 crate 缩短增量编译 |
 | H10 | ICU4X 规范化与大小写折叠数据加入核心后，核心体积与内存仍满足 08 | M1-A 已测：规范化与折叠 +156 KiB，含 IDN +292.5 KiB；[测量记录](../measurements.md)，常驻内存待 M1 回归 | 改用 `unicode-normalization` 与 `caseless` 等更小的 crate，保持第 10 章的比较语义 |
-| H11 | GPUI 能在 Windows 上正确呈现 Mica 窗口与半透明令牌，并通过 DirectWrite 选中 Segoe UI Variable 的光学尺寸实例和 `tnum` 特性 | M3 | Mica 不可用时用 `bg.base` 纯色；字体退回 `Segoe UI Variable` 单一字族，等宽数字用固定宽度容器 |
+| H11 | GPUI 能在 Windows 上正确呈现 Mica 窗口与半透明令牌，并通过 DirectWrite 选中 Segoe UI Variable 的光学尺寸实例和 `tnum` 特性 | M3；M3-A 已验证 Mica 壁纸染色，字体项待 M3 | Mica 不可用时用 `bg.base` 纯色；字体退回 `Segoe UI Variable` 单一字族，等宽数字用固定宽度容器 |
 | H12 | 基于前台事实的疑似违规检测，在宽限期与判例过滤后误报足够少，不打扰专注 | M7 | 默认只在用户主动报告时进入裁决，自动检测改为任务结束后的回顾提示 |
 
 ## 待定项

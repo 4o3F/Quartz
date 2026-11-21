@@ -1,0 +1,413 @@
+{
+  "repository": "https://github.com/microsoft/fluentui-system-icons",
+  "commit": "6c2c9075cf8952ef48369b2475233b6e9761efed",
+  "license": "MIT",
+  "icons": [
+    {
+      "name": "WindowMinimize",
+      "size": 16,
+      "style": "regular",
+      "file": "WindowMinimize-16-regular.svg",
+      "source": "assets/Subtract/SVG/ic_fluent_subtract_16_regular.svg"
+    },
+    {
+      "name": "WindowMinimize",
+      "size": 20,
+      "style": "regular",
+      "file": "WindowMinimize-20-regular.svg",
+      "source": "assets/Subtract/SVG/ic_fluent_subtract_20_regular.svg"
+    },
+    {
+      "name": "WindowMaximize",
+      "size": 16,
+      "style": "regular",
+      "file": "WindowMaximize-16-regular.svg",
+      "source": "assets/Maximize/SVG/ic_fluent_maximize_16_regular.svg"
+    },
+    {
+      "name": "WindowMaximize",
+      "size": 20,
+      "style": "regular",
+      "file": "WindowMaximize-20-regular.svg",
+      "source": "assets/Maximize/SVG/ic_fluent_maximize_20_regular.svg"
+    },
+    {
+      "name": "WindowRestore",
+      "size": 16,
+      "style": "regular",
+      "file": "WindowRestore-16-regular.svg",
+      "source": "assets/Square Multiple/SVG/ic_fluent_square_multiple_16_regular.svg"
+    },
+    {
+      "name": "WindowRestore",
+      "size": 20,
+      "style": "regular",
+      "file": "WindowRestore-20-regular.svg",
+      "source": "assets/Square Multiple/SVG/ic_fluent_square_multiple_20_regular.svg"
+    },
+    {
+      "name": "WindowClose",
+      "size": 16,
+      "style": "regular",
+      "file": "WindowClose-16-regular.svg",
+      "source": "assets/Dismiss/SVG/ic_fluent_dismiss_16_regular.svg"
+    },
+    {
+      "name": "WindowClose",
+      "size": 20,
+      "style": "regular",
+      "file": "WindowClose-20-regular.svg",
+      "source": "assets/Dismiss/SVG/ic_fluent_dismiss_20_regular.svg"
+    },
+    {
+      "name": "Menu",
+      "size": 16,
+      "style": "regular",
+      "file": "Menu-16-regular.svg",
+      "source": "assets/Navigation/SVG/ic_fluent_navigation_16_regular.svg"
+    },
+    {
+      "name": "Menu",
+      "size": 20,
+      "style": "regular",
+      "file": "Menu-20-regular.svg",
+      "source": "assets/Navigation/SVG/ic_fluent_navigation_20_regular.svg"
+    },
+    {
+      "name": "Calendar",
+      "size": 16,
+      "style": "regular",
+      "file": "Calendar-16-regular.svg",
+      "source": "assets/Calendar LTR/SVG/ic_fluent_calendar_ltr_16_regular.svg"
+    },
+    {
+      "name": "Calendar",
+      "size": 16,
+      "style": "filled",
+      "file": "Calendar-16-filled.svg",
+      "source": "assets/Calendar LTR/SVG/ic_fluent_calendar_ltr_16_filled.svg"
+    },
+    {
+      "name": "Calendar",
+      "size": 20,
+      "style": "regular",
+      "file": "Calendar-20-regular.svg",
+      "source": "assets/Calendar LTR/SVG/ic_fluent_calendar_ltr_20_regular.svg"
+    },
+    {
+      "name": "Calendar",
+      "size": 20,
+      "style": "filled",
+      "file": "Calendar-20-filled.svg",
+      "source": "assets/Calendar LTR/SVG/ic_fluent_calendar_ltr_20_filled.svg"
+    },
+    {
+      "name": "CalendarRange",
+      "size": 16,
+      "style": "regular",
+      "file": "CalendarRange-16-regular.svg",
+      "source": "assets/Calendar Week Start/SVG/ic_fluent_calendar_week_start_20_regular.svg"
+    },
+    {
+      "name": "CalendarRange",
+      "size": 16,
+      "style": "filled",
+      "file": "CalendarRange-16-filled.svg",
+      "source": "assets/Calendar Week Start/SVG/ic_fluent_calendar_week_start_20_filled.svg"
+    },
+    {
+      "name": "CalendarRange",
+      "size": 20,
+      "style": "regular",
+      "file": "CalendarRange-20-regular.svg",
+      "source": "assets/Calendar Week Start/SVG/ic_fluent_calendar_week_start_20_regular.svg"
+    },
+    {
+      "name": "CalendarRange",
+      "size": 20,
+      "style": "filled",
+      "file": "CalendarRange-20-filled.svg",
+      "source": "assets/Calendar Week Start/SVG/ic_fluent_calendar_week_start_20_filled.svg"
+    },
+    {
+      "name": "Tag",
+      "size": 16,
+      "style": "regular",
+      "file": "Tag-16-regular.svg",
+      "source": "assets/Tag/SVG/ic_fluent_tag_16_regular.svg"
+    },
+    {
+      "name": "Tag",
+      "size": 16,
+      "style": "filled",
+      "file": "Tag-16-filled.svg",
+      "source": "assets/Tag/SVG/ic_fluent_tag_16_filled.svg"
+    },
+    {
+      "name": "Tag",
+      "size": 20,
+      "style": "regular",
+      "file": "Tag-20-regular.svg",
+      "source": "assets/Tag/SVG/ic_fluent_tag_20_regular.svg"
+    },
+    {
+      "name": "Tag",
+      "size": 20,
+      "style": "filled",
+      "file": "Tag-20-filled.svg",
+      "source": "assets/Tag/SVG/ic_fluent_tag_20_filled.svg"
+    },
+    {
+      "name": "Settings",
+      "size": 16,
+      "style": "regular",
+      "file": "Settings-16-regular.svg",
+      "source": "assets/Settings/SVG/ic_fluent_settings_16_regular.svg"
+    },
+    {
+      "name": "Settings",
+      "size": 16,
+      "style": "filled",
+      "file": "Settings-16-filled.svg",
+      "source": "assets/Settings/SVG/ic_fluent_settings_16_filled.svg"
+    },
+    {
+      "name": "Settings",
+      "size": 20,
+      "style": "regular",
+      "file": "Settings-20-regular.svg",
+      "source": "assets/Settings/SVG/ic_fluent_settings_20_regular.svg"
+    },
+    {
+      "name": "Settings",
+      "size": 20,
+      "style": "filled",
+      "file": "Settings-20-filled.svg",
+      "source": "assets/Settings/SVG/ic_fluent_settings_20_filled.svg"
+    },
+    {
+      "name": "ChevronLeft",
+      "size": 16,
+      "style": "regular",
+      "file": "ChevronLeft-16-regular.svg",
+      "source": "assets/Chevron Left/SVG/ic_fluent_chevron_left_16_regular.svg"
+    },
+    {
+      "name": "ChevronLeft",
+      "size": 20,
+      "style": "regular",
+      "file": "ChevronLeft-20-regular.svg",
+      "source": "assets/Chevron Left/SVG/ic_fluent_chevron_left_20_regular.svg"
+    },
+    {
+      "name": "ChevronRight",
+      "size": 16,
+      "style": "regular",
+      "file": "ChevronRight-16-regular.svg",
+      "source": "assets/Chevron Right/SVG/ic_fluent_chevron_right_16_regular.svg"
+    },
+    {
+      "name": "ChevronRight",
+      "size": 20,
+      "style": "regular",
+      "file": "ChevronRight-20-regular.svg",
+      "source": "assets/Chevron Right/SVG/ic_fluent_chevron_right_20_regular.svg"
+    },
+    {
+      "name": "ChevronDown",
+      "size": 16,
+      "style": "regular",
+      "file": "ChevronDown-16-regular.svg",
+      "source": "assets/Chevron Down/SVG/ic_fluent_chevron_down_16_regular.svg"
+    },
+    {
+      "name": "ChevronDown",
+      "size": 20,
+      "style": "regular",
+      "file": "ChevronDown-20-regular.svg",
+      "source": "assets/Chevron Down/SVG/ic_fluent_chevron_down_20_regular.svg"
+    },
+    {
+      "name": "Minus",
+      "size": 16,
+      "style": "regular",
+      "file": "Minus-16-regular.svg",
+      "source": "assets/Subtract/SVG/ic_fluent_subtract_16_regular.svg"
+    },
+    {
+      "name": "Minus",
+      "size": 20,
+      "style": "regular",
+      "file": "Minus-20-regular.svg",
+      "source": "assets/Subtract/SVG/ic_fluent_subtract_20_regular.svg"
+    },
+    {
+      "name": "Plus",
+      "size": 16,
+      "style": "regular",
+      "file": "Plus-16-regular.svg",
+      "source": "assets/Add/SVG/ic_fluent_add_16_regular.svg"
+    },
+    {
+      "name": "Plus",
+      "size": 20,
+      "style": "regular",
+      "file": "Plus-20-regular.svg",
+      "source": "assets/Add/SVG/ic_fluent_add_20_regular.svg"
+    },
+    {
+      "name": "Close",
+      "size": 16,
+      "style": "regular",
+      "file": "Close-16-regular.svg",
+      "source": "assets/Dismiss/SVG/ic_fluent_dismiss_16_regular.svg"
+    },
+    {
+      "name": "Close",
+      "size": 20,
+      "style": "regular",
+      "file": "Close-20-regular.svg",
+      "source": "assets/Dismiss/SVG/ic_fluent_dismiss_20_regular.svg"
+    },
+    {
+      "name": "Clock",
+      "size": 16,
+      "style": "regular",
+      "file": "Clock-16-regular.svg",
+      "source": "assets/Clock/SVG/ic_fluent_clock_16_regular.svg"
+    },
+    {
+      "name": "Clock",
+      "size": 20,
+      "style": "regular",
+      "file": "Clock-20-regular.svg",
+      "source": "assets/Clock/SVG/ic_fluent_clock_20_regular.svg"
+    },
+    {
+      "name": "Check",
+      "size": 16,
+      "style": "regular",
+      "file": "Check-16-regular.svg",
+      "source": "assets/Checkmark/SVG/ic_fluent_checkmark_16_regular.svg"
+    },
+    {
+      "name": "Check",
+      "size": 20,
+      "style": "regular",
+      "file": "Check-20-regular.svg",
+      "source": "assets/Checkmark/SVG/ic_fluent_checkmark_20_regular.svg"
+    },
+    {
+      "name": "Shield",
+      "size": 16,
+      "style": "regular",
+      "file": "Shield-16-regular.svg",
+      "source": "assets/Shield/SVG/ic_fluent_shield_16_regular.svg"
+    },
+    {
+      "name": "Shield",
+      "size": 20,
+      "style": "regular",
+      "file": "Shield-20-regular.svg",
+      "source": "assets/Shield/SVG/ic_fluent_shield_20_regular.svg"
+    },
+    {
+      "name": "Trash",
+      "size": 16,
+      "style": "regular",
+      "file": "Trash-16-regular.svg",
+      "source": "assets/Delete/SVG/ic_fluent_delete_16_regular.svg"
+    },
+    {
+      "name": "Trash",
+      "size": 20,
+      "style": "regular",
+      "file": "Trash-20-regular.svg",
+      "source": "assets/Delete/SVG/ic_fluent_delete_20_regular.svg"
+    },
+    {
+      "name": "Code",
+      "size": 16,
+      "style": "regular",
+      "file": "Code-16-regular.svg",
+      "source": "assets/Code/SVG/ic_fluent_code_16_regular.svg"
+    },
+    {
+      "name": "Code",
+      "size": 20,
+      "style": "regular",
+      "file": "Code-20-regular.svg",
+      "source": "assets/Code/SVG/ic_fluent_code_20_regular.svg"
+    },
+    {
+      "name": "Globe",
+      "size": 16,
+      "style": "regular",
+      "file": "Globe-16-regular.svg",
+      "source": "assets/Globe/SVG/ic_fluent_globe_16_regular.svg"
+    },
+    {
+      "name": "Globe",
+      "size": 20,
+      "style": "regular",
+      "file": "Globe-20-regular.svg",
+      "source": "assets/Globe/SVG/ic_fluent_globe_20_regular.svg"
+    },
+    {
+      "name": "MessageCircle",
+      "size": 16,
+      "style": "regular",
+      "file": "MessageCircle-16-regular.svg",
+      "source": "assets/Chat/SVG/ic_fluent_chat_16_regular.svg"
+    },
+    {
+      "name": "MessageCircle",
+      "size": 20,
+      "style": "regular",
+      "file": "MessageCircle-20-regular.svg",
+      "source": "assets/Chat/SVG/ic_fluent_chat_20_regular.svg"
+    },
+    {
+      "name": "Send",
+      "size": 16,
+      "style": "regular",
+      "file": "Send-16-regular.svg",
+      "source": "assets/Send/SVG/ic_fluent_send_16_regular.svg"
+    },
+    {
+      "name": "Send",
+      "size": 20,
+      "style": "regular",
+      "file": "Send-20-regular.svg",
+      "source": "assets/Send/SVG/ic_fluent_send_20_regular.svg"
+    },
+    {
+      "name": "SquareTerminal",
+      "size": 16,
+      "style": "regular",
+      "file": "SquareTerminal-16-regular.svg",
+      "source": "assets/Window Console/SVG/ic_fluent_window_console_20_regular.svg"
+    },
+    {
+      "name": "SquareTerminal",
+      "size": 20,
+      "style": "regular",
+      "file": "SquareTerminal-20-regular.svg",
+      "source": "assets/Window Console/SVG/ic_fluent_window_console_20_regular.svg"
+    },
+    {
+      "name": "FileText",
+      "size": 16,
+      "style": "regular",
+      "file": "FileText-16-regular.svg",
+      "source": "assets/Document Text/SVG/ic_fluent_document_text_16_regular.svg"
+    },
+    {
+      "name": "FileText",
+      "size": 20,
+      "style": "regular",
+      "file": "FileText-20-regular.svg",
+      "source": "assets/Document Text/SVG/ic_fluent_document_text_20_regular.svg"
+    }
+  ]
+}

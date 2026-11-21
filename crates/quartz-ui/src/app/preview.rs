@@ -170,6 +170,8 @@ pub struct PreviewOptions {
     pub size: PreviewSize,
     /// Overrides the Windows "Text size" setting; `None` follows the system.
     pub text_scale: Option<TextScale>,
+    /// Forces solid Mica fallback or fixed system high contrast colors for screenshots.
+    pub material: super::system_theme::PreviewTheme,
 }
 
 /// Failures while placing the preview window off-screen.
@@ -273,7 +275,8 @@ impl PreviewOptions {
     /// # Errors
     /// Returns theme loading, window creation and placement failures.
     pub fn run(self) -> Result<(), RunPreviewError> {
-        let theme = ThemeBundle::embedded().context(LoadThemeSnafu)?;
+        let mut theme = ThemeBundle::embedded().context(LoadThemeSnafu)?;
+        theme.preview = self.material;
         let sample = SampleDay::new();
         let initial = self.state.initial_view(&sample);
         let tokens = theme.tokens();
@@ -311,7 +314,7 @@ impl PreviewOptions {
         let options = WindowOptions {
             focus: visible,
             show: visible,
-            ..window_options(init.formatter.text(Msg::AppName), bounds)
+            ..window_options(init.formatter.text(Msg::AppName), bounds, cx)
         };
         let placement: Rc<Cell<Option<PlaceWindowError>>> = Rc::new(Cell::new(None));
         let placement_failure = Rc::clone(&placement);
@@ -321,7 +324,7 @@ impl PreviewOptions {
             {
                 placement_failure.set(Some(error));
             }
-            self.appearance.observe(window);
+            self.appearance.observe(window, cx);
             cx.new(|cx| {
                 let mut shell = AppShell::new(init, window, cx);
                 if let Some(segment) = hover {

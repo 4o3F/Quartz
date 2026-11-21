@@ -4,9 +4,9 @@
 use gpui_kit::{
     App, BoxShadow, ClickEvent, Div, ElementId, Font, FontFeatures, FontWeight, Hsla,
     InteractiveElement as _, ParentElement as _, Pixels, SharedString, Stateful,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, WindowControlArea,
     assets::IconName,
-    component::{Icon, ThemeMode, TitleBar, label::Label},
+    component::{Icon, ThemeMode},
     div, font, point,
     prelude::FluentBuilder as _,
     px,
@@ -15,10 +15,14 @@ use gpui_kit::{
 use std::sync::Arc;
 
 use super::{
+    icons::{AppAssets, IconVariant},
     metrics::{Density, Metrics, Ramp, ShadowColor, ShadowLayer},
-    tokens::{Palette, Tokens},
+    tokens::{ContrastMode, Palette, Tokens},
 };
-use crate::{model::Glyph, text_scale::TextScale};
+use crate::{
+    model::{CategoryColor, Glyph},
+    text_scale::TextScale,
+};
 
 /// Smallest height of the segmented control: the compact control height plus a 2 px inset on each
 /// side. It grows with the text (11 section 5.7).
@@ -38,6 +42,8 @@ pub(crate) const PROPORTION_BAR_MIN_WIDTH: f32 = 48.;
 
 /// Side of the square category swatch in legends and chips.
 const SWATCH_SIZE: f32 = 8.;
+/// Native Windows caption button width for the 32 px title bar (11 section 5.4).
+const CAPTION_CONTROL_WIDTH: f32 = 46.;
 
 /// What a push button shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,9 +121,48 @@ impl<'a> Widgets<'a> {
 
     /// A themed icon sized for `density` (11 section 7).
     pub(crate) fn icon(&self, name: IconName, density: Density, color: Hsla) -> Icon {
-        Icon::new(name)
+        self.variant_icon(name, density, color, IconVariant::Regular)
+    }
+
+    pub(crate) fn variant_icon(
+        &self,
+        name: IconName,
+        density: Density,
+        color: Hsla,
+        variant: IconVariant,
+    ) -> Icon {
+        Icon::default()
+            .path(AppAssets::icon_path(name, density, variant))
             .size(self.metrics.density(density).icon_size)
             .text_color(color)
+    }
+
+    /// High contrast marks preserve their full extent and share the legend pattern (11 section 2).
+    pub(crate) fn category_mark(&self, body: Div, category: CategoryColor) -> Div {
+        if self.palette.contrast == ContrastMode::Standard {
+            return body.bg(self.palette.category(category));
+        }
+        body.relative()
+            .overflow_hidden()
+            .bg(self.palette.bg_base)
+            .child(
+                super::data_pattern::DataPattern::for_category(category)
+                    .canvas(
+                        self.palette.bg_base,
+                        self.palette.accent_fill,
+                        self.palette.text_primary,
+                    )
+                    .absolute()
+                    .inset_0(),
+            )
+    }
+
+    /// High contrast state marks retain opaque system colors (11 section 2).
+    pub(crate) fn state_color(&self, color: Hsla, opacity: f32) -> Hsla {
+        match self.palette.contrast {
+            ContrastMode::Standard => color.opacity(opacity),
+            ContrastMode::High => self.palette.bg_base,
+        }
     }
 
     /// The monospace font with its fallbacks.
@@ -150,23 +195,91 @@ impl<'a> Widgets<'a> {
     /// A small square in a category color, for legends and chips.
     pub(crate) fn swatch(&self, color: Hsla) -> Div {
         div()
-            .size(px(SWATCH_SIZE))
+            .size(if self.palette.contrast == ContrastMode::High {
+                self.metrics.density(Density::Compact).icon_size
+            } else {
+                px(SWATCH_SIZE)
+            })
             .rounded(self.metrics.timeline.block_radius)
             .bg(color)
     }
 
-    /// The custom title bar on `bg.base` with the window title in caption type.
-    pub(crate) fn title_bar(&self, title: String) -> TitleBar {
-        TitleBar::new()
+    /// Caption buttons retain native Windows hit testing with compact Fluent glyphs (11 sections 5.4 and 7).
+    pub(crate) fn title_bar(&self, title: String, window: &Window) -> Div {
+        let supported = window.window_controls();
+        let mut bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_shrink_0()
             .h(self.metrics.layout.title_bar_height)
-            .pl(self.metrics.space.m)
-            .border_b_0()
-            .bg(self.palette.bg_base)
+            .bg(self.palette.window_background)
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .flex_1()
+                    .h_full()
+                    .pl(self.metrics.space.m)
+                    .window_control_area(WindowControlArea::Drag)
                     .ramp(self, Ramp::Caption)
                     .text_color(self.palette.text_primary)
-                    .child(Label::new(title)),
+                    .child(title),
+            );
+        if supported.minimize {
+            bar = bar.child(self.caption_control(IconName::WindowMinimize, WindowControlArea::Min));
+        }
+        if supported.maximize {
+            let icon = if window.is_maximized() {
+                IconName::WindowRestore
+            } else {
+                IconName::WindowMaximize
+            };
+            bar = bar.child(self.caption_control(icon, WindowControlArea::Max));
+        }
+        bar.child(self.caption_control(IconName::WindowClose, WindowControlArea::Close))
+    }
+
+    fn caption_control(&self, icon: IconName, area: WindowControlArea) -> Stateful<Div> {
+        let close = area == WindowControlArea::Close;
+        let hover = if close {
+            self.palette.status_critical
+        } else {
+            self.palette.fill_control_hover
+        };
+        let foreground = if close {
+            self.palette.text_on(hover)
+        } else {
+            self.palette.text_primary
+        };
+        let pressed = if close {
+            hover
+        } else {
+            self.palette.fill_control_pressed
+        };
+        div()
+            .id(AppAssets::icon_path(
+                icon,
+                Density::Compact,
+                IconVariant::Regular,
+            ))
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(CAPTION_CONTROL_WIDTH))
+            .h_full()
+            .window_control_area(area)
+            .text_color(self.palette.text_primary)
+            .hover(move |style| style.bg(hover).text_color(foreground))
+            .active(move |style| style.bg(pressed).text_color(foreground))
+            .child(
+                Icon::default()
+                    .path(AppAssets::icon_path(
+                        icon,
+                        Density::Compact,
+                        IconVariant::Regular,
+                    ))
+                    .size(self.metrics.density(Density::Compact).icon_size),
             )
     }
 
@@ -348,11 +461,11 @@ impl<T: Styled> RampExt for T {}
 impl From<Glyph> for IconName {
     fn from(glyph: Glyph) -> Self {
         match glyph {
-            Glyph::Editor => Self::Code,
-            Glyph::Browser => Self::Globe,
-            Glyph::Chat => Self::MessageCircle,
-            Glyph::Messenger => Self::Send,
-            Glyph::Terminal => Self::SquareTerminal,
+            Glyph::Editor => IconName::Code,
+            Glyph::Browser => IconName::Globe,
+            Glyph::Chat => IconName::MessageCircle,
+            Glyph::Messenger => IconName::Send,
+            Glyph::Terminal => IconName::SquareTerminal,
         }
     }
 }

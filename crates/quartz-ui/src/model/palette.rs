@@ -64,6 +64,11 @@ impl PaletteSlot {
             .find(|slot| !used.contains(&CategoryColor::Palette(*slot)))
     }
 
+    /// Stable ordinal for high contrast chart patterns (11 section 2).
+    pub(crate) const fn ordinal(self) -> u8 {
+        self.0
+    }
+
     fn index(self) -> usize {
         usize::from(self.0 - 1)
     }
@@ -72,6 +77,13 @@ impl PaletteSlot {
 /// One value per palette slot, looked up without a fallback because every slot is present.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PaletteSlotMap<T>([T; PALETTE_LEN]);
+
+impl<T: Copy> PaletteSlotMap<T> {
+    /// Uses one system color for all category slots in high contrast (11 section 2).
+    pub(crate) fn filled(value: T) -> Self {
+        Self([value; PALETTE_LEN])
+    }
+}
 
 impl<T> PaletteSlotMap<T> {
     /// Builds the map by calling `value` once per slot in palette order, stopping at the first

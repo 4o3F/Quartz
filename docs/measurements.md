@@ -750,3 +750,16 @@ HEAD `f23a041`，Windows 11 build 26300，China Standard Time。release 构建�
 发现：Windows PowerShell 5.1 按 OEM 代码页（中文系统为 GBK）解码 quartz.exe 的 UTF-8 输出，含中文应用名的 dump JSON 首次 89 行中 33 行损坏；quartz 输出本身正确。M1、M2 手册已在导出前设置 `[Console]::OutputEncoding`。
 
 待测：§5 长空闲后的快速标注、§3 保持计时（均需连续无输入，用户本轮未测）；其他账户/会话拒绝（需第二账户）；语言切换实机操作待 M3 设置界面。
+
+## 2026-11-21 M3-A：Mica 呈现（H11）
+
+Windows 11 build 26300.9974，150% 缩放，`AdvancedEffectsEnabled=true`，节电关闭。预览窗口激活、DWM 报告 `DWMSBT_MAINWINDOW`；运行记录确认根层、自绘标题栏、gpui-component `Root` 与 `theme.background` / `title_bar` / `sidebar` 的 alpha 均为 0。用户原壁纸接近中性灰，Mica 与 `bg.base` 像素相同；临时换成 RGB `(20, 80, 180)` 参考壁纸（`deno run … scripts/preview-screenshots.ts --mica-wallpaper reference`，结束后恢复原壁纸）后：
+
+| 采样点 | 参考壁纸、激活 Mica | 强制纯色回退 |
+|---|---|---|
+| 侧栏、标题栏 | `(240, 243, 249)` | `(243, 243, 243)` = `bg.base` |
+| 主区域（`fill.layer`） | `(248, 249, 252)` | `(249, 249, 249)` |
+| 卡片（`fill.card`） | `(253, 253, 254)` | `(253, 253, 253)` |
+
+结论：GPUI 的 DirectComposition 路径能在 Mica 上合成，H11 的 Mica 项通过；字体光学尺寸与 `tnum` 待 M3 后续步骤验证。
+

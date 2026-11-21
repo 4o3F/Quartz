@@ -1,68 +1,259 @@
-//! Quartz tokens from the theme JSON (11 section 9): one palette per appearance and the
-//! theme-independent metrics. Components read colors and sizes only from here.
+//! Typed Fluent palettes, immutable embedded defaults and reversible system overlays (11 section 9).
 
-use std::collections::BTreeMap;
-
+use super::{metrics::Metrics, theme_mapping::ComponentMapping};
+use crate::model::{CategoryColor, PaletteSlot, PaletteSlotMap};
 use gpui_kit::{Hsla, component::ThemeMode};
 use serde::Deserialize;
-use snafu::{OptionExt as _, ResultExt as _, Snafu};
+#[cfg(test)]
+use snafu::ResultExt as _;
+use snafu::{OptionExt as _, Snafu};
 
-use super::metrics::Metrics;
-use crate::model::{CategoryColor, PaletteSlotMap};
-
-/// Failures while reading the Quartz tokens from the theme JSON.
 #[derive(Debug, Snafu)]
 pub enum LoadPaletteError {
-    /// The theme file is not valid JSON, or a Quartz token is missing or not a color.
     #[snafu(display("could not decode the Quartz tokens of the theme"))]
     DecodeTokens { source: serde_json::Error },
-    /// A categorical palette slot has no color in the theme.
     #[snafu(display("theme token {token} is missing"))]
     MissingCategoryColor { token: &'static str },
 }
 
-#[derive(Debug, Deserialize)]
-struct ThemeFile {
-    quartz: QuartzSection,
+/// Mica exposes the DWM backdrop; Solid paints the opaque Fluent base (11 section 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Material {
+    Mica,
+    Solid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContrastMode {
+    Standard,
+    High,
+}
+
+/// All seven Windows accent variants are retained from one successful read (11 section 3.2).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AccentColors {
+    pub(crate) accent: Hsla,
+    pub(crate) light1: Hsla,
+    pub(crate) light2: Hsla,
+    pub(crate) light3: Hsla,
+    pub(crate) dark1: Hsla,
+    pub(crate) dark2: Hsla,
+    pub(crate) dark3: Hsla,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub(crate) struct SystemColors {
+    pub(crate) window: Hsla,
+    pub(crate) window_text: Hsla,
+    pub(crate) highlight: Hsla,
+    pub(crate) highlight_text: Hsla,
+    pub(crate) gray_text: Hsla,
+    pub(crate) button_face: Hsla,
+}
+
+/// Accent hover opacity (11 section 3.2).
+const ACCENT_HOVER_ALPHA: f32 = 0.9;
+/// Selection opacity (11 section 3.4).
+const ACCENT_SELECTION_ALPHA: f32 = 0.2;
+
 #[derive(Debug, Deserialize)]
-struct QuartzSection {
+pub(super) struct QuartzSection {
     metrics: Metrics,
     palette: PaletteSources,
+    pub(super) component_mapping: ComponentMapping,
+}
+#[derive(Debug, Deserialize)]
+struct PaletteSources {
+    light: PaletteSource,
+    dark: PaletteSource,
 }
 
-/// Both palettes and the metrics.
+macro_rules! palette_fields {
+    ($($name:ident => $token:literal => $variant:ident),+ $(,)?) => {
+        #[derive(Debug, Deserialize)]
+        struct PaletteSource {
+            $(#[serde(rename = $token)] $name: Hsla,)+
+            #[serde(flatten)] categories: CategorySources,
+        }
+        #[derive(Debug, Clone, PartialEq)]
+        pub(crate) struct Palette {
+            $(pub(crate) $name: Hsla,)+
+            pub(crate) contrast: ContrastMode,
+            pub(crate) categories: CategoryColors,
+        }
+        #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+        pub(super) enum PaletteToken {
+            $(#[serde(rename = $token)] $variant,)+
+            #[serde(rename = "cat.1")] Cat1, #[serde(rename = "cat.2")] Cat2,
+            #[serde(rename = "cat.3")] Cat3, #[serde(rename = "cat.4")] Cat4,
+            #[serde(rename = "cat.5")] Cat5,
+        }
+        impl PaletteToken {
+            #[cfg(test)]
+            pub(super) const ALL: &[Self] = &[$(Self::$variant,)+Self::Cat1,Self::Cat2,Self::Cat3,Self::Cat4,Self::Cat5];
+            pub(super) fn color(self, palette: &Palette) -> Hsla {
+                match self {
+                    $(Self::$variant => palette.$name,)+
+                    Self::Cat1 => *palette.categories.get(PaletteSlot::numbered(1)),
+                    Self::Cat2 => *palette.categories.get(PaletteSlot::numbered(2)),
+                    Self::Cat3 => *palette.categories.get(PaletteSlot::numbered(3)),
+                    Self::Cat4 => *palette.categories.get(PaletteSlot::numbered(4)),
+                    Self::Cat5 => *palette.categories.get(PaletteSlot::numbered(5)),
+                }
+            }
+        }
+        impl Palette {
+            fn from_source(source: PaletteSource) -> Result<Self, LoadPaletteError> {
+                Ok(Self { $($name: source.$name,)+ contrast: ContrastMode::Standard, categories: source.categories.resolve()? })
+            }
+        }
+    };
+}
+palette_fields! {
+    text_primary => "text.primary" => TextPrimary,
+    text_secondary => "text.secondary" => TextSecondary,
+    text_tertiary => "text.tertiary" => TextTertiary,
+    text_disabled => "text.disabled" => TextDisabled,
+    text_on_accent => "text.on_accent" => TextOnAccent,
+    text_on_color_white => "text.on_color_white" => TextOnColorWhite,
+    text_on_color_black => "text.on_color_black" => TextOnColorBlack,
+    fill_control => "fill.control" => FillControl,
+    fill_control_hover => "fill.control_hover" => FillControlHover,
+    fill_control_pressed => "fill.control_pressed" => FillControlPressed,
+    fill_subtle_hover => "fill.subtle_hover" => FillSubtleHover,
+    fill_subtle_pressed => "fill.subtle_pressed" => FillSubtlePressed,
+    fill_layer => "fill.layer" => FillLayer,
+    fill_card => "fill.card" => FillCard,
+    fill_card_secondary => "fill.card_secondary" => FillCardSecondary,
+    bg_base => "bg.base" => BgBase,
+    bg_flyout => "bg.flyout" => BgFlyout,
+    stroke_control => "stroke.control" => StrokeControl,
+    stroke_control_strong => "stroke.control_strong" => StrokeControlStrong,
+    stroke_card => "stroke.card" => StrokeCard,
+    stroke_surface => "stroke.surface" => StrokeSurface,
+    stroke_divider => "stroke.divider" => StrokeDivider,
+    status_success => "status.success" => StatusSuccess,
+    status_caution => "status.caution" => StatusCaution,
+    status_critical => "status.critical" => StatusCritical,
+    status_neutral => "status.neutral" => StatusNeutral,
+    status_success_bg => "status.success_bg" => StatusSuccessBg,
+    accent_fill => "accent.fill" => AccentFill,
+    accent_fill_hover => "accent.fill_hover" => AccentFillHover,
+    accent_text => "accent.text" => AccentText,
+    shadow_ambient => "shadow.ambient" => ShadowAmbient,
+    shadow_key => "shadow.key" => ShadowKey,
+    window_background => "window.background" => WindowBackground,
+    transparent => "transparent" => Transparent,
+    stroke_focus_outer => "stroke.focus_outer" => StrokeFocusOuter,
+    stroke_focus_inner => "stroke.focus_inner" => StrokeFocusInner,
+    fill_smoke => "fill.smoke" => FillSmoke,
+    accent_selection => "accent.selection" => AccentSelection,
+    text_on_critical => "text.on_critical" => TextOnCritical,
+    text_on_success => "text.on_success" => TextOnSuccess,
+    text_on_caution => "text.on_caution" => TextOnCaution,
+}
+
+pub(crate) type CategoryColors = PaletteSlotMap<Hsla>;
+#[derive(Debug, Deserialize)]
+struct CategorySources {
+    #[serde(rename = "cat.1")]
+    cat1: Option<Hsla>,
+    #[serde(rename = "cat.2")]
+    cat2: Option<Hsla>,
+    #[serde(rename = "cat.3")]
+    cat3: Option<Hsla>,
+    #[serde(rename = "cat.4")]
+    cat4: Option<Hsla>,
+    #[serde(rename = "cat.5")]
+    cat5: Option<Hsla>,
+    #[serde(rename = "cat.6")]
+    cat6: Option<Hsla>,
+    #[serde(rename = "cat.7")]
+    cat7: Option<Hsla>,
+    #[serde(rename = "cat.8")]
+    cat8: Option<Hsla>,
+    #[serde(rename = "cat.9")]
+    cat9: Option<Hsla>,
+    #[serde(rename = "cat.10")]
+    cat10: Option<Hsla>,
+    #[serde(rename = "cat.11")]
+    cat11: Option<Hsla>,
+    #[serde(rename = "cat.12")]
+    cat12: Option<Hsla>,
+    #[serde(rename = "cat.13")]
+    cat13: Option<Hsla>,
+    #[serde(rename = "cat.14")]
+    cat14: Option<Hsla>,
+}
+impl CategorySources {
+    fn resolve(self) -> Result<CategoryColors, LoadPaletteError> {
+        CategoryColors::try_from_fn(|slot| {
+            let color = match slot.ordinal() {
+                1 => self.cat1,
+                2 => self.cat2,
+                3 => self.cat3,
+                4 => self.cat4,
+                5 => self.cat5,
+                6 => self.cat6,
+                7 => self.cat7,
+                8 => self.cat8,
+                9 => self.cat9,
+                10 => self.cat10,
+                11 => self.cat11,
+                12 => self.cat12,
+                13 => self.cat13,
+                14 => self.cat14,
+                _ => unreachable!("palette slots are numbered 1 to 14"),
+            };
+            color.context(MissingCategoryColorSnafu {
+                token: slot.token_key(),
+            })
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Tokens {
     light: Palette,
     dark: Palette,
     metrics: Metrics,
 }
-
 impl Tokens {
-    /// Reads all tokens from the embedded theme JSON.
-    ///
-    /// # Errors
-    /// Returns an error when the JSON is malformed or a token is missing or not a color.
-    pub(crate) fn from_theme_json(json: &str) -> Result<Self, LoadPaletteError> {
-        let file: ThemeFile = serde_json::from_str(json).context(DecodeTokensSnafu)?;
-        let section = file.quartz;
+    pub(super) fn from_section(section: QuartzSection) -> Result<Self, LoadPaletteError> {
         Ok(Self {
             light: Palette::from_source(section.palette.light)?,
             dark: Palette::from_source(section.palette.dark)?,
             metrics: section.metrics,
         })
     }
-
-    /// Theme-independent sizes, radii, type and shadows.
-    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn from_theme_json(json: &str) -> Result<Self, LoadPaletteError> {
+        #[derive(Deserialize)]
+        struct File {
+            quartz: QuartzSection,
+        }
+        let file: File = serde_json::from_str(json).context(DecodeTokensSnafu)?;
+        Self::from_section(file.quartz)
+    }
+    pub(crate) fn resolved(
+        &self,
+        accent: Option<&AccentColors>,
+        material: Material,
+        contrast: Option<&SystemColors>,
+    ) -> Self {
+        Self {
+            light: self
+                .light
+                .resolved(accent, material, contrast, ThemeMode::Light),
+            dark: self
+                .dark
+                .resolved(accent, material, contrast, ThemeMode::Dark),
+            metrics: self.metrics.clone(),
+        }
+    }
     pub(crate) const fn metrics(&self) -> &Metrics {
         &self.metrics
     }
-
-    /// Palette for the current appearance.
-    #[must_use]
     pub(crate) const fn palette(&self, mode: ThemeMode) -> &Palette {
         if matches!(mode, ThemeMode::Dark) {
             &self.dark
@@ -71,185 +262,114 @@ impl Tokens {
         }
     }
 }
-
-#[derive(Debug, Deserialize)]
-struct PaletteSources {
-    light: PaletteSource,
-    dark: PaletteSource,
-}
-
-/// The palette tokens of one appearance, as written in the theme; a missing token or a value
-/// that is not a color is a decoding error naming the token.
-#[derive(Debug, Deserialize)]
-struct PaletteSource {
-    #[serde(rename = "text.primary")]
-    text_primary: Hsla,
-    #[serde(rename = "text.secondary")]
-    text_secondary: Hsla,
-    #[serde(rename = "text.tertiary")]
-    text_tertiary: Hsla,
-    #[serde(rename = "text.on_color_white")]
-    text_on_color_white: Hsla,
-    #[serde(rename = "text.on_color_black")]
-    text_on_color_black: Hsla,
-    #[serde(rename = "fill.control")]
-    fill_control: Hsla,
-    #[serde(rename = "fill.control_hover")]
-    fill_control_hover: Hsla,
-    #[serde(rename = "fill.control_pressed")]
-    fill_control_pressed: Hsla,
-    #[serde(rename = "fill.subtle_hover")]
-    fill_subtle_hover: Hsla,
-    #[serde(rename = "fill.layer")]
-    fill_layer: Hsla,
-    #[serde(rename = "fill.card")]
-    fill_card: Hsla,
-    #[serde(rename = "bg.base")]
-    bg_base: Hsla,
-    #[serde(rename = "bg.flyout")]
-    bg_flyout: Hsla,
-    #[serde(rename = "stroke.control")]
-    stroke_control: Hsla,
-    #[serde(rename = "stroke.control_strong")]
-    stroke_control_strong: Hsla,
-    #[serde(rename = "stroke.card")]
-    stroke_card: Hsla,
-    #[serde(rename = "stroke.surface")]
-    stroke_surface: Hsla,
-    #[serde(rename = "stroke.divider")]
-    stroke_divider: Hsla,
-    #[serde(rename = "status.neutral")]
-    status_neutral: Hsla,
-    #[serde(rename = "status.success")]
-    status_success: Hsla,
-    #[serde(rename = "status.success_bg")]
-    status_success_bg: Hsla,
-    #[serde(rename = "status.caution")]
-    status_caution: Hsla,
-    #[serde(rename = "status.critical")]
-    status_critical: Hsla,
-    #[serde(rename = "accent.fill")]
-    accent_fill: Hsla,
-    #[serde(rename = "shadow.ambient")]
-    shadow_ambient: Hsla,
-    #[serde(rename = "shadow.key")]
-    shadow_key: Hsla,
-    /// `cat.1` to `cat.14` and the tokens the UI does not read yet.
-    #[serde(flatten)]
-    other: BTreeMap<String, serde_json::Value>,
-}
-
-/// One color per categorical palette slot.
-pub(crate) type CategoryColors = PaletteSlotMap<Hsla>;
-
-/// Resolved colors for one appearance.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Palette {
-    pub(crate) text_primary: Hsla,
-    pub(crate) text_secondary: Hsla,
-    pub(crate) text_tertiary: Hsla,
-    pub(crate) text_on_color_white: Hsla,
-    pub(crate) text_on_color_black: Hsla,
-    pub(crate) fill_control: Hsla,
-    pub(crate) fill_control_hover: Hsla,
-    pub(crate) fill_control_pressed: Hsla,
-    pub(crate) fill_subtle_hover: Hsla,
-    pub(crate) fill_layer: Hsla,
-    pub(crate) fill_card: Hsla,
-    pub(crate) bg_base: Hsla,
-    pub(crate) bg_flyout: Hsla,
-    pub(crate) stroke_control: Hsla,
-    pub(crate) stroke_control_strong: Hsla,
-    pub(crate) stroke_card: Hsla,
-    pub(crate) stroke_surface: Hsla,
-    pub(crate) stroke_divider: Hsla,
-    pub(crate) status_neutral: Hsla,
-    pub(crate) status_success: Hsla,
-    pub(crate) status_success_bg: Hsla,
-    pub(crate) status_caution: Hsla,
-    pub(crate) status_critical: Hsla,
-    pub(crate) accent_fill: Hsla,
-    pub(crate) shadow_ambient: Hsla,
-    pub(crate) shadow_key: Hsla,
-    /// `cat.1` to `cat.14`.
-    pub(crate) categories: CategoryColors,
-}
-
 impl Palette {
-    fn from_source(source: PaletteSource) -> Result<Self, LoadPaletteError> {
-        let categories = category_colors(&source.other)?;
-        Ok(Self {
-            text_primary: source.text_primary,
-            text_secondary: source.text_secondary,
-            text_tertiary: source.text_tertiary,
-            text_on_color_white: source.text_on_color_white,
-            text_on_color_black: source.text_on_color_black,
-            fill_control: source.fill_control,
-            fill_control_hover: source.fill_control_hover,
-            fill_control_pressed: source.fill_control_pressed,
-            fill_subtle_hover: source.fill_subtle_hover,
-            fill_layer: source.fill_layer,
-            fill_card: source.fill_card,
-            bg_base: source.bg_base,
-            bg_flyout: source.bg_flyout,
-            stroke_control: source.stroke_control,
-            stroke_control_strong: source.stroke_control_strong,
-            stroke_card: source.stroke_card,
-            stroke_surface: source.stroke_surface,
-            stroke_divider: source.stroke_divider,
-            status_neutral: source.status_neutral,
-            status_success: source.status_success,
-            status_success_bg: source.status_success_bg,
-            status_caution: source.status_caution,
-            status_critical: source.status_critical,
-            accent_fill: source.accent_fill,
-            shadow_ambient: source.shadow_ambient,
-            shadow_key: source.shadow_key,
-            categories,
-        })
+    fn resolved(
+        &self,
+        accent: Option<&AccentColors>,
+        material: Material,
+        contrast: Option<&SystemColors>,
+        mode: ThemeMode,
+    ) -> Self {
+        if let Some(colors) = contrast {
+            return Self::high_contrast(colors);
+        }
+        let palette = match accent {
+            Some(colors) => self.with_accent(colors, mode),
+            None => self.clone(),
+        };
+        palette.with_material(material)
     }
-
-    /// Color of a category.
-    #[must_use]
+    pub(crate) fn with_material(&self, material: Material) -> Self {
+        let mut palette = self.clone();
+        palette.window_background = match material {
+            Material::Mica => self.transparent,
+            Material::Solid => self.bg_base,
+        };
+        palette
+    }
+    pub(crate) fn with_accent(&self, colors: &AccentColors, mode: ThemeMode) -> Self {
+        let mut palette = self.clone();
+        palette.accent_fill = if mode.is_dark() {
+            colors.light2
+        } else {
+            colors.dark1
+        };
+        palette.accent_fill_hover = palette.accent_fill.opacity(ACCENT_HOVER_ALPHA);
+        palette.accent_text = if mode.is_dark() {
+            colors.light3
+        } else {
+            colors.dark2
+        };
+        palette.accent_selection = palette.accent_fill.opacity(ACCENT_SELECTION_ALPHA);
+        palette
+    }
+    /// Exhaustive construction makes every new palette field require a system-color decision (11 section 2).
+    pub(crate) fn high_contrast(colors: &SystemColors) -> Self {
+        Self {
+            text_primary: colors.window_text,
+            text_secondary: colors.window_text,
+            text_tertiary: colors.gray_text,
+            text_disabled: colors.gray_text,
+            text_on_accent: colors.highlight_text,
+            text_on_color_white: colors.window_text,
+            text_on_color_black: colors.highlight_text,
+            fill_control: colors.button_face,
+            fill_control_hover: colors.button_face,
+            fill_control_pressed: colors.button_face,
+            fill_subtle_hover: colors.button_face,
+            fill_subtle_pressed: colors.button_face,
+            fill_layer: colors.window,
+            fill_card: colors.button_face,
+            fill_card_secondary: colors.button_face,
+            bg_base: colors.window,
+            bg_flyout: colors.window,
+            stroke_control: colors.window_text,
+            stroke_control_strong: colors.window_text,
+            stroke_card: colors.window_text,
+            stroke_surface: colors.window_text,
+            stroke_divider: colors.window_text,
+            status_success: colors.window_text,
+            status_caution: colors.window_text,
+            status_critical: colors.window_text,
+            status_neutral: colors.gray_text,
+            status_success_bg: colors.window,
+            accent_fill: colors.highlight,
+            accent_fill_hover: colors.highlight,
+            accent_text: colors.window_text,
+            shadow_ambient: colors.window,
+            shadow_key: colors.window,
+            window_background: colors.window,
+            transparent: colors.window,
+            stroke_focus_outer: colors.window_text,
+            stroke_focus_inner: colors.window_text,
+            fill_smoke: colors.window,
+            accent_selection: colors.highlight,
+            text_on_critical: colors.window,
+            text_on_success: colors.window,
+            text_on_caution: colors.window,
+            contrast: ContrastMode::High,
+            categories: CategoryColors::filled(colors.highlight),
+        }
+    }
     pub(crate) fn category(&self, color: CategoryColor) -> Hsla {
         match color {
             CategoryColor::Palette(slot) => *self.categories.get(slot),
-            CategoryColor::Neutral => self.status_neutral,
+            CategoryColor::Neutral => self.bg_base.blend(self.status_neutral),
         }
     }
-}
-
-/// Reads `cat.1` to `cat.14` from the tokens the palette source did not name.
-fn category_colors(
-    tokens: &BTreeMap<String, serde_json::Value>,
-) -> Result<CategoryColors, LoadPaletteError> {
-    CategoryColors::try_from_fn(|slot| {
-        let token = slot.token_key();
-        let value = tokens
-            .get(token)
-            .context(MissingCategoryColorSnafu { token })?;
-        Hsla::deserialize(value).context(DecodeTokensSnafu)
-    })
-}
-
-impl Palette {
-    /// White or black text, whichever contrasts more with an opaque `background`.
-    #[must_use]
     pub(crate) fn text_on(&self, background: Hsla) -> Hsla {
         let luminance = relative_luminance(background);
-        let white = relative_luminance(self.text_on_color_white);
-        let black = relative_luminance(self.text_on_color_black);
-        let contrast = |other: f32| {
+        let contrast = |color: Hsla| {
+            let other = relative_luminance(color);
             (luminance.max(other) + CONTRAST_FLARE) / (luminance.min(other) + CONTRAST_FLARE)
         };
-        if contrast(white) >= contrast(black) {
+        if contrast(self.text_on_color_white) >= contrast(self.text_on_color_black) {
             self.text_on_color_white
         } else {
             self.text_on_color_black
         }
     }
 }
-
 // Relative luminance and contrast ratio as WCAG 2.2 defines them:
 // https://www.w3.org/TR/WCAG22/#dfn-relative-luminance and #dfn-contrast-ratio.
 /// sRGB channel values at or below this are on the linear segment of the transfer curve.
@@ -332,5 +452,217 @@ mod tests {
             error,
             LoadPaletteError::MissingCategoryColor { token: "cat.14" }
         ));
+    }
+
+    /// Minimum category and body-text ratios from 11 sections 3.3 and 9.3.
+    const MIN_CATEGORY_CONTRAST: f32 = 3.;
+    const MIN_BODY_CONTRAST: f32 = 4.5;
+
+    fn contrast(foreground: Hsla, background: Hsla) -> f32 {
+        let foreground = relative_luminance(background.blend(foreground));
+        let background = relative_luminance(background);
+        (foreground.max(background) + CONTRAST_FLARE)
+            / (foreground.min(background) + CONTRAST_FLARE)
+    }
+
+    #[test]
+    fn embedded_categories_and_body_text_meet_wcag_contrast() {
+        let theme: serde_json::Value = serde_json::from_str(THEME).expect("embedded JSON");
+        let tokens = Tokens::from_theme_json(THEME).expect("embedded tokens");
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let palette = tokens.palette(mode);
+            let mode_name = if mode.is_dark() { "dark" } else { "light" };
+            let source = theme
+                .pointer(&format!("/quartz/palette/{mode_name}"))
+                .expect("theme palette");
+            let color = |name: &str| {
+                Hsla::deserialize(source.get(name).expect("named color"))
+                    .expect("named theme color")
+            };
+            for slot in PaletteSlot::ALL {
+                let category = *palette.categories.get(slot);
+                let ratio = contrast(category, palette.bg_base);
+                println!("{mode_name} {} / bg.base: {ratio:.4}", slot.token_key());
+                assert!(
+                    ratio >= MIN_CATEGORY_CONTRAST,
+                    "{mode_name} {}: {ratio} < {MIN_CATEGORY_CONTRAST}",
+                    slot.token_key()
+                );
+                assert!(
+                    contrast(palette.text_on(category), category) >= MIN_BODY_CONTRAST,
+                    "{mode_name} {} block label",
+                    slot.token_key()
+                );
+            }
+            let neutral_color = palette.category(CategoryColor::Neutral);
+            let neutral_ratio = contrast(neutral_color, palette.bg_base);
+            assert!(
+                contrast(palette.text_on(neutral_color), neutral_color) >= MIN_BODY_CONTRAST,
+                "{mode_name} neutral block label"
+            );
+            println!("{mode_name} neutral / bg.base: {neutral_ratio:.4}");
+            assert!(
+                neutral_ratio >= MIN_CATEGORY_CONTRAST,
+                "{mode_name} neutral: {neutral_ratio}"
+            );
+            let base = palette.bg_base;
+            let layer = base.blend(palette.fill_layer);
+            let card = layer.blend(palette.fill_card);
+            struct Surface {
+                name: &'static str,
+                color: Hsla,
+            }
+            let surfaces = [
+                Surface {
+                    name: "bg.base",
+                    color: base,
+                },
+                Surface {
+                    name: "fill.layer / bg.base",
+                    color: layer,
+                },
+                Surface {
+                    name: "fill.card / fill.layer / bg.base",
+                    color: card,
+                },
+                Surface {
+                    name: "fill.control / card",
+                    color: card.blend(palette.fill_control),
+                },
+                Surface {
+                    name: "fill.control_hover / card",
+                    color: card.blend(palette.fill_control_hover),
+                },
+                Surface {
+                    name: "fill.control_pressed / card",
+                    color: card.blend(palette.fill_control_pressed),
+                },
+                Surface {
+                    name: "fill.subtle_hover / bg.base",
+                    color: base.blend(palette.fill_subtle_hover),
+                },
+                Surface {
+                    name: "fill.subtle_pressed / bg.base",
+                    color: base.blend(color("fill.subtle_pressed")),
+                },
+                Surface {
+                    name: "bg.flyout",
+                    color: palette.bg_flyout,
+                },
+            ];
+            for token in ["text.primary", "text.secondary", "accent.text"] {
+                for surface in &surfaces {
+                    let ratio = contrast(color(token), surface.color);
+                    println!("{mode_name} {token} / {}: {ratio:.4}", surface.name);
+                    assert!(
+                        ratio >= MIN_BODY_CONTRAST,
+                        "{mode_name} {token} / {}: {ratio} < {MIN_BODY_CONTRAST}",
+                        surface.name
+                    );
+                }
+            }
+            struct TextPair {
+                text: &'static str,
+                background: &'static str,
+            }
+            for pair in [
+                TextPair {
+                    text: "text.on_accent",
+                    background: "accent.fill",
+                },
+                TextPair {
+                    text: "text.on_accent",
+                    background: "accent.fill_hover",
+                },
+                TextPair {
+                    text: "status.success",
+                    background: "status.success_bg",
+                },
+                TextPair {
+                    text: "text.on_critical",
+                    background: "status.critical",
+                },
+                TextPair {
+                    text: "text.on_success",
+                    background: "status.success",
+                },
+                TextPair {
+                    text: "text.on_caution",
+                    background: "status.caution",
+                },
+            ] {
+                let ratio = contrast(color(pair.text), card.blend(color(pair.background)));
+                println!(
+                    "{mode_name} {} / {}: {ratio:.4}",
+                    pair.text, pair.background
+                );
+                assert!(
+                    ratio >= MIN_BODY_CONTRAST,
+                    "{mode_name} {} / {}: {ratio}",
+                    pair.text,
+                    pair.background
+                );
+            }
+        }
+    }
+
+    fn contains_color_literal(source: &str) -> bool {
+        let constructors = ["rgb(", "rgba(", "hsl(", "hsla("];
+        for constructor in constructors {
+            for (index, _) in source.match_indices(constructor) {
+                if index == 0
+                    || source[..index]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|character| !character.is_alphanumeric() && character != '_')
+                {
+                    return true;
+                }
+            }
+        }
+        source.split("0x").skip(1).any(|tail| {
+            matches!(
+                tail.chars().take_while(char::is_ascii_hexdigit).count(),
+                6 | 8
+            )
+        }) || source.split('#').skip(1).any(|tail| {
+            matches!(
+                tail.chars().take_while(char::is_ascii_hexdigit).count(),
+                3 | 4 | 6 | 8
+            )
+        })
+    }
+
+    fn check_source_colors(directory: &std::path::Path) {
+        for entry in std::fs::read_dir(directory).expect("UI source directory") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                check_source_colors(&path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                // Only this exact theme decoding module is exempt; the system observer and every view are checked.
+                if path
+                    == std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/tokens.rs")
+                {
+                    continue;
+                }
+                assert!(
+                    !contains_color_literal(&std::fs::read_to_string(&path).expect("Rust source")),
+                    "color literal outside theme loader: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ui_source_has_no_color_literals_outside_the_theme_loader() {
+        check_source_colors(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+        assert!(contains_color_literal("rgb(1, 2, 3)"));
+        assert!(contains_color_literal("rgba(1, 2, 3, 1)"));
+        assert!(contains_color_literal("hsl(0, 0%, 0%)"));
+        assert!(contains_color_literal("hsla(0, 0%, 0%, 1)"));
+        assert!(contains_color_literal("#123456"));
+        assert!(contains_color_literal("0xffaabb"));
+        assert!(!contains_color_literal("color.to_rgb()"));
     }
 }

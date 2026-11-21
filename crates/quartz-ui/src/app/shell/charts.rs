@@ -99,10 +99,12 @@ impl AppShell {
             let category = self.day.category(entry.category);
             let color = palette.category(category.color);
             bar = bar.child(
-                div()
-                    .h_full()
-                    .w(relative(Share::of(entry.total, active).fraction()))
-                    .bg(color),
+                ui.category_mark(
+                    div()
+                        .h_full()
+                        .w(relative(Share::of(entry.total, active).fraction())),
+                    category.color,
+                ),
             );
             legend = legend.child(
                 div()
@@ -112,7 +114,7 @@ impl AppShell {
                     .gap(space.s)
                     .ramp(ui, Ramp::Caption)
                     .text_color(palette.text_secondary)
-                    .child(ui.swatch(color))
+                    .child(ui.category_mark(ui.swatch(color), category.color))
                     .child(self.formatter.text_with(
                         Msg::LegendItem,
                         &[
@@ -277,14 +279,16 @@ impl AppShell {
             .rounded_t(ui.metrics.timeline.block_radius)
             .overflow_hidden()
             .children(bar.parts.iter().map(|part| {
-                let color = ui.palette.category(self.day.category(part.category).color);
-                div()
-                    .w_full()
-                    .h(px(
-                        Share::of(part.total, CHART_SCALE).fraction() * CHART_HEIGHT
-                    ))
-                    .flex_shrink_0()
-                    .bg(color)
+                let category = self.day.category(part.category);
+                ui.category_mark(
+                    div()
+                        .w_full()
+                        .h(px(
+                            Share::of(part.total, CHART_SCALE).fraction() * CHART_HEIGHT
+                        ))
+                        .flex_shrink_0(),
+                    category.color,
+                )
             }));
         div()
             .flex()

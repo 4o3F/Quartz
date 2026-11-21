@@ -2,8 +2,8 @@
 //! explanation tree and actions.
 
 use gpui_kit::{
-    ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement as _, ParentElement as _,
-    Stateful, StatefulInteractiveElement as _, Styled as _, assets::IconName, div,
+    ClickEvent, Context, Div, FontWeight, InteractiveElement as _, ParentElement as _, Stateful,
+    StatefulInteractiveElement as _, Styled as _, assets::IconName, div,
     prelude::FluentBuilder as _, px, relative,
 };
 
@@ -16,7 +16,7 @@ use crate::{
     },
     format::{Arg, Msg, SourceText},
     layout::{ColumnRange, PanelPlacement},
-    model::{BarDay, Details, Explanation, IntervalCard, Share},
+    model::{BarDay, CategoryColor, Details, Explanation, IntervalCard, Share},
 };
 
 /// Height of the 7-day chart.
@@ -43,7 +43,7 @@ impl AppShell {
     ) -> Stateful<Div> {
         let palette = ui.palette;
         let space = &ui.metrics.space;
-        let color = palette.category(self.day.category(details.category).color);
+        let category = self.day.category(details.category).color;
         let body = div()
             .id("details-scroll")
             .track_scroll(&self.details_scroll)
@@ -61,11 +61,11 @@ impl AppShell {
                     .as_ref()
                     .map(|interval| self.interval_card(ui, interval)),
             )
-            .child(self.section(ui, Msg::DetailsWeek, self.week_chart(ui, details, color)))
+            .child(self.section(ui, Msg::DetailsWeek, self.week_chart(ui, details, category)))
             .child(self.section(
                 ui,
                 Msg::DetailsTitles,
-                self.titles(ui, measure, details, color),
+                self.titles(ui, measure, details, category),
             ))
             .child(self.section(
                 ui,
@@ -267,7 +267,7 @@ impl AppShell {
             )
     }
 
-    fn week_chart(&self, ui: &Widgets<'_>, details: &Details, color: Hsla) -> Div {
+    fn week_chart(&self, ui: &Widgets<'_>, details: &Details, category: CategoryColor) -> Div {
         let palette = ui.palette;
         let longest = details
             .week
@@ -290,11 +290,13 @@ impl AppShell {
                     .h_full()
                     .px(ui.metrics.space.xs)
                     .child(
-                        div()
-                            .w_full()
-                            .h(px(height))
-                            .rounded_t(ui.metrics.timeline.block_radius)
-                            .bg(color),
+                        ui.category_mark(
+                            div()
+                                .w_full()
+                                .h(px(height))
+                                .rounded_t(ui.metrics.timeline.block_radius),
+                            category,
+                        ),
                     )
             }));
         let labels =
@@ -331,7 +333,7 @@ impl AppShell {
         ui: &Widgets<'_>,
         measure: &TextMeasure<'_>,
         details: &Details,
-        color: Hsla,
+        category: CategoryColor,
     ) -> Div {
         let palette = ui.palette;
         let bar_radius = ui.metrics.timeline.block_radius;
@@ -372,15 +374,23 @@ impl AppShell {
                         div()
                             .flex_1()
                             .min_w(px(PROPORTION_BAR_MIN_WIDTH))
-                            .h(px(TITLE_BAR_HEIGHT))
+                            .h(
+                                if palette.contrast == crate::app::tokens::ContrastMode::High {
+                                    ui.metrics.space.s
+                                } else {
+                                    px(TITLE_BAR_HEIGHT)
+                                },
+                            )
                             .rounded(bar_radius)
                             .bg(palette.fill_subtle_hover)
                             .child(
-                                div()
-                                    .h_full()
-                                    .w(relative(Share::of(row.total, longest).fraction()))
-                                    .rounded(bar_radius)
-                                    .bg(color),
+                                ui.category_mark(
+                                    div()
+                                        .h_full()
+                                        .w(relative(Share::of(row.total, longest).fraction()))
+                                        .rounded(bar_radius),
+                                    category,
+                                ),
                             ),
                     )
                     .child(

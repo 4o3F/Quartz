@@ -57,6 +57,30 @@ function hresult(result: number, operation: string): void {
   }
 }
 
+/** Preview review capture (11 sections 2, 5.4 and 9.3); numeric values follow Win32/GDI+ headers. */
+const previewCapture = {
+  extendedStyleIndex: -20,
+  topmostStyle: 0x8,
+  topmostWindow: 0xffffffffffffffffn,
+  normalWindow: 0xfffffffffffffffen,
+  fixedPositionShow: 0x43, // SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW.
+  fixedPositionNoActivate: 0x13, // SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE.
+  settleMilliseconds: 250,
+  backdropAttribute: 38, // DWMWA_SYSTEMBACKDROP_TYPE.
+  desktopCopy: 0x40cc0020, // SRCCOPY | CAPTUREBLT.
+  ownedBitmapFormat: 0x26200a, // PixelFormat32bppARGB.
+  bicubicInterpolation: 7, // InterpolationModeHighQualityBicubic.
+};
+
+/** Win32 SPI constants and a two-second material refresh wait for 11 section 2's controlled comparison. */
+const wallpaperProbe = {
+  read: 0x73,
+  write: 0x14,
+  broadcast: 2,
+  pathCharacters: 32768,
+  settleMilliseconds: 2000,
+};
+
 export class Windows {
   private kernel = Deno.dlopen("kernel32.dll", {
     GetLastError: { parameters: [], result: "u32" },
@@ -114,6 +138,10 @@ export class Windows {
     },
   });
   private user = Deno.dlopen("user32.dll", {
+    SystemParametersInfoW: {
+      parameters: ["u32", "u32", "buffer", "u32"],
+      result: "i32",
+    },
     FindWindowW: { parameters: ["buffer", "buffer"], result: "pointer" },
     PostMessageW: {
       parameters: ["pointer", "u32", "usize", "isize"],
@@ -127,19 +155,47 @@ export class Windows {
       parameters: ["pointer"],
       result: "pointer",
     },
+    GetClientRect: { parameters: ["pointer", "buffer"], result: "i32" },
+    ClientToScreen: { parameters: ["pointer", "buffer"], result: "i32" },
     GetWindowRect: { parameters: ["pointer", "buffer"], result: "i32" },
+    AttachThreadInput: { parameters: ["u32", "u32", "i32"], result: "i32" },
+    GetWindowLongW: { parameters: ["pointer", "i32"], result: "i32" },
+    SetWindowPos: {
+      parameters: ["pointer", "pointer", "i32", "i32", "i32", "i32", "u32"],
+      result: "i32",
+    },
+    BringWindowToTop: { parameters: ["pointer"], result: "i32" },
+    GetForegroundWindow: { parameters: [], result: "pointer" },
+    SetForegroundWindow: { parameters: ["pointer"], result: "i32" },
+    GetDC: { parameters: ["pointer"], result: "pointer" },
+    ReleaseDC: { parameters: ["pointer", "pointer"], result: "i32" },
     PrintWindow: { parameters: ["pointer", "pointer", "u32"], result: "i32" },
     EnumWindows: { parameters: ["function", "isize"], result: "i32" },
     IsWindowVisible: { parameters: ["pointer"], result: "i32" },
     GetWindow: { parameters: ["pointer", "u32"], result: "pointer" },
   });
   private dwm = Deno.dlopen("dwmapi.dll", {
+    DwmFlush: { parameters: [], result: "i32" },
     DwmGetWindowAttribute: {
       parameters: ["pointer", "u32", "buffer", "u32"],
       result: "i32",
     },
   });
   private gdi = Deno.dlopen("gdi32.dll", {
+    BitBlt: {
+      parameters: [
+        "pointer",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "pointer",
+        "i32",
+        "i32",
+        "u32",
+      ],
+      result: "i32",
+    },
     CreateCompatibleDC: { parameters: ["pointer"], result: "pointer" },
     CreateDIBSection: {
       parameters: ["pointer", "buffer", "u32", "buffer", "pointer", "u32"],
@@ -163,6 +219,16 @@ export class Windows {
       parameters: ["pointer", "buffer", "buffer", "pointer"],
       result: "i32",
     },
+    GdipGetImageGraphicsContext: {
+      parameters: ["pointer", "buffer"],
+      result: "i32",
+    },
+    GdipSetInterpolationMode: { parameters: ["pointer", "i32"], result: "i32" },
+    GdipDrawImageRectI: {
+      parameters: ["pointer", "pointer", "i32", "i32", "i32", "i32"],
+      result: "i32",
+    },
+    GdipDeleteGraphics: { parameters: ["pointer"], result: "i32" },
     GdipDisposeImage: { parameters: ["pointer"], result: "i32" },
   });
 
@@ -475,7 +541,171 @@ export class Windows {
     }
   }
 
-  async saveWindow(window: Deno.PointerObject, path: string): Promise<void> {
+  /** Controlled Mica comparison (11 section 2); SPI flags broadcast without persisting a new profile setting. */
+  async withDesktopWallpaper<T>(
+    path: string,
+    capture: () => Promise<T>,
+  ): Promise<T> {
+    const original = this.desktopWallpaper();
+    this.setDesktopWallpaper(path);
+    try {
+      await new Promise<void>((done) =>
+        setTimeout(done, wallpaperProbe.settleMilliseconds)
+      );
+      if (this.desktopWallpaper() !== path) {
+        throw new Error("The diagnostic wallpaper was replaced before capture");
+      }
+      return await capture();
+    } finally {
+      this.restoreDesktopWallpaper(original);
+    }
+  }
+
+  private restoreDesktopWallpaper(path: string): void {
+    this.setDesktopWallpaper(path);
+    if (this.desktopWallpaper() !== path) {
+      throw new Error("The original desktop wallpaper was not restored");
+    }
+  }
+
+  private desktopWallpaper(): string {
+    const path = new Uint16Array(wallpaperProbe.pathCharacters);
+    this.require(
+      this.user.symbols.SystemParametersInfoW(
+        wallpaperProbe.read,
+        path.length,
+        path,
+        0,
+      ),
+      "SPI_GETDESKWALLPAPER",
+    );
+    return wideText(path);
+  }
+
+  private setDesktopWallpaper(path: string): void {
+    this.require(
+      this.user.symbols.SystemParametersInfoW(
+        wallpaperProbe.write,
+        0,
+        wide(path),
+        wallpaperProbe.broadcast,
+      ),
+      "SPI_SETDESKWALLPAPER",
+    );
+  }
+
+  activate(window: Deno.PointerObject): void {
+    if (this.isForeground(window)) return;
+    if (this.user.symbols.SetForegroundWindow(window)) return;
+    const active = this.user.symbols.GetForegroundWindow();
+    if (!active) throw new Error("Desktop has no foreground window");
+    const foregroundThread = this.user.symbols.GetWindowThreadProcessId(
+      active,
+      new Uint32Array(1),
+    );
+    const targetThread = this.user.symbols.GetWindowThreadProcessId(
+      window,
+      new Uint32Array(1),
+    );
+    // Attach the preview thread to the foreground input queue only while requesting the review capture.
+    this.require(
+      this.user.symbols.AttachThreadInput(targetThread, foregroundThread, 1),
+      "AttachThreadInput",
+    );
+    try {
+      this.require(
+        this.user.symbols.BringWindowToTop(window),
+        "BringWindowToTop",
+      );
+      this.user.symbols.SetForegroundWindow(window);
+      if (!this.isForeground(window)) {
+        throw new Error("Windows did not activate the preview window");
+      }
+    } finally {
+      this.require(
+        this.user.symbols.AttachThreadInput(targetThread, foregroundThread, 0),
+        "AttachThreadInput detach",
+      );
+    }
+  }
+
+  isForeground(window: Deno.PointerObject): boolean {
+    const active = this.user.symbols.GetForegroundWindow();
+    return active !== null && Deno.UnsafePointer.equals(active, window);
+  }
+
+  backdrop(window: Deno.PointerObject): number {
+    const value = new Int32Array(1);
+    // DWMWA_SYSTEMBACKDROP_TYPE, available from Windows 11 build 22621.
+    hresult(
+      this.dwm.symbols.DwmGetWindowAttribute(
+        window,
+        previewCapture.backdropAttribute,
+        value,
+        value.byteLength,
+      ),
+      "DwmGetWindowAttribute backdrop",
+    );
+    return value[0];
+  }
+
+  async saveWindow(
+    window: Deno.PointerObject,
+    path: string,
+    capture: "window" | "desktop" = "window",
+    outputSize?: { width: number; height: number },
+  ): Promise<void> {
+    if (capture === "window") {
+      return this.captureWindow(window, path, capture, outputSize);
+    }
+    // GWL_EXSTYLE / WS_EX_TOPMOST, HWND_TOPMOST / HWND_NOTOPMOST and
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW preserve the preview's geometry.
+    const wasTopmost = (this.user.symbols.GetWindowLongW(
+      window,
+      previewCapture.extendedStyleIndex,
+    ) & previewCapture.topmostStyle) !== 0;
+    this.require(
+      this.user.symbols.SetWindowPos(
+        window,
+        Deno.UnsafePointer.create(previewCapture.topmostWindow),
+        0,
+        0,
+        0,
+        0,
+        previewCapture.fixedPositionShow,
+      ),
+      "SetWindowPos capture topmost",
+    );
+    try {
+      this.activate(window);
+      await new Promise<void>((done) =>
+        setTimeout(done, previewCapture.settleMilliseconds)
+      );
+      return await this.captureWindow(window, path, capture, outputSize);
+    } finally {
+      if (!wasTopmost) {
+        this.require(
+          this.user.symbols.SetWindowPos(
+            window,
+            Deno.UnsafePointer.create(previewCapture.normalWindow),
+            0,
+            0,
+            0,
+            0,
+            previewCapture.fixedPositionNoActivate,
+          ),
+          "SetWindowPos restore stacking",
+        );
+      }
+    }
+  }
+
+  private async captureWindow(
+    window: Deno.PointerObject,
+    path: string,
+    capture: "window" | "desktop" = "window",
+    outputSize?: { width: number; height: number },
+  ): Promise<void> {
     // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 is the pointer constant -4.
     const previous = this.require(
       this.user.symbols.SetThreadDpiAwarenessContext(
@@ -499,6 +729,24 @@ export class Windows {
         ),
         "DwmGetWindowAttribute",
       );
+      if (outputSize) {
+        const client = new Int32Array(4);
+        const origin = new Int32Array(2);
+        this.require(
+          this.user.symbols.GetClientRect(window, client),
+          "GetClientRect",
+        );
+        this.require(
+          this.user.symbols.ClientToScreen(window, origin),
+          "ClientToScreen",
+        );
+        visible.set([
+          origin[0],
+          origin[1],
+          origin[0] + client[2],
+          origin[1] + client[3],
+        ]);
+      }
     } finally {
       this.require(
         this.user.symbols.SetThreadDpiAwarenessContext(previous),
@@ -544,7 +792,51 @@ export class Windows {
         this.gdi.symbols.SelectObject(dc, bitmap),
         "SelectObject",
       );
-      this.require(this.user.symbols.PrintWindow(window, dc, 2), "PrintWindow");
+      if (capture === "desktop") {
+        this.activate(window);
+        hresult(this.dwm.symbols.DwmFlush(), "DwmFlush");
+        if (!this.isForeground(window)) {
+          throw new Error(
+            "Desktop capture requires the preview window to be active",
+          );
+        }
+        const captureDpi = this.require(
+          this.user.symbols.SetThreadDpiAwarenessContext(
+            Deno.UnsafePointer.create(0xfffffffffffffffcn),
+          ),
+          "SetThreadDpiAwarenessContext capture",
+        );
+        const screen = this.require(
+          this.user.symbols.GetDC(null),
+          "GetDC desktop",
+        );
+        try {
+          // SRCCOPY | CAPTUREBLT includes the DWM-composited backdrop in this on-screen capture.
+          this.require(
+            this.gdi.symbols.BitBlt(
+              dc,
+              0,
+              0,
+              width,
+              height,
+              screen,
+              rect[0],
+              rect[1],
+              previewCapture.desktopCopy,
+            ),
+            "BitBlt desktop",
+          );
+        } finally {
+          this.user.symbols.ReleaseDC(null, screen);
+          this.require(
+            this.user.symbols.SetThreadDpiAwarenessContext(captureDpi),
+            "SetThreadDpiAwarenessContext capture restore",
+          );
+        }
+      } else {this.require(
+          this.user.symbols.PrintWindow(window, dc, 2),
+          "PrintWindow",
+        );}
       const full = new Uint8Array(width * height * 4);
       new Deno.UnsafePointerView(pointer(pixels)).copyInto(full);
       const crop = new Uint8Array(cropWidth * cropHeight * 4);
@@ -557,7 +849,7 @@ export class Windows {
       }
       const destination = resolve(path);
       await Deno.mkdir(dirname(destination), { recursive: true });
-      this.savePng(crop, cropWidth, cropHeight, destination);
+      this.savePng(crop, cropWidth, cropHeight, destination, outputSize);
     } finally {
       if (oldBitmap) this.gdi.symbols.SelectObject(dc, oldBitmap);
       if (bitmap) this.gdi.symbols.DeleteObject(bitmap);
@@ -570,6 +862,7 @@ export class Windows {
     width: number,
     height: number,
     path: string,
+    outputSize?: { width: number; height: number },
   ): void {
     const token = new BigUint64Array(1);
     const startup = new Uint8Array(24);
@@ -582,6 +875,7 @@ export class Windows {
       "GdiplusStartup",
     );
     let image: Deno.PointerValue = null;
+    let resized: Deno.PointerValue = null;
     try {
       const output = new Uint8Array(8);
       // PixelFormat32bppRGB ignores the unused alpha byte written by GDI.
@@ -597,9 +891,54 @@ export class Windows {
         "GdipCreateBitmapFromScan0",
       );
       image = pointer(output);
+      if (
+        outputSize &&
+        (outputSize.width !== width || outputSize.height !== height)
+      ) {
+        // PixelFormat32bppARGB allocates an owned bitmap; interpolation mode 7 is HighQualityBicubic.
+        check(
+          this.gdiplus.symbols.GdipCreateBitmapFromScan0(
+            outputSize.width,
+            outputSize.height,
+            0,
+            previewCapture.ownedBitmapFormat,
+            null,
+            output,
+          ),
+          "GdipCreateBitmapFromScan0 resized",
+        );
+        resized = pointer(output);
+        check(
+          this.gdiplus.symbols.GdipGetImageGraphicsContext(resized, output),
+          "GdipGetImageGraphicsContext",
+        );
+        const graphics = pointer(output);
+        try {
+          check(
+            this.gdiplus.symbols.GdipSetInterpolationMode(
+              graphics,
+              previewCapture.bicubicInterpolation,
+            ),
+            "GdipSetInterpolationMode",
+          );
+          check(
+            this.gdiplus.symbols.GdipDrawImageRectI(
+              graphics,
+              image,
+              0,
+              0,
+              outputSize.width,
+              outputSize.height,
+            ),
+            "GdipDrawImageRectI",
+          );
+        } finally {
+          this.gdiplus.symbols.GdipDeleteGraphics(graphics);
+        }
+      }
       check(
         this.gdiplus.symbols.GdipSaveImageToFile(
-          image,
+          resized ?? image,
           wide(path),
           guid("557cf406-1a04-11d3-9a73-0000f81ef32e"),
           null,
@@ -607,6 +946,7 @@ export class Windows {
         "GdipSaveImageToFile",
       );
     } finally {
+      if (resized) this.gdiplus.symbols.GdipDisposeImage(resized);
       if (image) this.gdiplus.symbols.GdipDisposeImage(image);
       this.gdiplus.symbols.GdiplusShutdown(token[0]);
     }

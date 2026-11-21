@@ -30,7 +30,9 @@ Quartz 界面采用 **Fluent 2**，以 Windows 11 的 WinUI 3 实现为准（用
 - 侧边栏直接放在 Mica 上，不加填充；主区域使用内容层；状态行、排行等分组使用卡片。
 - WinUI 的弹出层使用 Acrylic。GPUI 不支持窗口内 Acrylic，弹出层改用不透明的 `bg.flyout`。
 - Mica 在以下情况由系统回退为纯色，界面要同样可用：Windows 10、关闭透明效果、节电模式、窗口失去焦点。回退后窗口底色为 `bg.base`。
-- 高对比度模式（`SystemParametersInfo(SPI_GETHIGHCONTRAST)`）下不使用 Mica 与半透明令牌，全部改用系统颜色（`GetSysColor`：窗口、窗口文字、高亮、高亮文字、灰色文字、按钮面）。分类色在高对比度下以文字标签和图案区分，不依赖颜色。
+- 高对比度模式（`SystemParametersInfo(SPI_GETHIGHCONTRAST)`）下不使用 Mica 与半透明令牌，全部改用系统颜色（`GetSysColor`：窗口、窗口文字、高亮、高亮文字、灰色文字、按钮面）。分类色在高对比度下以文字标签和图案区分，不依赖颜色。数据标记使用不透明填充和绘制在区间内部的 1 px 系统窗口文字色描边；分类按色板序号循环分配实心高亮、密集斜线、反斜线、交叉线、横线、竖线和点阵，图例采用相同图案。
+
+实现通过 GPUI 的 `set_background_appearance` 设置 backdrop；Quartz 补充自绘客户区的 `DwmExtendFrameIntoClientArea(-1)` 和亮暗属性。Windows build < 22621 或 DWM 调用失败时使用 `bg.base`。Mica 呈现的实测记录见 [测量记录](../measurements.md)。
 
 ## 3. 颜色
 
@@ -100,14 +102,15 @@ WinUI 资源写作 `#AARRGGBB`。下表已换成主题 JSON 使用的 `#RRGGBBAA
 | `cat.6` | `#520408` | `#FFF1F1` | 13.7 | 14.8 | 白 / 黑 |
 | `cat.7` | `#198038` | `#6FDC8C` | 4.5 | 9.5 | 白 / 黑 |
 | `cat.8` | `#002D9C` | `#4589FF` | 10.2 | 4.9 | 白 / 黑 |
-| `cat.9` | `#EE5396` | `#D02670` | 3.0 | 3.3 | 黑 / 白 |
+| `cat.9` | `#EE5296` | `#D02670` | 3.0 | 3.3 | 黑 / 白 |
 | `cat.10` | `#B28600` | `#D2A106` | 3.0 | 6.9 | 黑 |
 | `cat.11` | `#009D9A` | `#08BDBA` | 3.0 | 7.0 | 黑 |
 | `cat.12` | `#012749` | `#BAE6FF` | 13.6 | 12.3 | 白 / 黑 |
 | `cat.13` | `#8A3800` | `#BA4E00` | 7.2 | 3.2 | 白 |
 | `cat.14` | `#A56EFF` | `#D4BBFF` | 3.0 | 9.6 | 黑 |
-| `neutral` | `status.neutral` | `status.neutral` | — | — | 跟随主题文字色 |
+| `neutral` | `status.neutral` | `status.neutral` | 3.3 | 5.8 | 按合成色选黑或白 |
 
+- 亮色 `cat.9` 使用 `#EE5296`，相对 Carbon 原值将绿色通道降低一个 sRGB 步长，对 `bg.base` 为 3.0123:1。
 - 对比度为 WCAG 相对亮度对比，图形元素要求不低于 3:1。“色块上文字”取白色或黑色中对比较高的一个，均不低于 4.5:1。
 - 暗色下 `cat.1`、`cat.3`、`cat.9`、`cat.13` 对卡片底色（约 `#2C2C2C`）只有 2.8:1。因此**图表绘图区在暗色下不叠加卡片填充**，直接放在 `bg.base` 或 Mica 上；相邻色块之间留 1 px 背景色间隙。
 - 内置分类的默认颜色：开发 `cat.8`、学习 `cat.1`、沟通 `cat.3`、娱乐 `cat.13`（暖橙，符合“分心用暖色、不用红色”）、系统与工具 `cat.10`、未分类 `neutral`。
@@ -304,16 +307,43 @@ WinUI 资源写作 `#AARRGGBB`。下表已换成主题 JSON 使用的 `#RRGGBBAA
 | `secondary` / `secondary.hover` / `secondary.active` | `fill.control` / `fill.control_hover` / `fill.control_pressed` |
 | `list.hover` / `list.active` | `fill.subtle_hover` / `fill.subtle_pressed` |
 | `popover` | `bg.flyout` |
-| `sidebar` | 透明（Mica） |
+| `sidebar` | 透明（Mica）；回退 `bg.base` |
 | `ring` | `stroke.focus_outer` |
 | `danger` / `success` / `warning` | `status.critical` / `status.success` / `status.caution` |
 | `chart.1`–`chart.5` | `cat.1`–`cat.5` |
 | `radius` / `radius_lg` / `font_size` | 4 / 8 / 14 |
 
-未列出的令牌按语义就近映射，在 M3 实现时逐一列入主题文件。gpui-component 控件形态与 Fluent 不同的地方（开关、复选框、滑块、标签页、焦点框为双层描边），在 M3 逐个检查，必要时在 `quartz-ui` 中包装或自绘。
+组件 JSON 使用 gpui-kit 0.10.0 的字段名，例如 `primary.background`、`primary.hover.background`、`popover.background` 和 `sidebar.background`。`quartz.component_mapping` 在加载时解析为组件字段枚举和令牌枚举，运行时通过类型化访问器应用已解析的颜色；两个主题的 `colors` 显式保存这些字段的回退值。`window.background` 是派生令牌：Mica 时透明，纯色回退时取 `bg.base`。
+
+| gpui-component 补充字段 | Fluent 令牌 |
+|---|---|
+| `primary.active.background` | `accent.fill` |
+| `secondary.foreground`、`popover.foreground`、`sidebar.foreground` | `text.primary` |
+| `accent.background`、`sidebar.accent.background`、`muted.background` | `fill.subtle_hover` |
+| `accent.foreground`、`sidebar.accent.foreground` | `text.primary` |
+| `sidebar.primary.background` / `sidebar.primary.foreground` | `accent.fill` / `text.on_accent` |
+| `list.background` | `bg.flyout` |
+| `list.active.border` | `accent.fill` |
+| `list.highlight.foreground`、`link`、`link.hover`、`link.active` | `accent.text` |
+| `title_bar.background` | `window.background` |
+| `title_bar.border`、`sidebar.border` | `stroke.divider` |
+| `scrollbar.background` | 透明；高对比度时为系统窗口色 |
+| `scrollbar.thumb.background` / `scrollbar.thumb.hover.background` | `text.tertiary` / `text.secondary` |
+| `selection.background` | `accent.fill` 20% 不透明度（`accent.selection`） |
+| `progress.bar.background` | `accent.fill` |
+| `danger.hover.background`、`danger.active.background` | `status.critical` |
+| `danger.foreground`、`success.foreground`、`warning.foreground` | `text.on_critical`、`text.on_success`、`text.on_caution`；亮色为白，暗色为黑 |
+| `overlay` | `fill.smoke` |
+| `window.border` | `stroke.surface` |
+
+`Palette` 包含全部颜色字段，强调色、材质和高对比度覆盖直接生成类型化调色板；高对比度以完整结构构造逐一设置字段。系统变化不重新解析 JSON。组件颜色及绘制令牌在一次 `Theme::update` 中同步更新，高对比度下保持不透明。预览高对比度颜色只从 `preview` 功能内包含的独立 JSON 加载。标题栏使用原生 Windows 命中区域和 16 px Fluent 图标，按钮宽 46 px、高 32 px。图标的来源路径、提交与许可证保存在图标目录的 `manifest.json` 和 `LICENSE` 中。
+
+gpui-component 控件形态与 Fluent 不同的地方（开关、复选框、滑块、标签页、焦点框为双层描边），在 M3 逐个检查，必要时在 `quartz-ui` 中包装或自绘。
 
 ### 9.3 检查
 
-- 测试读取主题文件，计算第 3.3 节的对比度表，任何分类色对 `bg.base` 低于 3:1、正文文字令牌对背景低于 4.5:1 时失败。
+- 测试读取嵌入主题，检查全部 14 个分类色及 `neutral` 对 `bg.base` 不低于 3:1，以及每个分类色上的黑白自适应文字不低于 4.5:1。`neutral` 绘图色先与 `bg.base` 合成，再选择黑色或白色文字。
+- 两个主题分别检查 `text.primary`、`text.secondary`、`accent.text` 对以下九种背景不低于 4.5:1：`bg.base`、其上的 `fill.layer`、层上的 `fill.card`、卡片上的控件默认/悬停/按下填充、底层上的列表悬停/按下填充、`bg.flyout`。透明填充先逐层与背景合成，再计算文字对比度。
+- 另外检查 `text.on_accent` 对强调色默认/悬停填充，`status.success` 对 `status.success_bg`，以及 `text.on_critical`、`text.on_success`、`text.on_caution` 对各自状态填充。`text.tertiary` 用于坐标轴和辅助说明，`text.disabled` 用于禁用文字。测试 `embedded_categories_and_body_text_meet_wcag_contrast` 加 `--nocapture` 可输出各主题的实际对比度。
 - 截图评审（07 第 11 节、10 第 7 节）覆盖：亮色、暗色、Mica 回退（关闭透明效果）、高对比度，每种都有 zh-CN 与 en。
-- 代码检查：`quartz-ui` 中不出现颜色字面量（`rgb(`、`hsla(`、十六进制颜色），全部经主题读取。
+- 代码检查遍历 `crates/quartz-ui/src` 内全部 Rust 文件，禁止 `rgb(`、`rgba(`、`hsl(`、`hsla(`、`#RGB[A]`、`#RRGGBB[AA]` 与六/八位 `0x` 十六进制颜色。唯一豁免是主题解码模块 `src/app/tokens.rs`，其中含检查器自己的测试样本；系统事件模块与所有视图均受检查。

@@ -90,7 +90,16 @@ impl AppShell {
             })
             .when(!selected, |item| item.hover(ui.subtle_hover()))
             .on_click(cx.listener(move |this, _, _, cx| this.set_page(page, cx)))
-            .child(ui.icon(page.icon(), Density::Compact, palette.text_primary))
+            .child(ui.variant_icon(
+                page.icon(),
+                Density::Standard,
+                palette.text_primary,
+                if selected {
+                    crate::app::icons::IconVariant::Selected
+                } else {
+                    crate::app::icons::IconVariant::Regular
+                },
+            ))
             .when(layout == NavLayout::Expanded, |item| {
                 item.child(
                     div()

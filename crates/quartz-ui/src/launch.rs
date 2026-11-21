@@ -4,8 +4,6 @@ use quartz_i18n::{Language, ParseLanguageError};
 use quartz_protocol::CoreError;
 use snafu::{ResultExt as _, Snafu};
 
-use std::rc::Rc;
-
 use gpui_kit::{
     AppContext as _, Bounds, Context, Div, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, Size, StatefulInteractiveElement as _, Styled as _, Window,
@@ -14,8 +12,8 @@ use gpui_kit::{
 
 use crate::{
     app::{
-        Appearance, GpuiError, GpuiSnafu, LoadThemeError, Ramp, RampExt as _, ThemeBundle, Tokens,
-        Widgets, run_gpui, window_options,
+        Appearance, GpuiError, GpuiSnafu, LoadThemeError, Ramp, RampExt as _, ThemeBundle, Widgets,
+        run_gpui, window_options,
     },
     core_error::{CoreErrorPresentation, RecoveryLine},
     format::{Formatter, Msg},
@@ -84,15 +82,14 @@ impl WindowContent {
 
 #[derive(Debug)]
 struct LaunchWindow {
-    tokens: Rc<Tokens>,
     title: String,
     content: WindowContent,
     text_scale: LiveTextScale,
 }
 
 impl Render for LaunchWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = Rc::clone(&self.tokens);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = crate::app::system_theme::SystemTheme::tokens(cx);
         let ui = Widgets::new(&tokens, cx.theme().mode, self.text_scale.current());
         let space = &ui.metrics.space;
         let mut content = div()
@@ -120,9 +117,9 @@ impl Render for LaunchWindow {
             .flex()
             .flex_col()
             .size_full()
-            .bg(ui.palette.bg_base)
+            .bg(ui.palette.window_background)
             .text_color(ui.palette.text_primary)
-            .child(ui.title_bar(self.title.clone()))
+            .child(ui.title_bar(self.title.clone(), window))
             .child(content)
     }
 }
@@ -164,7 +161,6 @@ impl RunOptions {
             None => WindowContent::Placeholder,
         };
         let theme = ThemeBundle::embedded().context(LoadThemeSnafu)?;
-        let tokens = theme.tokens();
         let appearance = Appearance::System;
         run_gpui(language, appearance, theme, move |cx| {
             // Read here, once GPUI has made this thread a single-threaded COM apartment.
@@ -178,19 +174,19 @@ impl RunOptions {
                 cx,
             );
             gpui_kit::open_window(
-                window_options(title.clone(), bounds),
+                window_options(title.clone(), bounds, cx),
                 cx,
                 move |window, cx| {
-                    appearance.observe(window);
+                    appearance.observe(window, cx);
                     cx.new(|cx| {
                         cx.observe_window_activation(window, |this: &mut LaunchWindow, _, cx| {
+                            crate::app::system_theme::SystemTheme::refresh(cx);
                             if this.text_scale.refresh() == TextScaleChange::Changed {
                                 cx.notify();
                             }
                         })
                         .detach();
                         LaunchWindow {
-                            tokens,
                             title,
                             content,
                             text_scale,
