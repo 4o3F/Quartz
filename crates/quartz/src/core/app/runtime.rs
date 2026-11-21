@@ -127,6 +127,7 @@ pub(crate) struct CoreRuntime {
     clock: Arc<dyn ClockReader>,
     pub status: StatusPublisher,
     _ui_port: UiPort,
+    pub timed: crate::ipc::TimedPolicyPort,
     pub ui_commands: crate::ipc::UiCommands,
 }
 impl DataDirectory {
@@ -146,6 +147,9 @@ impl CoreRuntime {
             source,
             directory: directory.clone(),
         })?;
+        let day_offset = store
+            .day_start_offset()
+            .map_err(|source| StartCoreError::LoadSettings { source })?;
         let device_id = store
             .installation_id(&ports.proposed_device_id)
             .map_err(|source| StartCoreError::LoadDeviceId { source })?;
@@ -192,6 +196,9 @@ impl CoreRuntime {
             .writes
             .clone()
             .with_settings(system, Arc::clone(&ui_port));
+        let timed = workers
+            .sender
+            .timed_port(Arc::clone(&ports.clock), day_offset);
         let pipe_ports = PipePorts {
             shutdown_timeout: SHUTDOWN_TIMEOUT,
             services: Services {
@@ -200,6 +207,7 @@ impl CoreRuntime {
                 versions: workers.versions.clone(),
                 status: status.subscribe(),
                 ui: Arc::clone(&ui_port),
+                timed: timed.clone(),
             },
         };
         let mut runtime = Self {
@@ -209,6 +217,7 @@ impl CoreRuntime {
             status,
             ui_commands,
             _ui_port: ui_port,
+            timed,
         };
         // The runtime owns workers before the next fallible step; Drop uses the same shutdown path.
         runtime.pipe =

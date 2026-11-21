@@ -1,6 +1,8 @@
 //! Shell tray state, native callbacks and semantic commands.
 
 mod icon;
+mod timed_menu;
+mod variants;
 pub(super) mod window;
 
 use icon::{AddTrayIconError, TrayIcon, TrayMenuItem, UpdateTrayTooltipError};
@@ -10,6 +12,8 @@ use window::{CoreEvent, CreateCoreWindowError, Window};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TrayIconState {
     Normal,
+    Grey,
+    Private,
     Warning,
 }
 pub(super) use crate::tray_tooltip::TrayTooltip;
@@ -17,18 +21,21 @@ pub(super) use crate::tray_tooltip::TrayTooltip;
 pub(super) struct TrayState {
     pub icon: TrayIconState,
     pub tooltip: TrayTooltip,
+    pub timed: quartz_protocol::TimedPolicies,
 }
 impl Default for TrayState {
     fn default() -> Self {
         Self {
             icon: TrayIconState::Normal,
             tooltip: TrayTooltip::Ready,
+            timed: quartz_protocol::TimedPolicies::default(),
         }
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TrayCommand {
     OpenUi,
+    Timed(crate::ipc::TimedCommand),
     Exit,
     EndSession,
     Deadline(quartz_domain::capture::Timestamp),
@@ -110,9 +117,13 @@ impl Tray {
                         tracing::error!(?error, "could not restore tray icon");
                     }
                 }
-                CoreEvent::ShowTrayMenu => match self.icon.menu() {
+                CoreEvent::ShowTrayMenu => match self.icon.menu(self.state.timed) {
                     Ok(Some(TrayMenuItem::Open)) => commands.push(TrayCommand::OpenUi),
                     Ok(Some(TrayMenuItem::Exit)) => commands.push(TrayCommand::Exit),
+                    Ok(Some(item)) => commands.push(TrayCommand::Timed(
+                        item.timed_command()
+                            .expect("remaining menu items are timed commands"),
+                    )),
                     Ok(None) => {}
                     Err(error) => tracing::error!(?error, "could not show tray menu"),
                 },

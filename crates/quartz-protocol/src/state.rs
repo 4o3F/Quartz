@@ -79,6 +79,8 @@ pub struct ForegroundState {
 /// Latest state topic body; elapsed time is calculated by the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateSnapshot {
+    /// Active capture-owned timed policies.
+    pub timed_policies: crate::TimedPolicies,
     /// Absent whenever the core is not tracking a foreground interval.
     pub foreground: Option<ForegroundState>,
     /// Whether foreground recording is active.
@@ -98,7 +100,7 @@ mod tests {
     use super::*;
     #[test]
     fn state_round_trip_preserves_nulls_and_stable_enum_names() {
-        let wire = serde_json::json!({"foreground":{"app":{"kind":"exe","value":"c:\\app.exe"},"title":null,"interval_start_utc_ms":123},"recording":true,"stop_reason":null,"browser_streams":[],"ui_language":"zh-CN","locale":{"hour_cycle":"h24","first_day_of_week":"monday"}});
+        let wire = serde_json::json!({"foreground":{"app":{"kind":"exe","value":"c:\\app.exe"},"title":null,"interval_start_utc_ms":123},"timed_policies":{"pause_until_utc_ms":null,"privacy_mode":null,"keep_timing_until_utc_ms":null},"recording":true,"stop_reason":null,"browser_streams":[],"ui_language":"zh-CN","locale":{"hour_cycle":"h24","first_day_of_week":"monday"}});
         let body: StateSnapshot = serde_json::from_value(wire.clone()).expect("state body");
         assert_eq!(serde_json::to_value(body).expect("state encoding"), wire);
     }

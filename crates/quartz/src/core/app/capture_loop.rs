@@ -1,5 +1,6 @@
 //! Capture work units and nonblocking submission to the shared command budget.
 
+use super::timed::PublishTimedPolicies;
 use super::{
     DatabaseCommand, Feedback, MainCommand, MainPort, Observation, ObservedEvent,
     SendMainCommandError, Shutdown,
@@ -77,6 +78,8 @@ pub(super) struct CaptureLoop {
     pub at: Timestamp,
     pub snapshots: SnapshotCell,
     pub observed: Receiver<Observation>,
+    pub pending_control: Option<ObservedEvent>,
+    pub discard_remaining: usize,
     pub replies: Receiver<Feedback>,
     pub stop: Receiver<Shutdown>,
     pub database: Sender<DatabaseCommand>,
@@ -94,6 +97,7 @@ impl CaptureLoop {
         self.main.send(MainCommand::CaptureSnapshot {
             state: self.core.state(),
             foreground: self.core.foreground_view(),
+            timed: self.core.published_timed_policies(),
         })?;
         self.publish(step, self.at, Settlement::Deferred)?;
         for deadline in startup.deadlines {
@@ -130,7 +134,14 @@ impl CaptureLoop {
             }
         }
     }
-    fn next_work(&self) -> Result<CaptureWork, RunCaptureLoopError> {
+    fn next_work(&mut self) -> Result<CaptureWork, RunCaptureLoopError> {
+        if let Ok(stop) = self.stop.try_recv() {
+            return Ok(CaptureWork::Shutdown(stop));
+        }
+        self.drain_discarded();
+        if let Some(event) = self.pending_control.take() {
+            return Ok(CaptureWork::Observation(Observation::Event(event)));
+        }
         select_biased! {
             recv(self.stop) -> stop => stop.map(CaptureWork::Shutdown).map_err(|_| RunCaptureLoopError::Receive { source: crossbeam_channel::RecvError }),
             recv(self.replies) -> reply => reply.map(CaptureWork::Feedback).map_err(|_| RunCaptureLoopError::Receive { source: crossbeam_channel::RecvError }),
@@ -162,8 +173,15 @@ impl CaptureLoop {
         &mut self,
         foreground: &mut dyn ForegroundResolve,
     ) -> Result<(), RunCaptureLoopError> {
-        while let Ok(observation) = self.observed.try_recv() {
-            self.observe(observation, foreground)?;
+        loop {
+            self.drain_discarded();
+            if let Some(event) = self.pending_control.take() {
+                self.step(event, Settlement::Deferred)?;
+            } else if let Ok(observation) = self.observed.try_recv() {
+                self.observe(observation, foreground)?;
+            } else {
+                break;
+            }
         }
         Ok(())
     }
@@ -185,13 +203,27 @@ impl CaptureLoop {
         foreground: &mut dyn ForegroundResolve,
     ) -> Result<(), RunCaptureLoopError> {
         if self.overloaded.swap(false, Ordering::AcqRel) {
+            let observed_at = match &observation {
+                Observation::Event(event) => event.at,
+                Observation::Foreground(snapshot) => snapshot.at,
+            };
+            let at = if observed_at.mono < self.at.mono {
+                self.at
+            } else {
+                observed_at
+            };
+            if let Observation::Event(event) = observation
+                && matches!(
+                    event.event,
+                    CaptureEvent::SetTimedState(_) | CaptureEvent::CancelTimedPolicy(_)
+                )
+            {
+                self.pending_control = Some(event);
+            }
             self.discard_observations();
             self.step(
                 ObservedEvent {
-                    at: match &observation {
-                        Observation::Event(event) => event.at,
-                        Observation::Foreground(snapshot) => snapshot.at,
-                    },
+                    at,
                     event: CaptureEvent::EventOverload,
                 },
                 Settlement::Deferred,
@@ -247,8 +279,23 @@ impl CaptureLoop {
             Err(error) => tracing::debug!(%error, "could not measure foreground callback latency"),
         }
     }
-    fn discard_observations(&self) {
-        while self.observed.try_recv().is_ok() {}
+    fn discard_observations(&mut self) {
+        self.discard_remaining = self.observed.len();
+        self.drain_discarded();
+    }
+    fn drain_discarded(&mut self) {
+        // Retain one control at a time; the remaining commands stay in the bounded ingress.
+        while self.pending_control.is_none() && self.discard_remaining > 0 {
+            self.discard_remaining -= 1;
+            if let Ok(Observation::Event(event)) = self.observed.try_recv()
+                && matches!(
+                    event.event,
+                    CaptureEvent::SetTimedState(_) | CaptureEvent::CancelTimedPolicy(_)
+                )
+            {
+                self.pending_control = Some(event);
+            }
+        }
     }
     fn feedback(&mut self, feedback: Feedback) -> Result<(), RunCaptureLoopError> {
         let events = match feedback {
@@ -263,9 +310,18 @@ impl CaptureLoop {
     }
     pub(super) fn step(
         &mut self,
-        observation: ObservedEvent,
+        mut observation: ObservedEvent,
         settlement: Settlement,
     ) -> Result<(), RunCaptureLoopError> {
+        // Other producers and database feedback can advance capture after admission.
+        // Apply retained controls at the current boundary while preserving their UTC deadline.
+        if matches!(
+            observation.event,
+            CaptureEvent::SetTimedState(_) | CaptureEvent::CancelTimedPolicy(_)
+        ) && observation.at.mono < self.at.mono
+        {
+            observation.at = self.at;
+        }
         self.at = observation.at;
         let followup = self.followup(&observation.event);
         let event = self.normalize(observation.event);
@@ -327,15 +383,20 @@ impl CaptureLoop {
             .iter()
             .any(|effect| matches!(effect, CaptureEffect::StateChanged(_)))
             || parts.batch.as_ref().is_some_and(|batch| {
-                batch
-                    .writes
-                    .iter()
-                    .any(|write| matches!(write, CaptureWrite::OpenInterval(_)))
+                batch.writes.iter().any(|write| {
+                    matches!(
+                        write,
+                        CaptureWrite::OpenInterval(_)
+                            | CaptureWrite::SetTimedState(_)
+                            | CaptureWrite::ClearTimedPolicy(_)
+                    )
+                })
             })
         {
             self.main.send(MainCommand::CaptureSnapshot {
                 state: self.core.state(),
                 foreground: self.core.foreground_view(),
+                timed: self.core.published_timed_policies(),
             })?;
         }
         for effect in std::mem::take(&mut parts.effects) {
@@ -352,7 +413,7 @@ impl CaptureLoop {
         }
         Ok(())
     }
-    fn publish_effect(&self, effect: CaptureEffect) -> Result<(), RunCaptureLoopError> {
+    fn publish_effect(&mut self, effect: CaptureEffect) -> Result<(), RunCaptureLoopError> {
         if matches!(effect, CaptureEffect::StateChanged(_)) {
             return Ok(());
         }
@@ -459,6 +520,8 @@ mod tests {
         let (database, _writes) = bounded(CONTROL_CAPACITY);
         let (main, commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
         let mut capture = CaptureLoop {
+            pending_control: None,
+            discard_remaining: 0,
             core: started.core,
             run,
             at: at(10),
@@ -564,6 +627,8 @@ mod tests {
             .expect("rules")
             .snapshots();
         let mut capture = CaptureLoop {
+            pending_control: None,
+            discard_remaining: 0,
             core: started.core,
             run,
             at: at(0),
@@ -712,5 +777,102 @@ mod tests {
             .expect("capture exits without a database-capacity wait")
             .expect("capture result");
         worker.join().expect("capture worker");
+    }
+    #[test]
+    fn overload_cleanup_preserves_admitted_controls_in_order_and_publishes_stopped_updates() {
+        use crate::ipc::{TimedCommand, TimedDeadline};
+        let run = RunId::new(1);
+        let started = CaptureCore::start(run, at(0)).expect("core");
+        let rules = RuleRegistry::from_state(RegistryState::default())
+            .expect("rules")
+            .snapshots();
+        let (sender, observed) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let overloaded = Arc::new(AtomicBool::new(false));
+        let ingress = CaptureSender {
+            sender,
+            overloaded: overloaded.clone(),
+        };
+        let port = ingress.timed_port(Arc::new(TestClock(at(10))), 0);
+        port.call(TimedCommand::Pause(TimedDeadline::UtcMillis(100)))
+            .expect("pause admitted");
+        port.call(TimedCommand::Resume).expect("resume admitted");
+        port.call(TimedCommand::EnablePrivacy(TimedDeadline::UtcMillis(200)))
+            .expect("private admitted");
+        let (_feedback, replies) = bounded(CONTROL_CAPACITY);
+        let (_shutdown, stop) = bounded(CONTROL_CAPACITY);
+        let (database, _writes) = bounded(CONTROL_CAPACITY);
+        let (main, commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let mut capture = CaptureLoop {
+            core: started.core,
+            run,
+            at: at(20),
+            snapshots: rules,
+            observed,
+            pending_control: None,
+            discard_remaining: 0,
+            replies,
+            stop,
+            database,
+            writer: WriteQueue::new(),
+            main: MainPort {
+                sender: main,
+                wake: Arc::new(|| {}),
+            },
+            overloaded: overloaded.clone(),
+            clock: Arc::new(TestClock(at(20))),
+        };
+        overloaded.store(true, Ordering::Release);
+        capture
+            .observe(
+                capture.observed.try_recv().expect("first admitted command"),
+                &mut super::super::tests::FakeResolver,
+            )
+            .expect("overload");
+        assert!(capture.pending_control.is_some());
+        assert_eq!(capture.observed.len(), 2);
+        // A second overload must retain the first command ahead of the remaining controls.
+        overloaded.store(true, Ordering::Release);
+        let CaptureWork::Observation(observation) = capture.next_work().expect("pending pause")
+        else {
+            panic!("expected pending control")
+        };
+        capture
+            .observe(observation, &mut super::super::tests::FakeResolver)
+            .expect("second overload");
+        assert!(capture.pending_control.is_some());
+        assert_eq!(capture.observed.len(), 2);
+        for _ in 0..3 {
+            let CaptureWork::Observation(observation) =
+                capture.next_work().expect("retained control")
+            else {
+                panic!("expected retained control")
+            };
+            capture
+                .observe(observation, &mut super::super::tests::FakeResolver)
+                .expect("apply retained control at current time");
+        }
+        let policies = capture.core.published_timed_policies();
+        assert_eq!(policies.pause_until_utc_ms, None);
+        assert_eq!(
+            policies
+                .privacy_mode
+                .expect("privacy retained")
+                .until_utc_ms,
+            200
+        );
+        assert!(capture.pending_control.is_none());
+        let snapshots: Vec<_> = commands
+            .try_iter()
+            .filter_map(|command| match command {
+                MainCommand::CaptureSnapshot { timed, .. } => Some(timed),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            snapshots
+                .iter()
+                .any(|snapshot| snapshot.pause_until_utc_ms == Some(100))
+        );
+        assert_eq!(snapshots.last(), Some(&policies));
     }
 }

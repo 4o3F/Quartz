@@ -15,6 +15,7 @@ pub(crate) struct PublishedStatus {
     foreground: Option<ForegroundView>,
     language: UiLanguage,
     locale: Option<LocaleSettings>,
+    timed: quartz_protocol::TimedPolicies,
 }
 impl PublishedStatus {
     pub(crate) fn snapshot(&self) -> StateSnapshot {
@@ -34,6 +35,7 @@ impl PublishedStatus {
                 interval_start_utc_ms: view.start.utc.get().as_millisecond(),
             });
         StateSnapshot {
+            timed_policies: self.timed,
             foreground,
             recording: self.status.recording,
             stop_reason: self.status.stop_reason,
@@ -68,6 +70,7 @@ impl StatusPublisher {
         Self {
             sender: watch::Sender::new(PublishedStatus {
                 foreground: None,
+                timed: quartz_protocol::TimedPolicies::default(),
                 language,
                 locale,
                 status: CoreStatusResponse {
@@ -107,6 +110,9 @@ impl StatusPublisher {
             locale: published.locale,
         }
     }
+    pub(crate) fn timed_policies(&self) -> quartz_protocol::TimedPolicies {
+        self.sender.borrow().timed
+    }
     pub(crate) fn stop_reason(&self) -> Option<StopReason> {
         self.sender.borrow().status.stop_reason
     }
@@ -132,6 +138,15 @@ impl StatusPublisher {
         capture: Option<&CaptureState>,
         persistence: PersistenceState,
         foreground: Option<ForegroundView>,
+    ) {
+        self.publish_capture(capture, persistence, foreground, self.timed_policies());
+    }
+    pub(crate) fn publish_capture(
+        &self,
+        capture: Option<&CaptureState>,
+        persistence: PersistenceState,
+        foreground: Option<ForegroundView>,
+        timed: quartz_protocol::TimedPolicies,
     ) {
         let database = match persistence {
             PersistenceState::Ready | PersistenceState::Buffered { .. } => DatabaseState::Ok,
@@ -172,10 +187,12 @@ impl StatusPublisher {
             if status.database == database
                 && status.stop_reason == stop_reason
                 && published.foreground == foreground
+                && published.timed == timed
             {
                 return false;
             }
             published.foreground = foreground;
+            published.timed = timed;
             status.database = database;
             status.stop_reason = stop_reason;
             status.recording = stop_reason.is_none();
@@ -250,7 +267,7 @@ mod tests {
                     body,
                     json!({
                         "foreground": {"app":expected_app, "title":title, "interval_start_utc_ms":123},
-                        "recording":true, "stop_reason":null, "browser_streams":[], "ui_language":"en",
+                        "timed_policies":{"pause_until_utc_ms":null,"privacy_mode":null,"keep_timing_until_utc_ms":null},"recording":true, "stop_reason":null, "browser_streams":[], "ui_language":"en",
                         "locale":{"hour_cycle":"h24", "first_day_of_week":"monday"}
                     })
                 );
@@ -328,5 +345,40 @@ mod tests {
         );
         publisher.set_ui_settings(settings);
         assert!(!receiver.has_changed().expect("identical settings"));
+    }
+    #[test]
+    fn timed_snapshots_publish_changes_while_stopped_and_clear_on_expiry() {
+        let publisher = StatusPublisher::new(InstanceId("timed-state".into()));
+        let mut receiver = publisher.subscribe();
+        let stopped = CaptureState::Stopped {
+            reasons: [CaptureStop::Paused].into(),
+            session: SessionReadiness::Ready,
+        };
+        let policies = quartz_protocol::TimedPolicies {
+            pause_until_utc_ms: Some(100),
+            privacy_mode: Some(quartz_protocol::TimedPrivacyMode {
+                mode: quartz_protocol::PrivacyMode::Private,
+                until_utc_ms: 200,
+            }),
+            keep_timing_until_utc_ms: Some(300),
+        };
+        publisher.publish_capture(Some(&stopped), PersistenceState::Ready, None, policies);
+        assert_eq!(
+            receiver.borrow_and_update().snapshot().timed_policies,
+            policies
+        );
+        publisher.publish_capture(Some(&stopped), PersistenceState::Ready, None, policies);
+        assert!(!receiver.has_changed().expect("publisher alive"));
+        publisher.publish_capture(
+            Some(&stopped),
+            PersistenceState::Ready,
+            None,
+            quartz_protocol::TimedPolicies::default(),
+        );
+        assert!(receiver.has_changed().expect("expiry publishes"));
+        assert_eq!(
+            receiver.borrow().snapshot().timed_policies,
+            quartz_protocol::TimedPolicies::default()
+        );
     }
 }

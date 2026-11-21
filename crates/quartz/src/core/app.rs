@@ -5,6 +5,7 @@ mod database_loop;
 mod runtime;
 #[cfg(test)]
 mod tests;
+mod timed;
 mod workers;
 use crate::persistence::PersistenceState;
 use crate::rules::registry::{RegistryResult, RunRegistryCommandError};
@@ -59,6 +60,7 @@ impl From<ObservedEvent> for Observation {
 pub(crate) enum MainCommand {
     CaptureSnapshot {
         state: CaptureState,
+        timed: quartz_protocol::TimedPolicies,
         foreground: Option<quartz_domain::capture::ForegroundView>,
     },
     Effect(CaptureEffect),
@@ -192,6 +194,16 @@ pub(crate) struct CaptureSender {
 impl CaptureSender {
     pub(crate) fn observe(&self, observation: ObservedEvent) -> Result<(), ObserveCaptureError> {
         self.send(Observation::Event(observation))
+    }
+    fn admit(&self, observation: ObservedEvent) -> Result<(), quartz_protocol::ProtocolError> {
+        self.sender
+            .try_send(Observation::Event(observation))
+            .map_err(|error| {
+                quartz_protocol::ProtocolError::new(match error {
+                    TrySendError::Full(_) => quartz_protocol::ErrorKind::Busy,
+                    TrySendError::Disconnected(_) => quartz_protocol::ErrorKind::Internal,
+                })
+            })
     }
     pub(crate) fn mark_overloaded(&self) {
         self.overloaded.store(true, Ordering::Release);

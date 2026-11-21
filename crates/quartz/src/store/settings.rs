@@ -248,6 +248,9 @@ impl Settings<'_> {
     }
 }
 impl Store {
+    pub(crate) fn day_start_offset(&mut self) -> Result<i64, AccessSettingError> {
+        Settings::new(&mut self.writer).day_start_offset()
+    }
     pub(crate) fn ui_settings(&mut self) -> Result<UiSettings, AccessSettingError> {
         Settings::new(&mut self.writer).ui()
     }

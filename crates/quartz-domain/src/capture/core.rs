@@ -128,6 +128,11 @@ impl CaptureCore {
         Ok(StartedCapture { core, step })
     }
 
+    /// Returns session-wide policies after the most recent capture boundary.
+    pub fn timed_states(&self) -> Vec<super::TimedState> {
+        self.timed.active()
+    }
+
     /// Produces one atomic write plan; persistence acknowledgements never allocate row identifiers.
     pub fn step(&mut self, input: CaptureInput) -> Result<CaptureStep, StepCaptureError> {
         let mut step = CaptureStep::default();

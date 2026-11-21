@@ -523,6 +523,7 @@ mod tests {
             slot: Slot {
                 registry: RegistryHandle::start(publisher.subscribe(), received.clone()),
                 services: Services {
+                    timed: crate::ipc::TimedPolicyPort::unavailable(),
                     queries: channel.port,
                     writes: crate::ipc::WriteChannel::new().port,
                     versions: received,

@@ -6,6 +6,8 @@ pub(crate) mod outbox;
 pub(crate) mod registry;
 mod session;
 mod status;
+mod timed;
+pub(crate) use timed::{TimedCommand, TimedDeadline, TimedPolicyPort};
 
 #[cfg(test)]
 pub(crate) use crate::persistence::dispatch::WriteChannel;
@@ -23,6 +25,7 @@ pub(crate) struct Services {
     pub versions: crate::query::versions::VersionPort,
     pub status: tokio::sync::watch::Receiver<PublishedStatus>,
     pub ui: UiPort,
+    pub timed: TimedPolicyPort,
 }
 impl Services {
     pub(crate) fn start_registry(&self) -> registry::RegistryHandle {

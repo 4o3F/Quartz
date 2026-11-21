@@ -40,6 +40,10 @@ pub(crate) struct ConnectionSession {
 #[derive(Debug)]
 pub(crate) enum Action {
     Reply(Response),
+    Timed {
+        id: RequestId,
+        command: super::TimedCommand,
+    },
     Ui {
         id: RequestId,
         command: UiCommand,
@@ -160,6 +164,15 @@ impl ConnectionSession {
                     return Action::error(Some(id), ErrorKind::Forbidden);
                 }
                 match request.op {
+                    Op::TrackingPause
+                    | Op::TrackingResume
+                    | Op::TrackingKeepAlive
+                    | Op::PrivacyModeSet => {
+                        match super::TimedCommand::decode(request.op, request.body) {
+                            Ok(command) => Action::Timed { id, command },
+                            Err(error) => Action::Reply(Action::error_response(Some(id), error)),
+                        }
+                    }
                     Op::CoreStatus => {
                         if serde_json::from_value::<CoreStatusRequest>(request.body).is_err() {
                             return Action::error(Some(id), ErrorKind::BadRequest);
@@ -231,9 +244,6 @@ impl ConnectionSession {
                     | Op::CategoriesDelete
                     | Op::CategoriesReorder
                     | Op::DataDelete
-                    | Op::TrackingPause
-                    | Op::TrackingResume
-                    | Op::TrackingKeepAlive
                     | Op::BrowserHello
                     | Op::BrowserState
                     | Op::BrowserGap
@@ -245,7 +255,6 @@ impl ConnectionSession {
                     | Op::BrowserHostsDisable
                     | Op::MaintenanceBackup
                     | Op::MaintenanceCompact
-                    | Op::PrivacyModeSet
                     | Op::Unknown => Action::error(Some(id), ErrorKind::NotImplemented),
                 }
             }
@@ -466,6 +475,107 @@ mod tests {
             ),
             Action::Write {
                 request: crate::persistence::dispatch::WriteRequest::SettingsGet,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn timed_controls_require_ui_and_decode_required_fields_before_admission() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("timed-session".into()));
+        let receiver = status.subscribe();
+        let status = &receiver.borrow().status;
+        let ops = [
+            Op::TrackingPause,
+            Op::TrackingResume,
+            Op::TrackingKeepAlive,
+            Op::PrivacyModeSet,
+        ];
+        for role in [Role::Cli, Role::Host] {
+            let mut session = ConnectionSession {
+                state: State::Ready(role),
+                allowed: AllowedRoles::Quartz,
+            };
+            for op in ops {
+                assert_eq!(
+                    session
+                        .receive(request(1, op, serde_json::json!({})), status)
+                        .reply()
+                        .outcome,
+                    ResponseOutcome::Err {
+                        error: ProtocolError::new(ErrorKind::Forbidden)
+                    }
+                );
+            }
+        }
+        let mut ui = ConnectionSession {
+            state: State::Ready(Role::Ui),
+            allowed: AllowedRoles::Quartz,
+        };
+        for op in [Op::TrackingPause, Op::TrackingKeepAlive, Op::PrivacyModeSet] {
+            assert_eq!(
+                ui.receive(request(2, op, serde_json::json!({})), status)
+                    .reply()
+                    .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::BadRequest)
+                }
+            );
+        }
+        for body in [
+            serde_json::json!({"enabled":true}),
+            serde_json::json!({"enabled":true,"until_utc_ms":null}),
+            serde_json::json!({"enabled":"true","until_utc_ms":100}),
+        ] {
+            assert_eq!(
+                ui.receive(request(3, Op::PrivacyModeSet, body), status)
+                    .reply()
+                    .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::BadRequest)
+                }
+            );
+        }
+        for op in [Op::TrackingPause, Op::TrackingKeepAlive] {
+            assert!(matches!(
+                ui.receive(
+                    request(4, op, serde_json::json!({"until_utc_ms":100})),
+                    status
+                ),
+                Action::Timed { .. }
+            ));
+        }
+        assert!(matches!(
+            ui.receive(
+                request(5, Op::TrackingResume, serde_json::json!({})),
+                status
+            ),
+            Action::Timed {
+                command: super::super::TimedCommand::Resume,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ui.receive(
+                request(6, Op::PrivacyModeSet, serde_json::json!({"enabled":false})),
+                status
+            ),
+            Action::Timed {
+                command: super::super::TimedCommand::DisablePrivacy,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ui.receive(
+                request(
+                    7,
+                    Op::PrivacyModeSet,
+                    serde_json::json!({"enabled":true,"until_utc_ms":100})
+                ),
+                status
+            ),
+            Action::Timed {
+                command: super::super::TimedCommand::EnablePrivacy(_),
                 ..
             }
         ));

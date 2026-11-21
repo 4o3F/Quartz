@@ -285,7 +285,9 @@ impl CoreProcess {
                     break;
                 }
                 for event in events {
-                    if let Some(exit) = self.handle_tray_command(event, tray, status, sources)? {
+                    if let Some(exit) =
+                        self.handle_tray_command(event, tray, status, sources, &runtime.timed)?
+                    {
                         return Ok(exit);
                     }
                 }
@@ -323,6 +325,7 @@ impl CoreProcess {
                         tracing::error!(%error, "could not update tray language");
                     }
                 });
+                self.refresh_tray(tray, status, TrayRefresh::Capture);
             }
             UiCommand::FirstFrame => {
                 self.ui.first_frame();
@@ -338,9 +341,13 @@ impl CoreProcess {
         sources: &mut Sources,
     ) -> Result<(), WaitCoreEventsError> {
         match command {
-            MainCommand::CaptureSnapshot { state, foreground } => {
+            MainCommand::CaptureSnapshot {
+                state,
+                foreground,
+                timed,
+            } => {
                 self.capture = Some(state);
-                status.publish_snapshot(self.capture.as_ref(), self.persistence, foreground);
+                status.publish_capture(self.capture.as_ref(), self.persistence, foreground, timed);
             }
             MainCommand::Persistence(state) => {
                 self.persistence = state;
@@ -415,12 +422,18 @@ impl CoreProcess {
         tray: &mut Tray,
         status: &StatusPublisher,
         sources: &mut Sources,
+        timed: &crate::ipc::TimedPolicyPort,
     ) -> Result<Option<CoreExit>, WaitCoreEventsError> {
         match event {
             TrayCommand::Exit => return Ok(Some(CoreExit::UserExit)),
             TrayCommand::EndSession => return Ok(Some(CoreExit::SessionEnded)),
             TrayCommand::Deadline(at) => sources.fired(at).context(wait_error::ObserveSnafu)?,
             TrayCommand::OpenUi => self.open_ui(tray, status),
+            TrayCommand::Timed(command) => {
+                if let Err(error) = timed.call(command) {
+                    tracing::warn!(kind = ?error.kind, "could not admit tray timed policy command");
+                }
+            }
         }
         Ok(None)
     }
@@ -432,7 +445,10 @@ impl CoreProcess {
             | TrayRefresh::Capture
             | TrayRefresh::UiExited => TrayTooltip::Ready,
         };
-        if let Err(error) = tray.update(TrayState::from_status(status.stop_reason(), tooltip)) {
+        if let Err(error) = tray.update(
+            TrayState::from_status(status.stop_reason(), tooltip)
+                .with_timed(status.timed_policies(), status.ui_settings().locale),
+        ) {
             match refresh {
                 TrayRefresh::Startup => tracing::error!(?error, "could not update tray state"),
                 TrayRefresh::FirstFrame => {
@@ -456,6 +472,26 @@ impl CoreProcess {
 }
 
 impl TrayState {
+    fn with_timed(
+        mut self,
+        timed: quartz_protocol::TimedPolicies,
+        locale: Option<quartz_protocol::LocaleSettings>,
+    ) -> Self {
+        self.timed = timed;
+        if self.icon != TrayIconState::Warning {
+            if let Some(until_utc_ms) = timed.pause_until_utc_ms {
+                self.tooltip = TrayTooltip::Paused {
+                    until_utc_ms,
+                    hour_cycle: locale.map(|value| value.hour_cycle),
+                };
+                self.icon = TrayIconState::Grey;
+            } else if self.icon != TrayIconState::Grey && timed.privacy_mode.is_some() {
+                self.icon = TrayIconState::Private;
+            }
+        }
+        self
+    }
+
     fn from_status(reason: Option<quartz_protocol::StopReason>, normal: TrayTooltip) -> Self {
         use quartz_protocol::StopReason;
         let tooltip = match reason {
@@ -473,14 +509,28 @@ impl TrayState {
                 | StopReason::Ended,
             ) => {
                 return Self {
-                    icon: TrayIconState::Normal,
+                    icon: if matches!(
+                        reason,
+                        Some(
+                            StopReason::Paused
+                                | StopReason::Locked
+                                | StopReason::Suspended
+                                | StopReason::Disconnected
+                        )
+                    ) {
+                        TrayIconState::Grey
+                    } else {
+                        TrayIconState::Normal
+                    },
                     tooltip: normal,
+                    timed: quartz_protocol::TimedPolicies::default(),
                 };
             }
         };
         Self {
             icon: TrayIconState::Warning,
             tooltip,
+            timed: quartz_protocol::TimedPolicies::default(),
         }
     }
 }
@@ -561,7 +611,22 @@ mod tests {
         ] {
             for tooltip in [TrayTooltip::Ready, TrayTooltip::Opening] {
                 let state = TrayState::from_status(reason, tooltip);
-                assert_eq!(state.icon, TrayIconState::Normal);
+                assert_eq!(
+                    state.icon,
+                    if matches!(
+                        reason,
+                        Some(
+                            StopReason::Paused
+                                | StopReason::Locked
+                                | StopReason::Suspended
+                                | StopReason::Disconnected
+                        )
+                    ) {
+                        TrayIconState::Grey
+                    } else {
+                        TrayIconState::Normal
+                    }
+                );
                 assert_eq!(state.tooltip, tooltip);
             }
         }
@@ -644,5 +709,60 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::PermissionDenied
         );
+    }
+    #[test]
+    fn timed_tray_mapping_prioritizes_warning_then_grey_then_privacy() {
+        use quartz_protocol::{
+            HourCycle, LocaleSettings, PrivacyMode, StopReason, TimedPolicies, TimedPrivacyMode,
+            Weekday,
+        };
+        let locale = Some(LocaleSettings {
+            hour_cycle: HourCycle::H12,
+            first_day_of_week: Weekday::Monday,
+        });
+        let private = TimedPolicies {
+            privacy_mode: Some(TimedPrivacyMode {
+                mode: PrivacyMode::Private,
+                until_utc_ms: 200,
+            }),
+            ..Default::default()
+        };
+        let paused = TimedPolicies {
+            pause_until_utc_ms: Some(100),
+            ..private
+        };
+        assert_eq!(
+            TrayState::from_status(None, TrayTooltip::Ready)
+                .with_timed(private, locale)
+                .icon,
+            TrayIconState::Private
+        );
+        assert_eq!(
+            TrayState::from_status(Some(StopReason::Locked), TrayTooltip::Ready)
+                .with_timed(private, locale)
+                .icon,
+            TrayIconState::Grey
+        );
+        let state = TrayState::from_status(Some(StopReason::Paused), TrayTooltip::Ready)
+            .with_timed(paused, locale);
+        assert_eq!(state.icon, TrayIconState::Grey);
+        assert_eq!(
+            state.tooltip,
+            TrayTooltip::Paused {
+                until_utc_ms: 100,
+                hour_cycle: Some(HourCycle::H12)
+            }
+        );
+        for reason in [
+            StopReason::PersistenceFailed,
+            StopReason::SessionUnavailable,
+            StopReason::CaptureGap,
+        ] {
+            let state =
+                TrayState::from_status(Some(reason), TrayTooltip::Ready).with_timed(paused, locale);
+            assert_eq!(state.icon, TrayIconState::Warning);
+            assert!(!matches!(state.tooltip, TrayTooltip::Paused { .. }));
+            assert_eq!(state.timed, paused);
+        }
     }
 }

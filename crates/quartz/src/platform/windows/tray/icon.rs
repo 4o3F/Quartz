@@ -3,24 +3,20 @@
 use std::fmt;
 
 use snafu::{ResultExt, Snafu};
-use windows::{
-    Win32::{
-        Foundation::{LPARAM, POINT, WPARAM},
-        UI::{
-            Shell::{
-                self, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-                NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONDATAW_0,
-            },
-            WindowsAndMessaging::{
-                self, HMENU, IDI_APPLICATION, IDI_WARNING, MF_STRING, TPM_NONOTIFY, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, WM_NULL,
-            },
+use windows::Win32::{
+    Foundation::{LPARAM, POINT, WPARAM},
+    UI::{
+        Shell::{
+            self, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+            NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONDATAW_0,
+        },
+        WindowsAndMessaging::{
+            self, HMENU, IDI_APPLICATION, IDI_WARNING, TPM_NONOTIFY, TPM_RETURNCMD,
+            TPM_RIGHTBUTTON, WM_NULL,
         },
     },
-    core::PCWSTR,
 };
 
-use super::super::WideString;
 use super::window::{AppMessage, Window};
 use crate::tray_tooltip::{FormatTrayTooltipError, TrayTooltipText};
 
@@ -32,6 +28,10 @@ const ICON_ID: u32 = 1;
 pub(in crate::platform::windows) enum AddTrayIconError {
     #[snafu(display("could not load tray application icon (LoadIconW)"))]
     LoadIcon { source: windows::core::Error },
+    #[snafu(display("could not generate tray icon variants"))]
+    GenerateIcons {
+        source: super::variants::GenerateTrayIconsError,
+    },
     #[snafu(display("could not encode initial tray tooltip"))]
     FormatInitialTooltip { source: FormatTrayTooltipError },
     // Shell_NotifyIconW documents BOOL success without an extended GetLastError value.
@@ -75,15 +75,44 @@ pub(in crate::platform::windows) enum ShowTrayMenuError {
 pub(super) enum TrayMenuItem {
     Open = 1,
     Exit = 2,
+    Pause15 = 3,
+    PauseHour = 4,
+    PauseTomorrow = 5,
+    Resume = 6,
+    Keep30 = 7,
+    KeepHour = 8,
+    Private15 = 9,
+    PrivateHour = 10,
+    PrivateTomorrow = 11,
+    PrivateOff = 12,
 }
 
 impl TrayMenuItem {
-    const ALL: [Self; 2] = [Self::Open, Self::Exit];
+    const ALL: [Self; 12] = [
+        Self::Open,
+        Self::Exit,
+        Self::Pause15,
+        Self::PauseHour,
+        Self::PauseTomorrow,
+        Self::Resume,
+        Self::Keep30,
+        Self::KeepHour,
+        Self::Private15,
+        Self::PrivateHour,
+        Self::PrivateTomorrow,
+        Self::PrivateOff,
+    ];
 
-    fn label_key(self) -> quartz_i18n::MessageKey<'static> {
+    pub(super) fn label_key(self) -> quartz_i18n::MessageKey<'static> {
         quartz_i18n::MessageKey::new(match self {
             Self::Open => "tray.open",
             Self::Exit => "tray.exit",
+            Self::Pause15 | Self::Private15 => "tray.minutes_15",
+            Self::Keep30 => "tray.minutes_30",
+            Self::PauseHour | Self::KeepHour | Self::PrivateHour => "tray.hour_1",
+            Self::PauseTomorrow | Self::PrivateTomorrow => "tray.until_tomorrow",
+            Self::Resume => "tray.resume",
+            Self::PrivateOff => "tray.privacy_off",
         })
     }
 
@@ -95,6 +124,7 @@ impl TrayMenuItem {
 pub(super) struct TrayIcon {
     data: NOTIFYICONDATAW,
     language: quartz_i18n::Language,
+    variants: super::variants::IconVariants,
     window: windows::Win32::Foundation::HWND,
 }
 
@@ -120,7 +150,9 @@ impl TrayIcon {
         // SAFETY: IDI_APPLICATION names a shared system icon; it must not be destroyed by the caller.
         let icon = unsafe { WindowsAndMessaging::LoadIconW(None, IDI_APPLICATION) }
             .context(LoadIconSnafu)?;
+        let variants = super::variants::IconVariants::new(icon).context(GenerateIconsSnafu)?;
         let tray = Self {
+            variants,
             language,
             data: NOTIFYICONDATAW {
                 cbSize: const { super::super::structure_size::<NOTIFYICONDATAW>() },
@@ -176,21 +208,26 @@ impl TrayIcon {
     /// # Errors
     /// Returns tooltip encoding or Shell update failures.
     pub(super) fn update(&mut self, state: super::TrayState) -> Result<(), UpdateTrayTooltipError> {
-        self.data.szTip =
-            TrayTooltipText::try_from(state.tooltip.key().in_language(self.language).as_ref())
-                .context(FormatTooltipSnafu)?
-                .into_buffer();
+        self.data.szTip = TrayTooltipText::try_from(state.tooltip.text(self.language).as_str())
+            .context(FormatTooltipSnafu)?
+            .into_buffer();
         // SAFETY: Both icon identifiers name shared system resources.
-        self.data.hIcon = unsafe {
-            WindowsAndMessaging::LoadIconW(
-                None,
-                match state.icon {
-                    super::TrayIconState::Normal => IDI_APPLICATION,
-                    super::TrayIconState::Warning => IDI_WARNING,
-                },
-            )
-        }
-        .context(LoadUpdateIconSnafu)?;
+        self.data.hIcon = match state.icon {
+            super::TrayIconState::Grey => self.variants.grey(),
+            super::TrayIconState::Private => self.variants.private(),
+            // SAFETY: Both identifiers name shared system icon resources.
+            super::TrayIconState::Normal | super::TrayIconState::Warning => unsafe {
+                WindowsAndMessaging::LoadIconW(
+                    None,
+                    match state.icon {
+                        super::TrayIconState::Normal => IDI_APPLICATION,
+                        super::TrayIconState::Warning => IDI_WARNING,
+                        _ => unreachable!("generated icons handled above"),
+                    },
+                )
+            }
+            .context(LoadUpdateIconSnafu)?,
+        };
         let update = NOTIFYICONDATAW {
             uFlags: NIF_ICON | NIF_TIP | NIF_SHOWTIP,
             ..self.data
@@ -206,24 +243,16 @@ impl TrayIcon {
     ///
     /// # Errors
     /// Returns menu creation, item insertion, or cursor lookup failures.
-    pub(super) fn menu(&self) -> Result<Option<TrayMenuItem>, ShowTrayMenuError> {
+    pub(super) fn menu(
+        &self,
+        timed: quartz_protocol::TimedPolicies,
+    ) -> Result<Option<TrayMenuItem>, ShowTrayMenuError> {
         // SAFETY: Creates an empty, uniquely owned menu without pointer arguments.
         let menu =
             Menu(unsafe { WindowsAndMessaging::CreatePopupMenu() }.context(CreatePopupMenuSnafu)?);
-        for item in TrayMenuItem::ALL {
-            let key = item.label_key();
-            let label = WideString::new(&key.in_language(self.language));
-            // SAFETY: Menu is live; each label is terminated and copied synchronously by AppendMenuW.
-            unsafe {
-                WindowsAndMessaging::AppendMenuW(
-                    menu.0,
-                    MF_STRING,
-                    usize::from(item),
-                    PCWSTR(label.as_ptr()),
-                )
-            }
-            .context(AppendMenuSnafu { key })?;
-        }
+        menu.append(TrayMenuItem::Open, self.language)?;
+        menu.append_timed(timed, self.language)?;
+        menu.append(TrayMenuItem::Exit, self.language)?;
         let mut point = POINT::default();
         // SAFETY: point is writable storage for the screen-coordinate cursor position.
         unsafe { WindowsAndMessaging::GetCursorPos(&mut point) }.context(GetCursorPositionSnafu)?;
@@ -260,7 +289,7 @@ impl Drop for TrayIcon {
     }
 }
 
-struct Menu(HMENU);
+pub(super) struct Menu(pub(super) HMENU);
 
 impl Drop for Menu {
     fn drop(&mut self) {
@@ -279,7 +308,7 @@ mod tests {
         for item in TrayMenuItem::ALL {
             assert_eq!(TrayMenuItem::from_command(usize::from(item)), Some(item));
         }
-        for id in [0, 3, usize::MAX] {
+        for id in [0, 13, usize::MAX] {
             assert_eq!(TrayMenuItem::from_command(id), None, "unknown command {id}");
         }
         assert_eq!(TrayMenuItem::Open.label_key().as_str(), "tray.open");

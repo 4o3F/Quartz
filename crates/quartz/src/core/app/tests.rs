@@ -427,6 +427,8 @@ fn resume_notifications_create_only_one_clock_segment() {
         .expect("rules")
         .snapshots();
     let mut capture = CaptureLoop {
+        pending_control: None,
+        discard_remaining: 0,
         core: started.core,
         run: RunId::new(1),
         at,
@@ -826,6 +828,7 @@ fn io_write_replies_publish_committed_versions_and_rollback_keeps_versions() {
     runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
     let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("write-test".into()));
     let services = crate::ipc::Services {
+        timed: crate::ipc::TimedPolicyPort::unavailable(),
         queries: runtime.workers.queries.clone(),
         writes: runtime.workers.writes.clone(),
         versions: runtime.workers.versions.clone(),
@@ -1007,6 +1010,7 @@ fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
         "annotation-integration".into(),
     ));
     let services = crate::ipc::Services {
+        timed: crate::ipc::TimedPolicyPort::unavailable(),
         queries: runtime.workers.queries.clone(),
         writes: runtime.workers.writes.clone(),
         versions: runtime.workers.versions.clone(),
@@ -1223,6 +1227,7 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
     };
     let mut channel = crate::ipc::UiCommands::channel(Arc::new(|_| Ok(())));
     let services = crate::ipc::Services {
+        timed: crate::ipc::TimedPolicyPort::unavailable(),
         queries: runtime.workers.queries.clone(),
         writes: runtime
             .workers
@@ -1323,4 +1328,62 @@ fn core_runtime_starts_with_stored_preferences_overriding_platform_values() {
             .shutdown(super::RuntimeExit::UserExit)
             .expect("shutdown");
     });
+}
+
+#[test]
+fn timed_ipc_admits_typed_capture_events_and_reports_busy_and_invalid_deadlines() {
+    use crate::ipc::{TimedCommand, TimedDeadline};
+    use quartz_protocol::{ErrorKind, Op, ProtocolError, ResponseOutcome, Role};
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("timed-wire".into()));
+    let (sender, observed) = crossbeam_channel::bounded(1);
+    let overloaded = Arc::new(AtomicBool::new(false));
+    let ingress = CaptureSender {
+        sender,
+        overloaded: overloaded.clone(),
+    };
+    let services = crate::ipc::Services {
+        timed: ingress.timed_port(Arc::new(TestClock(at(10))), 0),
+        queries: runtime.workers.queries.clone(),
+        writes: runtime.workers.writes.clone(),
+        versions: runtime.workers.versions.clone(),
+        status: status.subscribe(),
+        ui: Arc::new(|_| Ok(())),
+    };
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("I/O runtime");
+    io.block_on(async {
+        let registry = services.start_registry();
+        let port = services.timed.clone();
+        let mut ui = AnnotationClient::connect(services, registry.clone(), Role::Ui).await;
+        ui.send(2, Op::TrackingPause, serde_json::json!({"until_utc_ms":10})).await;
+        assert_eq!(ui.response(2).await, ResponseOutcome::Err { error: ProtocolError::new(ErrorKind::BadRequest) });
+        ui.send(3, Op::TrackingPause, serde_json::json!({"until_utc_ms":100})).await;
+        assert_eq!(ui.success(3).await, serde_json::json!({"accepted":true,"requested":{"policy":"pause","until_utc_ms":100}}));
+        ui.send(4, Op::TrackingResume, serde_json::json!({})).await;
+        assert_eq!(ui.response(4).await, ResponseOutcome::Err { error: ProtocolError::new(ErrorKind::Busy) });
+        assert!(matches!(observed.try_recv().expect("pause event"), Observation::Event(ObservedEvent { at: timestamp, event: CaptureEvent::SetTimedState(TimedState { policy: TimedPolicy::Pause, until, .. }) }) if timestamp == at(10) && until == at(100).utc));
+        ui.send(5, Op::TrackingResume, serde_json::json!({})).await;
+        assert_eq!(ui.success(5).await, serde_json::json!({"accepted":true,"requested":{"policy":"pause","until_utc_ms":null}}));
+        assert!(matches!(observed.try_recv().expect("resume event"), Observation::Event(ObservedEvent { event: CaptureEvent::CancelTimedPolicy(TimedPolicyKind::Pause), .. })));
+        ui.send(6, Op::TrackingKeepAlive, serde_json::json!({"until_utc_ms":200})).await;
+        assert_eq!(ui.success(6).await, serde_json::json!({"accepted":true,"requested":{"policy":"keep_timing","until_utc_ms":200}}));
+        assert!(matches!(observed.try_recv().expect("keep timing event"), Observation::Event(ObservedEvent { event: CaptureEvent::SetTimedState(TimedState { policy: TimedPolicy::KeepTiming, .. }), .. })));
+        ui.send(7, Op::PrivacyModeSet, serde_json::json!({"enabled":true})).await;
+        assert_eq!(ui.response(7).await, ResponseOutcome::Err { error: ProtocolError::new(ErrorKind::BadRequest) });
+        ui.send(8, Op::PrivacyModeSet, serde_json::json!({"enabled":true,"until_utc_ms":300})).await;
+        assert_eq!(ui.success(8).await, serde_json::json!({"accepted":true,"requested":{"policy":"privacy","mode":{"mode":"private","until_utc_ms":300}}}));
+        assert!(matches!(observed.try_recv().expect("private event"), Observation::Event(ObservedEvent { event: CaptureEvent::SetTimedState(TimedState { policy: TimedPolicy::Privacy(PrivacyMode::Private), .. }), .. })));
+        ui.send(9, Op::PrivacyModeSet, serde_json::json!({"enabled":false})).await;
+        assert_eq!(ui.success(9).await, serde_json::json!({"accepted":true,"requested":{"policy":"privacy","mode":null}}));
+        assert!(matches!(observed.try_recv().expect("privacy cancellation"), Observation::Event(ObservedEvent { event: CaptureEvent::CancelTimedPolicy(TimedPolicyKind::Privacy), .. })));
+        port.call(TimedCommand::Pause(TimedDeadline::UtcMillis(100))).expect("tray uses same admission");
+        assert_eq!(observed.len(), 1);
+        assert!(!overloaded.load(Ordering::Acquire));
+        ui.close().await;
+    });
+    runtime.shutdown();
 }

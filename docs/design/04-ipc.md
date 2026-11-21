@@ -184,7 +184,13 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 | `annotations.create` / `update` / `delete` | 可以一次提交多个不相交的范围，核心在一个事务里写入 |
 | `settings.get` / `settings.set` | 设置 |
 | `data.delete` | 按日期范围、应用、域名、标题关键词或隐私规则删除，见 03 第 6 节 |
-| `tracking.pause` / `tracking.resume` / `tracking.keep_alive` | 暂停、恢复、临时保持计时 |
+| `tracking.pause` | ui：`{until_utc_ms}`，截止 UTC 毫秒必填且必须晚于核心接纳时刻；暂停到该时刻 |
+| `tracking.resume` | ui：`{}`，取消暂停 |
+| `tracking.keep_alive` | ui：`{until_utc_ms}`，截止 UTC 毫秒必填且必须在未来；保持计时并抑制空闲，按领域层 `TimedState::normalized()` 规范化；无单独取消操作 |
+
+三个 tracking 操作与 `privacy_mode.set` 在命令进入有界采集队列后返回 `{accepted:true, requested:<规范化的请求状态>}`，生效状态通过 `state` 观察。
+
+`requested` 使用类型化联合：暂停为 `{policy:"pause", until_utc_ms}`，恢复时 `until_utc_ms` 为 `null`；保持计时为 `{policy:"keep_timing", until_utc_ms}`；隐私模式为 `{policy:"privacy", mode:{mode:"private", until_utc_ms}}`，关闭时 `mode` 为 `null`。这些操作仅允许 `ui`，`cli` 和 `host` 返回 `forbidden`；请求缺少必填值、截止时间不在未来或时间越界时返回 `bad_request`；采集队列已满返回 `busy`。
 
 `settings.get` 和 `settings.set` 只允许 `ui`。`settings.get` 参数为 `{}`；`settings.set` 参数为部分更新对象，例如 `{"language":"zh-CN","hour_cycle":"h12","first_day_of_week":"sunday"}`，省略字段保持原值。`language` 可选 `auto | zh-CN | en`，`hour_cycle` 可选 `auto | h12 | h24`，`first_day_of_week` 可选 `auto | monday | tuesday | wednesday | thursday | friday | saturday | sunday`；无效值（包括显式 `null`）返回 `bad_request`，未知字段忽略。两者返回相同结构：
 
@@ -249,9 +255,9 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 | `browser_hosts.disable` | ui | browser | 移除注册后的状态 |
 | `maintenance.backup` | ui | `{}` | 备份文件名、完成时间 |
 | `maintenance.compact` | ui | `{}` | 压缩后的数据库字节数 |
-| `privacy_mode.set` | ui | enabled、until_utc_ms（启用时必填） | 当前模式与截止时间；触发 `policy_changed` |
+| `privacy_mode.set` | ui | `{enabled, until_utc_ms?}`；启用时截止 UTC 毫秒必填且必须在未来 | 启用请求使用 `private_window` 组合（`PrivacyMode::Private`），关闭请求取消该策略；按 §6.3 返回接纳回执，采集线程触发 `policy_changed` |
 
-备份和压缩由核心执行。临时保持计时、暂停和隐私模式的截止时间保存在 `settings`，重启后按截止时间恢复。
+备份和压缩由核心执行。临时保持计时、暂停和隐私模式及其截止时间保存在 `timed_policies`，重启后按截止时间恢复。
 
 ## 7. 订阅
 
@@ -282,6 +288,7 @@ UI 在握手中登记当前状态；核心重放 `show_requested`，直到收到
 | `foreground.app` | 被隐私规则移除时为 `null`；否则为 `{kind, value}`，`kind` 是 `exe`、`aumid` 或 `unresolved`，`value` 是字符串 |
 | `foreground.title` | 隐私处理后的标题，移除时为 `null` |
 | `recording`、`stop_reason` | 与 `core.status` 共用判定和优先顺序 |
+| `timed_policies` | 采集线程的当前限时策略快照：`{pause_until_utc_ms, privacy_mode, keep_timing_until_utc_ms}`；未启用的策略为 `null`，截止值为 UTC 毫秒；`privacy_mode` 启用时为 `{mode:"private", until_utc_ms}` |
 | `browser_streams` | 与 `core.status` 共用的类型化列表，M5 前为空 |
 | `ui_language` | 与托盘采用相同的 Windows 首选语言协商，生产值为 `zh-CN` 或 `en`；调试伪语言使用 `en` 的协议身份 |
 | `locale` | `{hour_cycle, first_day_of_week}`，值分别为 `h12` 或 `h24`，以及 `monday` 至 `sunday` 的英文星期名；分别解析用户区域的 `LOCALE_STIMEFORMAT`、`LOCALE_IFIRSTDAYOFWEEK`；读取失败时记录警告并发送 `null` |

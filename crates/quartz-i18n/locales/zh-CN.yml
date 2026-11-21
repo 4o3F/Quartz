@@ -231,3 +231,33 @@ privacy.label.credential_ui:
   zh-CN: "凭据界面"
 privacy.label.password_manager:
   zh-CN: "密码管理器"
+tray.pause:
+  zh-CN: "暂停"
+tray.keep_timing:
+  zh-CN: "保持计时"
+tray.privacy:
+  zh-CN: "隐私模式"
+tray.minutes_15:
+  zh-CN: "15 分钟"
+tray.minutes_30:
+  zh-CN: "30 分钟"
+tray.hour_1:
+  zh-CN: "1 小时"
+tray.until_tomorrow:
+  zh-CN: "直到明天"
+tray.resume:
+  zh-CN: "恢复"
+tray.privacy_off:
+  zh-CN: "关闭"
+tray.paused:
+  zh-CN: "已暂停 · %{time} 自动恢复"
+tray.paused_unknown_time:
+  zh-CN: "已暂停 · 已安排自动恢复"
+tray.time_24:
+  zh-CN: "%{hour}:%{minute}"
+tray.time_12:
+  zh-CN: "%{period}%{hour}:%{minute}"
+tray.am:
+  zh-CN: "上午"
+tray.pm:
+  zh-CN: "下午"

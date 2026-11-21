@@ -244,6 +244,8 @@ impl Workers {
         } = crate::query::versions::VersionPublisher::open(&mut store, registry.snapshots())
             .map_err(|source| StartWorkersError::Query { source })?;
         let capture = CaptureLoop {
+            pending_control: None,
+            discard_remaining: 0,
             core: started.core,
             run: startup.next_run,
             at,

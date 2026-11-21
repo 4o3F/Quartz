@@ -271,7 +271,18 @@ mod tests {
                 .expect("each advertised locale has an embedded catalog")
             {
                 if key.starts_with("tray.") || key == "app.name" {
-                    // M0 tray keys have no placeholders; add maximum substitutions with new keys.
+                    let language: Language = locale.parse().expect("catalog language");
+                    let period = ["tray.am", "tray.pm"]
+                        .into_iter()
+                        .map(|key| MessageKey::new(key).in_language(language))
+                        .max_by_key(|text| text.encode_utf16().count())
+                        .expect("two clock periods");
+                    let time = MessageKey::new("tray.time_12").in_language(language);
+                    let text = text
+                        .replace("%{time}", &time)
+                        .replace("%{hour}", "12")
+                        .replace("%{minute}", "59")
+                        .replace("%{period}", &period);
                     assert!(
                         placeholders(&text).is_empty(),
                         "provide maximum placeholder values for {key}"

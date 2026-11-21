@@ -91,6 +91,18 @@ struct ActiveState {
 #[derive(Debug, Default)]
 pub(super) struct TimedStates(BTreeMap<TimedPolicyKind, ActiveState>);
 impl TimedStates {
+    pub(super) fn active(&self) -> Vec<TimedState> {
+        self.0
+            .values()
+            .filter(|active| {
+                matches!(
+                    active.state.policy,
+                    TimedPolicy::Pause | TimedPolicy::Privacy(_) | TimedPolicy::KeepTiming
+                )
+            })
+            .map(|active| active.state.clone())
+            .collect()
+    }
     pub(super) fn install(&mut self, state: TimedState, evidence: GrantEvidence) {
         self.0
             .insert(state.owner(), ActiveState { state, evidence });

@@ -12,7 +12,12 @@ mod settings;
 mod startup_error;
 mod state;
 mod status;
+mod timed;
 mod topic;
+pub use timed::{
+    PrivacyMode, PrivacyModeSetRequest, RequestedTimedState, TimedPolicies, TimedPolicyResponse,
+    TimedPrivacyMode, TrackingKeepAliveRequest, TrackingPauseRequest, TrackingResumeRequest,
+};
 
 pub use envelope::{Envelope, Event, EventSeq, Request, RequestId, Response, ResponseOutcome};
 pub use error::{ErrorKind, ProtocolError, RuleSetVersion};

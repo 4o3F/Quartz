@@ -231,3 +231,33 @@ privacy.label.credential_ui:
   en: "Credentials"
 privacy.label.password_manager:
   en: "Password manager"
+tray.pause:
+  en: "Pause"
+tray.keep_timing:
+  en: "Keep timing"
+tray.privacy:
+  en: "Privacy mode"
+tray.minutes_15:
+  en: "15 minutes"
+tray.minutes_30:
+  en: "30 minutes"
+tray.hour_1:
+  en: "1 hour"
+tray.until_tomorrow:
+  en: "Until tomorrow"
+tray.resume:
+  en: "Resume"
+tray.privacy_off:
+  en: "Turn off"
+tray.paused:
+  en: "Paused · resumes at %{time}"
+tray.paused_unknown_time:
+  en: "Paused · automatic resume scheduled"
+tray.time_24:
+  en: "%{hour}:%{minute}"
+tray.time_12:
+  en: "%{hour}:%{minute} %{period}"
+tray.am:
+  en: "AM"
+tray.pm:
+  en: "PM"

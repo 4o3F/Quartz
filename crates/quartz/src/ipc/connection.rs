@@ -92,6 +92,10 @@ impl Connection {
             }
             let response = match action {
                 Action::Reply(response) => Some(response),
+                Action::Timed { id, command } => Some(match self.services.timed.call(command) {
+                    Ok(response) => Action::success_response(id, response),
+                    Err(error) => Action::error_response(Some(id), error),
+                }),
                 Action::Ui { id, command } => Some(match (self.services.ui)(command) {
                     Ok(()) => Action::success_response(id, quartz_protocol::AcceptedBody),
                     Err(error) => {
@@ -198,6 +202,7 @@ mod tests {
     fn connection(database: &TestDatabase, status: &StatusPublisher) -> Connection {
         Connection {
             services: Services {
+                timed: crate::ipc::TimedPolicyPort::unavailable(),
                 queries: database.port.clone(),
                 writes: crate::ipc::WriteChannel::new().port,
                 versions: database.versions.clone(),
