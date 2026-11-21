@@ -1,7 +1,7 @@
 use super::*;
 use crate::query::{QueryJob, QueryRequest, QueryResponse, RunQueryError};
 use quartz_protocol::{Activity, ErrorKind, QUERY_PAGE_BYTES, QueryCursor};
-use test_support::QueryFixture;
+use test_support::{FIXTURE_DATE, QueryFixture};
 
 fn collect_timeline(
     fixture: &mut QueryFixture,
@@ -650,4 +650,285 @@ fn annotation_commit_invalidates_an_existing_timeline_cursor() {
         fixture.run(QueryRequest::Timeline(request)),
         Err(RunQueryError::StaleCursor)
     ));
+}
+
+#[test]
+fn annotations_drive_day_metrics_hour_stacks_and_timeline_from_one_snapshot() {
+    use quartz_protocol::{AnnotationKind, BuiltinCategory, CategoryRef, CategorySource};
+    let mut fixture = QueryFixture::new(4);
+    fixture.mask_idle(1000, 3000);
+    fixture.annotate(
+        1,
+        AnnotationKind::CategoryOverride,
+        0,
+        1000,
+        Some(BuiltinCategory::Development),
+    );
+    fixture.annotate(
+        2,
+        AnnotationKind::ActiveOverride,
+        1000,
+        2000,
+        Some(BuiltinCategory::Learning),
+    );
+    fixture.annotate(
+        3,
+        AnnotationKind::OfflineActivity,
+        1500,
+        5000,
+        Some(BuiltinCategory::Entertainment),
+    );
+    let request = fixture.request_day();
+    let QueryResponse::Day(day) = fixture.run(request).expect("annotated day") else {
+        panic!("day")
+    };
+    let metrics = day.metrics.expect("metrics");
+    assert_eq!(metrics.active_ms, 5000);
+    assert_eq!(metrics.focus_ratio, 0.4);
+    assert_eq!(metrics.distract_ratio, 0.4);
+    assert_eq!(metrics.unclassified_ms, 1000);
+    assert_eq!(metrics.longest_focus_ms, 2000);
+    assert_eq!(metrics.switches_per_hour, 4.0 * 3_600_000.0 / 5000.0);
+    assert_eq!(
+        day.applications
+            .iter()
+            .map(|app| app.active_ms)
+            .sum::<i64>(),
+        3000
+    );
+    assert_eq!(
+        day.hours
+            .expect("hours")
+            .iter()
+            .flat_map(|hour| &hour.categories)
+            .map(|category| category.duration_ms)
+            .sum::<i64>(),
+        5000
+    );
+    let request = fixture.request_timeline();
+    let timeline = collect_timeline(&mut fixture, request);
+    assert_eq!(timeline.len(), 6);
+    assert!(matches!(
+        &timeline[0].category_source,
+        CategorySource::Annotation { .. }
+    ));
+    assert!(matches!(
+        &timeline[1].activity,
+        Activity::ActiveOverride { .. }
+    ));
+    assert!(matches!(
+        &timeline[2].activity,
+        Activity::ActiveOverride { .. }
+    ));
+    assert!(matches!(
+        &timeline[3].activity,
+        Activity::OfflineActivity { .. }
+    ));
+    assert_eq!(timeline[4].activity, Activity::Active);
+    assert!(matches!(&timeline[4].category, CategoryRef::Unclassified));
+    assert!(matches!(
+        &timeline[5].activity,
+        Activity::OfflineActivity { .. }
+    ));
+    assert!(timeline[5].app.is_none());
+}
+
+#[test]
+fn annotation_write_invalidates_old_timeline_and_pending_away_cursors() {
+    use quartz_protocol::{AnnotationKind, CursorQuery, QueryPendingAwayRequest};
+    let mut fixture = QueryFixture::new(1000);
+    fixture.mask_idle(0, 2_400_000);
+    let QueryRequest::Timeline(request) = fixture.request_timeline() else {
+        panic!("timeline")
+    };
+    let QueryResponse::Timeline(first) = fixture
+        .run(QueryRequest::Timeline(request.clone()))
+        .expect("first page")
+    else {
+        panic!("timeline")
+    };
+    let away = QueryPendingAwayRequest {
+        local_date: FIXTURE_DATE.parse().expect("date"),
+        cursor: None,
+    };
+    let QueryResponse::PendingAway(pending) = fixture
+        .run(QueryRequest::PendingAway(away.clone()))
+        .expect("pending")
+    else {
+        panic!("pending")
+    };
+    assert_eq!(pending.ranges.len(), 1);
+    let pending_cursor = QueryCursor::new(pending.versions, CursorQuery::from(&away), 0);
+    fixture.annotate(1, AnnotationKind::DismissedAway, 0, 1000, None);
+    assert!(matches!(
+        fixture.run(QueryRequest::Timeline(
+            quartz_protocol::QueryTimelineRequest {
+                cursor: Some(first.next_cursor.expect("continuation")),
+                ..request
+            }
+        )),
+        Err(RunQueryError::StaleCursor)
+    ));
+    assert!(matches!(
+        fixture.run(QueryRequest::PendingAway(QueryPendingAwayRequest {
+            cursor: Some(pending_cursor),
+            ..away
+        })),
+        Err(RunQueryError::StaleCursor)
+    ));
+}
+
+#[test]
+fn pending_away_subtracts_partial_coverage_and_uses_only_idle_longer_than_fifteen_minutes() {
+    use quartz_protocol::{AnnotationKind, QueryPendingAwayRequest};
+    const MINUTE_MS: i64 = 60_000;
+    let mut fixture = QueryFixture::new(1);
+    fixture.mask_idle(0, 20 * MINUTE_MS);
+    fixture.mask_idle(30 * MINUTE_MS, 50 * MINUTE_MS);
+    fixture.mask_idle(60 * MINUTE_MS, 100 * MINUTE_MS);
+    fixture.mask_locked(110 * MINUTE_MS, 140 * MINUTE_MS);
+    fixture.mask_idle(150 * MINUTE_MS, 165 * MINUTE_MS);
+    fixture.mask_idle(170 * MINUTE_MS, 200 * MINUTE_MS);
+    fixture.mask_idle(210 * MINUTE_MS, 240 * MINUTE_MS);
+    fixture.annotate(
+        1,
+        AnnotationKind::DismissedAway,
+        35 * MINUTE_MS,
+        45 * MINUTE_MS,
+        None,
+    );
+    fixture.annotate(
+        2,
+        AnnotationKind::OfflineActivity,
+        60 * MINUTE_MS,
+        70 * MINUTE_MS,
+        None,
+    );
+    fixture.annotate(
+        3,
+        AnnotationKind::CategoryOverride,
+        0,
+        20 * MINUTE_MS,
+        Some(quartz_protocol::BuiltinCategory::Learning),
+    );
+    fixture.annotate(
+        4,
+        AnnotationKind::Note,
+        170 * MINUTE_MS,
+        200 * MINUTE_MS,
+        None,
+    );
+    fixture.annotate(
+        5,
+        AnnotationKind::ActiveOverride,
+        210 * MINUTE_MS,
+        240 * MINUTE_MS,
+        None,
+    );
+    let request = QueryPendingAwayRequest {
+        local_date: FIXTURE_DATE.parse().expect("date"),
+        cursor: None,
+    };
+    let QueryResponse::PendingAway(away) = fixture
+        .run(QueryRequest::PendingAway(request.clone()))
+        .expect("pending away")
+    else {
+        panic!("pending")
+    };
+    assert_eq!(
+        away.ranges,
+        vec![
+            quartz_protocol::PendingAway {
+                start_utc_ms: fixture.start,
+                end_utc_ms: fixture.start + 20 * MINUTE_MS,
+                duration_ms: 20 * MINUTE_MS
+            },
+            quartz_protocol::PendingAway {
+                start_utc_ms: fixture.start + 70 * MINUTE_MS,
+                end_utc_ms: fixture.start + 100 * MINUTE_MS,
+                duration_ms: 30 * MINUTE_MS
+            },
+        ]
+    );
+    let continuation = QueryCursor::new(
+        away.versions,
+        quartz_protocol::CursorQuery::from(&request),
+        1,
+    );
+    let QueryResponse::PendingAway(next) = fixture
+        .run(QueryRequest::PendingAway(QueryPendingAwayRequest {
+            cursor: Some(continuation),
+            ..request
+        }))
+        .expect("pending continuation")
+    else {
+        panic!("pending")
+    };
+    assert_eq!(next.ranges, away.ranges[1..]);
+}
+
+#[test]
+fn annotation_scan_pages_by_start_and_id_and_reads_full_intersections() {
+    use quartz_protocol::AnnotationKind;
+    let mut fixture = QueryFixture::new(1);
+    for id in 1..=u32::try_from(READ_BATCH_ROWS + 1).expect("batch count") {
+        fixture.annotate(id, AnnotationKind::Note, -1000, 2000, None);
+    }
+    fixture.annotate(1000, AnnotationKind::Note, -2000, 0, None);
+    fixture.annotate(1001, AnnotationKind::Note, 1000, 2000, None);
+    let mut snapshot = fixture
+        .store
+        .take_query_reader()
+        .expect("reader")
+        .snapshot();
+    snapshot.begin().expect("snapshot");
+    let mut count = 0;
+    while let Some(rows) = snapshot
+        .read_batch(QueryRange {
+            start: fixture.start,
+            end: fixture.start + 1000,
+        })
+        .expect("batch")
+    {
+        assert!(rows.len() <= READ_BATCH_ROWS);
+        count += rows
+            .iter()
+            .filter(|row| matches!(row, InputRow::Annotation(_)))
+            .count();
+    }
+    assert_eq!(count, READ_BATCH_ROWS + 1);
+    fixture
+        .store
+        .return_query_reader(snapshot.finish().expect("finish snapshot"));
+}
+
+#[test]
+fn annotations_written_after_query_start_do_not_enter_the_pinned_snapshot() {
+    let mut fixture = QueryFixture::new(1);
+    let request = fixture.request_day();
+    let mut job = fixture.start(request.clone());
+    fixture.annotate(
+        1,
+        quartz_protocol::AnnotationKind::OfflineActivity,
+        1000,
+        2000,
+        Some(quartz_protocol::BuiltinCategory::Learning),
+    );
+    let response = loop {
+        if let Some(response) = job.advance().expect("snapshot turn") {
+            break response;
+        }
+    };
+    fixture
+        .store
+        .return_query_reader(job.finish().expect("finish snapshot"));
+    let QueryResponse::Day(before) = response else {
+        panic!("day")
+    };
+    let QueryResponse::Day(after) = fixture.run(request).expect("updated day") else {
+        panic!("day")
+    };
+    assert_eq!(before.metrics.expect("old metrics").active_ms, 1000);
+    assert_eq!(after.metrics.expect("new metrics").active_ms, 2000);
+    assert_ne!(before.versions, after.versions);
 }

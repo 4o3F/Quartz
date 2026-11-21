@@ -1,8 +1,7 @@
 //! Snapshot fact inputs and duration clipping for pipeline-internal segments.
 
 pub(crate) use quartz_domain::facts::{
-    Availability, CaptureLevel, ClockSegment, FactId, Foreground, ForegroundKind, InputRow,
-    QueryRange,
+    Availability, CaptureLevel, ClockSegment, FactId, Foreground, ForegroundKind, QueryRange,
 };
 
 impl super::pipeline::DerivedSegment {
@@ -13,3 +12,5 @@ impl super::pipeline::DerivedSegment {
 
 #[cfg(test)]
 pub(crate) use quartz_domain::facts::FactSpan;
+
+pub(crate) use crate::store::query::{InputRow, QueryAnnotation};

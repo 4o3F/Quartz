@@ -187,7 +187,7 @@ impl ConnectionSession {
                         };
                         Action::Subscribe { id, subscription }
                     }
-                    Op::QueryDay | Op::QueryTimeline => Action::from_query(
+                    Op::QueryDay | Op::QueryTimeline | Op::QueryPendingAway => Action::from_query(
                         id,
                         crate::query::QueryRequest::decode(request.op, request.body),
                     ),
@@ -205,7 +205,6 @@ impl ConnectionSession {
                     | Op::QuerySegmentDetail
                     | Op::QueryEntityDetail
                     | Op::QueryUnclassified
-                    | Op::QueryPendingAway
                     | Op::RuleSetsTree
                     | Op::RuleSetsGet
                     | Op::RuleSetsVersions

@@ -41,9 +41,10 @@ pub use query::{
     Activity, ApplicationId, ApplicationRank, ApplicationRef, BuiltinCategory, Category,
     CategoryDuration, CategoryId, CategoryRef, CategorySource, CategoryTendency, CategoryUuid,
     ClassificationRuleId, ClockSegmentId, CursorQuery, DayChanged, DayMetrics, HourStack,
-    MillisecondsPerPixel, ParseClassificationRuleIdError, QUERY_PAGE_BYTES, QueryCursor,
-    QueryDayRequest, QueryDayResponse, QueryGapReason, QueryStopReason, QueryTimelineRequest,
-    QueryTimelineResponse, QueryVersions, TimelineDetail, TimelineSegment,
+    MillisecondsPerPixel, ParseClassificationRuleIdError, PendingAway, QUERY_PAGE_BYTES,
+    QueryCursor, QueryDayRequest, QueryDayResponse, QueryGapReason, QueryPendingAwayRequest,
+    QueryPendingAwayResponse, QueryStopReason, QueryTimelineRequest, QueryTimelineResponse,
+    QueryVersions, TimelineDetail, TimelineSegment,
 };
 
 pub use annotations::{

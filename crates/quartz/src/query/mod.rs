@@ -6,6 +6,7 @@ pub(crate) mod classification;
 pub(crate) mod dispatch;
 pub(crate) mod input;
 mod paging;
+mod pending_away;
 pub(crate) mod pipeline;
 #[cfg(any(windows, test))]
 pub(crate) mod runner;
@@ -20,14 +21,15 @@ use input::QueryRange;
 use paging::{PageBudget, PagePosition};
 use pipeline::{DayAccumulator, DerivedSegment, Pipeline, QUERY_BATCH_ROWS, TimelineProjection};
 use quartz_protocol::{
-    CursorQuery, ErrorKind, QueryCursor, QueryDayRequest, QueryDayResponse, QueryTimelineRequest,
-    QueryTimelineResponse, QueryVersions,
+    CursorQuery, ErrorKind, QueryCursor, QueryDayRequest, QueryDayResponse,
+    QueryPendingAwayRequest, QueryPendingAwayResponse, QueryTimelineRequest, QueryTimelineResponse,
+    QueryVersions,
 };
 use serde::Serialize;
 use timing::{QueryStage, QueryTimer, QueryTimings};
 
 /// Increment whenever slicing, duration, aggregation, or projection semantics change.
-pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 1;
+pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 2;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
 const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
 
@@ -89,6 +91,7 @@ impl RunQueryError {
 #[derive(Debug, Clone)]
 pub(crate) enum QueryRequest {
     Day(QueryDayRequest),
+    PendingAway(QueryPendingAwayRequest),
     Timeline(QueryTimelineRequest),
 }
 impl QueryRequest {
@@ -99,6 +102,9 @@ impl QueryRequest {
     ) -> Result<Self, serde_json::Error> {
         match op {
             quartz_protocol::Op::QueryDay => serde_json::from_value(body).map(Self::Day),
+            quartz_protocol::Op::QueryPendingAway => {
+                serde_json::from_value(body).map(Self::PendingAway)
+            }
             quartz_protocol::Op::QueryTimeline => serde_json::from_value(body).map(Self::Timeline),
             _ => Err(<serde_json::Error as serde::de::Error>::custom(
                 "operation has no implemented query decoder",
@@ -109,6 +115,7 @@ impl QueryRequest {
     fn parameters(&self) -> CursorQuery {
         match self {
             Self::Day(day) => CursorQuery::from(day),
+            Self::PendingAway(away) => CursorQuery::from(away),
             Self::Timeline(timeline) => CursorQuery::from(timeline),
         }
     }
@@ -117,6 +124,7 @@ impl QueryRequest {
 #[serde(untagged)]
 pub(crate) enum QueryResponse {
     Day(QueryDayResponse),
+    PendingAway(QueryPendingAwayResponse),
     Timeline(QueryTimelineResponse),
 }
 #[derive(Debug)]
@@ -133,6 +141,7 @@ enum Stage {
 #[derive(Debug)]
 enum Aggregation {
     Day(DayAccumulator),
+    PendingAway(pending_away::PendingAwayAccumulator),
     Timeline(TimelineProjection),
 }
 #[derive(Debug)]
@@ -188,10 +197,16 @@ impl QueryJob {
                 day.local_date,
                 settings.day_start_offset_min,
             )?),
+            QueryRequest::PendingAway(away) => Some(DayCalendar::new(
+                away.local_date,
+                settings.day_start_offset_min,
+            )?),
             QueryRequest::Timeline(_) => None,
         };
         let range = match request {
-            QueryRequest::Day(_) => calendar.as_ref().expect("day calendar").range,
+            QueryRequest::Day(_) | QueryRequest::PendingAway(_) => {
+                calendar.as_ref().expect("day calendar").range
+            }
             QueryRequest::Timeline(timeline) => QueryRange {
                 start: timeline.start_utc_ms,
                 end: timeline.end_utc_ms,
@@ -220,6 +235,7 @@ impl QueryJob {
         let parameters = request.parameters();
         let cursor = match request {
             QueryRequest::Day(day) => day.cursor.as_ref(),
+            QueryRequest::PendingAway(away) => away.cursor.as_ref(),
             QueryRequest::Timeline(timeline) => timeline.cursor.as_ref(),
         };
         let position = PagePosition::from_cursor(cursor, &versions, &parameters)?;
@@ -276,6 +292,9 @@ impl QueryJob {
                     QueryRequest::Day(_) => Aggregation::Day(DayAccumulator::new(
                         self.calendar.take().expect("day calendar retained"),
                     )),
+                    QueryRequest::PendingAway(_) => {
+                        Aggregation::PendingAway(pending_away::PendingAwayAccumulator::default())
+                    }
                     QueryRequest::Timeline(_) => {
                         Aggregation::Timeline(TimelineProjection::default())
                     }
@@ -297,6 +316,7 @@ impl QueryJob {
                     for segment in segments.by_ref().take(QUERY_BATCH_ROWS) {
                         match &mut output {
                             Aggregation::Day(day) => day.push(&segment, &facts),
+                            Aggregation::PendingAway(away) => away.push(&segment),
                             Aggregation::Timeline(timeline) => {
                                 let QueryRequest::Timeline(request) = &self.request else {
                                     unreachable!("timeline aggregation")
@@ -341,6 +361,13 @@ impl QueryJob {
                     next_cursor: None,
                 })
             }
+            Aggregation::PendingAway(away) => {
+                QueryResponse::PendingAway(QueryPendingAwayResponse {
+                    ranges: away.finish(),
+                    versions: self.versions.clone(),
+                    next_cursor: None,
+                })
+            }
             Aggregation::Timeline(projection) => QueryResponse::Timeline(QueryTimelineResponse {
                 segments: projection.into_segments(),
                 versions: self.versions.clone(),
@@ -355,6 +382,14 @@ impl QueryJob {
                 let page = PageBudget::new(day)?.page(items, self.position)?;
                 day.applications = page.items;
                 day.next_cursor = page.next.map(|position| {
+                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
+                });
+            }
+            QueryResponse::PendingAway(away) => {
+                let items = std::mem::take(&mut away.ranges);
+                let page = PageBudget::new(away)?.page(items, self.position)?;
+                away.ranges = page.items;
+                away.next_cursor = page.next.map(|position| {
                     QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
                 });
             }

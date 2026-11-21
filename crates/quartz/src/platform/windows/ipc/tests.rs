@@ -652,6 +652,21 @@ fn cli_queries_temporary_database_over_pipe_and_host_cannot_query() {
     )
     .expect("typed timeline");
     assert_eq!(timeline.segments.len(), 5);
+    let pending_body = json!({"local_date":"2025-01-02"});
+    for mut client in [fixture.cli(), fixture.ui()] {
+        let pending: quartz_protocol::QueryPendingAwayResponse = serde_json::from_value(
+            client
+                .request(Op::QueryPendingAway, &pending_body)
+                .expect("pending away query"),
+        )
+        .expect("typed pending away");
+        assert!(pending.ranges.is_empty());
+    }
+    assert!(
+        quartz_protocol::Role::Host
+            .authorize(Op::QueryPendingAway)
+            .is_err()
+    );
     assert!(quartz_protocol::Role::Host.authorize(Op::QueryDay).is_err());
     assert!(
         quartz_protocol::Role::Host

@@ -4,7 +4,8 @@ use super::{
     calendar::DayCalendar,
     classification::{ClassificationId, Classifier, QueryCategoryRef},
     input::{
-        Availability, CaptureLevel, ClockSegment, FactId, ForegroundKind, InputRow, QueryRange,
+        Availability, CaptureLevel, ClockSegment, FactId, ForegroundKind, InputRow,
+        QueryAnnotation, QueryRange,
     },
 };
 use quartz_protocol::{
@@ -36,15 +37,34 @@ struct ClockOrder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Activity {
     Active,
+    ActiveOverride(quartz_protocol::AnnotationId),
+    #[expect(
+        clippy::enum_variant_names,
+        reason = "03 section 5.1 names this activity OfflineActivity"
+    )]
+    OfflineActivity(quartz_protocol::AnnotationId),
     Idle,
     NoForeground,
     Excluded,
-    Stopped { reasons: Vec<StopReason> },
+    Stopped {
+        reasons: Vec<StopReason>,
+    },
     CoreOffline,
-    Gap { reason: GapReason },
+    Gap {
+        reason: GapReason,
+    },
+}
+impl Activity {
+    fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Self::Active | Self::ActiveOverride(_) | Self::OfflineActivity(_)
+        )
+    }
 }
 #[derive(Debug, Clone)]
 pub(crate) enum CategorySource {
+    Annotation(quartz_protocol::AnnotationId),
     Rule(std::sync::Arc<quartz_domain::rules::ExplanationId>),
     Unclassified,
 }
@@ -59,6 +79,7 @@ pub(crate) struct DerivedSegment {
     pub activity: Activity,
     category_source: CategorySource,
     pub interval_id: Option<FactId>,
+    pub pending_idle: Option<QueryRange>,
 }
 #[derive(Debug)]
 #[cfg_attr(test, derive(Clone))]
@@ -147,6 +168,7 @@ impl Sweep {
 pub(crate) struct Pipeline {
     range: QueryRange,
     rows: Vec<ClassifiedInput>,
+    annotations: Vec<usize>,
     clocks: BTreeMap<ClockSegmentId, Sweep>,
     clock_order: BTreeSet<ClockOrder>,
     segments: Vec<DerivedSegment>,
@@ -160,6 +182,7 @@ impl Pipeline {
             range,
             classifier,
             rows: Vec::new(),
+            annotations: Vec::new(),
             clocks: BTreeMap::new(),
             clock_order: BTreeSet::new(),
             segments: Vec::new(),
@@ -184,6 +207,7 @@ impl Pipeline {
     fn classify_row(&mut self, row: &InputRow) -> ClassificationId {
         match row {
             InputRow::Foreground(row) => self.classifier.classify(row),
+            InputRow::Annotation(annotation) => self.classifier.annotation(annotation),
             _ => ClassificationId::UNCLASSIFIED,
         }
     }
@@ -235,6 +259,31 @@ impl Pipeline {
             );
             return Ok(());
         }
+        if let InputRow::Annotation(annotation) = &row.input {
+            if annotation.range.end <= annotation.range.start {
+                return Err(DeriveSegmentsError::InvalidSpan);
+            }
+            let index = self.rows.len();
+            for sweep in self.clocks.values_mut() {
+                let start = annotation
+                    .range
+                    .start
+                    .max(sweep.clock.start_utc_ms)
+                    .max(self.range.start);
+                let end = annotation
+                    .range
+                    .end
+                    .min(sweep.clock.end_utc_ms)
+                    .min(self.range.end);
+                if start < end {
+                    sweep.insert(start, index, BoundaryEdge::Start);
+                    sweep.insert(end, index, BoundaryEdge::End);
+                }
+            }
+            self.annotations.push(index);
+            self.rows.push(row);
+            return Ok(());
+        }
         if let Some(span) = row.input.span() {
             if span.end_mono_ms < span.start_mono_ms || span.end_utc_ms < span.start_utc_ms {
                 return Err(DeriveSegmentsError::InvalidSpan);
@@ -282,6 +331,33 @@ impl Pipeline {
             });
         }
     }
+    fn offline_segment(&self, range: QueryRange) -> DerivedSegment {
+        let mut segment = DerivedSegment {
+            span: SpanDuration {
+                start_utc_ms: range.start,
+                end_utc_ms: range.end,
+                duration_ms: range.end - range.start,
+            },
+            clock_segment_id: None,
+            foreground: None,
+            classification: ClassificationId::UNCLASSIFIED,
+            activity: Activity::CoreOffline,
+            category_source: CategorySource::Unclassified,
+            interval_id: None,
+            pending_idle: None,
+        };
+        for &index in &self.annotations {
+            let row = &self.rows[index];
+            if let InputRow::Annotation(annotation) = &row.input
+                && annotation.kind == quartz_protocol::AnnotationKind::OfflineActivity
+                && annotation.range.start <= range.start
+                && annotation.range.end >= range.end
+            {
+                segment.apply_offline(annotation, row.classification);
+            }
+        }
+        segment
+    }
     /// Processes a bounded number of boundaries; returns true after the last turn.
     pub(crate) fn advance(&mut self) -> bool {
         for _ in 0..QUERY_BATCH_ROWS {
@@ -290,19 +366,32 @@ impl Pipeline {
                 .offline
                 .pop_front_if(|range| order.is_none_or(|clock| range.start < clock.start))
             {
-                self.segments.push(DerivedSegment {
-                    span: SpanDuration {
-                        start_utc_ms: range.start,
-                        end_utc_ms: range.end,
-                        duration_ms: range.end - range.start,
-                    },
-                    clock_segment_id: None,
-                    foreground: None,
-                    classification: ClassificationId::UNCLASSIFIED,
-                    activity: Activity::CoreOffline,
-                    category_source: CategorySource::Unclassified,
-                    interval_id: None,
-                });
+                let boundary = self
+                    .annotations
+                    .iter()
+                    .filter_map(|&index| match &self.rows[index].input {
+                        InputRow::Annotation(annotation)
+                            if annotation.kind
+                                == quartz_protocol::AnnotationKind::OfflineActivity =>
+                        {
+                            Some(annotation)
+                        }
+                        _ => None,
+                    })
+                    .flat_map(|annotation| [annotation.range.start, annotation.range.end])
+                    .filter(|at| *at > range.start && *at < range.end)
+                    .min();
+                let end = boundary.unwrap_or(range.end);
+                if end < range.end {
+                    self.offline.push_front(QueryRange {
+                        start: end,
+                        end: range.end,
+                    });
+                }
+                self.segments.push(self.offline_segment(QueryRange {
+                    start: range.start,
+                    end,
+                }));
                 continue;
             }
             let Some(order) = order else {
@@ -341,6 +430,10 @@ impl Pipeline {
         let mut gap = None;
         let mut stopped_span = None;
         let mut gap_span = None;
+        let mut category_override = None;
+        let mut active_override = None;
+        let mut offline_activity = None;
+        let mut annotated_away = None;
         for &index in &sweep.active {
             match &rows[index].input {
                 InputRow::Foreground(row) => {
@@ -367,10 +460,21 @@ impl Pipeline {
                     gap = Some(*reason);
                     gap_span = Some(span);
                 }
+                InputRow::Annotation(annotation) => {
+                    use quartz_protocol::AnnotationKind;
+                    match annotation.kind {
+                        AnnotationKind::CategoryOverride => category_override = Some(&rows[index]),
+                        AnnotationKind::ActiveOverride => active_override = Some(&rows[index]),
+                        AnnotationKind::OfflineActivity => offline_activity = Some(&rows[index]),
+                        AnnotationKind::Note | AnnotationKind::DismissedAway => {}
+                    }
+                    if annotation.kind != AnnotationKind::CategoryOverride {
+                        annotated_away = Some(annotation.kind);
+                    }
+                }
                 InputRow::Clock(_) => unreachable!("clocks are not fact rows"),
             }
         }
-        // TODO(M2-D): Apply annotation category and activity overrides before aggregation.
         let activity = if let Some(reason) = gap {
             Activity::Gap { reason }
         } else if !reasons.is_empty() {
@@ -396,7 +500,7 @@ impl Pipeline {
             Some(span) => span.duration_within(range),
             None => sweep.clock.duration_within(range),
         };
-        DerivedSegment {
+        let mut segment = DerivedSegment {
             span: SpanDuration {
                 start_utc_ms: start,
                 end_utc_ms: end,
@@ -410,7 +514,36 @@ impl Pipeline {
                 rows[index.0].source.clone()
             }),
             interval_id: foreground.map(|row| row.span.id),
+            pending_idle: (idle && stopped_span.is_none() && annotated_away.is_none())
+                .then_some(range),
+        };
+        if segment.activity == Activity::Idle
+            && let Some(row) = active_override
+            && let InputRow::Annotation(annotation) = &row.input
+        {
+            segment.activity = Activity::ActiveOverride(annotation.id.clone());
+            if annotation.category.is_some() {
+                segment.classification = row.classification;
+                segment.category_source = row.source.clone();
+            }
         }
+        if segment.activity.is_active() {
+            if let Some(row) = category_override {
+                segment.classification = row.classification;
+                segment.category_source = row.source.clone();
+            }
+        } else if matches!(
+            segment.activity,
+            Activity::Idle
+                | Activity::Stopped { .. }
+                | Activity::Gap { .. }
+                | Activity::NoForeground
+        ) && let Some(row) = offline_activity
+            && let InputRow::Annotation(annotation) = &row.input
+        {
+            segment.apply_offline(annotation, row.classification);
+        }
+        segment
     }
     pub(crate) fn into_segments(self) -> DerivedSegments {
         DerivedSegments {
@@ -420,6 +553,15 @@ impl Pipeline {
                 classifier: self.classifier,
             },
         }
+    }
+}
+impl DerivedSegment {
+    fn apply_offline(&mut self, annotation: &QueryAnnotation, classification: ClassificationId) {
+        self.activity = Activity::OfflineActivity(annotation.id.clone());
+        self.classification = classification;
+        self.category_source = CategorySource::Annotation(annotation.id.clone());
+        self.foreground = None;
+        self.interval_id = None;
     }
 }
 #[derive(Debug)]
@@ -438,11 +580,16 @@ impl DayAggregation {
         builder.finish()
     }
 }
+#[derive(Debug, PartialEq, Eq)]
+enum ActiveApplication {
+    Captured(Option<ApplicationId>),
+    Offline(quartz_protocol::AnnotationId),
+}
 #[derive(Debug)]
 struct PreviousActive {
     segment: Option<ClockSegmentId>,
     end: i64,
-    app: Option<ApplicationId>,
+    app: ActiveApplication,
 }
 #[derive(Debug)]
 pub(crate) struct DayAccumulator {
@@ -475,7 +622,7 @@ impl DayAccumulator {
     pub(crate) fn push(&mut self, segment: &DerivedSegment, facts: &SegmentFacts) {
         let current = &segment.span;
         let category = facts.category(segment);
-        if segment.activity != Activity::Active {
+        if !segment.activity.is_active() {
             self.previous = None;
             self.focus_run_ms = 0;
             return;
@@ -515,7 +662,10 @@ impl DayAccumulator {
                 })
                 .active_ms += current.duration_ms;
         }
-        let app = facts.app(segment).map(|app| ApplicationId(app.id.0));
+        let app = match &segment.activity {
+            Activity::OfflineActivity(id) => ActiveApplication::Offline(id.clone()),
+            _ => ActiveApplication::Captured(facts.app(segment).map(|app| ApplicationId(app.id.0))),
+        };
         if self.previous.as_ref().is_some_and(|old| {
             old.segment == segment.clock_segment_id
                 && old.end == current.start_utc_ms
@@ -609,6 +759,14 @@ impl TimelineProjection {
                 .map(|id| quartz_protocol::ClockSegmentId(id.0)),
             activity: match &segment.activity {
                 Activity::Active => quartz_protocol::Activity::Active,
+                Activity::ActiveOverride(annotation) => quartz_protocol::Activity::ActiveOverride {
+                    annotation: annotation.clone(),
+                },
+                Activity::OfflineActivity(annotation) => {
+                    quartz_protocol::Activity::OfflineActivity {
+                        annotation: annotation.clone(),
+                    }
+                }
                 Activity::Idle => quartz_protocol::Activity::Idle,
                 Activity::NoForeground => quartz_protocol::Activity::NoForeground,
                 Activity::Excluded => quartz_protocol::Activity::Excluded,
@@ -639,6 +797,11 @@ impl TimelineProjection {
             category: facts.category(segment).clone(),
             category_source: match &segment.category_source {
                 CategorySource::Unclassified => quartz_protocol::CategorySource::Unclassified,
+                CategorySource::Annotation(annotation) => {
+                    quartz_protocol::CategorySource::Annotation {
+                        annotation: annotation.clone(),
+                    }
+                }
                 CategorySource::Rule(rule) => quartz_protocol::CategorySource::Rule {
                     rule: rule
                         .as_str()
@@ -675,8 +838,16 @@ impl TimelineProjection {
             && last.clock_segment_id == current.clock_segment_id
             && last.activity == current.activity
             && last.category.id() == current.category.id()
-            && (detail == TimelineDetail::Category
-                || last.category_source == current.category_source)
+            && (last.category_source == current.category_source
+                || (detail == TimelineDetail::Category
+                    && !matches!(
+                        last.category_source,
+                        quartz_protocol::CategorySource::Annotation { .. }
+                    )
+                    && !matches!(
+                        current.category_source,
+                        quartz_protocol::CategorySource::Annotation { .. }
+                    )))
             && last.app == current.app
             && last.title == current.title
             && u64::try_from(current.end_utc_ms - last.start_utc_ms)

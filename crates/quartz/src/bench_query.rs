@@ -247,7 +247,8 @@ impl<'path> BenchQuery<'path> {
     ) -> Result<ReadOnlyStore, BenchQueryError> {
         use crate::query::{QueryJob, QueryRequest};
         use quartz_protocol::{
-            MillisecondsPerPixel, QueryDayRequest, QueryTimelineRequest, TimelineDetail,
+            MillisecondsPerPixel, QueryDayRequest, QueryPendingAwayRequest, QueryTimelineRequest,
+            TimelineDetail,
         };
         let registry = quartz_domain::rules::registry::RuleRegistry::from_state(
             reader.rule_sets().load().context(RulesSnafu)?,
@@ -287,11 +288,16 @@ impl<'path> BenchQuery<'path> {
             }),
             timeline(1),
             timeline(WEEK_DAYS),
+            QueryRequest::PendingAway(QueryPendingAwayRequest {
+                local_date,
+                cursor: None,
+            }),
         ];
         snafu::ensure!(self.runs > 0, RunsSnafu);
         for query in queries {
             let name = match &query {
                 QueryRequest::Day(_) => "pipeline.day",
+                QueryRequest::PendingAway(_) => "pipeline.pending_away",
                 QueryRequest::Timeline(query)
                     if query.end_utc_ms - query.start_utc_ms == UTC_DAY_MS =>
                 {

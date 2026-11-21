@@ -1,6 +1,6 @@
 //! Typed day summaries, timelines, and version-bound pagination.
 
-use crate::LocalDate;
+use crate::{AnnotationId, LocalDate};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -42,6 +42,8 @@ impl QueryCursor {
 pub enum CursorQuery {
     /// A logical date in the core's current system time zone.
     Day { local_date: LocalDate },
+    /// Pending idle pieces in a logical day.
+    PendingAway { local_date: LocalDate },
     /// A UTC range and its display projection.
     Timeline {
         start_utc_ms: i64,
@@ -66,6 +68,34 @@ impl From<&QueryTimelineRequest> for CursorQuery {
             ms_per_pixel: request.ms_per_pixel,
         }
     }
+}
+impl From<&QueryPendingAwayRequest> for CursorQuery {
+    fn from(request: &QueryPendingAwayRequest) -> Self {
+        Self::PendingAway {
+            local_date: request.local_date,
+        }
+    }
+}
+/// Pending idle query in the core's current system time zone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryPendingAwayRequest {
+    pub local_date: LocalDate,
+    #[serde(default)]
+    pub cursor: Option<QueryCursor>,
+}
+/// Uncovered contiguous idle time, with UTC boundaries and elapsed duration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAway {
+    pub start_utc_ms: i64,
+    pub end_utc_ms: i64,
+    pub duration_ms: i64,
+}
+/// One version-bound page of pending idle pieces ordered by start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryPendingAwayResponse {
+    pub ranges: Vec<PendingAway>,
+    pub versions: QueryVersions,
+    pub next_cursor: Option<QueryCursor>,
 }
 /// Digest of all persisted and semantic query inputs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +222,9 @@ pub enum CategorySource {
     Rule {
         rule: ClassificationRuleId,
     },
+    Annotation {
+        annotation: AnnotationId,
+    },
     /// A category projection merged slices with different classification sources.
     Mixed,
 }
@@ -218,6 +251,8 @@ pub enum QueryGapReason {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Activity {
     Active,
+    ActiveOverride { annotation: AnnotationId },
+    OfflineActivity { annotation: AnnotationId },
     Idle,
     NoForeground,
     Excluded,
@@ -427,6 +462,87 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<QueryTimelineResponse>(expected).expect("timeline response"),
             response
+        );
+    }
+    #[test]
+    fn annotated_timeline_and_pending_away_match_new_golden_json() {
+        let id = |number: u32| {
+            AnnotationId(
+                format!("abcdef00-0000-4000-8000-{number:012x}")
+                    .parse()
+                    .expect("UUID"),
+            )
+        };
+        let response = QueryTimelineResponse {
+            segments: vec![
+                TimelineSegment {
+                    start_utc_ms: 0,
+                    end_utc_ms: 1000,
+                    duration_ms: 1000,
+                    clock_segment_id: Some(ClockSegmentId(2)),
+                    activity: Activity::ActiveOverride { annotation: id(1) },
+                    category: CategoryRef::Unclassified,
+                    category_source: CategorySource::Annotation { annotation: id(1) },
+                    app: None,
+                    title: None,
+                },
+                TimelineSegment {
+                    start_utc_ms: 1000,
+                    end_utc_ms: 2000,
+                    duration_ms: 1000,
+                    clock_segment_id: None,
+                    activity: Activity::OfflineActivity { annotation: id(2) },
+                    category: CategoryRef::Unclassified,
+                    category_source: CategorySource::Annotation { annotation: id(2) },
+                    app: None,
+                    title: None,
+                },
+            ],
+            versions: QueryVersions("version-token".into()),
+            next_cursor: None,
+        };
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/timeline-annotations.json"))
+                .expect("annotated golden");
+        assert_eq!(serde_json::to_value(&response).expect("encode"), expected);
+        assert_eq!(
+            serde_json::from_value::<QueryTimelineResponse>(expected).expect("decode"),
+            response
+        );
+        let response = QueryPendingAwayResponse {
+            ranges: vec![PendingAway {
+                start_utc_ms: 0,
+                end_utc_ms: 1_200_000,
+                duration_ms: 1_200_000,
+            }],
+            versions: QueryVersions("version-token".into()),
+            next_cursor: None,
+        };
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/pending-away.json"))
+                .expect("pending golden");
+        assert_eq!(serde_json::to_value(&response).expect("encode"), expected);
+        assert_eq!(
+            serde_json::from_value::<QueryPendingAwayResponse>(expected).expect("decode"),
+            response
+        );
+        let request = QueryPendingAwayRequest {
+            local_date: "2025-01-02".parse().expect("date"),
+            cursor: None,
+        };
+        let cursor = QueryCursor::new(
+            QueryVersions("version-token".into()),
+            CursorQuery::from(&request),
+            1,
+        );
+        let value = serde_json::to_value(&cursor).expect("cursor");
+        assert_eq!(
+            value["query"],
+            serde_json::json!({"kind":"pending_away", "local_date":"2025-01-02"})
+        );
+        assert_eq!(
+            serde_json::from_value::<QueryCursor>(value).expect("cursor round trip"),
+            cursor
         );
     }
     #[test]

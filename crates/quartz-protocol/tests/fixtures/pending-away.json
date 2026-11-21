@@ -1,0 +1,11 @@
+{
+  "ranges": [
+    {
+      "start_utc_ms": 0,
+      "end_utc_ms": 1200000,
+      "duration_ms": 1200000
+    }
+  ],
+  "versions": "version-token",
+  "next_cursor": null
+}

@@ -119,6 +119,32 @@ impl Classifier {
             results: vec![Classification::unclassified()],
         }
     }
+    pub(super) fn annotation(
+        &mut self,
+        annotation: &crate::store::query::QueryAnnotation,
+    ) -> ClassificationId {
+        let category = annotation
+            .category
+            .and_then(|id| {
+                self.categories
+                    .values()
+                    .find(|category| category.id.0 == id.0)
+            })
+            .cloned();
+        if let Some(category_id) = annotation.category
+            && category.is_none()
+        {
+            tracing::debug!(annotation = %annotation.id.0, category = category_id.0, "annotation references a missing or archived category");
+        }
+        let id = ClassificationId(self.results.len());
+        self.results.push(Classification {
+            category: category.map_or(CategoryRef::Unclassified, |category| {
+                CategoryRef::Classified { category }
+            }),
+            source: CategorySource::Annotation(annotation.id.clone()),
+        });
+        id
+    }
     #[cfg(test)]
     pub(super) fn result_mut(&mut self, id: ClassificationId) -> &mut Classification {
         &mut self.results[id.0]

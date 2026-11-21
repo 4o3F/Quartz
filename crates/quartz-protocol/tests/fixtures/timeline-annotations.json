@@ -1,0 +1,40 @@
+{
+  "segments": [
+    {
+      "start_utc_ms": 0,
+      "end_utc_ms": 1000,
+      "duration_ms": 1000,
+      "clock_segment_id": 2,
+      "activity": {
+        "kind": "active_override",
+        "annotation": "abcdef00-0000-4000-8000-000000000001"
+      },
+      "category": {
+        "kind": "unclassified"
+      },
+      "category_source": {
+        "kind": "annotation",
+        "annotation": "abcdef00-0000-4000-8000-000000000001"
+      }
+    },
+    {
+      "start_utc_ms": 1000,
+      "end_utc_ms": 2000,
+      "duration_ms": 1000,
+      "clock_segment_id": null,
+      "activity": {
+        "kind": "offline_activity",
+        "annotation": "abcdef00-0000-4000-8000-000000000002"
+      },
+      "category": {
+        "kind": "unclassified"
+      },
+      "category_source": {
+        "kind": "annotation",
+        "annotation": "abcdef00-0000-4000-8000-000000000002"
+      }
+    }
+  ],
+  "versions": "version-token",
+  "next_cursor": null
+}

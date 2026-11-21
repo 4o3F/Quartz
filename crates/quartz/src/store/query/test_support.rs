@@ -264,6 +264,49 @@ impl QueryFixture {
             .execute(&mut self.store.writer)
             .expect("idle mask");
     }
+    pub(crate) fn mask_locked(&mut self, start: i64, end: i64) {
+        self.mask_idle(start, end);
+        diesel::update(
+            availability_intervals::table
+                .filter(availability_intervals::start_utc_ms.eq(self.start + start)),
+        )
+        .set(availability_intervals::reason.eq(enums::AvailabilityReason::Locked))
+        .execute(&mut self.store.writer)
+        .expect("locked mask");
+    }
+    pub(crate) fn annotate(
+        &mut self,
+        id: u32,
+        kind: quartz_protocol::AnnotationKind,
+        start: i64,
+        end: i64,
+        category: Option<quartz_protocol::BuiltinCategory>,
+    ) {
+        self.store
+            .create_annotations(
+                quartz_protocol::AnnotationsCreateRequest {
+                    entities: vec![quartz_protocol::CreateAnnotation {
+                        uuid: quartz_protocol::AnnotationId(
+                            format!("abcdef00-0000-4000-8000-{id:012x}")
+                                .parse()
+                                .expect("annotation UUID"),
+                        ),
+                        kind,
+                        values: quartz_protocol::AnnotationValues {
+                            start_utc_ms: self.start + start,
+                            end_utc_ms: self.start + end,
+                            category: category
+                                .map(|key| quartz_protocol::AnnotationCategory::Builtin { key }),
+                            label: (kind == quartz_protocol::AnnotationKind::Note)
+                                .then(|| "fixture".into()),
+                            note: None,
+                        },
+                    }],
+                },
+                quartz_domain::capture::UtcInstant::try_from(self.start).expect("UTC"),
+            )
+            .expect("annotation write");
+    }
     pub(crate) fn open_last_fact(&mut self, confirmed_ms: i64) {
         diesel::update(intervals::table.filter(intervals::id.eq(self.count)))
             .set((

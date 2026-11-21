@@ -5,12 +5,12 @@ use super::{
     enums::{self, IntegerCode},
     query_error::ReadQueryError,
     rows::{
-        ApplicationsRow, AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow,
+        AnnotationsRow, ApplicationsRow, AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow,
         ClockSegmentsRow, IntervalsRow,
     },
     schema::{
-        applications, availability_intervals, capture_gaps, capture_runs, clock_segments,
-        intervals, titles,
+        annotations, applications, availability_intervals, capture_gaps, capture_runs,
+        clock_segments, intervals, titles,
     },
     versions::QuerySettings,
 };
@@ -18,13 +18,16 @@ use quartz_domain::{
     capture::{GapReason, StopReason, limits::UTC_DAY_MS},
     facts::{
         ApplicationId, ApplicationRef, Availability, CaptureLevel, ClockSegment, ClockSegmentId,
-        FactId, FactSpan, Foreground, ForegroundKind, InputRow, QueryRange,
+        FactId, FactSpan, Foreground, ForegroundKind, QueryRange,
     },
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+
+mod input;
+pub(crate) use input::{InputRow, QueryAnnotation};
 
 /// Bounds each SQLite fact scan before the database loop services pending writes.
 pub(crate) const READ_BATCH_ROWS: usize = 256;
@@ -109,6 +112,7 @@ enum ScanCursor {
     AvailabilityClosed(StartCursor<FactId>),
     AvailabilityOpen(AvailabilityCursor),
     Gaps(StartCursor<FactId>),
+    Annotations(StartCursor<FactId>),
     Done,
 }
 impl ScanCursor {
@@ -128,7 +132,8 @@ impl ScanCursor {
             Self::AvailabilityOpen(_) => {
                 Self::Gaps(StartCursor::initial(FactId(i64::from(i32::MIN))))
             }
-            Self::Gaps(_) | Self::Done => Self::Done,
+            Self::Gaps(_) => Self::Annotations(StartCursor::initial(FactId(i64::MIN))),
+            Self::Annotations(_) | Self::Done => Self::Done,
         }
     }
 }
@@ -219,12 +224,59 @@ impl ReadSnapshot {
             }
             ScanCursor::AvailabilityOpen(cursor) => self.read_availability_open(range, cursor)?,
             ScanCursor::Gaps(cursor) => self.read_gaps(range, cursor)?,
+            ScanCursor::Annotations(cursor) => self.read_annotations(range, cursor)?,
             ScanCursor::Done => return Ok(None),
         };
         if result.len() < READ_BATCH_ROWS {
             self.cursor = self.cursor.next();
         }
         Ok(Some(result))
+    }
+    fn read_annotations(
+        &mut self,
+        range: QueryRange,
+        cursor: StartCursor<FactId>,
+    ) -> Result<Vec<InputRow>, ReadQueryError> {
+        let rows = annotations::table
+            .filter(annotations::start_utc_ms.lt(range.end))
+            .filter(annotations::end_utc_ms.gt(range.start))
+            .filter(
+                annotations::start_utc_ms
+                    .gt(cursor.start_utc_ms)
+                    .or(annotations::start_utc_ms
+                        .eq(cursor.start_utc_ms)
+                        .and(annotations::id.gt(cursor.id.0))),
+            )
+            .order(annotations::start_utc_ms)
+            .then_order_by(annotations::id)
+            .limit(i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64"))
+            .select(AnnotationsRow::as_select())
+            .load::<AnnotationsRow>(self.connection())?;
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.end_utc_ms <= row.start_utc_ms
+                || (row.kind == enums::AnnotationKind::CategoryOverride
+                    && row.category_id.is_none())
+            {
+                return Err(ReadQueryError::InvalidFacts);
+            }
+            self.cursor = ScanCursor::Annotations(StartCursor {
+                start_utc_ms: row.start_utc_ms,
+                id: FactId(row.id.ok_or(ReadQueryError::InvalidFacts)?),
+            });
+            result.push(InputRow::Annotation(QueryAnnotation {
+                id: quartz_protocol::AnnotationId(
+                    row.uuid.parse().map_err(|_| ReadQueryError::InvalidFacts)?,
+                ),
+                kind: row.kind.into(),
+                range: QueryRange {
+                    start: row.start_utc_ms,
+                    end: row.end_utc_ms,
+                },
+                category: row.category_id.map(quartz_domain::categories::CategoryId),
+            }));
+        }
+        Ok(result)
     }
     fn read_clock(
         &mut self,

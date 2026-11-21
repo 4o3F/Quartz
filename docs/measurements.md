@@ -664,3 +664,25 @@ C1 运行 `bench-query --db <已准备模拟库> --runs 100`，C2 运行 `bench-
 补充固定逻辑处理器 0（亲和性掩码 1）运行当前版本、真实软件映射副本 100 次，日汇总、日时间线、七天时间线 P95 分别为 4.418、6.021、38.427 ms；预算判断采用上述默认调度结果。
 
 验证通过：`cargo.exe fmt --all`、`cargo.exe clippy --workspace --all-targets --all-features --target-dir target/windows -- -D warnings`、`cargo.exe clippy --workspace --all-targets --target-dir target/windows -- -D warnings`。修复捕获队列溢出测试的清理通知同步后，`cargo.exe test --workspace --all-features --target-dir target/windows` 连续 5 轮通过，每轮 488 项测试通过，1 项需要可见 ApplicationFrameWindow 的检查被忽略。
+
+## M2-D3：注解查询与待标注空闲
+
+2026-11-20，比较 `49e2c5d` 与本次工作树的 release 构建，使用默认调度，不设置进程亲和性。两者采用相同的 365 天典型模拟数据，应用映射为 `code.exe`、`msedge.exe`、`windowsterminal.exe` 和 `vlc.exe`，提前安装内置分类和规则。无注解负载的注解表为空。
+
+注解负载从同一份模拟数据复制，在首七天各加入三条注解，共 21 条：日起点后 `[0, 60 分钟)` 为 learning 离线活动，`[8 小时, 8 小时 30 分钟)` 为不指定分类的有效活动覆盖，`[10 小时, 10 小时 20 分钟)` 为 communication 分类覆盖。测量完成后删除此次专用的注解数据库副本。
+
+构建命令为 `cargo.exe build --package quartz --release --target-dir target/windows`；对照版本从 `49e2c5d` 的源码归档构建。每份已准备的模拟库执行 `quartz.exe bench-query --db <模拟库> --runs 100 --scope pipeline --input prepared`。每项查询采样 100 次，报告包含快照准备、完整派生与聚合、首个响应体分页和编码的总耗时；`pending_away` 查询使用与日汇总相同的逻辑日期。
+
+验证通过：`cargo.exe fmt --all`、`cargo.exe clippy --workspace --all-targets --all-features --target-dir target/windows -- -D warnings`、`cargo.exe clippy --workspace --all-targets --target-dir target/windows -- -D warnings`。`cargo.exe test --workspace --all-features --target-dir target/windows` 连续三轮通过，每轮 542 项通过、1 项忽略；忽略项需要已有可见的 ApplicationFrameWindow。
+
+逻辑日期为 `2025-01-02`，核心系统时区为 `Asia/Shanghai`，日起点偏移为 0，日范围为 `[1735747200000, 1735833600000)`；七天时间轴从同一起点开始，使用 app 细节和 60,000 毫秒/像素。两个版本均构建完成后，无注解负载交替执行四轮，每轮各项 100 次；表中为四轮 P95 的中位数。注解负载执行一轮，每项 100 次。
+
+| 版本与负载 | 日汇总 P95（ms） | 日时间轴 P95（ms） | 七天时间轴 P95（ms） | pending_away P95（ms） |
+|---|---:|---:|---:|---:|
+| `49e2c5d`，无注解 | 7.343 | 8.727 | 51.301 | — |
+| 当前版本，无注解 | 7.799 | 9.137 | 54.210 | 10.055 |
+| 当前版本，21 条注解 | 7.299 | 10.016 | 57.086 | 11.742 |
+
+无注解对照四轮的日汇总、日时间轴、七天时间轴 P95 范围分别为 6.751–7.888、7.790–9.513、50.006–52.653 ms；当前版本分别为 6.926–9.466、8.839–10.648、51.414–55.203 ms，pending_away 为 8.865–11.169 ms。前三项 P95 中位数分别高 6.20%、4.70%、5.67%，各轮测量区间重叠，差异与本轮默认调度下的波动相当。当前日汇总和七天时间轴均低于 D1 约 10.3 和 61 ms 的参考值。
+
+当前无注解与注解负载的最大 Private Bytes 增量为 7.914 MiB，低于 20 MiB。新增 `timeline-annotations.json` 和 `pending-away.json` 两份协议 golden；原有无注解 day 和 timeline golden 文件逐字节保持不变。

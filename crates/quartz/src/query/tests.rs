@@ -735,3 +735,308 @@ impl pipeline::DerivedSegments {
         )
     }
 }
+
+fn annotation(
+    id: u32,
+    kind: quartz_protocol::AnnotationKind,
+    start: i64,
+    end: i64,
+    category: Option<i64>,
+) -> InputRow {
+    InputRow::Annotation(input::QueryAnnotation {
+        id: quartz_protocol::AnnotationId(
+            format!("abcdef00-0000-4000-8000-{id:012x}")
+                .parse()
+                .expect("annotation UUID"),
+        ),
+        kind,
+        range: QueryRange { start, end },
+        category: category.map(quartz_domain::categories::CategoryId),
+    })
+}
+
+#[test]
+fn annotation_categories_restore_allowed_idle_and_preserve_ineligible_slices() {
+    use quartz_protocol::{AnnotationKind, BuiltinCategory, CategoryRef, CategorySource};
+    let mut excluded = classified_window(2, 60, 80, "code.exe");
+    if let InputRow::Foreground(row) = &mut excluded {
+        edit_foreground(row, CaptureLevel::Excluded, |_| {});
+    }
+    let no_foreground = InputRow::Foreground(Foreground::new(
+        span(3, 80, 100),
+        ForegroundKind::NoForeground,
+        CaptureLevel::Full,
+        Default::default(),
+    ));
+    let segments = derive_classified(
+        vec![
+            clock(1, 0, 0, 100),
+            classified_window(1, 0, 60, "code.exe"),
+            excluded,
+            no_foreground,
+            InputRow::Availability {
+                span: span(4, 20, 100),
+                state: Availability::Idle,
+            },
+            annotation(1, AnnotationKind::CategoryOverride, 0, 100, Some(4)),
+            annotation(2, AnnotationKind::ActiveOverride, 40, 100, Some(2)),
+        ],
+        QueryRange { start: 0, end: 100 },
+        classifier(&[]),
+    );
+    let active = segments.display(0);
+    assert_eq!(active.duration_ms, 20);
+    assert_eq!(active.activity, Activity::Active);
+    assert!(matches!(
+        active.category_source,
+        CategorySource::Annotation { .. }
+    ));
+    assert!(
+        matches!(active.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Entertainment))
+    );
+    let idle = segments.display(1);
+    assert_eq!(idle.activity, Activity::Idle);
+    assert!(matches!(idle.category_source, CategorySource::Rule { .. }));
+    assert!(
+        matches!(idle.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Development))
+    );
+    let restored = segments.display(2);
+    assert!(matches!(restored.activity, Activity::ActiveOverride { .. }));
+    assert!(
+        matches!(restored.category_source, CategorySource::Annotation { annotation } if annotation.0.to_string().ends_with("000000000001"))
+    );
+    assert!(
+        matches!(restored.category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Entertainment))
+    );
+    assert_eq!(segments.display(3).activity, Activity::Excluded);
+    assert_eq!(
+        segments.display(3).category_source,
+        CategorySource::Unclassified
+    );
+    assert_eq!(segments.display(4).activity, Activity::NoForeground);
+    let day = DayAggregation::new(
+        DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("day"),
+        &segments,
+    );
+    assert_eq!(day.metrics.active_ms, 40);
+    assert_eq!(day.metrics.distract_ratio, 1.0);
+}
+
+#[test]
+fn active_override_uses_optional_category_or_rule_and_only_restores_idle() {
+    use quartz_protocol::{AnnotationKind, BuiltinCategory, CategoryRef};
+    let segments = derive_classified(
+        vec![
+            clock(1, 0, 0, 80),
+            classified_window(1, 0, 80, "code.exe"),
+            InputRow::Availability {
+                span: span(2, 0, 80),
+                state: Availability::Idle,
+            },
+            InputRow::Availability {
+                span: span(3, 60, 80),
+                state: Availability::Stopped(StopReason::Locked),
+            },
+            annotation(1, AnnotationKind::ActiveOverride, 0, 20, None),
+            annotation(2, AnnotationKind::ActiveOverride, 20, 80, Some(2)),
+        ],
+        QueryRange { start: 0, end: 80 },
+        classifier(&[]),
+    );
+    assert!(
+        matches!(segments.display(0).category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Development))
+    );
+    assert!(
+        matches!(segments.display(1).category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Learning))
+    );
+    assert!(matches!(
+        segments.display(2).activity,
+        Activity::Stopped { .. }
+    ));
+    let day = DayAggregation::new(
+        DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("day"),
+        &segments,
+    );
+    assert_eq!(day.metrics.active_ms, 60);
+    assert_eq!(day.metrics.longest_focus_ms, 60);
+}
+
+#[test]
+fn offline_activity_fills_idle_stopped_gap_no_foreground_and_core_offline_as_a_union() {
+    use quartz_protocol::{AnnotationKind, CategoryRef};
+    let segments = derive_classified(
+        vec![
+            clock(1, 0, 0, 100),
+            classified_window(1, 0, 40, "code.exe"),
+            InputRow::Availability {
+                span: span(2, 20, 40),
+                state: Availability::Idle,
+            },
+            InputRow::Availability {
+                span: span(3, 40, 60),
+                state: Availability::Stopped(StopReason::Locked),
+            },
+            InputRow::Gap {
+                span: span(4, 60, 80),
+                reason: quartz_domain::capture::GapReason::DatabaseError,
+            },
+            annotation(1, AnnotationKind::OfflineActivity, 10, 120, Some(2)),
+            annotation(2, AnnotationKind::ActiveOverride, 30, 40, None),
+            annotation(3, AnnotationKind::OfflineActivity, 120, 130, None),
+        ],
+        QueryRange { start: 0, end: 140 },
+        classifier(&[]),
+    );
+    for segment in &segments.segments {
+        let display = segments.project(segment);
+        match display.start_utc_ms {
+            0 | 10 => assert_eq!(display.activity, Activity::Active),
+            30 => assert!(matches!(display.activity, Activity::ActiveOverride { .. })),
+            130 => assert!(
+                matches!(display.activity, Activity::Stopped { reasons } if reasons == vec![QueryStopReason::CoreOffline])
+            ),
+            _ => {
+                assert!(matches!(display.activity, Activity::OfflineActivity { .. }));
+                assert!(display.app.is_none());
+                assert!(display.title.is_none());
+            }
+        }
+    }
+    assert_eq!(
+        segments
+            .segments
+            .iter()
+            .filter(|segment| matches!(segment.activity, pipeline::Activity::OfflineActivity(_)))
+            .map(|segment| segment.span.duration_ms)
+            .sum::<i64>(),
+        100
+    );
+    let last_activity = segments
+        .segments
+        .iter()
+        .find(|segment| segment.span.start_utc_ms == 120)
+        .expect("unclassified offline");
+    assert_eq!(
+        segments.project(last_activity).category,
+        CategoryRef::Unclassified
+    );
+    let day = DayAggregation::new(
+        DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("day"),
+        &segments,
+    );
+    assert_eq!(day.metrics.active_ms, 130);
+    assert_eq!(day.metrics.unclassified_ms, 10);
+    assert_eq!(day.metrics.longest_focus_ms, 100);
+    assert_eq!(day.ranking[0].active_ms, 30);
+    assert_eq!(day.metrics.switches_per_hour, 4.0 * 3_600_000.0 / 130.0);
+    assert_eq!(
+        day.calendar
+            .hours
+            .iter()
+            .flat_map(|hour| &hour.categories)
+            .map(|category| category.duration_ms)
+            .sum::<i64>(),
+        130
+    );
+}
+
+#[test]
+fn notes_and_dismissals_only_split_boundaries_and_annotation_sources_never_merge() {
+    use quartz_protocol::AnnotationKind;
+    let rows = vec![
+        clock(1, 0, 0, 100),
+        classified_window(1, 0, 100, "code.exe"),
+    ];
+    let original = derive_classified(
+        rows.clone(),
+        QueryRange { start: 0, end: 100 },
+        classifier(&[]),
+    );
+    let mut annotated = rows;
+    annotated.extend([
+        annotation(1, AnnotationKind::Note, 10, 60, None),
+        annotation(2, AnnotationKind::DismissedAway, 40, 80, None),
+    ]);
+    let segments = derive_classified(
+        annotated.clone(),
+        QueryRange { start: 0, end: 100 },
+        classifier(&[]),
+    );
+    let calendar = DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("day");
+    assert_eq!(
+        DayAggregation::new(calendar.clone(), &original).metrics,
+        DayAggregation::new(calendar, &segments).metrics
+    );
+    assert!(
+        segments
+            .segments
+            .iter()
+            .all(|segment| segments.project(segment).category == original.display(0).category)
+    );
+    annotated.extend([
+        annotation(3, AnnotationKind::CategoryOverride, 0, 50, Some(2)),
+        annotation(4, AnnotationKind::CategoryOverride, 50, 100, Some(2)),
+    ]);
+    let segments = derive_classified(
+        annotated,
+        QueryRange { start: 0, end: 100 },
+        classifier(&[]),
+    );
+    let mut projection = TimelineProjection::default();
+    for segment in &segments.segments {
+        projection.push(
+            segment,
+            &segments.facts,
+            quartz_protocol::TimelineDetail::Category,
+            1000,
+        );
+    }
+    let projected = projection.into_segments();
+    assert_eq!(projected.len(), 2);
+    assert_ne!(projected[0].category_source, projected[1].category_source);
+}
+
+#[test]
+fn pending_away_uses_idle_availability_even_without_a_window_and_subtracts_stops() {
+    const MINUTE_MS: i64 = 60_000;
+    let segments = derive(
+        vec![
+            clock(1, 0, 0, 90 * MINUTE_MS),
+            InputRow::Availability {
+                span: span(1, 0, 90 * MINUTE_MS),
+                state: Availability::Idle,
+            },
+            InputRow::Availability {
+                span: span(2, 30 * MINUTE_MS, 60 * MINUTE_MS),
+                state: Availability::Stopped(StopReason::Locked),
+            },
+            InputRow::Gap {
+                span: span(3, 10 * MINUTE_MS, 20 * MINUTE_MS),
+                reason: quartz_domain::capture::GapReason::DatabaseError,
+            },
+        ],
+        QueryRange {
+            start: 0,
+            end: 90 * MINUTE_MS,
+        },
+    );
+    let mut pending = pending_away::PendingAwayAccumulator::default();
+    for segment in &segments.segments {
+        pending.push(segment);
+    }
+    assert_eq!(
+        pending.finish(),
+        vec![
+            quartz_protocol::PendingAway {
+                start_utc_ms: 0,
+                end_utc_ms: 30 * MINUTE_MS,
+                duration_ms: 30 * MINUTE_MS
+            },
+            quartz_protocol::PendingAway {
+                start_utc_ms: 60 * MINUTE_MS,
+                end_utc_ms: 90 * MINUTE_MS,
+                duration_ms: 30 * MINUTE_MS
+            },
+        ]
+    );
+}
