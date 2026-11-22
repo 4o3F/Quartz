@@ -367,3 +367,84 @@ ui.failure.ui_version:
   en: "Window version"
 ui.failure.protocol:
   en: "Protocol"
+
+tooltip.mixed:
+  en: "Multiple classification sources"
+
+today.updating:
+  en: "Updating…"
+
+today.query_failed.title:
+  en: "Could not load this day"
+
+today.query_failed.message:
+  en: "Retry to load this day again."
+
+today.query_failed.busy:
+  en: "The core is handling other queries. Please try again."
+
+today.retry:
+  en: "Retry"
+
+today.go_today:
+  en: "Go to today"
+
+today.empty_today.title:
+  en: "No activity recorded today"
+
+today.empty_today.message:
+  en: "Your recorded activity will appear here."
+
+today.empty_past.title:
+  en: "No activity recorded on this day"
+
+today.empty_past.message:
+  en: "The core may not have been running, or the records were deleted."
+
+today.resume:
+  en: "Resume"
+
+today.stop.starting:
+  en: "Recording is starting"
+
+today.stop.persistence:
+  en: "Could not save recordings. The core will retry."
+
+today.stop.session:
+  en: "Session status is unavailable"
+
+today.stop.gap:
+  en: "Capture is temporarily interrupted"
+
+today.stop.locked:
+  en: "Recording stopped while the screen is locked"
+
+today.stop.disconnected:
+  en: "Recording stopped while the session is disconnected"
+
+today.stop.suspended:
+  en: "Recording stopped while the device is suspended"
+
+today.stop.paused:
+  en: "Recording is paused"
+
+today.stop.foreground:
+  en: "There is no foreground window to record"
+
+today.stop.ended:
+  en: "Recording has ended"
+
+today.calendar.month:
+  en: "%{month} %{value}"
+
+clock.twelve:
+  en: "%{hours}:%{minutes} %{name}"
+
+clock.morning:
+  en: "AM"
+
+clock.afternoon:
+  en: "PM"
+
+today.locale_unavailable:
+  en: "Regional settings unavailable; times use 24-hour format"

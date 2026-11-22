@@ -4,6 +4,8 @@ use std::{fmt, time::Duration};
 
 use snafu::Snafu;
 
+/// Milliseconds in one second.
+pub(crate) const MILLIS_PER_SECOND: u32 = 1000;
 /// Seconds in one minute.
 pub(crate) const SECONDS_PER_MINUTE: u32 = 60;
 /// Minutes in one hour.
@@ -13,7 +15,7 @@ pub(crate) const SECONDS_PER_HOUR: u32 = SECONDS_PER_MINUTE * MINUTES_PER_HOUR;
 /// Hours in one logical day (03 section 1).
 pub(crate) const HOURS_PER_DAY: u32 = 24;
 
-/// Seconds since the start of the logical day, from 00:00 to 24:00 inclusive.
+/// Elapsed milliseconds from the logical day start; live days can span 23 or 25 hours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub(crate) struct TimeOfDay(u32);
 
@@ -21,7 +23,7 @@ impl TimeOfDay {
     /// Start of the day.
     pub(crate) const START: Self = Self(0);
     /// End of the day (24:00).
-    pub(crate) const END: Self = Self(HOURS_PER_DAY * SECONDS_PER_HOUR);
+    pub(crate) const END: Self = Self(HOURS_PER_DAY * SECONDS_PER_HOUR * MILLIS_PER_SECOND);
 
     /// Builds a time from hours and minutes.
     ///
@@ -35,14 +37,15 @@ impl TimeOfDay {
             hours < HOURS_PER_DAY || (hours == HOURS_PER_DAY && minutes == 0),
             "time of day must lie within 00:00 to 24:00"
         );
-        Self(hours * SECONDS_PER_HOUR + minutes * SECONDS_PER_MINUTE)
+        Self((hours * SECONDS_PER_HOUR + minutes * SECONDS_PER_MINUTE) * MILLIS_PER_SECOND)
     }
 
     /// Builds a time from seconds since the start of the day; `None` after 24:00.
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn from_seconds(seconds: u32) -> Option<Self> {
-        if seconds <= Self::END.0 {
-            Some(Self(seconds))
+        if seconds <= Self::END.seconds() {
+            Some(Self(seconds * MILLIS_PER_SECOND))
         } else {
             None
         }
@@ -51,19 +54,26 @@ impl TimeOfDay {
     /// Seconds since the start of the day.
     #[must_use]
     pub(crate) const fn seconds(self) -> u32 {
+        self.0 / MILLIS_PER_SECOND
+    }
+
+    pub(crate) const fn from_elapsed_millis(millis: u32) -> Self {
+        Self(millis)
+    }
+    pub(crate) const fn millis(self) -> u32 {
         self.0
     }
 
     /// Whole hours.
     #[must_use]
     pub(crate) const fn hour(self) -> u32 {
-        self.0 / SECONDS_PER_HOUR
+        self.seconds() / SECONDS_PER_HOUR
     }
 
     /// Minutes within the hour.
     #[must_use]
     pub(crate) const fn minute(self) -> u32 {
-        self.0 / SECONDS_PER_MINUTE % MINUTES_PER_HOUR
+        self.seconds() / SECONDS_PER_MINUTE % MINUTES_PER_HOUR
     }
 
     /// Moves earlier; the start of the day is the earliest result.
@@ -71,7 +81,7 @@ impl TimeOfDay {
     pub(crate) const fn earlier_by_minutes(self, minutes: u32) -> Self {
         Self(
             self.0
-                .saturating_sub(minutes.saturating_mul(SECONDS_PER_MINUTE)),
+                .saturating_sub(minutes.saturating_mul(SECONDS_PER_MINUTE * MILLIS_PER_SECOND)),
         )
     }
 
@@ -80,7 +90,7 @@ impl TimeOfDay {
     pub(crate) const fn later_by_minutes(self, minutes: u32) -> Self {
         let seconds = self
             .0
-            .saturating_add(minutes.saturating_mul(SECONDS_PER_MINUTE));
+            .saturating_add(minutes.saturating_mul(SECONDS_PER_MINUTE * MILLIS_PER_SECOND));
         if seconds > Self::END.0 {
             Self::END
         } else {
@@ -157,7 +167,7 @@ impl TimeSpan {
     /// Length of the span.
     #[must_use]
     pub(crate) fn duration(self) -> Duration {
-        Duration::from_secs(u64::from(self.end.0 - self.start.0))
+        Duration::from_millis(u64::from(self.end.0 - self.start.0))
     }
 
     /// The common part of two spans; `None` when they share no time.

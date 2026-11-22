@@ -1,5 +1,8 @@
 //! Everything the Today page shows for one logical day, validated once when it is built.
 
+mod live;
+use live::LiveDay;
+pub(crate) use live::PendingAwaySpan;
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -93,9 +96,17 @@ struct Derived {
     rankings: Rankings,
 }
 
+/// The model's origin and loading state are explicit; only live days carry core display metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DaySource {
+    Fixture,
+    Loading,
+    Live(LiveDay),
+}
+
 /// Everything the Today page shows for one logical day. Every id inside refers to an item of the
 /// same day, and no two spans overlap.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Day {
     pub(super) date: Date,
     pub(super) categories: Vec<Category>,
@@ -108,6 +119,7 @@ pub(crate) struct Day {
     pub(super) history: BTreeMap<AppId, EarlierDays>,
     pub(super) rules: Vec<Rule>,
     derived: Derived,
+    source: DaySource,
 }
 
 impl Day {
@@ -186,6 +198,7 @@ impl Day {
             history,
             rules,
             derived: Derived::default(),
+            source: DaySource::Fixture,
         };
         day.derived = Derived {
             activity_range: day.compute_activity_range(),
@@ -197,6 +210,10 @@ impl Day {
             rankings: day.compute_rankings(),
         };
         Ok(day)
+    }
+
+    pub(crate) fn source(&self) -> &DaySource {
+        &self.source
     }
 
     /// The calendar date of the logical day.
@@ -305,6 +322,9 @@ impl Day {
     #[must_use]
     pub(crate) fn main_block_at(&self, start: TimeOfDay) -> Option<&MainBlock> {
         let track = self.main_track();
+        if matches!(self.source, DaySource::Live(_)) {
+            return track.iter().find(|block| block.span().start() == start);
+        }
         let index = track
             .binary_search_by_key(&start, |block| block.span().start())
             .ok()?;
@@ -335,6 +355,9 @@ impl Day {
     /// Ranking rows for a tab, longest first, ties by name.
     #[must_use]
     pub(crate) fn ranking(&self, kind: RankingKind) -> &[RankRow] {
+        if let DaySource::Live(live) = &self.source {
+            return &live.ranking;
+        }
         self.derived.rankings.get(kind)
     }
 

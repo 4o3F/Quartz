@@ -1,6 +1,9 @@
 //! Pending-away row with inline label buttons (07 section 3).
 
-use gpui_kit::{IntoElement, ParentElement as _, Styled as _, assets::IconName, div};
+use gpui_kit::{
+    Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, assets::IconName, div,
+};
 
 use super::AppShell;
 use crate::{
@@ -52,8 +55,71 @@ impl PendingAction {
 }
 
 impl AppShell {
-    // The label buttons are inert until labeling exists.
-    pub(super) fn render_pending(&self, ui: &Widgets<'_>) -> Option<impl IntoElement> {
+    pub(super) fn render_pending(
+        &self,
+        ui: &Widgets<'_>,
+        cx: &Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if matches!(self.day.source(), super::DaySource::Live(_)) {
+            let pending = self.day.pending_ranges();
+            if pending.is_empty() {
+                return None;
+            }
+            let rows = pending.iter().enumerate().map(|(index, range)| {
+                let buttons = div().flex().flex_wrap().gap(ui.metrics.space.s).children(
+                    PendingAction::ALL.map(|action| {
+                        let range = *range;
+                        let label = ButtonContent::Label(self.formatter.text(action.label()));
+                        if action == PendingAction::Other {
+                            return ui.disabled_button(
+                                action.element_id(),
+                                Density::Compact,
+                                label,
+                            ); // TODO(M4): category picker.
+                        }
+                        ui.button(action.element_id(), Density::Compact, label)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let action = match action {
+                                    PendingAction::Rest => crate::link::AwayAction::Rest,
+                                    PendingAction::Meeting => crate::link::AwayAction::Meeting,
+                                    PendingAction::Reading => crate::link::AwayAction::Reading,
+                                    PendingAction::Dismiss => crate::link::AwayAction::Ignore,
+                                    PendingAction::Other => return,
+                                };
+                                this.annotate(action, range, cx);
+                            }))
+                    }),
+                );
+                let span = range.span;
+                let range_text = format!(
+                    "{} – {}",
+                    self.clock_label(span.start()),
+                    self.clock_label(span.end())
+                );
+                div()
+                    .id(("pending-away", index))
+                    .flex()
+                    .flex_col()
+                    .gap(ui.metrics.space.s)
+                    .child(self.formatter.text_with(
+                        Msg::PendingRange,
+                        &[
+                            Arg::Range.with(&range_text),
+                            Arg::Duration.with(&self.formatter.duration(range.duration)),
+                        ],
+                    ))
+                    .child(buttons)
+            });
+            return Some(
+                ui.card()
+                    .p(ui.metrics.space.l)
+                    .flex()
+                    .flex_col()
+                    .gap(ui.metrics.space.m)
+                    .child(self.formatter.text(Msg::PendingTitle))
+                    .children(rows),
+            );
+        }
         let away = self.day.pending_away()?;
         let space = &ui.metrics.space;
         let buttons = div()

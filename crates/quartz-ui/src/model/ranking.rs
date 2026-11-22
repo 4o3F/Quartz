@@ -71,15 +71,25 @@ pub(crate) struct RankRow {
     pub(crate) name: String,
     pub(crate) total: Duration,
     /// Category with the most time in this row; the last one wins a tie.
-    dominant: CategoryId,
+    dominant: Option<CategoryId>,
     /// Time per category in category order; never empty.
     pub(crate) parts: Vec<CategoryTotal>,
 }
 
 impl RankRow {
+    pub(super) fn application(app: AppId, name: String, total: Duration) -> Self {
+        Self {
+            key: RankKey::App(app),
+            name,
+            total,
+            dominant: None,
+            parts: Vec::new(),
+        }
+    }
+
     /// The category with the most time; the last one wins a tie.
     #[must_use]
-    pub(crate) const fn dominant_category(&self) -> CategoryId {
+    pub(crate) const fn dominant_category(&self) -> Option<CategoryId> {
         self.dominant
     }
 }
@@ -156,7 +166,7 @@ impl Day {
                 RankRow {
                     name,
                     total: total(segments.iter().map(|segment| segment.duration())),
-                    dominant,
+                    dominant: Some(dominant),
                     parts,
                     key,
                 }
@@ -192,7 +202,7 @@ mod tests {
         let keys: Vec<&RankKey> = apps.iter().map(|row| &row.key).collect();
         assert_eq!(keys, [&RankKey::App(BROWSER), &RankKey::App(EDITOR)]);
         let browser = apps.first().expect("browser row");
-        assert_eq!(browser.dominant_category(), PLAY);
+        assert_eq!(browser.dominant_category(), Some(PLAY));
         assert_eq!(
             browser.key.details_subject(),
             Some(DetailsSubject::App(BROWSER))

@@ -247,7 +247,7 @@ impl AppShell {
                             .child(rule),
                     ),
             )
-            .child(
+            .children(interval.merged.map(|count| {
                 div()
                     .flex()
                     .flex_row()
@@ -260,11 +260,11 @@ impl AppShell {
                         Density::Compact,
                         palette.text_secondary,
                     ))
-                    .child(self.formatter.text_with(
-                        Msg::DetailsMerged,
-                        &[Arg::Count.with(&interval.merged.to_string())],
-                    )),
-            )
+                    .child(
+                        self.formatter
+                            .text_with(Msg::DetailsMerged, &[Arg::Count.with(&count.to_string())]),
+                    )
+            }))
     }
 
     fn week_chart(&self, ui: &Widgets<'_>, details: &Details, category: CategoryColor) -> Div {

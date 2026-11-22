@@ -74,3 +74,45 @@ Both classes share the exact same card structure; status color is used **only** 
 6. **Restore command wrapping**: Long paths wrap cleanly across lines inside the command box rather than truncating with an ellipsis so the backup filename remains inspectable before copying.
 7. **Error code naming**: Used `connect_timeout` (`connect-failed`), `database_too_new` (`newer-database`), and `version_mismatch` (`version-mismatch`) as placeholder diagnostic codes; align with the final `quartz-ipc` / `quartz-core` error codes during implementation.
 
+## Today data states (`today-states.html`)
+
+Covers the Today page states not shown in `today.html` (which depicts the loaded-with-data state). Reuses the `today.html` chrome unchanged (32 px custom title bar, 240 px navigation sidebar, date bar) at 1280×800 and verifies the 640×480 minimum window (`07 §2.3`) via `?size=min`. Query parameters: `?state=<key>&theme=light|dark&lang=zh-CN|en[&size=min][&reason=paused|locked|persistence-failed][&err=busy|internal]`. Uses only `tokens.css` variables and `mockup.css` controls (`.btn.disabled` was promoted to `mockup.css` as a shared control state).
+
+### Layout per state
+
+- **`loading`**: Keeps the date bar interactive and preserves the exact 4-card Today geometry (status line, timeline, hourly chart, ranking — no pending-away row) with static neutral skeleton bars while retaining known section headings, metric labels, and y-axis labels. Timeline controls and segmented toggles appear dimmed/disabled until data arrives.
+- **`refreshing`**: Keeps all loaded cards, charts, and metrics at 100% crisp opacity with zero dimming, blanking, or reflow. Reserves the unused right end of the date bar for a quiet `14 px` progress ring and `正在更新…` / `Updating…` caption (`type.caption`, `text.tertiary`), shown only if a re-query takes noticeable time.
+- **`empty-today`**: Date bar shows today with `→` and `今天` disabled. Below it, one spacious `fill.card` replaces the 4 empty data cards: a neutral 48×48 clock icon tile (`fill.subtle_hover` / `text.secondary`), `type.subtitle` heading, reassuring `text.secondary` copy, and a quiet recording pill (`status.success` 6 px dot + `正在记录` / `Recording`).
+- **`empty-past`**: Date bar remains fully navigable (past date selected, `→` and `今天` enabled). Same calm single `fill.card` structure with a neutral calendar icon tile, factual explanation (core not running or records deleted), and one standard `回到今天` / `Go to today` button.
+- **`stopped`**: Date bar shows today (`→` and `今天` disabled); all collected data remains visible below. A full-width Fluent 2 InfoBar sits directly **between the date bar and the status-line card**:
+  - Neutral stop reasons (`paused` default, `locked`, etc.): `fill.card` + `stroke.card` with a `16 px` `text.secondary` icon, neutral copy matching `07 §1.2` / `quartz-i18n`, and a compact `恢复` / `Resume` button when paused.
+  - Critical stop reason (`persistence-failed`, the sole critical stop state): `status.critical_bg` surface, subtle `status.critical` border, `16 px` `status.critical` circle-cross icon, and clear retry wording.
+- **`query-failed`**: Full chrome, navigation sidebar, and date bar remain usable. Directly below the date bar sits one lightweight horizontal `fill.card` (`20 px` inline `status.caution` warning icon, `type.body_strong` heading, concise explanation, muted monospace error code `busy` / `internal`, and a single standard `重试` / `Retry` button) — visibly distinct from the full-window fatal/connection screen in `errors.html`.
+- **`date-picker`**: Underlying Today page (past date `11月16日 周一` / `Mon, Nov 16`) stays visible behind an opaque `300 px` Fluent 2 `CalendarDatePicker` flyout (`bg.flyout`, `stroke.surface`, `radius.overlay`, `shadow.28`) anchored 4 px below the date button. Shows month header with prev/next buttons (next month disabled on current month), locale-aware weekday headers (`zh-CN` Monday-first, `en` Sunday-first), selected day (solid `accent.fill` circle), today (`1.5 px` `accent.fill` ring), and future days disabled (`text.disabled`).
+- **`today-nav`**: Shows the live date bar with today selected (`→` and `今天` disabled via `.btn.disabled`), paired with a compact comparison card below stacking the today-selected bar against a past-day bar (`11月16日 周一`) above the status line and timeline.
+- **Compact minimum window (`size=min`, 640×480)**: Follows `07 §2.1` and `07 §2.3` — sidebar collapses to the `48 px` icon rail (no collapse button), status metrics reflow into a 3×2 grid, hourly and ranking cards stack vertically, `query-failed` wraps its Retry button cleanly onto the text axis, and vertical overflow uses a `text.tertiary` Fluent overlay scroll thumb with zero horizontal scrolling.
+
+### Design questions / choices made
+
+1. **Static skeleton vs. shimmer / pulse (`loading`)**: Chose a **static skeleton** with no shimmer or looping pulse, matching `07 §9` ("没有持续动画") and `11 §1`/`§8` ("静止不重绘 / 数据刷新无动画"). Local SQLite IPC queries normally complete in tens of milliseconds; a static skeleton avoids flicker and preserves zero idle CPU. Confirm whether a slow opacity pulse is wanted if a query ever stalls past ~1 s.
+2. **Refreshing indicator placement & debounce (`refreshing`)**: Chose **no indicator at all** for fast refreshes (< ~300 ms) so routine 5 s `day:<date>` pushes and quick timeline zooms never flicker; only when a re-query exceeds ~300 ms should the quiet `正在更新…` / `Updating…` cue appear in the empty right side of the date bar (causing zero layout shift and never dimming data). Confirm the ~300 ms delay threshold vs. omitting an indicator altogether.
+3. **Single empty card vs. zeroed 4-card layout (`empty-today`, `empty-past`)**: Replaced the 4 empty data cards with one calm `fill.card` instead of rendering four boxes of `0 分` / `—` placeholders. Confirm whether the status-line card should still be kept above the empty message when `active_ms == 0`.
+4. **Stop-reason InfoBar placement & severity (`stopped`)**: Placed the InfoBar **above** the status-line card (between the date bar and status metrics) so live capture state is clearly separated from historical day totals and never crowds the responsive 6-column stat grid. Only `persistence_failed` uses `status.critical` / `status.critical_bg`; `paused` and `locked` stay neutral. Confirm whether `session_unavailable` and `capture_gap` should use neutral InfoBar styling or `status.caution` / `status.caution_bg`.
+5. **Inline `query-failed` visual weight vs. `errors.html`**: Kept `query-failed` strictly inline and lightweight (no 48×48 icon tile, no status badge, no collapsible details drawer, no Quit button, standard `Retry` button instead of an accent CTA) so users immediately read it as a transient per-day error while the sidebar and date bar remain usable.
+6. **Activity dots on the calendar (`date-picker`) — recommendation**: **Recommend NOT adding activity dots in M3-D1.** Painting dots on calendar open requires an additional month-level range query (`query.range` is not built until M4 and is heavier than a presence check), adds IPC latency, and causes dots to pop in asynchronously after the flyout opens. Revisit in M4 only if a cheap cached `data_day_versions` day-presence bitmap is exposed.
+7. **Calendar selected vs. today visual convention (`date-picker`)**: Used a solid `accent.fill` circle for the **selected** day (the day currently displayed on screen) and a `1.5 px` `accent.fill` ring for **today**. WinUI 3 `CalendarView` uses the inverse (solid Today, outlined Selected), whereas `gpui-component` `Calendar` highlights the selected day solidly. Confirm which convention to standardize on during GPUI implementation.
+8. **Date bar disabled state (`today-nav`)**: Disabled both `→` and `今天` when viewing today (`fill.control_disabled`, `text.disabled`) rather than hiding `今天`, keeping the date bar geometry completely stable as the user steps across days.
+
+
+
+### Decisions (today-states)
+
+The user approved the mockup with these answers:
+
+- Q1: static skeleton, no pulse.
+- Q2: the refreshing indicator appears only after a re-query exceeds ~300 ms, at the right end of the date bar.
+- Q3: an empty day replaces the four data cards with one empty-state card.
+- Q4: only `persistence_failed` is critical; all other stop reasons (including `session_unavailable` and `capture_gap`) use the neutral InfoBar.
+- Q6: no activity dots on the calendar in M3.
+- Q7: selected day = solid accent circle, today = accent ring.
+- Q8: `→` and `今天` are disabled (not hidden) on today.

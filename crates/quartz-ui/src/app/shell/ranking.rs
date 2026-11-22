@@ -102,7 +102,14 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let rows = self.day.ranking(self.ranking);
-        let shown = || rows.iter().take(RANKING_ROWS);
+        let shown = || {
+            rows.iter()
+                .take(if !matches!(self.day.source(), super::DaySource::Fixture) {
+                    rows.len()
+                } else {
+                    RANKING_ROWS
+                })
+        };
         let longest = rows.iter().map(|row| row.total).max().unwrap_or_default();
         let durations: Vec<String> = shown()
             .map(|row| self.formatter.duration(row.total))
@@ -130,11 +137,16 @@ impl AppShell {
             );
         let tabs = ui.segmented(
             "ranking-tabs",
-            TABS.map(|tab| Segment {
-                id: tab.id,
-                label: self.formatter.ranking_tab(tab.kind),
-                value: tab.kind,
-            }),
+            TABS.into_iter()
+                .filter(|tab| {
+                    matches!(self.day.source(), super::DaySource::Fixture)
+                        || tab.kind == RankingKind::Apps
+                })
+                .map(|tab| Segment {
+                    id: tab.id,
+                    label: self.formatter.ranking_tab(tab.kind),
+                    value: tab.kind,
+                }),
             self.ranking,
             |kind| {
                 cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -183,7 +195,11 @@ impl AppShell {
         let row_height = ui.metrics.density(Density::Compact).row_height;
         let subject = row.key.details_subject();
         let selected = subject.is_some() && self.details_subject() == subject;
-        let accent = palette.category(self.day.category(row.dominant_category()).color);
+        let accent = row
+            .dominant_category()
+            .map_or(palette.text_tertiary, |category| {
+                palette.category(self.day.category(category).color)
+            });
         let icon = match &row.key {
             RankKey::App(app) => IconName::from(self.day.app(*app).glyph),
             RankKey::Domain(_) => IconName::Globe,
@@ -275,6 +291,7 @@ impl AppShell {
             .w(relative(bar.width.fraction()))
             .rounded_full()
             .overflow_hidden()
+            .bg(ui.palette.text_tertiary)
             .children(bar.parts.iter().map(|part| {
                 ui.category_mark(
                     div().h_full().w(relative(part.share.fraction())),

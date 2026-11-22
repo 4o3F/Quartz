@@ -367,3 +367,84 @@ ui.failure.ui_version:
   zh-CN: "界面版本"
 ui.failure.protocol:
   zh-CN: "协议范围"
+
+tooltip.mixed:
+  zh-CN: "多个分类来源"
+
+today.updating:
+  zh-CN: "正在更新…"
+
+today.query_failed.title:
+  zh-CN: "暂时无法加载这一天"
+
+today.query_failed.message:
+  zh-CN: "请重试以重新读取这一天的数据。"
+
+today.query_failed.busy:
+  zh-CN: "核心正在处理其他查询，请稍后重试。"
+
+today.retry:
+  zh-CN: "重试"
+
+today.go_today:
+  zh-CN: "回到今天"
+
+today.empty_today.title:
+  zh-CN: "今天还没有活动记录"
+
+today.empty_today.message:
+  zh-CN: "活动记录会在这里显示。"
+
+today.empty_past.title:
+  zh-CN: "这一天没有活动记录"
+
+today.empty_past.message:
+  zh-CN: "核心当时可能没有运行，或记录已被删除。"
+
+today.resume:
+  zh-CN: "恢复"
+
+today.stop.starting:
+  zh-CN: "正在启动记录"
+
+today.stop.persistence:
+  zh-CN: "记录写入失败，核心将重试保存。"
+
+today.stop.session:
+  zh-CN: "会话状态暂时不可用"
+
+today.stop.gap:
+  zh-CN: "采集暂时中断"
+
+today.stop.locked:
+  zh-CN: "屏幕已锁定，记录已停止"
+
+today.stop.disconnected:
+  zh-CN: "会话已断开，记录已停止"
+
+today.stop.suspended:
+  zh-CN: "设备已休眠，记录已停止"
+
+today.stop.paused:
+  zh-CN: "记录已暂停"
+
+today.stop.foreground:
+  zh-CN: "当前没有可记录的前台窗口"
+
+today.stop.ended:
+  zh-CN: "记录已结束"
+
+today.calendar.month:
+  zh-CN: "%{value}年%{month}"
+
+clock.twelve:
+  zh-CN: "%{name}%{hours}:%{minutes}"
+
+clock.morning:
+  zh-CN: "上午"
+
+clock.afternoon:
+  zh-CN: "下午"
+
+today.locale_unavailable:
+  zh-CN: "区域设置暂时不可用，时间使用 24 小时格式"

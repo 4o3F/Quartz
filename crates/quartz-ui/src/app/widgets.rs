@@ -337,6 +337,20 @@ impl<'a> Widgets<'a> {
         self.button_foreground(id, density, content, self.palette.text_primary)
     }
 
+    pub(crate) fn disabled_button(
+        &self,
+        id: impl Into<ElementId>,
+        density: Density,
+        content: ButtonContent,
+    ) -> Stateful<Div> {
+        let fill = self.palette.fill_control_disabled;
+        self.button_foreground(id, density, content, self.palette.text_disabled)
+            .bg(fill)
+            .cursor_default()
+            .hover(move |style| style.bg(fill))
+            .active(move |style| style.bg(fill))
+    }
+
     /// Accent actions use the matching icon and label foreground, including high contrast.
     pub(crate) fn accent_button(
         &self,

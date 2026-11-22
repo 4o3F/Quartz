@@ -555,4 +555,7 @@ mod pipe {
             ui.stop().await;
         }
     }
+    mod day_queries {
+        include!("day_tests.rs");
+    }
 }

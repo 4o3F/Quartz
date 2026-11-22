@@ -1,9 +1,8 @@
 //! The windows: the main window shell with the Today page, the widgets and tokens they share, and
 //! the GPUI start-up.
 //!
-//! Until the data layer exists the main window only opens in the preview, on the sample day. The
-//! data layer later fills the same [`model`](crate::model) types from protocol messages; [`AppShell`]
-//! reads only these view models.
+//! The real window maps core protocol responses into [`model`](crate::model); the preview supplies
+//! fixture models. [`AppShell`] shares layout and drawing between both inputs.
 
 mod data_pattern;
 pub(crate) mod failure_screen;

@@ -193,18 +193,35 @@ impl AppShell {
             .w_full()
             .max_w(ui.metrics.layout.max_content_width)
             .mx_auto()
-            .px(space.xxl)
-            .pt(space.xxxl)
-            .pb(space.xxl)
-            .child(self.render_date_bar(ui))
-            .child(self.render_status(ui, frame.measure))
-            .child(self.render_timeline(ui, frame, cx))
-            .child(
-                charts
-                    .child(self.render_hourly(ui, frame, cx))
-                    .child(self.render_ranking(ui, frame, cx)),
+            .px(
+                if frame.layout.class == crate::layout::WindowClass::Compact {
+                    space.l
+                } else {
+                    space.xxl
+                },
             )
-            .children(self.render_pending(ui));
+            .pt(
+                if frame.layout.class == crate::layout::WindowClass::Compact {
+                    space.l
+                } else {
+                    space.xxxl
+                },
+            )
+            .pb(space.xxl)
+            .child(self.render_date_bar(ui, cx))
+            .children(self.stop_bar(ui, cx));
+        let content = match self.live_notice(ui, frame, cx) {
+            Some(notice) => content.child(notice),
+            None => content
+                .child(self.render_status(ui, frame.measure))
+                .child(self.render_timeline(ui, frame, cx))
+                .child(
+                    charts
+                        .child(self.render_hourly(ui, frame, cx))
+                        .child(self.render_ranking(ui, frame, cx)),
+                )
+                .children(self.render_pending(ui, cx)),
+        };
         div()
             .id("today-scroll")
             .flex_1()
@@ -213,60 +230,135 @@ impl AppShell {
             .child(content)
     }
 
-    // The date buttons are inert until day navigation exists.
-    fn render_date_bar(&self, ui: &Widgets<'_>) -> impl IntoElement {
+    fn render_date_bar(&self, ui: &Widgets<'_>, cx: &Context<Self>) -> impl IntoElement {
         let density = Density::Standard;
+        let on_today = self
+            .live
+            .as_ref()
+            .is_none_or(|live| self.day.date() >= live.snapshot.logical_date);
         div()
+            .relative()
             .flex()
-            .flex_row()
             .items_center()
             .gap(ui.metrics.space.s)
-            .child(ui.button(
-                "date-prev",
-                density,
-                ButtonContent::Icon(IconName::ChevronLeft),
-            ))
             .child(
                 ui.button(
-                    "date-pick",
+                    "date-prev",
                     density,
-                    ButtonContent::Icon(IconName::Calendar),
+                    ButtonContent::Icon(IconName::ChevronLeft),
                 )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Ok(date) = this.day.date().yesterday() {
+                        this.select_date(date, cx);
+                    }
+                })),
+            )
+            .child(
+                (if self
+                    .live
+                    .as_ref()
+                    .is_some_and(|live| live.snapshot.locale.is_none())
+                {
+                    ui.disabled_button(
+                        "date-pick",
+                        density,
+                        ButtonContent::IconLabel(
+                            IconName::Calendar,
+                            self.formatter.date(self.day.date()),
+                        ),
+                    )
+                } else {
+                    ui.button(
+                        "date-pick",
+                        density,
+                        ButtonContent::IconLabel(
+                            IconName::Calendar,
+                            self.formatter.date(self.day.date()),
+                        ),
+                    )
+                })
                 .min_w(px(DATE_PICKER_MIN_WIDTH))
                 .max_w(px(DATE_PICKER_MAX_WIDTH))
-                .justify_start()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(self.formatter.date(self.day.date())),
-                )
-                .child(ui.icon(
-                    IconName::ChevronDown,
-                    density,
-                    ui.palette.text_secondary,
-                )),
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_calendar(cx))),
             )
-            .child(ui.button(
-                "date-next",
-                density,
-                ButtonContent::Icon(IconName::ChevronRight),
-            ))
-            .child(ui.button(
-                "date-today",
-                density,
-                ButtonContent::Label(self.formatter.text(Msg::TodayButton)),
-            ))
+            .child(
+                (if on_today {
+                    ui.disabled_button(
+                        "date-next",
+                        density,
+                        ButtonContent::Icon(IconName::ChevronRight),
+                    )
+                } else {
+                    ui.button(
+                        "date-next",
+                        density,
+                        ButtonContent::Icon(IconName::ChevronRight),
+                    )
+                })
+                .text_color(if on_today {
+                    ui.palette.text_disabled
+                } else {
+                    ui.palette.text_primary
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(live) = &this.live
+                        && this.day.date() < live.snapshot.logical_date
+                        && let Ok(date) = this.day.date().tomorrow()
+                    {
+                        this.select_date(date, cx);
+                    }
+                })),
+            )
+            .child(
+                (if on_today {
+                    ui.disabled_button(
+                        "date-today",
+                        density,
+                        ButtonContent::Label(self.formatter.text(Msg::TodayButton)),
+                    )
+                } else {
+                    ui.button(
+                        "date-today",
+                        density,
+                        ButtonContent::Label(self.formatter.text(Msg::TodayButton)),
+                    )
+                })
+                .text_color(if on_today {
+                    ui.palette.text_disabled
+                } else {
+                    ui.palette.text_primary
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(live) = &this.live {
+                        this.select_date(live.snapshot.logical_date, cx);
+                    }
+                })),
+            )
+            .children(
+                self.live
+                    .as_ref()
+                    .filter(|live| live.snapshot.locale.is_none())
+                    .map(|_| {
+                        div()
+                            .ramp(ui, Ramp::Caption)
+                            .text_color(ui.palette.text_tertiary)
+                            .child(self.formatter.text(Msg::LocaleUnavailable))
+                    }),
+            )
+            .children(self.refresh_indicator(ui))
+            .children(self.render_calendar(ui, cx))
     }
 
     /// The cells in equal columns: the largest of 6, 3, 2 or 1 columns in which the widest cell
     /// still fits the width the card gives the grid (07 section 2.1).
     fn render_status(&self, ui: &Widgets<'_>, measure: &TextMeasure<'_>) -> impl IntoElement {
-        let views: [StatCellView; STAT_CELL_COUNT] =
-            stat_cells(self.day.summary()).map(|cell| self.stat_cell(ui, measure, cell));
+        let views: [StatCellView; STAT_CELL_COUNT] = {
+            let mut cells = stat_cells(self.day.summary());
+            if let Some(cell) = cells.last_mut() {
+                cell.value = StatValue::SwitchesPerHour(self.day.switches_per_hour());
+            }
+            cells.map(|cell| self.stat_cell(ui, measure, cell))
+        };
         let widest = views
             .iter()
             .fold(0., |widest, view| f32::max(widest, view.width));

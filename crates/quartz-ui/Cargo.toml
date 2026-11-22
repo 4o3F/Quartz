@@ -12,7 +12,7 @@ quartz-pipe.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 gpui-kit.workspace = true
-jiff.workspace = true
+jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform"] }
 num-traits.workspace = true
 quartz-i18n.workspace = true
 quartz-protocol.workspace = true
@@ -36,7 +36,7 @@ tokio = { workspace = true, features = ["test-util"] }
 serde_json.workspace = true
 quartz-pipe = { workspace = true, features = ["test-util"] }
 strum.workspace = true
-jiff.workspace = true
+jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform"] }
 num-traits.workspace = true
 quartz-i18n.workspace = true
 quartz-protocol.workspace = true

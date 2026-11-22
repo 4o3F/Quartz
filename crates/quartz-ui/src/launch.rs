@@ -1,13 +1,15 @@
 //! Main and startup windows share the approved failure screen.
 
+use crate::app::{AppShell, Page, RangeChoice, ShellInit};
+use crate::model::Day;
 use crate::{
     app::failure_screen::{FailureScreen, RecoveryActivity},
     app::{
-        Appearance, GpuiError, GpuiSnafu, LoadThemeError, Ramp, RampExt as _, ThemeBundle, Widgets,
-        run_gpui, window_options,
+        Appearance, GpuiError, GpuiSnafu, LoadThemeError, ThemeBundle, Widgets, run_gpui,
+        window_options,
     },
     failure::{Failure, FailureAction, FailureKind, Severity},
-    format::{Arg, Formatter, Msg},
+    format::{Formatter, Msg},
     link::{ConnectionState, Link, LinkBridge, LinkEvent},
     text_scale::{LiveTextScale, ReadTextScaleError, TextScaleChange, TextScaleSource},
 };
@@ -17,13 +19,14 @@ use gpui_kit::{
     component::ActiveTheme as _, div, px, size,
 };
 use quartz_i18n::{Language, ParseLanguageError};
-use quartz_protocol::{AppIdentity, ControlOp, CoreError, StateSnapshot};
+use quartz_protocol::{ControlOp, CoreError, StateSnapshot};
 use snafu::{ResultExt as _, Snafu};
+use std::rc::Rc;
 
-/// Size of the existing placeholder window.
+/// Initial size of the main shell window.
 const MAIN_WINDOW_SIZE: Size<f32> = Size {
-    width: 960.,
-    height: 640.,
+    width: 1280.,
+    height: 800.,
 };
 
 /// Selects a visible launch, startup failure, or the M3-E prewarm placeholder.
@@ -69,6 +72,7 @@ pub(crate) struct LaunchWindow {
     connection: ConnectionState,
     link: Option<Link>,
     snapshot: Option<StateSnapshot>,
+    shell: Option<Entity<AppShell>>,
     screen: Entity<FailureScreen>,
     activity: RecoveryActivity,
     _events: Option<Task<()>>,
@@ -86,48 +90,13 @@ impl Render for LaunchWindow {
                 .min_h(px(0.))
                 .child(self.screen.clone())
                 .into_any_element(),
-            ConnectionState::Connected { core_version, .. } => {
-                let mut content =
-                    self.content(&ui)
-                        .child(
-                            div()
-                                .ramp(&ui, Ramp::Title)
-                                .child(self.formatter.text(Msg::LinkConnected)),
-                        )
-                        .child(div().ramp(&ui, Ramp::Body).child(self.formatter.text_with(
-                            Msg::LinkCoreVersion,
-                            &[Arg::Version.with(&core_version.0)],
-                        )));
-                if let Some(snapshot) = &self.snapshot {
-                    let recording = self.formatter.text(if snapshot.recording {
-                        Msg::LinkRecording
-                    } else {
-                        Msg::LinkStopped
-                    });
-                    let foreground = match snapshot
-                        .foreground
-                        .as_ref()
-                        .and_then(|foreground| foreground.app.as_ref())
-                    {
-                        Some(
-                            AppIdentity::Exe(app)
-                            | AppIdentity::Aumid(app)
-                            | AppIdentity::Unresolved(app),
-                        ) => self
-                            .formatter
-                            .text_with(Msg::LinkForeground, &[Arg::App.with(app)]),
-                        None => self.formatter.text(Msg::LinkNoForeground),
-                    };
-                    content = content
-                        .child(div().ramp(&ui, Ramp::BodyStrong).child(recording))
-                        .child(
-                            div()
-                                .ramp(&ui, Ramp::Body)
-                                .whitespace_normal()
-                                .child(foreground),
-                        );
+            ConnectionState::Connected { .. } => {
+                if let Some(shell) = &self.shell {
+                    return div().size_full().child(shell.clone()).into_any_element();
                 }
-                content.into_any_element()
+                self.content(&ui)
+                    .child(self.formatter.text(Msg::LinkConnecting))
+                    .into_any_element()
             }
         };
         div()
@@ -138,6 +107,7 @@ impl Render for LaunchWindow {
             .text_color(ui.palette.text_primary)
             .child(ui.title_bar(self.title.clone(), window))
             .child(content)
+            .into_any_element()
     }
 }
 impl LaunchWindow {
@@ -282,11 +252,43 @@ impl LaunchWindow {
                 self.formatter = Formatter::new(language);
                 language.set_global();
                 gpui_kit::component::set_locale(language.code());
+                if let Some(shell) = &self.shell {
+                    shell.update(cx, |shell, cx| {
+                        shell.state_changed(snapshot.clone(), self.formatter, cx)
+                    });
+                } else if let Some(link) = self.link.clone() {
+                    let init = ShellInit {
+                        day: Day::empty(snapshot.logical_date),
+                        formatter: self.formatter,
+                        tokens: Rc::new(
+                            crate::app::system_theme::SystemTheme::tokens(cx)
+                                .as_ref()
+                                .clone(),
+                        ),
+                        page: Page::Today,
+                        details: None,
+                        range: RangeChoice::FullDay,
+                        text_scale: self.text_scale,
+                    };
+                    let shell = cx.new(|cx| {
+                        let mut shell = AppShell::new(init, window, cx);
+                        shell.connect(link, snapshot.clone(), cx);
+                        shell
+                    });
+                    self.shell = Some(shell);
+                }
                 self.snapshot = Some(snapshot);
             }
-            LinkEvent::Day(changed) => {
-                tracing::debug!(date = %changed.date, "UI day data changed");
-                // TODO(M3-D1): Invalidate and re-request the displayed day's snapshots.
+            LinkEvent::Day(_) => {} // The link worker coalesces day invalidations.
+            LinkEvent::DayLoading { generation } => {
+                if let Some(shell) = &self.shell {
+                    shell.update(cx, |shell, cx| shell.day_loading(generation, cx));
+                }
+            }
+            LinkEvent::DayLoaded { generation, result } => {
+                if let Some(shell) = &self.shell {
+                    shell.update(cx, |shell, cx| shell.day_loaded(generation, result, cx));
+                }
             }
             LinkEvent::Control(ControlOp::UiShutdown) | LinkEvent::Disconnected => Self::quit(cx),
             LinkEvent::Control(_) => tracing::warn!("received a non-UI control operation"),
@@ -395,6 +397,7 @@ impl RunOptions {
                             connection,
                             link: bridge.as_ref().map(|bridge| bridge.link.clone()),
                             snapshot: None,
+                            shell: None,
                             screen,
                             activity: RecoveryActivity::Idle,
                             _events: None,

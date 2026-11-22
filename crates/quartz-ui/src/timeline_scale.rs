@@ -21,7 +21,7 @@ const TICK_LABEL_GAP: f32 = 8.;
 /// Narrowest painted block in logical pixels, so one-pixel blocks stay visible (07 section 4.3).
 pub(crate) const MIN_BLOCK_WIDTH: f32 = 2.;
 /// Candidate tick steps in minutes, finest first; the last one fits a whole day.
-const TICK_STEPS_MINUTES: [u32; 9] = [1, 5, 10, 15, 30, 60, 120, 180, 360];
+const TICK_STEPS_MINUTES: [u32; 11] = [1, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440];
 
 /// Zooming in halves the visible span; zooming out doubles it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -446,12 +446,12 @@ impl View {
     /// the view. This is the only place where time becomes a float.
     #[must_use]
     pub(crate) fn fraction(self, time: TimeOfDay) -> f32 {
-        let start = self.span.start().seconds();
-        let offset = |seconds: u32| Duration::from_secs(u64::from(seconds)).as_secs_f32();
-        let from_start = if time.seconds() >= start {
-            offset(time.seconds() - start)
+        let start = self.span.start().millis();
+        let offset = |millis: u32| Duration::from_millis(u64::from(millis)).as_secs_f32();
+        let from_start = if time.millis() >= start {
+            offset(time.millis() - start)
         } else {
-            -offset(start - time.seconds())
+            -offset(start - time.millis())
         };
         from_start / self.span.duration().as_secs_f32()
     }
@@ -483,7 +483,9 @@ impl View {
         let first = self.span.start().seconds().div_ceil(step) * step;
         (first..=self.span.end().seconds())
             .step_by(usize::try_from(step).expect("a tick step fits in usize"))
-            .filter_map(TimeOfDay::from_seconds)
+            .map(|seconds| {
+                TimeOfDay::from_elapsed_millis(seconds * crate::model::MILLIS_PER_SECOND)
+            })
             .map(|time| Tick {
                 time,
                 fraction: self.fraction(time),
@@ -491,10 +493,28 @@ impl View {
             .collect()
     }
 
+    pub(crate) fn panned(self, delta_millis: i64, bounds: TimeSpan) -> Self {
+        let length = self.span.end().millis() - self.span.start().millis();
+        let max_start = bounds.end().millis().saturating_sub(length);
+        let start = (i64::from(self.span.start().millis()) + delta_millis)
+            .clamp(i64::from(bounds.start().millis()), i64::from(max_start));
+        let start = u32::try_from(start).expect("pan is clamped to the logical day");
+        Self {
+            span: TimeSpan::new(
+                TimeOfDay::from_elapsed_millis(start),
+                TimeOfDay::from_elapsed_millis(start + length),
+            ),
+        }
+    }
+
     /// The view after one zoom step around the center, kept inside the day and no narrower
     /// than [`MIN_ZOOM_MINUTES`].
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn zoomed(self, step: ZoomStep) -> Self {
+        self.zoomed_within(step, TimeSpan::DAY)
+    }
+    pub(crate) fn zoomed_within(self, step: ZoomStep, bounds: TimeSpan) -> Self {
         let length = self.span.end().seconds() - self.span.start().seconds();
         let center = self.span.start().seconds() + length / 2;
         let half = match step {
@@ -503,13 +523,15 @@ impl View {
         };
         let half = half.clamp(
             MIN_ZOOM_MINUTES * SECONDS_PER_MINUTE / 2,
-            TimeOfDay::END.seconds() / 2,
+            bounds.end().seconds() / 2,
         );
-        let start = TimeOfDay::from_seconds(center.saturating_sub(half))
-            .expect("the start lies before the center");
-        let end =
-            TimeOfDay::from_seconds(center.saturating_add(half).min(TimeOfDay::END.seconds()))
-                .expect("the end is clamped to the day");
+        let start = TimeOfDay::from_elapsed_millis(
+            center.saturating_sub(half) * crate::model::MILLIS_PER_SECOND,
+        );
+        let end = TimeOfDay::from_elapsed_millis(
+            center.saturating_add(half).min(bounds.end().seconds())
+                * crate::model::MILLIS_PER_SECOND,
+        );
         Self {
             span: TimeSpan::new(start, end),
         }

@@ -18,7 +18,7 @@
     expect(
         dead_code,
         unused_imports,
-        reason = "Today view models and widgets are used by the preview until M3-D1 connects the page"
+        reason = "domain and document models remain available to preview before M4 and M5"
     )
 )]
 

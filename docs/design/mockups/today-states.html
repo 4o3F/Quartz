@@ -1,0 +1,1054 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Quartz — Today data states</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mockup.css">
+<!--
+  Today page data states mockup for Quartz (M3-D1).
+  Query parameters:
+    ?state=loading | refreshing | empty-today | empty-past |
+           stopped | query-failed | date-picker | today-nav
+    &theme=light | dark
+    &lang=zh-CN | en
+    &size=min          (optional: 640x480 minimum window per 07 §2.3; default 1280x800)
+    &reason=paused | locked | persistence-failed  (optional, for state=stopped)
+    &err=busy | internal                          (optional, for state=query-failed)
+-->
+<style>
+/* Minimum window 640x480 (Compact breakpoint per 07 §2.1 & §2.3) */
+html[data-size="min"],
+html[data-size="min"] body,
+html[data-size="min"] .window{width:640px;height:480px}
+
+.main-wrap{position:relative;flex:1;min-width:0;display:flex}
+.main{position:relative}
+html[data-size="min"] .main{
+  padding:var(--space-l) var(--space-l) var(--space-l);
+  overflow-y:auto;overflow-x:hidden;
+}
+
+/* Fluent 2 overlay scrollbar indicator (shown only when compact viewport overflows vertically) */
+.scroll-track{
+  display:none;
+  position:absolute;top:var(--space-xs);right:var(--space-xs);bottom:var(--space-xs);
+  width:6px;pointer-events:none;z-index:5;
+}
+.main-wrap.scrollable .scroll-track{display:block}
+.scroll-thumb{
+  position:absolute;left:1px;right:1px;top:0;
+  border-radius:var(--radius-control);
+  background:var(--text-tertiary);
+}
+
+/* Compact (640x480) layout adjustments per 07 §2.1 */
+html[data-size="min"] .datebar .date{min-width:168px}
+html[data-size="min"] .stats{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  row-gap:var(--space-m);
+}
+html[data-size="min"] .stat{padding:0 var(--space-m);border-left:1px solid var(--stroke-divider)}
+html[data-size="min"] .stat:nth-child(3n+1){padding-left:0;border-left:none}
+html[data-size="min"] .two-col{flex-direction:column}
+html[data-size="min"] .tl{--gut:84px}
+html[data-size="min"] .tl-head{flex-wrap:wrap;row-gap:var(--space-xs)}
+html[data-size="min"] .legend{flex-wrap:wrap;gap:var(--space-xs) var(--space-m)}
+
+/* Date bar positioning & active/open button state */
+.datebar{position:relative}
+.datebar .btn.date.open{
+  background:var(--fill-control-pressed);
+  border-color:var(--stroke-control-strong);
+}
+
+/* Subtle in-flight re-query indicator (refreshing state, right side of date bar) */
+.refresh-ind{
+  margin-left:auto;
+  display:inline-flex;align-items:center;gap:6px;
+  font:var(--type-caption);color:var(--text-tertiary);
+  white-space:nowrap;
+}
+.ring-xs{width:14px;height:14px;display:block;flex:none}
+
+/* Static Fluent 2 skeleton primitives (zero looping animation per 07 §9 & 11 §1) */
+.skel{
+  display:inline-block;
+  border-radius:var(--radius-control);
+  background:color-mix(in srgb,var(--text-tertiary) 18%,transparent);
+}
+.skel.soft{background:var(--fill-subtle-hover)}
+.skel.sm{border-radius:var(--tl-block-radius)}
+.skel-v-slot{height:36px;display:flex;align-items:flex-end;padding-bottom:4px}
+.skel-stat-v{height:22px;width:72px}
+.skel-stat-v.big{height:28px;width:104px}
+.skel-catbar{height:8px;width:100%;border-radius:var(--radius-control);background:var(--fill-subtle-hover);margin-top:10px}
+.skel-legend{display:flex;gap:16px;margin-top:8px;flex-wrap:wrap}
+.skel-legend span{display:inline-flex;align-items:center;gap:6px}
+.skel-dot{width:8px;height:8px;border-radius:2px;background:color-mix(in srgb,var(--text-tertiary) 18%,transparent);flex:none}
+.skel-blk{
+  position:absolute;top:0;bottom:0;
+  border-radius:var(--tl-block-radius);
+  background:color-mix(in srgb,var(--text-tertiary) 18%,transparent);
+}
+.skel-blk.soft{background:var(--fill-subtle-hover)}
+.skel-col{
+  width:60%;max-width:30px;
+  border-radius:1px;
+  background:color-mix(in srgb,var(--text-tertiary) 16%,transparent);
+}
+.skel-ic{width:16px;height:16px;border-radius:var(--radius-control);background:var(--fill-subtle-hover);flex:none}
+.skel-cb{width:3px;height:16px;border-radius:2px;background:var(--fill-subtle-hover);flex:none}
+.seg.dim{opacity:.55}
+
+/* Calm empty states (empty-today & empty-past) */
+.empty-card{
+  flex:1;min-height:0;
+  margin-bottom:var(--space-xxl);
+  display:flex;align-items:center;justify-content:center;
+}
+.empty-inner{
+  max-width:440px;
+  display:flex;flex-direction:column;align-items:center;
+  text-align:center;gap:var(--space-m);
+  padding:var(--space-xxl) var(--space-l);
+}
+.empty-tile{
+  width:48px;height:48px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-subtle-hover);
+  border:1px solid var(--stroke-card);
+  color:var(--text-secondary);
+  display:grid;place-items:center;
+}
+.empty-tile svg{width:24px;height:24px;stroke-width:1.5}
+.empty-title{font:var(--type-subtitle);color:var(--text-primary)}
+.empty-desc{font:var(--type-body);color:var(--text-secondary)}
+.status-pill{
+  display:inline-flex;align-items:center;gap:8px;
+  height:24px;padding:0 var(--space-m);
+  border-radius:var(--radius-control);
+  background:var(--fill-subtle-hover);
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.status-pill i{width:6px;height:6px;border-radius:50%;background:var(--status-success);flex:none}
+
+/* Stop-reason InfoBar (positioned between date bar and status-line card) */
+.infobar{
+  flex:none;
+  min-height:var(--h-row-standard);
+  padding:var(--space-s) var(--space-l);
+  border-radius:var(--radius-overlay);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card);
+  display:flex;align-items:center;gap:var(--space-m);
+}
+.infobar .ib-ic{color:var(--text-secondary);flex:none}
+.infobar .ib-txt{
+  flex:1;min-width:0;
+  display:flex;align-items:baseline;flex-wrap:wrap;
+  column-gap:var(--space-s);row-gap:var(--space-xxs);
+}
+.infobar .ib-title{font:var(--type-body-strong);color:var(--text-primary)}
+.infobar .ib-msg{font:var(--type-body);color:var(--text-secondary)}
+.infobar.critical{
+  background:var(--status-critical-bg);
+  border-color:color-mix(in srgb,var(--status-critical) 28%,transparent);
+}
+.infobar.critical .ib-ic{color:var(--status-critical)}
+
+/* Inline page-level query-failed notice (clearly lighter than full-window errors.html) */
+.qfail-card{
+  flex:none;
+  padding:var(--space-l) var(--space-xl);
+  display:flex;align-items:flex-start;gap:var(--space-m);
+}
+.qfail-ic{color:var(--status-caution);margin-top:1px;flex:none}
+.qfail-body{
+  flex:1;min-width:0;
+  display:flex;flex-direction:column;gap:var(--space-xs);
+}
+.qfail-title{font:var(--type-body-strong);color:var(--text-primary)}
+.qfail-msg{font:var(--type-body);color:var(--text-secondary)}
+.qfail-code{font:var(--type-caption);font-family:var(--font-mono);color:var(--text-tertiary);margin-top:2px}
+.qfail-act{flex:none;align-self:center;margin-left:var(--space-m)}
+html[data-size="min"] .qfail-card{flex-wrap:wrap;padding:var(--space-l)}
+html[data-size="min"] .qfail-act{
+  margin-left:calc(20px + var(--space-m));
+  margin-top:var(--space-xs);
+  align-self:flex-start;
+}
+
+/* Fluent 2 CalendarDatePicker flyout */
+.cal-flyout{
+  position:absolute;
+  left:40px; /* aligned with date button (32px prev button + 8px gap) */
+  top:calc(var(--h-control-standard) + var(--space-xs));
+  width:300px;
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-overlay);
+  box-shadow:var(--shadow-28);
+  z-index:20;
+  overflow:hidden;
+}
+.cal-head{
+  height:40px;
+  padding:0 var(--space-s) 0 var(--space-m);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:center;gap:var(--space-xs);
+}
+.cal-month{
+  flex:1;min-width:0;
+  height:32px;padding:0 var(--space-s);
+  border-radius:var(--radius-control);
+  display:flex;align-items:center;
+  font:var(--type-body-strong);color:var(--text-primary);
+}
+.cal-nav{
+  width:32px;height:32px;
+  border-radius:var(--radius-control);
+  display:grid;place-items:center;
+  color:var(--text-primary);
+}
+.cal-nav.disabled{color:var(--text-disabled)}
+.cal-body{padding:var(--space-s) var(--space-m) var(--space-m)}
+.cal-wk{
+  display:grid;grid-template-columns:repeat(7,1fr);
+  margin-bottom:var(--space-xs);
+}
+.cal-wk span{
+  height:28px;
+  display:grid;place-items:center;
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.cal-grid{
+  display:grid;grid-template-columns:repeat(7,1fr);
+  row-gap:2px;
+}
+.cal-day{
+  height:38px;
+  display:grid;place-items:center;
+}
+.cal-day span{
+  width:34px;height:34px;
+  border-radius:50%;
+  display:grid;place-items:center;
+  font:var(--type-body);color:var(--text-primary);
+}
+.cal-day.out span{color:var(--text-tertiary)}
+.cal-day.future span{color:var(--text-disabled)}
+.cal-day.today span{
+  border:1.5px solid var(--accent-fill);
+  color:var(--accent-text);
+  font-weight:600;
+}
+.cal-day.selected span{
+  background:var(--accent-fill);
+  color:var(--text-on-accent);
+  font-weight:600;
+}
+
+/* Today-nav comparison card */
+.nav-cmp{
+  flex:none;
+  padding:var(--space-m) var(--space-l);
+  display:flex;flex-direction:column;gap:var(--space-m);
+}
+.nav-cmp-row{
+  display:flex;align-items:center;gap:var(--space-l);
+  padding-top:var(--space-m);
+  border-top:1px solid var(--stroke-divider);
+}
+.nav-cmp-row:first-of-type{padding-top:0;border-top:none}
+.nav-cmp-meta{width:176px;flex:none;display:flex;flex-direction:column;gap:2px}
+.nav-cmp-bar{display:flex;align-items:center;gap:var(--space-s);flex:none}
+.nav-cmp-bar .date{min-width:196px;justify-content:flex-start}
+.nav-cmp-note{flex:1;min-width:0;font:var(--type-caption);color:var(--text-secondary)}
+</style>
+<script>
+const __p = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = __p.get('theme') || 'light';
+if (__p.get('size') === 'min') document.documentElement.dataset.size = 'min';
+</script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.4" fill="currentColor"/></symbol>
+  <symbol id="today-f" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5" fill="currentColor" stroke="none"/><path d="M4 9.5h16" stroke="var(--cut)"/><path d="M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.6" fill="var(--cut)" stroke="none"/></symbol>
+  <symbol id="week" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3M8 13h8M8 16.5h5"/></symbol>
+  <symbol id="tag" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z"/><circle cx="8.3" cy="8.3" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><path d="M10.29 4.59L10.47 2.32L13.53 2.32L13.71 4.59L16.03 5.55L17.76 4.07L19.93 6.24L18.45 7.97L19.41 10.29L21.68 10.47L21.68 13.53L19.41 13.71L18.45 16.03L19.93 17.76L17.76 19.93L16.03 18.45L13.71 19.41L13.53 21.68L10.47 21.68L10.29 19.41L7.97 18.45L6.24 19.93L4.07 17.76L5.55 16.03L4.59 13.71L2.32 13.53L2.32 10.47L4.59 10.29L5.55 7.97L4.07 6.24L6.24 4.07L7.97 5.55Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="chev-l" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+  <symbol id="chev-r" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+  <symbol id="chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
+  <symbol id="chev-u" viewBox="0 0 24 24"><path d="M5 15l7-7 7 7"/></symbol>
+  <symbol id="menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="code" viewBox="0 0 24 24"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></symbol>
+  <symbol id="globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.3 3.8 5.1 3.8 8.5s-1.3 6.2-3.8 8.5c-2.5-2.3-3.8-5.1-3.8-8.5S9.5 5.8 12 3.5z"/></symbol>
+  <symbol id="chat" viewBox="0 0 24 24"><path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4.5 3.5V16H6a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="send" viewBox="0 0 24 24"><path d="M20 4L4 11l6 2.5L12.5 20zM10 13.5L20 4"/></symbol>
+  <symbol id="terminal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M7.5 10l3 2.5-3 2.5M12.5 15h4"/></symbol>
+  <symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.3" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.5" height="14" rx="1"/><rect x="14" y="5" width="3.5" height="14" rx="1"/></symbol>
+  <symbol id="play" viewBox="0 0 24 24"><path d="M7.5 5.5l10.5 6.5-10.5 6.5z"/></symbol>
+  <symbol id="refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.2h-4.2"/></symbol>
+  <symbol id="crit-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></symbol>
+  <symbol id="logo" viewBox="0 0 24 24"><path d="M12 2.5l8 4.5v10l-8 4.5-8-4.5V7z" fill="var(--accent-fill)" stroke="none"/><path d="M12 2.5v19M4 7l16 10M20 7L4 17" stroke="var(--text-on-accent)" stroke-width="1" opacity=".7"/></symbol>
+</defs></svg>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="app"><svg class="ic s16"><use href="#logo"/></svg>Quartz</div>
+    <div class="btns">
+      <div><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></div>
+    </div>
+  </div>
+  <div class="body">
+    <nav class="nav" id="nav"></nav>
+    <div class="wrap">
+      <div class="main-wrap" id="main-wrap">
+        <main class="main" id="main"></main>
+        <div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="scroll-thumb"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const lang = params.get('lang') === 'en' ? 'en' : 'zh-CN';
+const stateKey = params.get('state') || 'loading';
+const isMin = params.get('size') === 'min';
+const stopReason = params.get('reason') || 'paused';
+const failCode = params.get('err') === 'internal' ? 'internal' : 'busy';
+document.documentElement.lang = lang;
+
+const COPY = {
+  'zh-CN': {
+    nav: { today: '今天', week: '本周', rules: '分类与规则', settings: '设置' },
+    dates: {
+      today: '11月19日 周四',
+      past: '11月16日 周一',
+      emptyPast: '11月12日 周四',
+      emptyPastShort: '11月12日',
+      monthLabel: '2026年11月',
+      weekdays: ['一', '二', '三', '四', '五', '六', '日'],
+      weekStart: 'mon',
+    },
+    datebar: {
+      todayBtn: '今天',
+      updating: '正在更新…',
+    },
+    stats: {
+      active: '活跃时长',
+      focus: '专注占比',
+      distraction: '分心占比',
+      unclassified: '未分类',
+      longestFocus: '最长连续专注',
+      switches: '每小时切换',
+      hUnit: '小时',
+      mUnit: '分',
+      swUnit: '次',
+    },
+    cat: {
+      dev: '开发',
+      comm: '沟通',
+      browse: '浏览',
+      ent: '娱乐',
+      uncl: '未分类',
+    },
+    legend: [
+      { c: '--cat-8', text: '开发 4 小时 31 分' },
+      { c: '--cat-3', text: '沟通 1 小时 9 分' },
+      { c: '--cat-2', text: '浏览 30 分' },
+      { c: '--cat-13', text: '娱乐 40 分' },
+      { c: '--cat-neutral', text: '未分类 15 分' },
+    ],
+    tl: {
+      title: '时间轴',
+      cat: '分类',
+      appLanes: '应用泳道',
+      catOnly: '仅分类',
+      full24: '整 24 小时',
+      devLong: '开发 1 小时 46 分',
+      dev: '开发',
+      devShort: '开发',
+      comm: '沟通',
+      excl: '已排除 65 分钟',
+      apps: ['VS Code', 'Microsoft Edge', '飞书', '终端', '微信'],
+    },
+    hourly: {
+      title: '按小时',
+      y0: '0 分',
+      y30: '30 分',
+      y60: '60 分',
+    },
+    rank: {
+      title: '排行',
+      tabs: ['应用', '域名', '文档', '混排'],
+      rows: [
+        { c: '--cat-8', ic: 'code', name: 'Visual Studio Code', w: '100.0%', segs: [['--cat-8', 234]], dur: '3 小时 54 分' },
+        { c: '--cat-13', ic: 'globe', name: 'Microsoft Edge', w: '44.9%', segs: [['--cat-8', 20], ['--cat-2', 30], ['--cat-13', 40], ['--cat-neutral', 15]], dur: '1 小时 45 分' },
+        { c: '--cat-3', ic: 'send', name: '飞书', w: '23.1%', segs: [['--cat-3', 54]], dur: '54 分' },
+        { c: '--cat-8', ic: 'terminal', name: 'Windows Terminal', w: '7.3%', segs: [['--cat-8', 17]], dur: '17 分' },
+        { c: '--cat-3', ic: 'chat', name: '微信', w: '6.4%', segs: [['--cat-3', 15]], dur: '15 分' },
+      ],
+    },
+    pending: {
+      title: '待标注的离开',
+      range: '15:12 – 15:32 · 20 分',
+      actions: ['休息', '会议', '阅读思考', '忽略', '其他…'],
+    },
+    emptyToday: {
+      title: '今天还没有记录',
+      desc: 'Quartz 正在后台记录，产生新的活动后会自动显示在这里。',
+      pill: '正在记录',
+    },
+    emptyPast: {
+      title: '这一天没有记录',
+      desc: '11月12日没有采集到活动数据，可能是 Quartz 核心当天未运行，或相关记录已被删除。',
+      backToday: '回到今天',
+    },
+    stopped: {
+      paused: {
+        title: '记录已暂停',
+        msg: '将于 14:30 自动恢复。今日已采集的数据仍可正常查看。',
+        action: '恢复',
+      },
+      locked: {
+        title: '已锁屏，当前未记录',
+        msg: '解锁会话后将自动继续记录。',
+      },
+      'persistence-failed': {
+        title: '无法保存记录',
+        msg: '数据库写入失败，核心正在重试。恢复前的新活动可能无法保存。',
+      },
+    },
+    qfail: {
+      title: '暂时无法加载当天数据',
+      busyMsg: '核心暂时繁忙，未能返回当天查询结果。你仍可切换其他日期或打开其他页面。',
+      internalMsg: '核心处理当天查询时发生内部错误。你仍可切换其他日期或打开其他页面。',
+      retry: '重试',
+      codePrefix: '错误代码',
+    },
+    navCmp: {
+      heading: '日期栏导航状态对照',
+      todayLabel: '已选今天',
+      todaySub: '当前日期（无未来数据）',
+      todayNote: '“→”与“今天”按钮禁用，避免跳往未来日期或重复跳转。',
+      pastLabel: '已选历史日期',
+      pastSub: '对照状态（早于今天）',
+      pastNote: '四个导航按钮均可用；“→”前进一天，“今天”一键回到当天。',
+    },
+  },
+  en: {
+    nav: { today: 'Today', week: 'This week', rules: 'Categories & rules', settings: 'Settings' },
+    dates: {
+      today: 'Thu, Nov 19',
+      past: 'Mon, Nov 16',
+      emptyPast: 'Thu, Nov 12',
+      emptyPastShort: 'Nov 12',
+      monthLabel: 'November 2026',
+      weekdays: ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'],
+      weekStart: 'sun',
+    },
+    datebar: {
+      todayBtn: 'Today',
+      updating: 'Updating…',
+    },
+    stats: {
+      active: 'Active time',
+      focus: 'Focus share',
+      distraction: 'Distraction share',
+      unclassified: 'Unclassified',
+      longestFocus: 'Longest focus streak',
+      switches: 'Switches per hour',
+      hUnit: 'h',
+      mUnit: 'm',
+      swUnit: '',
+    },
+    cat: {
+      dev: 'Development',
+      comm: 'Communication',
+      browse: 'Browsing',
+      ent: 'Entertainment',
+      uncl: 'Unclassified',
+    },
+    legend: [
+      { c: '--cat-8', text: 'Development 4h 31m' },
+      { c: '--cat-3', text: 'Communication 1h 9m' },
+      { c: '--cat-2', text: 'Browsing 30m' },
+      { c: '--cat-13', text: 'Entertainment 40m' },
+      { c: '--cat-neutral', text: 'Unclassified 15m' },
+    ],
+    tl: {
+      title: 'Timeline',
+      cat: 'Category',
+      appLanes: 'App lanes',
+      catOnly: 'Category only',
+      full24: 'Full 24 h',
+      devLong: 'Development 1h 46m',
+      dev: 'Development',
+      devShort: '',
+      comm: '',
+      excl: 'Excluded 65m',
+      apps: ['VS Code', 'Microsoft Edge', 'Feishu', 'Terminal', 'WeChat'],
+    },
+    hourly: {
+      title: 'By hour',
+      y0: '0m',
+      y30: '30m',
+      y60: '60m',
+    },
+    rank: {
+      title: 'Ranking',
+      tabs: ['Apps', 'Domains', 'Documents', 'Mixed'],
+      rows: [
+        { c: '--cat-8', ic: 'code', name: 'Visual Studio Code', w: '100.0%', segs: [['--cat-8', 234]], dur: '3h 54m' },
+        { c: '--cat-13', ic: 'globe', name: 'Microsoft Edge', w: '44.9%', segs: [['--cat-8', 20], ['--cat-2', 30], ['--cat-13', 40], ['--cat-neutral', 15]], dur: '1h 45m' },
+        { c: '--cat-3', ic: 'send', name: 'Feishu', w: '23.1%', segs: [['--cat-3', 54]], dur: '54m' },
+        { c: '--cat-8', ic: 'terminal', name: 'Windows Terminal', w: '7.3%', segs: [['--cat-8', 17]], dur: '17m' },
+        { c: '--cat-3', ic: 'chat', name: 'WeChat', w: '6.4%', segs: [['--cat-3', 15]], dur: '15m' },
+      ],
+    },
+    pending: {
+      title: 'Away to label',
+      range: '15:12 – 15:32 · 20m',
+      actions: ['Break', 'Meeting', 'Reading', 'Dismiss', 'Other…'],
+    },
+    emptyToday: {
+      title: 'No activity recorded yet today',
+      desc: 'Quartz is recording in the background. New activity will appear here automatically.',
+      pill: 'Recording',
+    },
+    emptyPast: {
+      title: 'No activity recorded on this day',
+      desc: 'No activity was captured on Nov 12. The Quartz core may not have been running, or records for this day were deleted.',
+      backToday: 'Go to today',
+    },
+    stopped: {
+      paused: {
+        title: 'Recording paused',
+        msg: 'Resumes automatically at 14:30. Activity already collected today remains available.',
+        action: 'Resume',
+      },
+      locked: {
+        title: 'Screen locked — recording paused',
+        msg: 'Recording will resume automatically when your session unlocks.',
+      },
+      'persistence-failed': {
+        title: 'Can’t save records',
+        msg: 'Database write failed and the core is retrying. New activity may not be saved until writing recovers.',
+      },
+    },
+    qfail: {
+      title: 'Couldn’t load data for this day',
+      busyMsg: 'The core is temporarily busy and couldn’t complete this query. You can still switch dates or open other pages.',
+      internalMsg: 'The core hit an internal error while loading this day. You can still switch dates or open other pages.',
+      retry: 'Retry',
+      codePrefix: 'Error code',
+    },
+    navCmp: {
+      heading: 'Date bar navigation states',
+      todayLabel: 'Today selected',
+      todaySub: 'Current day (no future data)',
+      todayNote: 'Next-day (“→”) and “Today” are disabled to prevent stepping into the future.',
+      pastLabel: 'Past day selected',
+      pastSub: 'Comparison (before today)',
+      pastNote: 'All four controls are enabled; “→” steps forward one day and “Today” jumps back.',
+    },
+  },
+};
+
+const T = COPY[lang];
+
+function ringSvg(cls) {
+  return `<svg class="${cls}" viewBox="0 0 28 28" aria-hidden="true">` +
+    `<circle cx="14" cy="14" r="10.5" fill="none" stroke="var(--stroke-control-strong)" stroke-width="3"/>` +
+    `<path d="M14 3.5 A10.5 10.5 0 0 1 24.5 14" fill="none" stroke="var(--accent-fill)" stroke-width="3" stroke-linecap="round"/>` +
+    `</svg>`;
+}
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  if (isMin) nav.classList.add('rail');
+  // Per 07 §2.1: Compact (<641) keeps 48px icon rail with no collapse toggle button.
+  const menuRow = isMin
+    ? `<div style="height:4px;flex:none"></div>`
+    : `<div class="nav-item" style="margin-top:4px"><svg class="ic"><use href="#menu"/></svg></div>`;
+  nav.innerHTML =
+    menuRow +
+    `<div class="nav-item selected"><i class="ind"></i><svg class="ic"><use href="#today-f"/></svg><span>${T.nav.today}</span></div>` +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#week"/></svg><span>${T.nav.week}</span></div>` +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#tag"/></svg><span>${T.nav.rules}</span></div>` +
+    `<div class="spacer"></div>` +
+    `<div class="bottom"><div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#gear"/></svg><span>${T.nav.settings}</span></div></div>`;
+}
+
+function renderDateBar({ dateText, isToday, pickerOpen = false, refreshing = false, extraHtml = '' }) {
+  const disCls = isToday ? ' disabled' : '';
+  const openCls = pickerOpen ? ' open' : '';
+  const chevId = pickerOpen ? 'chev-u' : 'chev-d';
+  const refreshHtml = refreshing
+    ? `<div class="refresh-ind">${ringSvg('ring-xs')}<span>${T.datebar.updating}</span></div>`
+    : '';
+  return `<div class="datebar">` +
+    `<button class="btn icon"><svg class="ic s16"><use href="#chev-l"/></svg></button>` +
+    `<div class="btn date${openCls}"><svg class="ic s16"><use href="#today"/></svg><span class="strong">${dateText}</span><span class="grow"></span><svg class="ic s16"><use href="#${chevId}"/></svg></div>` +
+    `<button class="btn icon${disCls}"><svg class="ic s16"><use href="#chev-r"/></svg></button>` +
+    `<button class="btn${disCls}">${T.datebar.todayBtn}</button>` +
+    refreshHtml +
+    extraHtml +
+    `</div>`;
+}
+
+function renderStatusCard() {
+  const s = T.stats;
+  const swUnit = s.swUnit ? `<small>${s.swUnit}</small>` : '';
+  return `<div class="card" style="padding:12px 16px;flex:none">` +
+    `<div class="stats">` +
+      `<div class="stat"><div class="v big">7<small>${s.hUnit}</small>5<small>${s.mUnit}</small></div><div class="l">${s.active}</div></div>` +
+      `<div class="stat"><div class="v">64%</div><div class="l">${s.focus}</div></div>` +
+      `<div class="stat"><div class="v">9%</div><div class="l">${s.distraction}</div></div>` +
+      `<div class="stat"><div class="v">15<small>${s.mUnit}</small></div><div class="l">${s.unclassified} <svg class="ic s16" style="width:12px;height:12px"><use href="#chev-r"/></svg></div></div>` +
+      `<div class="stat"><div class="v">1<small>${s.hUnit}</small>46<small>${s.mUnit}</small></div><div class="l">${s.longestFocus}</div></div>` +
+      `<div class="stat"><div class="v">3${swUnit}</div><div class="l">${s.switches}</div></div>` +
+    `</div>` +
+    `<div class="catbar" style="margin-top:10px">` +
+      `<div style="--c:var(--cat-8);flex:271"></div>` +
+      `<div style="--c:var(--cat-3);flex:69"></div>` +
+      `<div style="--c:var(--cat-2);flex:30"></div>` +
+      `<div style="--c:var(--cat-13);flex:40"></div>` +
+      `<div style="--c:var(--cat-neutral);flex:15"></div>` +
+    `</div>` +
+    `<div class="legend" style="margin-top:6px">` +
+      T.legend.map(l => `<span style="--c:var(${l.c})"><i></i>${l.text}</span>`).join('') +
+    `</div>` +
+  `</div>`;
+}
+
+function renderTimelineCard() {
+  const tl = T.tl;
+  const gridLefts = [4.412, 14.216, 24.020, 33.824, 43.627, 53.431, 63.235, 73.039, 82.843, 92.647];
+  const hours = ['09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00','18:00'];
+  const gridHtml = gridLefts.map(x => `<i style="left:${x}%"></i>`).join('');
+  const ticksHtml = gridLefts.map((x, i) => `<i class="tick" style="left:${x}%"></i><span class="tickl" style="left:${x}%">${hours[i]}</span>`).join('');
+  const laneIcons = ['code', 'globe', 'send', 'terminal', 'chat'];
+  const laneBlocks = [
+    [[6.046,8.987,'--cat-8'],[16.176,5.882,'--cat-8'],[25.654,6.209,'--cat-8'],[33.007,4.085,'--cat-8'],[54.248,7.353,'--cat-8'],[78.758,5.719,'--cat-8']],
+    [[4.739,1.307,'--cat-8'],[23.203,2.451,'--cat-2'],[51.797,2.451,'--cat-2'],[63.235,1.961,'--cat-8'],[68.464,2.941,'--cat-13'],[72.712,3.595,'--cat-13'],[76.307,2.451,'--cat-neutral', 'none']],
+    [[2.451,2.288,'--cat-3'],[47.712,4.085,'--cat-3'],[95.098,2.451,'--cat-3']],
+    [[15.033,1.144,'--cat-8'],[61.601,1.634,'--cat-8']],
+    [[22.059,1.144,'--cat-3'],[71.405,1.307,'--cat-3']],
+  ];
+  const lanesHtml = laneBlocks.map((blks, idx) =>
+    `<div class="trow lane">` +
+      `<div class="lab"><svg class="ic s16"><use href="#${laneIcons[idx]}"/></svg><span class="ell">${tl.apps[idx]}</span></div>` +
+      `<div class="trk">` +
+        blks.map(([l, w, c, extra]) => `<div class="blk ${extra || ''}" style="left:${l}%;width:calc(${w}% - 1px);--c:var(${c});--c-on:var(${c === '--cat-neutral' ? '--text-primary' : c + '-on'})"></div>`).join('') +
+      `</div>` +
+    `</div>`
+  ).join('');
+
+  return `<div class="card" style="flex:none;padding:12px 16px 8px">` +
+    `<div class="row tl-head" style="margin-bottom:10px">` +
+      `<span class="h-sub grow">${tl.title}</span>` +
+      `<span class="cap sec" style="margin-right:12px">08:33 – 18:45</span>` +
+      `<div class="seg" style="margin-right:8px"><div class="on">${tl.appLanes}</div><div>${tl.catOnly}</div></div>` +
+      `<button class="btn compact icon"><svg class="ic s16"><use href="#minus"/></svg></button>` +
+      `<button class="btn compact icon" style="margin-left:4px"><svg class="ic s16"><use href="#add"/></svg></button>` +
+      `<button class="btn compact" style="margin-left:8px">${tl.full24}</button>` +
+    `</div>` +
+    `<div class="plot" style="padding:0"><div class="tl">` +
+      `<div class="grid" style="height:152px">${gridHtml}</div>` +
+      `<div class="trow mtrk"><div class="lab">${tl.cat}</div><div class="trk" style="position:relative">` +
+        `<div class="blk" style="left:2.451%;width:calc(2.288% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+        `<div class="blk" style="left:4.739%;width:calc(17.320% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.devLong}</div>` +
+        `<div class="blk" style="left:22.059%;width:calc(1.144% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+        `<div class="blk" style="left:23.203%;width:calc(2.451% - 1px);--c:var(--cat-2);--c-on:var(--cat-2-on)"></div>` +
+        `<div class="blk" style="left:25.654%;width:calc(6.209% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.devShort}</div>` +
+        `<div class="blk idle" style="left:31.863%;width:calc(1.144% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)"></div>` +
+        `<div class="blk" style="left:33.007%;width:calc(4.085% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.devShort}</div>` +
+        `<div class="blk lock" style="left:37.092%;width:calc(10.621% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)"></div>` +
+        `<div class="blk" style="left:47.712%;width:calc(4.085% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)">${tl.comm}</div>` +
+        `<div class="blk" style="left:51.797%;width:calc(2.451% - 1px);--c:var(--cat-2);--c-on:var(--cat-2-on)"></div>` +
+        `<div class="blk" style="left:54.248%;width:calc(10.948% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.dev}</div>` +
+        `<div class="blk idle" style="left:65.196%;width:calc(3.268% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)"></div>` +
+        `<div class="blk" style="left:68.464%;width:calc(2.941% - 1px);--c:var(--cat-13);--c-on:var(--cat-13-on)"></div>` +
+        `<div class="blk" style="left:71.405%;width:calc(1.307% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+        `<div class="blk" style="left:72.712%;width:calc(3.595% - 1px);--c:var(--cat-13);--c-on:var(--cat-13-on)"></div>` +
+        `<div class="blk none" style="left:76.307%;width:calc(2.451% - 1px);--c:var(--cat-neutral);--c-on:var(--text-primary)"></div>` +
+        `<div class="blk" style="left:78.758%;width:calc(5.719% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.devShort}</div>` +
+        `<div class="blk excl" style="left:84.477%;width:calc(10.621% - 1px);--c:var(--cat-neutral);--c-on:var(--text-primary)">${tl.excl}</div>` +
+        `<div class="blk" style="left:95.098%;width:calc(2.451% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+      `</div></div>` +
+      `<div class="lanes">${lanesHtml}</div>` +
+      `<div class="trow ruler" style="margin-top:4px"><div class="lab"></div><div class="trk">${ticksHtml}</div></div>` +
+    `</div></div>` +
+  `</div>`;
+}
+
+function renderHourlyAndRanking() {
+  const h = T.hourly;
+  const r = T.rank;
+  const cols = [
+    [['--cat-3', 24]],
+    [['--cat-8', 116], ['--cat-3', 4]],
+    [['--cat-8', 96], ['--cat-3', 14], ['--cat-2', 10]],
+    [['--cat-8', 86], ['--cat-2', 20]],
+    [['--cat-8', 40]],
+    [['--cat-3', 50], ['--cat-2', 20]],
+    [['--cat-8', 110], ['--cat-2', 10]],
+    [['--cat-8', 24], ['--cat-3', 16], ['--cat-13', 40]],
+    [['--cat-8', 50], ['--cat-13', 40], ['--cat-neutral', 30]],
+    [['--cat-8', 20]],
+    [['--cat-3', 30]],
+  ];
+  const colsHtml = cols.map(st =>
+    `<div class="col"><div class="stack">` +
+      st.map(([c, px]) => `<div style="--c:var(${c});height:${px}.0px"></div>`).join('') +
+    `</div></div>`
+  ).join('');
+  const hLabels = [8,9,10,11,12,13,14,15,16,17,18].map(n => `<span>${n}</span>`).join('');
+  const rankRows = r.rows.map(row =>
+    `<div class="rank" style="--c:var(${row.c})">` +
+      `<i class="cb"></i>` +
+      `<div class="nm"><svg class="ic s16"><use href="#${row.ic}"/></svg><span class="ell">${row.name}</span></div>` +
+      `<div class="bar"><div class="fill" style="width:${row.w}">` +
+        row.segs.map(([c, f]) => `<div style="--c:var(${c});flex:${f}"></div>`).join('') +
+      `</div></div>` +
+      `<div class="du">${row.dur}</div>` +
+    `</div>`
+  ).join('');
+  return `<div class="row gap8 two-col" style="flex:none;align-items:stretch">` +
+    `<div class="card grow" style="padding:12px 16px">` +
+      `<div class="h-sub" style="margin-bottom:8px">${h.title}</div>` +
+      `<div class="plot" style="padding:4px 0 6px">` +
+        `<div class="hours">` +
+          `<div class="y"><span style="bottom:0px">${h.y0}</span><span style="bottom:60px">${h.y30}</span><span style="bottom:120px">${h.y60}</span></div>` +
+          `<div class="plotarea"><div class="gl" style="bottom:60px"></div><div class="gl" style="bottom:120px"></div>${colsHtml}</div>` +
+        `</div>` +
+        `<div class="hlabels">${hLabels}</div>` +
+      `</div>` +
+    `</div>` +
+    `<div class="card grow" style="padding:12px 16px">` +
+      `<div class="row" style="margin-bottom:4px"><span class="h-sub grow">${r.title}</span><div class="seg">${r.tabs.map((t, i) => `<div${i === 0 ? ' class="on"' : ''}>${t}</div>`).join('')}</div></div>` +
+      rankRows +
+    `</div>` +
+  `</div>`;
+}
+
+function renderPendingRow() {
+  const p = T.pending;
+  return `<div class="card pending" style="flex:none;padding:8px 16px">` +
+    `<svg class="ic s16"><use href="#clock"/></svg>` +
+    `<span class="strong">${p.title}</span>` +
+    `<span class="sec">${p.range}</span>` +
+    `<span class="grow"></span>` +
+    `<div class="row gap4">${p.actions.map(a => `<button class="btn compact">${a}</button>`).join('')}</div>` +
+  `</div>`;
+}
+
+/* State 1: Calm static skeleton matching exact Today card geometry */
+function renderLoadingState() {
+  const s = T.stats;
+  const tl = T.tl;
+  const h = T.hourly;
+  const r = T.rank;
+
+  const statSkels = [
+    { label: s.active, big: true, w: 106 },
+    { label: s.focus, w: 54 },
+    { label: s.distraction, w: 46 },
+    { label: s.unclassified, w: 58 },
+    { label: s.longestFocus, w: 84 },
+    { label: s.switches, w: 48 },
+  ];
+  const statusCard = `<div class="card" style="padding:12px 16px;flex:none">` +
+    `<div class="stats">` +
+      statSkels.map(it =>
+        `<div class="stat"><div class="skel-v-slot"><div class="skel ${it.big ? 'skel-stat-v big' : 'skel-stat-v'}" style="width:${it.w}px"></div></div><div class="l">${it.label}</div></div>`
+      ).join('') +
+    `</div>` +
+    `<div class="skel-catbar"></div>` +
+    `<div class="skel-legend">` +
+      [88, 76, 62, 68].map(w => `<span><i class="skel-dot"></i><i class="skel soft" style="width:${w}px;height:12px"></i></span>`).join('') +
+    `</div>` +
+  `</div>`;
+
+  const gridLefts = isMin
+    ? [8, 28, 48, 68, 88]
+    : [4.412, 14.216, 24.020, 33.824, 43.627, 53.431, 63.235, 73.039, 82.843, 92.647];
+  const gridHtml = gridLefts.map(x => `<i style="left:${x}%"></i>`).join('');
+  const tickSkels = gridLefts.map(x => `<i class="tick" style="left:${x}%"></i><span class="tickl" style="left:${x}%"><i class="skel soft" style="width:28px;height:10px;vertical-align:top"></i></span>`).join('');
+
+  const skelLanes = [
+    { w: 62, blks: [[7, 16], [26, 11], [54, 15], [76, 10]] },
+    { w: 80, blks: [[4, 6], [21, 9], [48, 8], [67, 12]] },
+    { w: 46, blks: [[14, 7], [43, 9], [88, 7]] },
+    { w: 56, blks: [[29, 8], [61, 6]] },
+  ];
+  const skelLanesHtml = skelLanes.map(ln =>
+    `<div class="trow lane">` +
+      `<div class="lab"><i class="skel-ic"></i><i class="skel soft" style="width:${isMin ? Math.min(ln.w, 54) : ln.w}px;height:12px"></i></div>` +
+      `<div class="trk">${ln.blks.map(([l, w]) => `<div class="skel-blk soft" style="left:${l}%;width:${w}%"></div>`).join('')}</div>` +
+    `</div>`
+  ).join('');
+
+  const timelineCard = `<div class="card" style="flex:none;padding:12px 16px 8px">` +
+    `<div class="row tl-head" style="margin-bottom:10px">` +
+      `<span class="h-sub grow">${tl.title}</span>` +
+      `<span class="skel soft" style="width:76px;height:14px;margin-right:12px"></span>` +
+      `<div class="seg dim" style="margin-right:8px"><div class="on">${tl.appLanes}</div><div>${tl.catOnly}</div></div>` +
+      `<button class="btn compact icon disabled"><svg class="ic s16"><use href="#minus"/></svg></button>` +
+      `<button class="btn compact icon disabled" style="margin-left:4px"><svg class="ic s16"><use href="#add"/></svg></button>` +
+      `<button class="btn compact disabled" style="margin-left:8px">${tl.full24}</button>` +
+    `</div>` +
+    `<div class="plot" style="padding:0"><div class="tl">` +
+      `<div class="grid" style="height:128px">${gridHtml}</div>` +
+      `<div class="trow mtrk"><div class="lab">${tl.cat}</div><div class="trk" style="position:relative">` +
+        `<div class="skel-blk" style="left:4%;width:19%"></div>` +
+        `<div class="skel-blk" style="left:25%;width:14%"></div>` +
+        `<div class="skel-blk soft" style="left:41%;width:10%"></div>` +
+        `<div class="skel-blk" style="left:53%;width:18%"></div>` +
+        `<div class="skel-blk" style="left:74%;width:16%"></div>` +
+      `</div></div>` +
+      `<div class="lanes">${skelLanesHtml}</div>` +
+      `<div class="trow ruler" style="margin-top:4px"><div class="lab"></div><div class="trk">${tickSkels}</div></div>` +
+    `</div></div>` +
+  `</div>`;
+
+  const skelBars = [28, 86, 72, 60, 34, 52, 82, 48, 66, 26, 36];
+  const hourlySkel = `<div class="card grow" style="padding:12px 16px">` +
+    `<div class="h-sub" style="margin-bottom:8px">${h.title}</div>` +
+    `<div class="plot" style="padding:4px 0 6px">` +
+      `<div class="hours">` +
+        `<div class="y"><span style="bottom:0px">${h.y0}</span><span style="bottom:60px">${h.y30}</span><span style="bottom:120px">${h.y60}</span></div>` +
+        `<div class="plotarea"><div class="gl" style="bottom:60px"></div><div class="gl" style="bottom:120px"></div>` +
+          skelBars.map(px => `<div class="col"><div class="skel-col" style="height:${px}px"></div></div>`).join('') +
+        `</div>` +
+      `</div>` +
+      `<div class="hlabels">${skelBars.map(() => `<span><i class="skel soft" style="width:14px;height:10px"></i></span>`).join('')}</div>` +
+    `</div>` +
+  `</div>`;
+
+  const skelRanks = [
+    { nm: 112, bar: 92, du: 56 },
+    { nm: 96, bar: 52, du: 52 },
+    { nm: 64, bar: 34, du: 38 },
+    { nm: 104, bar: 20, du: 36 },
+    { nm: 58, bar: 14, du: 34 },
+  ];
+  const rankSkel = `<div class="card grow" style="padding:12px 16px">` +
+    `<div class="row" style="margin-bottom:4px"><span class="h-sub grow">${r.title}</span><div class="seg dim">${r.tabs.map((t, i) => `<div${i === 0 ? ' class="on"' : ''}>${t}</div>`).join('')}</div></div>` +
+    skelRanks.map(row =>
+      `<div class="rank">` +
+        `<i class="skel-cb"></i>` +
+        `<div class="nm"><i class="skel-ic"></i><i class="skel" style="width:${row.nm}px;height:12px"></i></div>` +
+        `<div class="bar"><div class="fill" style="width:${row.bar}%"><div style="flex:1;background:color-mix(in srgb,var(--text-tertiary) 18%,transparent)"></div></div></div>` +
+        `<div class="du"><i class="skel soft" style="width:${row.du}px;height:12px"></i></div>` +
+      `</div>`
+    ).join('') +
+  `</div>`;
+
+  return renderDateBar({ dateText: T.dates.today, isToday: true }) +
+    statusCard +
+    timelineCard +
+    `<div class="row gap8 two-col" style="flex:none;align-items:stretch">${hourlySkel}${rankSkel}</div>`;
+}
+
+/* State 2: Refreshing — full content preserved at full opacity + subtle datebar indicator */
+function renderRefreshingState() {
+  return renderDateBar({ dateText: T.dates.today, isToday: true, refreshing: true }) +
+    renderStatusCard() +
+    renderTimelineCard() +
+    renderHourlyAndRanking() +
+    renderPendingRow();
+}
+
+/* State 3: Empty today — actively recording, nothing captured yet */
+function renderEmptyTodayState() {
+  const e = T.emptyToday;
+  return renderDateBar({ dateText: T.dates.today, isToday: true }) +
+    `<div class="card empty-card">` +
+      `<div class="empty-inner">` +
+        `<div class="empty-tile"><svg class="ic"><use href="#clock"/></svg></div>` +
+        `<div class="empty-title">${e.title}</div>` +
+        `<div class="empty-desc">${e.desc}</div>` +
+        `<div class="status-pill"><i></i><span>${e.pill}</span></div>` +
+      `</div>` +
+    `</div>`;
+}
+
+/* State 4: Empty past day — navigable date bar + calm empty state */
+function renderEmptyPastState() {
+  const e = T.emptyPast;
+  return renderDateBar({ dateText: T.dates.emptyPast, isToday: false }) +
+    `<div class="card empty-card">` +
+      `<div class="empty-inner">` +
+        `<div class="empty-tile"><svg class="ic"><use href="#today"/></svg></div>` +
+        `<div class="empty-title">${e.title}</div>` +
+        `<div class="empty-desc">${e.desc}</div>` +
+        `<button class="btn" style="margin-top:4px">${e.backToday}</button>` +
+      `</div>` +
+    `</div>`;
+}
+
+/* State 5: Today with data, recording currently stopped */
+function renderStoppedState() {
+  const key = T.stopped[stopReason] ? stopReason : 'paused';
+  const info = T.stopped[key];
+  const isCritical = key === 'persistence-failed';
+  const iconId = isCritical ? 'crit-circle' : (key === 'locked' ? 'lock' : 'pause');
+  const actionHtml = info.action
+    ? `<button class="btn compact"><svg class="ic s16"><use href="#play"/></svg><span>${info.action}</span></button>`
+    : '';
+  const infoBar = `<div class="infobar${isCritical ? ' critical' : ''}" role="status">` +
+    `<svg class="ic s16 ib-ic"><use href="#${iconId}"/></svg>` +
+    `<div class="ib-txt"><span class="ib-title">${info.title}</span><span class="ib-msg">${info.msg}</span></div>` +
+    actionHtml +
+  `</div>`;
+
+  return renderDateBar({ dateText: T.dates.today, isToday: true }) +
+    infoBar +
+    renderStatusCard() +
+    renderTimelineCard() +
+    renderHourlyAndRanking();
+}
+
+/* State 6: Query failed — lightweight inline page-level notice, app remains usable */
+function renderQueryFailedState() {
+  const q = T.qfail;
+  const msg = failCode === 'internal' ? q.internalMsg : q.busyMsg;
+  return renderDateBar({ dateText: T.dates.today, isToday: true }) +
+    `<div class="card qfail-card" role="alert">` +
+      `<svg class="ic qfail-ic"><use href="#warn"/></svg>` +
+      `<div class="qfail-body">` +
+        `<div class="qfail-title">${q.title}</div>` +
+        `<div class="qfail-msg">${msg}</div>` +
+        `<div class="qfail-code">${q.codePrefix}: ${failCode}</div>` +
+      `</div>` +
+      `<div class="qfail-act"><button class="btn"><svg class="ic s16"><use href="#refresh"/></svg><span>${q.retry}</span></button></div>` +
+    `</div>`;
+}
+
+/* State 7: Fluent 2 CalendarDatePicker flyout opened from date button
+   November 2026: Nov 1 = Sunday. Today = Nov 19 (Thu), Selected = Nov 16 (Mon), Future = Nov 20..30 */
+function renderCalendarFlyout() {
+  const d = T.dates;
+  const cells = [];
+  if (d.weekStart === 'mon') {
+    // Leading Oct 26..31 (Mon..Sat)
+    for (let day = 26; day <= 31; day++) cells.push({ n: day, cls: 'out' });
+  }
+  // November 1..30 (Today = 19, Selected = 16, Future = 20..30)
+  for (let day = 1; day <= 30; day++) {
+    let cls = '';
+    if (day === 16) cls = 'selected';
+    else if (day === 19) cls = 'today';
+    else if (day > 19) cls = 'future';
+    cells.push({ n: day, cls });
+  }
+  // Trailing December days to complete the final calendar week
+  let nextDay = 1;
+  while (cells.length % 7 !== 0) {
+    cells.push({ n: nextDay++, cls: 'out future' });
+  }
+
+  return `<div class="cal-flyout" role="dialog" aria-label="${d.monthLabel}">` +
+    `<div class="cal-head">` +
+      `<div class="cal-month">${d.monthLabel}</div>` +
+      `<div class="cal-nav" role="button"><svg class="ic s16"><use href="#chev-l"/></svg></div>` +
+      `<div class="cal-nav disabled" role="button"><svg class="ic s16"><use href="#chev-r"/></svg></div>` +
+    `</div>` +
+    `<div class="cal-body">` +
+      `<div class="cal-wk">${d.weekdays.map(w => `<span>${w}</span>`).join('')}</div>` +
+      `<div class="cal-grid">${cells.map(c => `<div class="cal-day ${c.cls}"><span>${c.n}</span></div>`).join('')}</div>` +
+    `</div>` +
+  `</div>`;
+}
+
+function renderDatePickerState() {
+  return renderDateBar({ dateText: T.dates.past, isToday: false, pickerOpen: true, extraHtml: renderCalendarFlyout() }) +
+    renderStatusCard() +
+    renderTimelineCard() +
+    renderHourlyAndRanking() +
+    renderPendingRow();
+}
+
+/* State 8: Today-nav — Today selected (next & Today disabled) + past-day comparison strip */
+function renderTodayNavState() {
+  const c = T.navCmp;
+  const cmpCard = `<div class="card nav-cmp">` +
+    `<div class="strong">${c.heading}</div>` +
+    `<div class="nav-cmp-row">` +
+      `<div class="nav-cmp-meta"><span class="strong">${c.todayLabel}</span><span class="cap sec">${c.todaySub}</span></div>` +
+      `<div class="nav-cmp-bar">` +
+        `<button class="btn icon"><svg class="ic s16"><use href="#chev-l"/></svg></button>` +
+        `<div class="btn date"><svg class="ic s16"><use href="#today"/></svg><span class="strong">${T.dates.today}</span><span class="grow"></span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+        `<button class="btn icon disabled"><svg class="ic s16"><use href="#chev-r"/></svg></button>` +
+        `<button class="btn disabled">${T.datebar.todayBtn}</button>` +
+      `</div>` +
+      `<div class="nav-cmp-note">${c.todayNote}</div>` +
+    `</div>` +
+    `<div class="nav-cmp-row">` +
+      `<div class="nav-cmp-meta"><span class="strong">${c.pastLabel}</span><span class="cap sec">${c.pastSub}</span></div>` +
+      `<div class="nav-cmp-bar">` +
+        `<button class="btn icon"><svg class="ic s16"><use href="#chev-l"/></svg></button>` +
+        `<div class="btn date"><svg class="ic s16"><use href="#today"/></svg><span class="strong">${T.dates.past}</span><span class="grow"></span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+        `<button class="btn icon"><svg class="ic s16"><use href="#chev-r"/></svg></button>` +
+        `<button class="btn">${T.datebar.todayBtn}</button>` +
+      `</div>` +
+      `<div class="nav-cmp-note">${c.pastNote}</div>` +
+    `</div>` +
+  `</div>`;
+
+  return renderDateBar({ dateText: T.dates.today, isToday: true }) +
+    cmpCard +
+    renderStatusCard() +
+    renderTimelineCard();
+}
+
+const RENDERERS = {
+  loading: renderLoadingState,
+  refreshing: renderRefreshingState,
+  'empty-today': renderEmptyTodayState,
+  'empty-past': renderEmptyPastState,
+  stopped: renderStoppedState,
+  'query-failed': renderQueryFailedState,
+  'date-picker': renderDatePickerState,
+  'today-nav': renderTodayNavState,
+};
+
+renderNav();
+const main = document.getElementById('main');
+main.innerHTML = (RENDERERS[stateKey] || renderLoadingState)();
+
+/* Sync Fluent 2 overlay scrollbar indicator on compact viewport */
+const mainWrap = document.getElementById('main-wrap');
+const scrollThumb = document.getElementById('scroll-thumb');
+function syncScroll() {
+  const overflow = main.scrollHeight > main.clientHeight + 1;
+  mainWrap.classList.toggle('scrollable', overflow);
+  if (!overflow) return;
+  const trackH = mainWrap.clientHeight - 8;
+  const ratio = main.clientHeight / main.scrollHeight;
+  const thumbH = Math.max(32, Math.round(trackH * ratio));
+  const maxScroll = main.scrollHeight - main.clientHeight;
+  const top = maxScroll > 0 ? Math.round((main.scrollTop / maxScroll) * (trackH - thumbH)) : 0;
+  scrollThumb.style.height = thumbH + 'px';
+  scrollThumb.style.top = top + 'px';
+}
+main.addEventListener('scroll', syncScroll);
+syncScroll();
+</script>
+</body>
+</html>

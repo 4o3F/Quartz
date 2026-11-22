@@ -77,15 +77,17 @@ pub(crate) fn segment(
     to: (u32, u32),
 ) -> Segment {
     Segment {
+        window_instance: None,
         id: SegmentId::new(id),
         span: span(from, to),
+        elapsed: span(from, to).duration(),
         app,
         category,
         title: format!("title {id}"),
         domain: None,
         document: None,
         source: ClassificationSource::Unmatched,
-        merged: NonZeroU32::MIN,
+        merged: Some(NonZeroU32::MIN),
     }
 }
 

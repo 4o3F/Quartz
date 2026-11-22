@@ -55,6 +55,7 @@ svg.ic.s16{width:16px;height:16px}
 .btn.accent{background:var(--accent-fill);border-color:var(--accent-fill);color:var(--text-on-accent);box-shadow:var(--shadow-2)}
 .btn.subtle{background:transparent;border-color:transparent}
 .btn.danger{color:var(--status-critical)}
+.btn.disabled,.btn:disabled{background:var(--fill-control-disabled);border-color:var(--stroke-control);border-bottom-color:var(--stroke-control);color:var(--text-disabled);cursor:default}
 .seg{display:inline-flex;height:var(--h-control-compact);padding:2px;gap:2px;background:var(--fill-subtle-hover);border-radius:var(--radius-control)}
 .seg div{display:flex;align-items:center;padding:0 10px;border-radius:var(--radius-control);font:var(--type-caption);color:var(--text-secondary)}
 .seg div.on{background:var(--fill-control);color:var(--text-primary);box-shadow:var(--shadow-2)}

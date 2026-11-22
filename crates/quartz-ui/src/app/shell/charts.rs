@@ -212,7 +212,9 @@ impl AppShell {
                 return div().size_full().into_any_element();
             }
             let slot = f32::from(layer.bounds.size.width)
-                / f32::from(u8::try_from(bars.len()).expect("a day has 24 hourly bars"));
+                / f32::from(
+                    u8::try_from(bars.len()).expect("a logical day has at most 25 hourly bars"),
+                );
             let stride = HourStride::fit(slot, measure.width("00", Ramp::Caption));
             div()
                 .flex()

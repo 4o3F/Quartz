@@ -11,7 +11,7 @@ use crate::model::{
 };
 
 /// The sample day and the segments the preview states open.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SampleDay {
     pub(crate) day: Day,
     /// The interval the details preview selects.
@@ -293,15 +293,17 @@ impl Row {
             RowSource::Unmatched => (UNCATEGORIZED, ClassificationSource::Unmatched),
         };
         Segment {
+            window_instance: None,
             id,
             span: self.span,
+            elapsed: self.span.duration(),
             app: self.app,
             category,
             title: self.title.to_owned(),
             domain: self.domain.map(str::to_owned),
             document: self.document.map(str::to_owned),
             source,
-            merged: NonZeroU32::new(self.merged).expect("merged counts are positive"),
+            merged: NonZeroU32::new(self.merged),
         }
     }
 }

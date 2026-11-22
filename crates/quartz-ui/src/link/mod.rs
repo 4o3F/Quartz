@@ -3,7 +3,15 @@
 #[cfg(windows)]
 mod worker;
 
+mod annotation;
+mod day;
 use crate::failure::Failure;
+pub(crate) use annotation::AwayAction;
+pub(crate) use day::REFRESH_INDICATOR_DELAY;
+pub use day::{
+    DayData, DayFailure, DayFailureCode, DayGeneration, DayLoad, DayRequest, DayView,
+    LocalFailureCode, UtcRange,
+};
 use quartz_pipe::CallCoreError;
 use quartz_protocol::{
     ControlOp, CoreRequest, CoreVersion, DayChanged, InstanceId, JsonValue, Op, StateSnapshot,
@@ -37,6 +45,13 @@ pub enum LinkEvent {
     Control(ControlOp),
     Connection(ConnectionState),
     Disconnected,
+    DayLoading {
+        generation: DayGeneration,
+    },
+    DayLoaded {
+        generation: DayGeneration,
+        result: Result<DayData, DayFailure>,
+    },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowAction {
@@ -49,7 +64,9 @@ impl LinkEvent {
         match self {
             Self::Disconnected | Self::Control(ControlOp::UiShutdown) => WindowAction::Quit,
             Self::Control(ControlOp::UiShow | ControlOp::UiActivate) => WindowAction::Activate,
-            Self::State(_)
+            Self::DayLoading { .. }
+            | Self::DayLoaded { .. }
+            | Self::State(_)
             | Self::Day(_)
             | Self::Connection(_)
             | Self::Control(
@@ -121,6 +138,12 @@ impl StartCoreError {
 
 type Reply = oneshot::Sender<Result<JsonValue, RequestCoreError>>;
 enum Command {
+    LoadDay {
+        request: DayRequest,
+        generation: DayGeneration,
+        mode: DayLoad,
+        link: Link,
+    },
     Request {
         op: Op,
         body: JsonValue,
@@ -216,6 +239,22 @@ impl LinkBridge {
     }
 }
 impl Link {
+    pub async fn load_day(
+        &self,
+        request: DayRequest,
+        generation: DayGeneration,
+        mode: DayLoad,
+    ) -> Result<(), RequestCoreError> {
+        self.commands
+            .send(Command::LoadDay {
+                request,
+                generation,
+                mode,
+                link: self.clone(),
+            })
+            .await
+            .map_err(|_| RequestCoreError::Closed)
+    }
     /// Requests exactly one new connection attempt; there is no automatic retry.
     pub async fn retry(&self) -> Result<(), RequestCoreError> {
         let (reply, receive) = oneshot::channel();

@@ -167,7 +167,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 游标是 `quartz-protocol::QueryCursor` 的 JSON 对象，私有字段保存 `versions`、类型化的 `query` 参数和下一项 `position`，客户端原样保存和回传。
 
-版本摘要覆盖相交 UTC 日期的全部 `data_day_versions` 来源、`settings.metadata_version`、规则注册表快照中的分类哈希、日起点偏移、查询 UTC 边界和 `QUERY_SEMANTICS_VERSION`；缺失的元数据版本从 0 开始。每次请求在一个读事务中计算完整结果再选取一页；游标参数不匹配或位置超出列表返回 `bad_request`，输入版本变化返回 `stale_cursor`。I/O 到数据库的查询通道容量为 `QUERY_CHANNEL_CAPACITY`（8），满时返回 `busy`。
+版本摘要覆盖相交 UTC 日期的全部 `data_day_versions` 来源、`settings.metadata_version`、规则注册表快照中的分类哈希、日起点偏移、查询 UTC 边界和 `QUERY_SEMANTICS_VERSION`；缺失的元数据版本从 0 开始。每次请求在一个读事务中计算完整结果再选取一页；游标参数不匹配或位置超出列表返回 `bad_request`，输入版本变化返回 `stale_cursor`。I/O 到数据库的查询通道容量为 `QUERY_CHANNEL_CAPACITY`（8），满时返回 `busy`。 M3 今天页客户端遇到 `stale_cursor` 时丢弃整组分页结果，最多重启 2 次；耗尽后显示行内错误。`busy` 与其他查询错误直接显示错误码和“重试”，不自动轮询。
 
 ### 6.3 规则、标注与设置
 

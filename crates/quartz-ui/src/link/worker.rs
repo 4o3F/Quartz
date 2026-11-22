@@ -56,6 +56,7 @@ pub(super) struct Worker {
     topics: Vec<Topic>,
     frame: FrameStatus,
     pending: BTreeMap<RequestId, Pending>,
+    day: Option<super::day::DayLoader>,
     #[cfg(test)]
     pub(super) name: Option<quartz_pipe::PipeName>,
     #[cfg(test)]
@@ -76,6 +77,7 @@ impl Worker {
             topics: vec![Topic::State],
             frame: FrameStatus::Awaiting,
             pending: BTreeMap::new(),
+            day: None,
             #[cfg(test)]
             name: None,
             #[cfg(test)]
@@ -170,6 +172,14 @@ impl Worker {
     }
     async fn handle_idle_command(&mut self, command: Command) -> Result<Option<Client>, UiClosed> {
         match command {
+            Command::LoadDay { generation, .. } => {
+                self.emit(LinkEvent::DayLoaded {
+                    generation,
+                    result: Err(RequestCoreError::Disconnected.into()),
+                })
+                .await?;
+                Ok(None)
+            }
             Command::Retry { reply } => {
                 self.emit(LinkEvent::Connection(ConnectionState::Connecting))
                     .await?;
@@ -277,6 +287,28 @@ impl Worker {
         command: Command,
     ) -> Result<(), CallCoreError> {
         match command {
+            Command::LoadDay {
+                request,
+                generation,
+                mode,
+                link,
+            } => {
+                let loader = self
+                    .day
+                    .get_or_insert_with(|| super::day::DayLoader::start(link, self.events.clone()));
+                if let Err(source) = loader.send(super::day::DayCommand::Load {
+                    request,
+                    generation,
+                    mode,
+                }) {
+                    let _ = self
+                        .emit(LinkEvent::DayLoaded {
+                            generation,
+                            result: Err(source.into()),
+                        })
+                        .await;
+                }
+            }
             Command::Retry { reply } => Self::reply_retry(reply, Ok(())),
             Command::StartCore { reply } => Self::reply_start(reply, Ok(())),
             Command::Request { op, body, reply } => {
@@ -366,6 +398,11 @@ impl Worker {
                 };
                 match event {
                     Ok(event) => {
+                        if let LinkEvent::Day(changed) = &event
+                            && let Some(loader) = &self.day
+                        {
+                            loader.changed(changed.date);
+                        }
                         if self.emit(event).await.is_err() {
                             self.commands.close();
                         }

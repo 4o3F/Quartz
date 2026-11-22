@@ -174,6 +174,10 @@ impl Formatter {
         form: SourceText<'_>,
     ) -> String {
         match source {
+            ClassificationSource::ProtocolRule(rule) => {
+                self.text_with(Msg::DetailsRuleLine, &[Arg::Condition.with(rule.as_str())])
+            }
+            ClassificationSource::Mixed => self.text(Msg::TooltipMixed),
             ClassificationSource::Rule { rule, .. } => {
                 let condition = day.rule(*rule).condition.value.as_str();
                 match form {

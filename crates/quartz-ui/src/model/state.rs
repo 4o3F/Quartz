@@ -8,10 +8,6 @@ pub(crate) enum AwayLabel {
     /// Shown in the pending-away row until the user labels or dismisses it.
     Pending,
     /// Already labeled, dismissed, or too short to ask about.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the sample day's only idle span is pending")
-    )]
     Settled,
 }
 
@@ -24,26 +20,10 @@ pub(crate) enum StateKind {
         away: AwayLabel,
     },
     Locked,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the sample day has no such span")
-    )]
     Sleep,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the sample day has no such span")
-    )]
     CoreStopped,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the sample day has no such span")
-    )]
     NoForeground,
     Excluded,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the sample day has no such span")
-    )]
     CollectionGap,
 }
 

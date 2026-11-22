@@ -6,9 +6,9 @@
 
 use gpui_kit::{
     AnyElement, ClickEvent, Context, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    MouseMoveEvent, ParentElement as _, Pixels, Point, Stateful, StatefulInteractiveElement as _,
-    Styled as _, anchored, assets::IconName, div, pattern_slash, point,
-    prelude::FluentBuilder as _, px,
+    MouseButton, MouseMoveEvent, ParentElement as _, Pixels, Point, Stateful,
+    StatefulInteractiveElement as _, Styled as _, anchored, assets::IconName, div, pattern_slash,
+    point, prelude::FluentBuilder as _, px,
 };
 
 use super::{AppShell, Frame, HoverTarget, LaneMode, LayerCx, RangeChoice};
@@ -22,7 +22,7 @@ use crate::{
     layout::{ColumnRange, LABEL_COLUMN_MAX_WIDTH},
     model::{
         CategoryId, ClockAnomaly, DetailsSubject, Lane, MainBlock, Segment, StateBlock, StateKind,
-        TimeSpan,
+        TimeOfDay, TimeSpan,
     },
     timeline_scale::{
         BuildPlotGridError, Interval, PixelPlacement, PlotGrid, RowTiles, ScaleFactor, Tick,
@@ -103,17 +103,75 @@ impl PlotGeometry {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PanGesture {
+    start_x: f32,
+    view: View,
+}
+
 impl AppShell {
-    fn view(&self) -> View {
+    pub(super) fn view(&self) -> View {
         match self.range {
-            RangeChoice::Activity => View::activity(self.day.activity_range()),
-            RangeChoice::FullDay => View::full_day(),
+            RangeChoice::Activity => {
+                if matches!(self.day.source(), super::DaySource::Fixture) {
+                    return View::activity(self.day.activity_range());
+                }
+                let full = self.day.full_span();
+                let span = self
+                    .day
+                    .activity_range()
+                    .map(|span| {
+                        let margin = crate::timeline_scale::ACTIVITY_MARGIN_MINUTES
+                            * crate::model::SECONDS_PER_MINUTE
+                            * crate::model::MILLIS_PER_SECOND;
+                        TimeSpan::new(
+                            TimeOfDay::from_elapsed_millis(
+                                span.start().millis().saturating_sub(margin),
+                            ),
+                            TimeOfDay::from_elapsed_millis(
+                                span.end()
+                                    .millis()
+                                    .saturating_add(margin)
+                                    .min(full.end().millis()),
+                            ),
+                        )
+                    })
+                    .unwrap_or(full);
+                View::new(span).expect("activity view is nonempty")
+            }
+            RangeChoice::FullDay => View::new(self.day.full_span()).expect("nonempty logical day"),
             RangeChoice::Zoomed(view) => view,
         }
     }
 
+    fn move_pan(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        use num_traits::ToPrimitive as _;
+        let Some(pan) = self.pan else {
+            return;
+        };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.pan = None;
+            return;
+        }
+        let Some(width) = self.plot_width.filter(|width| *width > 0.) else {
+            return;
+        };
+        let delta = f64::from(pan.start_x - f32::from(event.position.x))
+            * pan.view.span().duration().as_secs_f64()
+            * f64::from(crate::model::MILLIS_PER_SECOND)
+            / f64::from(width);
+        if let Some(delta) = delta.round().to_i64() {
+            let view = pan.view.panned(delta, self.day.full_span());
+            if view != self.view() {
+                self.range = RangeChoice::Zoomed(view);
+                self.hover = None;
+                cx.notify();
+            }
+        }
+    }
+
     fn zoom(&mut self, step: ZoomStep, cx: &mut Context<Self>) {
-        self.range = RangeChoice::Zoomed(self.view().zoomed(step));
+        self.range = RangeChoice::Zoomed(self.view().zoomed_within(step, self.day.full_span()));
         self.hover = None;
         cx.notify();
     }
@@ -193,7 +251,7 @@ impl AppShell {
 
     /// The width of the label column: the widest of the main track label and the lane labels
     /// (icon, gap and name).
-    fn label_column_width(&self, ui: &Widgets<'_>, measure: &TextMeasure<'_>) -> f32 {
+    pub(super) fn label_column_width(&self, ui: &Widgets<'_>, measure: &TextMeasure<'_>) -> f32 {
         let main = measure.width(&self.formatter.text(Msg::TimelineMainTrack), Ramp::Caption);
         let icon = f32::from(ui.metrics.density(Density::Compact).icon_size)
             + f32::from(ui.metrics.space.s);
@@ -225,7 +283,11 @@ impl AppShell {
                     .ramp(ui, Ramp::Caption)
                     .text_color(ui.palette.text_secondary)
                     .mr(ui.metrics.space.s)
-                    .child(self.view().span().to_string()),
+                    .child(format!(
+                        "{} – {}",
+                        self.clock_label(self.view().span().start()),
+                        self.clock_label(self.view().span().end())
+                    )),
             )
             .child(ui.segmented(
                 "timeline-lanes",
@@ -309,13 +371,47 @@ impl AppShell {
     /// The plot box. Its content is built from the bounds the layout gives the box in this
     /// frame, so nothing lags a resize, a navigation change or a text size change.
     fn plot(&self, ui: &Widgets<'_>, cx: &mut Context<Self>) -> Div {
+        let line_height = ui.line_height(Ramp::Body);
         ui.plot_area()
             .relative()
             .flex_1()
             .min_w(px(0.))
             .h(self.plot_height(ui))
             .overflow_hidden()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui_kit::MouseDownEvent, _, _| {
+                    this.pan = Some(PanGesture {
+                        start_x: f32::from(event.position.x),
+                        view: this.view(),
+                    });
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(|this, event: &MouseMoveEvent, _, cx| this.move_pan(event, cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.pan = None),
+            )
+            .on_scroll(
+                cx.listener(move |this, event: &gpui_kit::ScrollEvent, _, cx| {
+                    let delta = event.delta.pixel_delta(line_height);
+                    if delta.y != px(0.) {
+                        this.zoom(
+                            if delta.y > px(0.) {
+                                ZoomStep::In
+                            } else {
+                                ZoomStep::Out
+                            },
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .child(self.bounds_layer(cx, |layer| layer.shell.plot_content(layer)))
+            .child(self.measure_plot(cx))
     }
 
     fn plot_content(&self, layer: &LayerCx<'_>) -> AnyElement {
@@ -386,7 +482,7 @@ impl AppShell {
                     .tabular_figures()
                     .whitespace_nowrap()
                     .text_color(ui.palette.text_tertiary)
-                    .child(tick.time.to_string())
+                    .child(self.clock_label(tick.time))
             });
         div().relative().h(Self::axis_height(ui)).children(labels)
     }
@@ -446,7 +542,7 @@ impl AppShell {
     ) -> Div {
         let view = self.view();
         let mut intervals = Vec::new();
-        for block in self.day.main_track() {
+        for (index, block) in self.day.main_track().iter().enumerate() {
             let span = block.span();
             let Some(placement) = view.place(span) else {
                 continue;
@@ -460,7 +556,7 @@ impl AppShell {
                 }
                 MainBlock::State(state) => self.state_block(ui, measure, body, state, pixels),
             };
-            let tile = tile(("main-block", span.start().seconds()), pixels).child(body);
+            let tile = tile(("main-block", index), pixels).child(body);
             intervals.push(Interval {
                 placement: pixels,
                 duration: span.duration(),
@@ -608,13 +704,28 @@ impl AppShell {
                 .on_click(layer.listen(move |this, _: &ClickEvent, window, cx| {
                     this.select(DetailsSubject::Segment(id), window, cx);
                 }))
-                .child(ui.category_mark(
-                    block_body(ui, self.block_hover(target), pixels),
-                    self.day.category(segment.category).color,
-                ));
+                .child({
+                    let category = self.day.category(segment.category).color;
+                    block_text(
+                        ui,
+                        ui.category_mark(
+                            block_body(ui, self.block_hover(target), pixels),
+                            category,
+                        ),
+                        layer.with_ui(|_, measure, _| {
+                            measure.fit_block_label(
+                                pixels,
+                                BLOCK_TEXT_PADDING,
+                                &segment.title,
+                                &segment.title,
+                            )
+                        }),
+                        ui.palette.text_on(ui.palette.category(category)),
+                    )
+                });
             intervals.push(Interval {
                 placement: pixels,
-                duration: segment.span.duration(),
+                duration: segment.duration(),
                 item: self.with_hover(tile, target, layer),
             });
         }
@@ -727,7 +838,11 @@ impl AppShell {
             .justify_between()
             .ramp(ui, Ramp::Caption)
             .text_color(ui.palette.text_primary)
-            .child(span.to_string())
+            .child(format!(
+                "{} – {}",
+                self.clock_label(span.start()),
+                self.clock_label(span.end())
+            ))
             .child(self.formatter.duration(span.duration()))
     }
 

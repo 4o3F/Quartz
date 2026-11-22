@@ -1,7 +1,9 @@
 //! The application shell: title bar, navigation, pages and the right-hand details panel (07 section 2).
 
+mod calendar;
 mod charts;
 mod details;
+mod live;
 mod nav;
 mod pending;
 mod ranking;
@@ -26,7 +28,7 @@ use super::{
 use crate::{
     format::{Formatter, Msg},
     layout::{NavLayout, PanelPlacement, PanelState, ShellLayout},
-    model::{Day, Details, DetailsSubject, RankingKind, SegmentId, TimeOfDay},
+    model::{Day, DaySource, Details, DetailsSubject, RankingKind, SegmentId, TimeOfDay},
     text_scale::{LiveTextScale, TextScaleChange},
     timeline_scale::{ScaleFactor, View},
 };
@@ -212,6 +214,8 @@ pub(super) struct OpenDetails {
 /// Root view of the main window.
 #[derive(Debug)]
 pub(crate) struct AppShell {
+    live: Option<live::LivePage>,
+    calendar: Option<calendar::CalendarMonth>,
     day: Day,
     formatter: Formatter,
     tokens: Rc<Tokens>,
@@ -232,6 +236,8 @@ pub(crate) struct AppShell {
     lanes: LaneMode,
     range: RangeChoice,
     hover: Option<Hover>,
+    plot_width: Option<f32>,
+    pan: Option<timeline::PanGesture>,
 }
 
 impl AppShell {
@@ -248,6 +254,8 @@ impl AppShell {
             .details
             .and_then(|subject| open_details(&init.day, subject));
         Self {
+            live: None,
+            calendar: None,
             day: init.day,
             formatter: init.formatter,
             tokens: init.tokens,
@@ -263,6 +271,8 @@ impl AppShell {
             lanes: LaneMode::Swimlanes,
             range: init.range,
             hover: None,
+            plot_width: None,
+            pan: None,
         }
     }
 
@@ -425,6 +435,12 @@ impl Render for AppShell {
             .flex_col()
             .size_full()
             .track_focus(&self.root_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.calendar.take().is_some() {
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
             .bg(ui.palette.window_background)
             .text_color(ui.palette.text_primary)
             .font_family(font_family)

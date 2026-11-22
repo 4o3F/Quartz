@@ -28,7 +28,7 @@ pub(crate) struct IntervalCard {
     pub(crate) title: String,
     pub(crate) category: CategoryId,
     pub(crate) source: ClassificationSource,
-    pub(crate) merged: NonZeroU32,
+    pub(crate) merged: Option<NonZeroU32>,
 }
 
 /// The day one bar of the 7-day chart stands for.
@@ -72,6 +72,9 @@ impl Day {
     /// not part of this day.
     #[must_use]
     pub(crate) fn details(&self, subject: DetailsSubject) -> Option<Details> {
+        if !matches!(self.source(), super::DaySource::Fixture) {
+            return None;
+        }
         let (app, selected) = match subject {
             DetailsSubject::Segment(id) => {
                 let segment = self.segment(id)?;
@@ -127,7 +130,10 @@ impl Day {
                 rule: self.rule(*rule).clone(),
                 actual: actual.clone(),
             }),
-            ClassificationSource::Manual | ClassificationSource::Unmatched => None,
+            ClassificationSource::Manual
+            | ClassificationSource::Unmatched
+            | ClassificationSource::ProtocolRule(_)
+            | ClassificationSource::Mixed => None,
         }
     }
 
