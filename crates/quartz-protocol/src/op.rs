@@ -69,6 +69,9 @@ pub enum Op {
     /// The `ui.first_frame` request.
     #[serde(rename = "ui.first_frame")]
     UiFirstFrame,
+    /// UI reports that its last window has closed.
+    #[serde(rename = "ui.hidden")]
+    UiHidden,
     /// The `query.facts` request.
     #[serde(rename = "query.facts")]
     QueryFacts,
@@ -229,7 +232,7 @@ impl Op {
             Self::Hello => OpFamily::Hello,
             Self::Subscribe | Self::Unsubscribe => OpFamily::Subscribe,
             Self::CoreStatus => OpFamily::Core,
-            Self::UiOpen | Self::UiFirstFrame => OpFamily::Ui,
+            Self::UiOpen | Self::UiFirstFrame | Self::UiHidden => OpFamily::Ui,
             Self::QueryFacts
             | Self::QueryDay
             | Self::QueryTimeline

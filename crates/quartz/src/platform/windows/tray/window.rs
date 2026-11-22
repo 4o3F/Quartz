@@ -76,8 +76,7 @@ impl CoreEvent {
             Some(AppMessage::TrayCallback) => match TrayNotification(lparam).code() {
                 NIN_SELECT | NIN_KEYSELECT => Some(Self::OpenUi),
                 WM_CONTEXTMENU => Some(Self::ShowTrayMenu),
-                NIN_POPUPOPEN => Some(Self::Hover),
-                // TODO(M3): Start UI prewarming on hover, with TTL and cooldown.
+                NIN_POPUPOPEN | WindowsAndMessaging::WM_MOUSEMOVE => Some(Self::Hover),
                 _ => None,
             },
             Some(
@@ -464,7 +463,11 @@ mod tests {
                 isize::try_from(NIN_POPUPOPEN).expect("notification fits LPARAM"),
                 Some(CoreEvent::Hover),
             ),
-            (tray_callback, WM_MOUSEMOVE as isize, None),
+            (
+                tray_callback,
+                isize::try_from(WM_MOUSEMOVE).expect("notification fits LPARAM"),
+                Some(CoreEvent::Hover),
+            ),
             (
                 tray_callback,
                 0x1234_0000 | NIN_SELECT as isize,

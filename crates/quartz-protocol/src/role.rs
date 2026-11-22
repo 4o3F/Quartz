@@ -69,7 +69,11 @@ impl Role {
                 | OpFamily::Unknown => false,
             },
             Self::Cli => match op.family() {
-                OpFamily::Hello | OpFamily::Query | OpFamily::Core | OpFamily::Apps => true,
+                OpFamily::Hello
+                | OpFamily::Query
+                | OpFamily::Core
+                | OpFamily::Apps
+                | OpFamily::Settings => true,
                 OpFamily::Ui
                 | OpFamily::RuleSets
                 | OpFamily::Rules
@@ -78,7 +82,6 @@ impl Role {
                 OpFamily::Subscribe
                 | OpFamily::Categories
                 | OpFamily::Annotations
-                | OpFamily::Settings
                 | OpFamily::Data
                 | OpFamily::Tracking
                 | OpFamily::Browser
@@ -111,6 +114,7 @@ impl Op {
             | Self::Subscribe
             | Self::Unsubscribe
             | Self::CoreStatus
+            | Self::UiHidden
             | Self::UiFirstFrame
             | Self::QueryFacts
             | Self::QueryDay
@@ -176,9 +180,9 @@ mod tests {
     #[test]
     fn every_role_and_operation_matches_the_independent_permission_table() {
         // Written as wire-name lists, independently of the production family helper.
-        let ui = "hello subscribe unsubscribe core.status ui.open ui.first_frame query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away rule_sets.tree rule_sets.get rule_sets.versions rule_sets.set_enabled rule_sets.reorder rule_sets.delete rule_sets.revert rule_sets.edit rules.preview rules.explain rules_text.validate rules_text.preview rules_text.diff rules_text.import rules_text.export categories.list categories.create categories.update categories.delete categories.reorder annotations.create annotations.update annotations.delete settings.get settings.set data.delete tracking.pause tracking.resume tracking.keep_alive apps.icon browser_hosts.status browser_hosts.enable browser_hosts.disable maintenance.backup maintenance.compact privacy_mode.set";
+        let ui = "hello subscribe unsubscribe core.status ui.open ui.first_frame ui.hidden query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away rule_sets.tree rule_sets.get rule_sets.versions rule_sets.set_enabled rule_sets.reorder rule_sets.delete rule_sets.revert rule_sets.edit rules.preview rules.explain rules_text.validate rules_text.preview rules_text.diff rules_text.import rules_text.export categories.list categories.create categories.update categories.delete categories.reorder annotations.create annotations.update annotations.delete settings.get settings.set data.delete tracking.pause tracking.resume tracking.keep_alive apps.icon browser_hosts.status browser_hosts.enable browser_hosts.disable maintenance.backup maintenance.compact privacy_mode.set";
         let host = "hello browser.hello browser.state browser.gap browser.purge_ack browser.query_site_today";
-        let cli = "hello ui.open query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away apps.icon browser_hosts.status core.status rules_text.validate rules_text.preview rules_text.diff rules_text.export rule_sets.tree rule_sets.versions rules.explain";
+        let cli = "hello settings.get settings.set ui.open query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away apps.icon browser_hosts.status core.status rules_text.validate rules_text.preview rules_text.diff rules_text.export rule_sets.tree rule_sets.versions rules.explain";
         for role in [Role::Ui, Role::Host, Role::Cli] {
             let expected = match role {
                 Role::Ui => ui,
@@ -236,5 +240,8 @@ mod tests {
         assert!(Role::Host.authorize(Op::UiFirstFrame).is_err());
         assert!(Role::Cli.authorize(Op::UiFirstFrame).is_err());
         assert!(Role::Ui.authorize(Op::UiFirstFrame).is_ok());
+        assert!(Role::Ui.authorize(Op::UiHidden).is_ok());
+        assert!(Role::Cli.authorize(Op::UiHidden).is_err());
+        assert!(Role::Host.authorize(Op::UiHidden).is_err());
     }
 }

@@ -171,6 +171,7 @@ enum Command {
         topics: Vec<Topic>,
         reply: Reply,
     },
+    Hidden,
     FirstFrame,
     Retry {
         reply: oneshot::Sender<Result<(), RequestCoreError>>,
@@ -206,7 +207,7 @@ impl LinkEvents {
         self.receiver.recv().await
     }
 }
-/// The handle and event receiver owned by the main window.
+/// The handle and event receiver owned by the UI process.
 #[derive(Debug)]
 pub struct LinkBridge {
     pub link: Link,
@@ -216,13 +217,28 @@ pub struct LinkBridge {
 impl LinkBridge {
     /// Starts one connection attempt on a dedicated thread.
     pub fn start() -> Result<Self, StartLinkError> {
-        Self::spawn(InitialConnection::Connect)
+        Self::spawn(
+            InitialConnection::Connect,
+            quartz_protocol::UiState::Starting,
+        )
     }
     /// Creates an idle bridge for a recoverable startup failure's actions.
     pub(crate) fn for_failure() -> Result<Self, StartLinkError> {
-        Self::spawn(InitialConnection::AwaitAction)
+        Self::spawn(
+            InitialConnection::AwaitAction,
+            quartz_protocol::UiState::Starting,
+        )
     }
-    fn spawn(initial: InitialConnection) -> Result<Self, StartLinkError> {
+    pub(crate) fn prewarm() -> Result<Self, StartLinkError> {
+        Self::spawn(
+            InitialConnection::Connect,
+            quartz_protocol::UiState::Prewarming,
+        )
+    }
+    fn spawn(
+        initial: InitialConnection,
+        state: quartz_protocol::UiState,
+    ) -> Result<Self, StartLinkError> {
         let (commands, receive) = mpsc::channel(BRIDGE_CAPACITY);
         let (send, events) = mpsc::channel(BRIDGE_CAPACITY);
         std::thread::Builder::new()
@@ -234,9 +250,11 @@ impl LinkBridge {
                     .max_blocking_threads(UI_BLOCKING_THREADS)
                     .build()
                 {
-                    Ok(runtime) => {
-                        runtime.block_on(worker::Worker::new(receive, send, initial).run())
-                    }
+                    Ok(runtime) => runtime.block_on(
+                        worker::Worker::new(receive, send, initial)
+                            .with_hello_state(state)
+                            .run(),
+                    ),
                     Err(source) => {
                         let failure = Failure::from_connection(&CallCoreError::Runtime { source });
                         if send
@@ -256,6 +274,15 @@ impl LinkBridge {
     }
 }
 impl Link {
+    /// Queues the close notification before a subsequent show can acknowledge its first frame.
+    pub(crate) fn hidden(&self) -> Result<(), RequestCoreError> {
+        self.commands
+            .try_send(Command::Hidden)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RequestCoreError::Busy,
+                mpsc::error::TrySendError::Closed(_) => RequestCoreError::Closed,
+            })
+    }
     pub async fn select_details(
         &self,
         request: Option<DetailRequest>,

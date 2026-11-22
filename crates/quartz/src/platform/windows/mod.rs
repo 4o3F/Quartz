@@ -34,7 +34,7 @@ use windows::Win32::{
 use crate::{
     data_directory::{self, DataDirectory},
     logging,
-    ui_state::{ExitUi, RegisterUi, UiControl, UiState},
+    ui_state::{ExitUi, LaunchIntent, PowerSource, RegisterUi, UiControl, UiState},
 };
 pub(crate) use instance::{AcquireInstance, AcquireInstanceError};
 use tray::{CreateTrayError, Tray, TrayCommand, TrayIconState, TrayState, TrayTooltip};
@@ -164,6 +164,7 @@ enum TrayRefresh {
 #[derive(Debug)]
 pub(crate) struct CoreProcess {
     ui: UiState<process::UiProcess>,
+    ui_open_started: Option<std::time::Instant>,
     capture: Option<CaptureState>,
     persistence: PersistenceState,
     untriggered_changes: u64,
@@ -182,6 +183,7 @@ impl CoreProcess {
     pub(crate) fn new() -> Self {
         Self {
             ui: UiState::default(),
+            ui_open_started: None,
             capture: None,
             persistence: PersistenceState::Ready,
             untriggered_changes: 0,
@@ -246,11 +248,16 @@ impl CoreProcess {
         tray.attach_capture(ingress.clone());
         let mut sources = Sources::start(tray.raw_window(), ingress).context(ObserveSystemSnafu)?;
         self.refresh_tray(&mut tray, &runtime.status, TrayRefresh::Startup);
+        self.ui.configure_resident(
+            runtime.status.ui_settings().resident.enabled,
+            std::time::Instant::now(),
+        );
         tracing::info!(?autostart, "core message loop started");
         let result = self.message_loop(&mut tray, &mut runtime, &mut sources);
-        self.ui = UiState::default();
+        self.ui.begin_shutdown();
         let exit = CoreExit::from_loop(&result).runtime_exit();
         let stopped = runtime.shutdown(exit);
+        self.ui = UiState::default();
         drop(sources);
         // Preserve transport failures before message-loop failures and worker cleanup errors.
         if matches!(stopped, Err(StopCoreError::StopPipe { .. })) {
@@ -313,12 +320,35 @@ impl CoreProcess {
                 }
                 // Native dispatch can enqueue another batch of semantic commands.
             }
+            let now = std::time::Instant::now();
+            if let Err(error) = self
+                .ui
+                .ensure_resident(now, || process::UiProcess::launch(LaunchIntent::Resident))
+            {
+                tracing::error!(%error, "could not launch resident UI; retry scheduled");
+            }
+            if let Some(control) = self.ui.expire_prewarm(now) {
+                runtime.target_ui(control.connection, control.op);
+            }
             let handles = self.ui.process().map(|process| [process.raw()]);
-            let wait_ms = Self::logical_day_wait(status.update_logical_day(
+            let logical_wait = status.update_logical_day(
                 RefreshLogicalDay::CheckDeadline,
                 &sources::SystemClock,
                 jiff::tz::TimeZone::try_system,
-            ));
+            );
+            let wait = match logical_wait {
+                Some(logical) => Some(
+                    self.ui
+                        .prewarm_wait(now)
+                        .map_or(logical, |prewarm| logical.min(prewarm)),
+                ),
+                None => self.ui.prewarm_wait(now),
+            };
+            let wait = match self.ui.resident_wait(now) {
+                Some(resident) => Some(wait.map_or(resident, |other| other.min(resident))),
+                None => wait,
+            };
+            let wait_ms = Self::logical_day_wait(wait);
             // SAFETY: The optional process handle stays owned throughout the wait. Waiting for any
             // message or process exit on this thread needs neither polling nor a worker thread.
             let result = unsafe {
@@ -336,11 +366,12 @@ impl CoreProcess {
                 if let Some(process) = self.ui.process() {
                     process.log_exit();
                 }
-                let outcome = self.ui.exited();
+                let outcome = self.ui.exited(std::time::Instant::now());
                 outcome.log_ui_exit();
                 if outcome == ExitUi::OpenRequested {
                     self.open_ui(tray, status, runtime);
                 } else {
+                    self.ui_open_started = None;
                     self.refresh_tray(tray, status, TrayRefresh::UiExited);
                 }
             }
@@ -354,9 +385,15 @@ impl CoreProcess {
     }
     fn logical_day_wait(wait: Option<std::time::Duration>) -> u32 {
         match wait {
-            Some(wait) => u32::try_from(wait.as_millis())
-                .unwrap_or(MAX_LOGICAL_DAY_WAIT)
-                .min(MAX_LOGICAL_DAY_WAIT),
+            Some(wait) => {
+                // Win32 waits use whole milliseconds; round up so a future deadline never polls.
+                let milliseconds = wait
+                    .as_nanos()
+                    .div_ceil(std::time::Duration::from_millis(1).as_nanos());
+                u32::try_from(milliseconds)
+                    .unwrap_or(MAX_LOGICAL_DAY_WAIT)
+                    .min(MAX_LOGICAL_DAY_WAIT)
+            }
             None => INFINITE,
         }
     }
@@ -368,13 +405,16 @@ impl CoreProcess {
                 connection,
                 pid,
                 state,
+                registered_at,
             } => {
                 match self.ui.register(
                     connection,
                     crate::ipc::registry::UiPeer { pid, state },
+                    registered_at,
                     process::UiProcess::adopt,
                 ) {
                     Ok(RegisterUi::Accepted { replay }) => {
+                        tracing::info!(%pid, ?state, "UI connection registered");
                         if let Some(control) = replay {
                             Self::send_ui(control, runtime);
                         }
@@ -391,9 +431,24 @@ impl CoreProcess {
             UiCommand::Unregistered { connection } => {
                 let outcome = self.ui.unregister(connection);
                 outcome.log_ui_exit();
+                if matches!(outcome, ExitUi::Closed | ExitUi::PendingShowLost) {
+                    self.ui_open_started = None;
+                }
                 self.refresh_tray(tray, status, TrayRefresh::UiExited);
             }
+            UiCommand::Hidden { connection } => {
+                if let Some(control) = self.ui.hidden(connection) {
+                    Self::send_ui(control, runtime);
+                }
+                self.refresh_tray(tray, status, TrayRefresh::Capture);
+            }
             UiCommand::SettingsChanged(effective) => {
+                if let Some(control) = self
+                    .ui
+                    .configure_resident(effective.resident.enabled, std::time::Instant::now())
+                {
+                    Self::send_ui(control, runtime);
+                }
                 status.apply_ui_settings(effective, |language| {
                     if let Err(error) = tray.set_language(language) {
                         tracing::error!(%error, "could not update tray language");
@@ -403,6 +458,11 @@ impl CoreProcess {
             }
             UiCommand::FirstFrame { connection } => {
                 self.ui.first_frame(connection);
+                if !self.ui.opening()
+                    && let Some(started) = self.ui_open_started.take()
+                {
+                    tracing::info!(click_to_first_frame_ms = %started.elapsed().as_millis(), "UI first frame acknowledged");
+                }
                 self.refresh_tray(tray, status, TrayRefresh::FirstFrame);
             }
         }
@@ -521,6 +581,24 @@ impl CoreProcess {
             TrayCommand::EndSession => return Ok(Some(CoreExit::SessionEnded)),
             TrayCommand::Deadline(at) => sources.fired(at).context(wait_error::ObserveSnafu)?,
             TrayCommand::OpenUi => self.open_ui(tray, status, runtime),
+            TrayCommand::Hover => {
+                let now = std::time::Instant::now();
+                let settings = status.ui_settings().prewarm;
+                if self.ui.prewarm_available(now, settings.enabled) {
+                    match PowerSource::read() {
+                        Ok(power) => {
+                            if let Err(error) = self.ui.hover(now, settings, power, || {
+                                process::UiProcess::launch(LaunchIntent::Prewarm)
+                            }) {
+                                tracing::warn!(%error, "could not launch prewarm UI");
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "could not read power source; skipping prewarm")
+                        }
+                    }
+                }
+            }
             TrayCommand::Annotate(choice) => self.submit_annotation(choice, runtime),
             TrayCommand::Timed(command) => {
                 if let Err(error) = runtime.timed.call(command) {
@@ -615,8 +693,11 @@ impl CoreProcess {
         }
     }
     fn send_ui(control: UiControl, runtime: &CoreRuntime) {
-        // SAFETY: The PID belongs to the registered authenticated UI. Failure leaves normal
-        // Windows foreground restrictions in place and does not prevent control delivery.
+        if control.op == quartz_protocol::ControlOp::UiShutdown {
+            runtime.target_ui(control.connection, control.op);
+            return;
+        }
+        // SAFETY: The PID belongs to the authenticated, currently registered UI process.
         let permission =
             unsafe { WindowsAndMessaging::AllowSetForegroundWindow(control.pid.raw()) };
         if let Err(error) = permission {
@@ -625,10 +706,17 @@ impl CoreProcess {
         runtime.target_ui(control.connection, control.op);
     }
     fn open_ui(&mut self, tray: &mut Tray, status: &StatusPublisher, runtime: &CoreRuntime) {
-        match self.ui.open(process::UiProcess::launch) {
+        self.ui_open_started
+            .get_or_insert_with(std::time::Instant::now);
+        match self.ui.open(std::time::Instant::now(), || {
+            process::UiProcess::launch(LaunchIntent::Show)
+        }) {
             Ok(Some(control)) => Self::send_ui(control, runtime),
             Ok(None) => {}
-            Err(error) => tracing::error!(?error, "could not launch UI"),
+            Err(error) => {
+                self.ui_open_started = None;
+                tracing::error!(?error, "could not launch UI");
+            }
         }
         self.refresh_tray(tray, status, TrayRefresh::UiOpening);
     }
@@ -707,6 +795,10 @@ mod tests {
     fn logical_day_wait_clamps_finite_values_below_the_infinite_sentinel() {
         use std::time::Duration;
         assert_eq!(CoreProcess::logical_day_wait(Some(Duration::ZERO)), 0);
+        assert_eq!(
+            CoreProcess::logical_day_wait(Some(Duration::from_nanos(1))),
+            1
+        );
         assert_eq!(
             CoreProcess::logical_day_wait(Some(Duration::from_millis(1))),
             1

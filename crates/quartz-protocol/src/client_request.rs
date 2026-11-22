@@ -9,7 +9,7 @@ use crate::{
     QueryTimelineRequest, QueryTimelineResponse, SettingsGetRequest, SettingsResponse,
     SettingsSetRequest, Subscribe, SubscribeResponse, TimedPolicyResponse,
     TrackingKeepAliveRequest, TrackingPauseRequest, TrackingResumeRequest, UiFirstFrameRequest,
-    UiOpenRequest, Unsubscribe,
+    UiHiddenRequest, UiOpenRequest, Unsubscribe,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -50,6 +50,7 @@ requests! {
     CoreStatusRequest => CoreStatus => CoreStatusResponse,
     UiOpenRequest => UiOpen => AcceptedBody,
     UiFirstFrameRequest => UiFirstFrame => AcceptedBody,
+    UiHiddenRequest => UiHidden => AcceptedBody,
     Subscribe => Subscribe => SubscribeResponse,
     Unsubscribe => Unsubscribe => SubscribeResponse,
     QueryFactsRequest => QueryFacts => QueryFactsResponse,

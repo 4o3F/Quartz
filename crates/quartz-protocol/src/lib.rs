@@ -45,7 +45,7 @@ pub use state::{
 
 pub use status::{
     AcceptedBody, BrowserStream, BrowserStreamId, CoreStatusRequest, CoreStatusResponse,
-    DatabaseState, StopReason, UiFirstFrameRequest, UiOpenRequest,
+    DatabaseState, StopReason, UiFirstFrameRequest, UiHiddenRequest, UiOpenRequest,
 };
 
 pub use query::{
@@ -68,6 +68,7 @@ pub use annotations::{
 };
 
 pub use settings::{
-    EffectiveUiSettings, FirstDayOfWeekSetting, HourCycleSetting, SettingsGetRequest,
-    SettingsResponse, SettingsSetRequest, UiLanguageSetting, UiSettings,
+    EffectiveUiSettings, FirstDayOfWeekSetting, HourCycleSetting, PrewarmEnabled, PrewarmOnBattery,
+    PrewarmSettings, PrewarmUpdate, ResidentEnabled, ResidentSettings, ResidentUpdate,
+    SettingsGetRequest, SettingsResponse, SettingsSetRequest, UiLanguageSetting, UiSettings,
 };

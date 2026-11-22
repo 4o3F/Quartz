@@ -99,9 +99,9 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 | 角色 | 可用操作 |
 |---|---|
-| `ui` | 全部查询、订阅、设置、规则、标注、删除、图标、浏览器 host 管理、维护、隐私模式；发送 `ui.open`、`ui.first_frame` |
+| `ui` | 全部查询、订阅、设置、规则、标注、删除、图标、浏览器 host 管理、维护、隐私模式；发送 `ui.open`、`ui.first_frame`、`ui.hidden` |
 | `host` | `hello`、`browser.*`；只能为它自己在握手里登记的 `browser_stream` 上报 |
-| `cli` | `ui.open`；只读 `query.*`、`apps.icon`、`browser_hosts.status`、`core.status`、`rules_text.validate`、`rules_text.preview`、`rules_text.diff`、`rules_text.export`、`rule_sets.tree`、`rule_sets.versions`、`rules.explain`（用于诊断、测试脚本与规则编写） |
+| `cli` | `ui.open`、`settings.get`、`settings.set`；只读 `query.*`、`apps.icon`、`browser_hosts.status`、`core.status`、`rules_text.validate`、`rules_text.preview`、`rules_text.diff`、`rules_text.export`、`rule_sets.tree`、`rule_sets.versions`、`rules.explain`（用于诊断、测试脚本与规则编写） |
 
 新增功能模块使用独立的操作前缀与订阅主题（例如以后的自控协议使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节），权限表按前缀授权。
 
@@ -115,9 +115,10 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 |---|---|---|
 | `core.status` | 请求 | 参数 `{}`；返回 `recording`、`stop_reason`、`database`、`browser_streams`、`instance_id`、`core_version` |
 | `ui.open` | UI、CLI 请求 | 参数 `{}`；按托盘“打开”动作打开或激活界面，入主线程队列后返回 `{accepted:true}` |
-| `ui.show` | 核心 → 已登记的启动或预热界面 | 向登记连接发送控制事件，显示主窗口 |
+| `ui.show` | 核心 → 已登记的启动、预热或隐藏界面 | 向登记连接发送控制事件，显示主窗口 |
 | `ui.activate` | 核心 → 已登记的可见界面 | 向登记连接发送控制事件，还原最小化窗口并请求前台激活 |
-| `ui.shutdown` | 核心 → 全部 UI 连接 | 用户退出 Quartz 时广播关闭控制事件 |
+| `ui.shutdown` | 核心 → UI | 退出 Quartz 时广播；预热 TTL 到期或关闭隐藏常驻时，仅定向发送给对应 UI |
+| `ui.hidden` | UI 请求 | 参数 `{}`，仅允许 UI 角色，返回 `{accepted:true}`；最后一个窗口关闭且常驻开启时发送，核心将登记转为 `Hidden` 并取消 TTL，打开请求通过 `ui.show` 重建窗口 |
 | `ui.first_frame` | UI 请求 | 参数 `{}`；每次显示或激活请求后的首帧完成时发送，返回 `{accepted:true}`，登记连接的首帧通知使核心设为可见并清除 `show_requested` |
 
 `core.status` 从主线程发布的不可变快照读取，不访问 SQLite。`database` 为 `ok | persistence_failed`，`stop_reason` 在记录时为 `null`，停止时为稳定枚举：`persistence_failed`、`starting`、`session_unavailable`、`capture_gap`、`suspended`、`disconnected`、`locked`、`paused`、`no_foreground`、`ended`。`awaiting_browser_context` 随 M5 浏览器扩展加入。多个条件重叠时按上述顺序选择；`ended` 表示已结束的采集运行，运行结束的历史原因保留在采集记录中。`browser_streams` 是类型化连接列表，条目包含 `browser_stream` 标识，M5 前为空。`instance_id` 每次核心启动重新生成，`core_version` 为核心的 crate 版本。
@@ -134,7 +135,7 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 UI 首次连接失败后等待显式操作；已连接后的管道断开使 UI 关闭窗口并退出，生命周期见 01 第 4 节。启动核心时通过命名就绪事件等待管道监听实例创建，不进行自动重连。
 
-UI 在握手中登记当前状态；主线程取得类型化连接标识、经身份校验的进程标识和 `ui.state`。有待处理的 `show_requested` 时，`prewarming` 重放 `ui.show`，`visible` 重放 `ui.activate`，`starting` 自行创建窗口。登记连接的 `ui.first_frame` 完成显示请求；注销清除旧请求并保留进程句柄直到退出；关闭期间的新打开请求在旧进程退出后执行一次。预热 TTL 从握手完成时起算，显式打开优先于 TTL（01 第 4 节）。
+UI 在握手中登记当前状态；主线程取得类型化连接标识、经身份校验的进程标识和 `ui.state`。有待处理的 `show_requested` 时，`prewarming`（常驻开启时映射为核心的 `Hidden`）重放 `ui.show`，`visible` 重放 `ui.activate`，`starting` 自行创建窗口。登记连接的 `ui.first_frame` 完成显示请求；注销清除旧请求并保留进程句柄直到退出；关闭期间的新打开请求在旧进程退出后执行一次。常驻 `Hidden` 没有 TTL；关闭常驻后的预热 TTL 从握手完成时起算，显式打开优先于 TTL（01 第 4 节）。
 
 ### 6.2 查询
 
@@ -204,16 +205,16 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 `requested` 使用类型化联合：暂停为 `{policy:"pause", until_utc_ms}`，恢复时 `until_utc_ms` 为 `null`；保持计时为 `{policy:"keep_timing", until_utc_ms}`；隐私模式为 `{policy:"privacy", mode:{mode:"private", until_utc_ms}}`，关闭时 `mode` 为 `null`。这些操作仅允许 `ui`，`cli` 和 `host` 返回 `forbidden`；请求缺少必填值、截止时间不在未来或时间越界时返回 `bad_request`；采集队列已满返回 `busy`。
 
-`settings.get` 和 `settings.set` 只允许 `ui`。`settings.get` 参数为 `{}`；`settings.set` 参数为部分更新对象，例如 `{"language":"zh-CN","hour_cycle":"h12","first_day_of_week":"sunday"}`，省略字段保持原值。`language` 可选 `auto | zh-CN | en`，`hour_cycle` 可选 `auto | h12 | h24`，`first_day_of_week` 可选 `auto | monday | tuesday | wednesday | thursday | friday | saturday | sunday`；无效值（包括显式 `null`）返回 `bad_request`，未知字段忽略。两者返回相同结构：
+`settings.get` 和 `settings.set` 允许 `ui` 与 `cli`。`settings.get` 参数为 `{}`；`settings.set` 参数为部分更新对象，例如 `{"language":"zh-CN","hour_cycle":"h12","first_day_of_week":"sunday"}`，省略字段保持原值。`language` 可选 `auto | zh-CN | en`，`hour_cycle` 可选 `auto | h12 | h24`，`first_day_of_week` 可选 `auto | monday | tuesday | wednesday | thursday | friday | saturday | sunday`；`prewarm` 为部分更新对象，例如 `{"prewarm":{"enabled":true,"on_battery":false}}`，两个字段均为布尔值，分别保存为 `ui.prewarm.enabled` 和 `ui.prewarm.on_battery`。`resident` 是部分更新对象，例如 `{"resident":{"enabled":true}}`，布尔值保存为 `ui.resident.enabled`，默认 `true`。无效值（包括显式 `null`）返回 `bad_request`，未知字段忽略。两者返回相同结构：
 
 ```json
 {
-  "ui": {"language":"zh-CN","hour_cycle":"auto","first_day_of_week":"auto"},
-  "effective": {"ui_language":"zh-CN","locale":{"hour_cycle":"h24","first_day_of_week":"monday"}}
+  "ui": {"resident":{"enabled":true},"language":"zh-CN","hour_cycle":"auto","first_day_of_week":"auto","prewarm":{"enabled":true,"on_battery":false}},
+  "effective": {"resident":{"enabled":true},"ui_language":"zh-CN","locale":{"hour_cycle":"h24","first_day_of_week":"monday"},"prewarm":{"enabled":true,"on_battery":false}}
 }
 ```
 
-`ui` 是三个设置的保存值，缺失行按 `auto` 返回；`effective` 与 `state` 使用相同的已解析语言和区域值。系统区域读取失败且设置仍需要自动值时，`locale` 为 `null`，核心记录警告。写入通过数据库线程的写入队列在一个事务内提交，提交后通知主线程刷新托盘并推送 `state`，响应在提交后返回。
+`ui` 返回保存值：语言与区域设置缺失时为 `auto`，预热缺失时为启用且禁止电池预热；`effective.resident.enabled` 返回有效常驻设置，`state.ui_resident` 向 UI 推送同一布尔值，供最后一个窗口关闭时判断；`effective.prewarm` 保留该策略，实际电源在悬停时读取。`effective` 与 `state` 使用相同的已解析语言和区域值。系统区域读取失败且设置仍需要自动值时，`locale` 为 `null`，核心记录警告。写入通过数据库线程的写入队列在一个事务内提交，有效保存值变化时增加元数据版本，提交后通知主线程刷新托盘并推送 `state`，响应在提交后返回。CLI 使用 `quartz settings get` 读取，使用 `quartz settings set --prewarm-enabled true --prewarm-on-battery false` 部分更新预热策略，`quartz settings set --resident-enabled false` 关闭常驻。
 
 标注写操作只允许 `ui`。请求体与响应体如下，可选字段 `category`、`label`、`note` 缺省为 `null`：
 
@@ -304,12 +305,13 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 | `recording`、`stop_reason` | 与 `core.status` 共用判定和优先顺序 |
 | `timed_policies` | 采集线程的当前限时策略快照：`{pause_until_utc_ms, privacy_mode, keep_timing_until_utc_ms}`；未启用的策略为 `null`，截止值为 UTC 毫秒；`privacy_mode` 启用时为 `{mode:"private", until_utc_ms}` |
 | `browser_streams` | 与 `core.status` 共用的类型化列表，M5 前为空 |
+| `ui_resident` | 有效 `ui.resident.enabled` 布尔值，默认 `true`；UI 在最后一个窗口关闭时决定隐藏并通知核心或退出进程 |
 | `ui_language` | 与托盘采用相同的 Windows 首选语言协商，生产值为 `zh-CN` 或 `en`；调试伪语言使用 `en` 的协议身份 |
 | `locale` | `{hour_cycle, first_day_of_week}`，值分别为 `h12` 或 `h24`，以及 `monday` 至 `sunday` 的英文星期名；分别解析用户区域的 `LOCALE_STIMEFORMAT`、`LOCALE_IFIRSTDAYOFWEEK`；读取失败时记录警告并发送 `null` |
 
 逻辑日的下次 UTC 起点保存在主线程 `StatusPublisher` 持有的 `LogicalDay::next_start_utc_ms`，作为 `MsgWaitForMultipleObjects` 的等待期限；到期后重新计算日期和下次起点，并仅在日期变化时通过原有 watch 发布状态。Windows 时钟变更、恢复和系统设置变更通知会清除时区缓存并重算；数据库线程在已提交版本变化中发现日起点偏移改变时通知主线程重算。已有日期后，读取时区或时钟失败时记录类型化警告，保留上次发布的日期、期限和待应用的偏移，在下一条时钟、日历、偏移事件或主线程唤醒时重试；已过期的保留期限在恢复期间不触发零等待循环。首次启动尚无日期时，初始计算失败作为启动错误返回。该期限独立于采集线程用于存储拆分的 UTC 午夜期限，无需轮询或采集状态变化。
 
-主线程通过 watch 发布已清洗的区间和状态；有 state 订阅者时，注册表在每次变化后构造一份状态快照并立即转发到各连接的最新值槽，day 变化也立即转发到对应槽。每个连接的 outbox 从实际写入完成时计时，按上述间隔限流，并仅保留各槽的最新值。主线程将 `ui.show`、`ui.activate` 连同首个已登记 UI 的连接标识非阻塞地投递给注册表，注册表仅向该连接的 outbox 发送；后续 UI 登记不替换首个连接。托盘退出向全部 UI 连接广播 `ui.shutdown`，停止管道前在现有关闭期限内尽力写出控制消息。控制事件不要求显式订阅 `control`。
+主线程通过 watch 发布已清洗的区间和状态；有 state 订阅者时，注册表在每次变化后构造一份状态快照并立即转发到各连接的最新值槽，day 变化也立即转发到对应槽。每个连接的 outbox 从实际写入完成时计时，按上述间隔限流，并仅保留各槽的最新值。主线程将 `ui.show`、`ui.activate` 连同首个已登记 UI 的连接标识非阻塞地投递给注册表，注册表仅向该连接的 outbox 发送；后续 UI 登记不替换首个连接。预热 TTL 到期或关闭隐藏常驻时，`ui.shutdown` 仅发给对应连接；托盘退出向全部 UI 连接广播 `ui.shutdown`，停止管道前在现有关闭期限内尽力写出控制消息。控制事件不要求显式订阅 `control`。
 
 ## 8. 其他客户端的连接恢复
 

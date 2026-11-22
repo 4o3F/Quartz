@@ -9,8 +9,8 @@ quartz.exe（windows 子系统，核心与界面共用）
 │  ├─ 采集线程：应用身份解析 → 隐私策略 → 计时状态机 → 写入队列
 │  ├─ 数据库线程：diesel（SQLite）单写者，查询也在这里执行
 │  └─ I/O 线程：tokio current-thread，命名管道服务
-└─ 界面模式（`ui` 子命令，按需启动）
-   └─ GPUI 窗口：连接核心 → 查询与订阅 → 渲染；最后一个窗口关闭即退出进程
+└─ 界面模式（`ui` 子命令，默认常驻，可配置）
+   └─ GPUI：连接核心 → 无窗口等待或查询与渲染；关窗销毁窗口，按常驻设置保留或退出进程
 
 quartz-host.exe（console 子系统，由浏览器启动，不链接 GPUI）
 └─ 浏览器 stdio ⇄ 长度与格式校验 ⇄ 命名管道
@@ -114,30 +114,39 @@ enum RulesCommand {
 
 ## 4. 界面生命周期
 
+界面进程默认常驻，由 `ui.resident.enabled` 控制；核心管道就绪后启动无窗口界面，保留 GPUI 和 D3D 设备。关闭常驻后，界面按需启动，并可由托盘悬停预热。
+
 ### 4.1 打开
 
 1. 用户左键点击托盘、选择“打开 Quartz”或“设置…”，以及管道收到 `ui.open`，均进入同一打开路径。
-2. 核心维护 `None`、`Starting { process }`、`Registered { process, connection, phase }`、`Closing { process }` 和 `show_requested: DisplayRequest`；登记后的阶段为 `Starting | Prewarming | Visible`，显示请求为 `Idle | Pending`。打开请求置 `show_requested = Pending`：`None` 时启动界面，`Starting` 时等待握手，已登记且阶段为 `Starting` 或 `Prewarming` 时向该连接发送 `ui.show`，`Visible` 时发送 `ui.activate`。核心在发送前以登记的进程标识调用 `AllowSetForegroundWindow`；界面通过 GPUI 还原最小化窗口并请求前台激活。
-3. 核心用 `CreateProcessW` 以 `current_exe()` 的绝对路径和 `ui` 子命令启动界面，不经过 shell，设置 `STARTF_FORCEONFEEDBACK`。保存进程句柄后进入 `Starting`，防止连续点击重复启动。托盘提示从启动起保持“正在打开…”，直到首帧或界面退出。
+2. 核心维护 `None`、`Starting { process, intent: Show | Prewarm | Resident }`、`Registered { process, connection, phase }`、`Closing { process }` 和 `show_requested: DisplayRequest`；登记后的阶段为 `Starting | Prewarming | Hidden | Visible`，显示请求为 `Idle | Pending`。打开请求置 `show_requested = Pending`：`None` 时启动界面，`Starting` 时等待握手，已登记且阶段为 `Starting`、`Prewarming` 或 `Hidden` 时向该连接发送 `ui.show`，`Visible` 时发送 `ui.activate`。核心在发送前以登记的进程标识调用 `AllowSetForegroundWindow`；界面通过 GPUI 还原最小化窗口并请求前台激活。
+3. 显式打开时，核心用 `CreateProcessW` 以 `current_exe()` 的绝对路径和 `ui` 子命令启动界面，不经过 shell，设置 `STARTF_FORCEONFEEDBACK`。保存进程句柄后进入 `Starting`，防止连续点击重复启动。托盘提示从启动起保持“正在打开…”，直到首帧或界面退出。
 4. UI 完成 `hello` 后，注册表非阻塞地将连接标识、经管道身份校验的进程标识和 `ui.state` 交给主线程。核心保留同一子进程的句柄；其他进程通过 `OpenProcess` 取得同步和有限查询权限，接管退出观察与退出码日志。已登记界面存在时保留首个连接，对后续登记记录警告。
-5. 握手时若仍有显示请求，`Prewarming` 重放 `ui.show`，`Visible` 重放 `ui.activate`；`Starting` 会自行创建窗口，无需重放。核心只保留预热阶段和握手映射，当前不启动预热进程。
+5. 握手时若仍有显示请求，`Prewarming` 或 `Hidden` 重放 `ui.show`，`Visible` 重放 `ui.activate`；`Starting` 会自行创建窗口，无需重放。预热进程使用同一个 UI 互斥量，重复运行 `quartz ui` 会通过核心显示它。
 6. 仅登记连接的 `ui.first_frame` 将阶段改为 `Visible`、清除 `show_requested` 并恢复普通托盘提示。该连接注销后进入 `Closing` 并保留进程句柄，关闭期间的新打开请求记为 `Pending`，等旧进程退出后启动一次。注销或进程退出会清除未完成的旧显示请求并记录警告；仅所跟踪的进程退出才回到 `None`。
 
-### 4.2 悬停预热
+### 4.2 无窗口常驻与悬停预热
 
-鼠标进入托盘图标（`NIN_POPUPOPEN` 或首个 `WM_MOUSEMOVE`）时，核心以 `ui --prewarm` 启动界面进程，规则如下：
+`ui.resident.enabled` 默认 `true`，可通过 `quartz settings set --resident-enabled false` 或 `settings.set` 的 `{"resident":{"enabled":false}}` 修改。核心在管道就绪后、或设置从关闭变为开启且状态为 `None` 时，用 `ui --prewarm` 启动无窗口进程，意图为 `Resident`；hello 的 `prewarming` 在常驻开启时登记为 `Hidden`。常驻不受电池、预热设置、预热 TTL 或悬停冷却限制。
 
-- 预热进程会完成 GPUI 初始化和 D3D 设备创建，但不创建窗口。
-- `PREWARM_TTL`（默认 8 秒）从预热进程握手完成时起算。到期前未被打开才退出；显式打开请求优先于 TTL，核心的 `show_requested` 在首帧确认前一直保留。
-- 用户点击后，核心登记 `show_requested`；预热进程已握手就发送 `ui.show`，否则握手完成后重放。
-- 两次预热之间至少间隔 `PREWARM_COOLDOWN`（默认 60 秒），避免鼠标频繁扫过托盘时反复唤醒 dGPU。
-- 设置中提供开关，默认开启，电池供电时关闭；M3 实测后复核此默认值。
+运行中关闭常驻时，已隐藏且没有待显示请求的界面收到定向 `ui.shutdown`，可见界面继续运行并在最后一个窗口关闭时退出；启动中的常驻界面在握手后执行同一判断。开启常驻时，已有预热进程转为 `Hidden` 并取消 TTL。
 
-GPUI 在 `Application::run` 内部、启动回调之前创建 D3D 设备（`connect_initially` → `DirectXDevices::new`），所以"进入 run 但不开窗"就能完成预热中最耗时的部分。这一点在 M3 实测确认。
+常驻进程意外退出后，核心按 `RESIDENT_RELAUNCH_COOLDOWN = 60 s` 调度无窗口重启，从上次启动起算；若已超过六十秒，立即重启。启动失败也等待六十秒后重试。截止时间加入主线程的消息等待，不轮询；核心关闭时取消重启。显式打开请求可以立即启动界面，退出码日志对启动和接管的进程均保留。
+
+鼠标悬停通知 `NIN_POPUPOPEN` 或首个 `WM_MOUSEMOVE` 触发预热判断，同时请求刷新托盘摘要与提示。只有常驻关闭、状态为 `None`、设置与电源允许且冷却期已过时，核心才通过 `CreateProcessW` 启动 `ui --prewarm`，进入 `Starting { intent: Prewarm }`；预热不设置 `STARTF_FORCEONFEEDBACK`，也不显示“正在打开…”提示。
+
+- `ui.prewarm.enabled` 默认 `true`，`ui.prewarm.on_battery` 默认 `false`，通过 `quartz settings set --prewarm-enabled true --prewarm-on-battery false` 或 `settings.set` 修改。
+- 核心在允许启动的悬停事件上调用 `GetSystemPowerStatus`：接通电源可预热，电池供电按 `ui.prewarm.on_battery` 判断；读取失败或电源状态未知时记录警告并跳过。现有睡眠与恢复通知不提供电源接入状态。
+- UI 持有单实例互斥量，进入 GPUI 的 `Application::run` 完成初始化及 D3D 设备创建，不创建窗口；随后发送 `hello`，登记 `ui.state = prewarming`，进入 `Registered { phase: Prewarming }`。收到 `ui.show` 才复用正常打开路径创建主窗口并确认首帧；断线、初次连接失败或 `ui.shutdown` 均退出隐藏进程。
+- `PREWARM_TTL` 为 8 秒，由核心主线程管理，从 I/O 线程完成 hello 时记录的单调时间起算，与逻辑日截止时间共同决定 `MsgWaitForMultipleObjects` 的等待期限。到期且没有显示请求时，仅向对应预热连接发送 `ui.shutdown`，进入 `Closing` 并保留句柄直到退出。
+- 主线程先处理已收到的打开请求，再检查 TTL；打开请求保留为 `Pending` 并取消预热期限，握手前请求在登记后重放 `ui.show`，握手后请求立即定向发送，直到首帧确认才清除。退出控制已经发出后收到的打开请求，沿用 `Closing` 的规则等待旧进程退出后启动一次。
+- `PREWARM_COOLDOWN` 为 60 秒，从上次成功启动预热进程起算，进程退出后仍保留；重复移动鼠标不会在启动中、已登记或关闭中启动第二个进程。
+
+核心在有效首帧确认时记录 `click_to_first_frame_ms`，从接收显式打开请求计至收到 `ui.first_frame`。使用相同构建、电源和等待间隔，分别测量常驻隐藏、关闭常驻但有预热、关闭常驻与预热三组，每组至少二十次；预热组在握手后八秒内点击且满足六十秒冷却，隐藏常驻组每次关闭窗口后确认进程标识未变。各组排序后取第 `ceil(样本数 × 0.5)` 个值作为 P50（08 第 1.3 节）。
 
 ### 4.3 关闭
 
-- 最后一个窗口关闭时，界面进程调用 `cx.quit()`，整个进程退出，GPU 驱动占用随之释放。
+- 最后一个窗口关闭时销毁窗口。有效常驻设置开启且管道仍连接时，UI 发送 `ui.hidden`，核心保留登记并转为无 TTL 的 `Hidden`；下一次打开通过 `ui.show` 重建主窗口并确认首帧。常驻关闭时调用 `cx.quit()`，退出进程并释放 GPU 设备。
 - 已成功连接的界面在管道断开后关闭所有窗口并退出，释放界面互斥量。核心在连接注销后以 `Closing` 保留进程句柄，收到退出信号后才回到 `None`，并执行关闭期间新收到的打开请求。
 - 用户在托盘选择"退出 Quartz"时，核心先通知界面关闭，再结算当前区间、关闭数据库，最后退出。
 

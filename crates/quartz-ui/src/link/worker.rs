@@ -8,7 +8,7 @@ use crate::failure::Failure;
 use quartz_pipe::{AsyncCoreClient, CallCoreError, IncomingFrame, PipeClient, RESPONSE_TIMEOUT};
 use quartz_protocol::{
     ControlBody, CoreRequest, HelloRole, JsonValue, Op, RequestId, Response, ResponseOutcome,
-    Subscribe, Topic, UiFirstFrameRequest, UiHello, UiState, Unsubscribe,
+    Subscribe, Topic, UiFirstFrameRequest, UiHello, UiHiddenRequest, UiState, Unsubscribe,
 };
 use std::collections::BTreeMap;
 use tokio::{
@@ -30,6 +30,7 @@ enum Completion {
         reply: Reply,
     },
     FirstFrame,
+    Hidden,
 }
 impl Completion {
     fn fail(self, error: RequestCoreError) {
@@ -39,6 +40,7 @@ impl Completion {
                     tracing::debug!("UI request cancelled before failure delivery");
                 }
             }
+            Self::Hidden => tracing::warn!(%error, "could not notify core that UI is hidden"),
             Self::FirstFrame => tracing::warn!(%error, "could not acknowledge the UI frame"),
         }
     }
@@ -53,6 +55,7 @@ pub(super) struct Worker {
     commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<LinkEvent>,
     initial: InitialConnection,
+    hello_state: UiState,
     topics: Vec<Topic>,
     frame: FrameStatus,
     pending: BTreeMap<RequestId, Pending>,
@@ -75,6 +78,7 @@ impl Worker {
             commands,
             events,
             initial,
+            hello_state: UiState::Starting,
             topics: vec![Topic::State],
             frame: FrameStatus::Awaiting,
             pending: BTreeMap::new(),
@@ -87,6 +91,10 @@ impl Worker {
             #[cfg(test)]
             initial_failure: None,
         }
+    }
+    pub(super) fn with_hello_state(mut self, state: UiState) -> Self {
+        self.hello_state = state;
+        self
     }
     pub(super) async fn run(mut self) {
         let closed = self.events.clone();
@@ -148,7 +156,7 @@ impl Worker {
         let hello = client
             .handshake(HelloRole::Ui {
                 ui: UiHello {
-                    state: UiState::Starting,
+                    state: self.hello_state,
                 },
             })
             .await?;
@@ -221,6 +229,11 @@ impl Worker {
             }
             Command::Request { reply, .. } => {
                 Completion::Request(reply).fail(RequestCoreError::Disconnected);
+                Ok(None)
+            }
+            Command::Hidden => {
+                self.frame = FrameStatus::Awaiting;
+                tracing::warn!("discarded hidden notification while UI is disconnected");
                 Ok(None)
             }
             Command::FirstFrame => {
@@ -380,6 +393,16 @@ impl Worker {
                 )
                 .await?;
             }
+            Command::Hidden => {
+                self.frame = FrameStatus::Awaiting;
+                self.day = None;
+                self.details = None;
+                let body = (UiHiddenRequest {})
+                    .body()
+                    .map_err(|source| CallCoreError::EncodeBody { source })?;
+                self.submit(client, Op::UiHidden, body, Completion::Hidden)
+                    .await?;
+            }
             Command::FirstFrame => {
                 self.frame = FrameStatus::Drawn;
                 self.first_frame(client).await?;
@@ -469,6 +492,11 @@ impl Worker {
                     self.update_topics(change, topics);
                 }
                 Self::reply_request(reply, result);
+            }
+            Completion::Hidden => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "core rejected UI hidden notification");
+                }
             }
             Completion::FirstFrame => {
                 if let Err(error) = result {

@@ -34,6 +34,20 @@ use crate::{
     timeline_scale::{ScaleFactor, View},
 };
 
+/// Query generations retained across window destruction to reject late replies from older windows.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QueryGenerations {
+    pub day: crate::link::DayGeneration,
+    pub details: crate::link::DetailGeneration,
+}
+impl QueryGenerations {
+    pub(crate) fn next(self) -> Self {
+        Self {
+            day: self.day.next(),
+            details: self.details.next(),
+        }
+    }
+}
 /// Top-level pages of the navigation (07 section 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Page {
@@ -262,6 +276,22 @@ pub(crate) struct AppShell {
 }
 
 impl AppShell {
+    pub(crate) fn query_generations(&self) -> QueryGenerations {
+        QueryGenerations {
+            day: self
+                .live
+                .as_ref()
+                .map_or_else(Default::default, |live| live.generation),
+            details: self.detail_generation,
+        }
+    }
+    pub(crate) fn resume_queries(&mut self, previous: QueryGenerations) {
+        let next = previous.next();
+        if let Some(live) = &mut self.live {
+            live.generation = next.day;
+        }
+        self.detail_generation = next.details;
+    }
     /// Builds the shell from its initial state; re-reads the text size whenever `window` is
     /// activated, since Windows has no notification the window can rely on while in the background.
     #[must_use]

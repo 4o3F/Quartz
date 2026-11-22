@@ -27,7 +27,8 @@ impl From<super::settings::AccessSettingError> for ReadQueryError {
     fn from(error: super::settings::AccessSettingError) -> Self {
         match error {
             super::settings::AccessSettingError::Database { source } => Self::Read { source },
-            super::settings::AccessSettingError::Json { .. }
+            super::settings::AccessSettingError::Version { .. }
+            | super::settings::AccessSettingError::Json { .. }
             | super::settings::AccessSettingError::Deadline { .. }
             | super::settings::AccessSettingError::DayStartOffset
             | super::settings::AccessSettingError::MetadataVersion => Self::InvalidSettings,

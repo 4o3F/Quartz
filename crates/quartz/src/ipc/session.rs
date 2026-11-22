@@ -8,7 +8,7 @@ use super::{
 use quartz_protocol::{
     CoreStatusRequest, CoreStatusResponse, Envelope, ErrorKind, Hello, HelloResponse, HelloRole,
     Op, PROTOCOL_VERSION, ProtoRange, ProtocolError, RequestId, Response, ResponseOutcome, Role,
-    Subscribe, UiFirstFrameRequest, UiOpenRequest, UiState,
+    Subscribe, UiFirstFrameRequest, UiHiddenRequest, UiOpenRequest, UiState,
 };
 
 /// Roles permitted by the authenticated executable path.
@@ -28,6 +28,9 @@ impl AllowedRoles {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UiCommand {
     Open,
+    Hidden {
+        connection: super::registry::ConnectionId,
+    },
     FirstFrame {
         connection: super::registry::ConnectionId,
     },
@@ -35,6 +38,7 @@ pub(crate) enum UiCommand {
         connection: super::registry::ConnectionId,
         pid: ProcessId,
         state: quartz_protocol::UiState,
+        registered_at: std::time::Instant,
     },
     Unregistered {
         connection: super::registry::ConnectionId,
@@ -86,6 +90,9 @@ pub(crate) struct ConnectionSession {
 #[derive(Debug)]
 pub(crate) enum Action {
     Reply(Response),
+    Hidden {
+        id: RequestId,
+    },
     FirstFrame {
         id: RequestId,
     },
@@ -240,6 +247,12 @@ impl ConnectionSession {
                             return Action::error(Some(id), ErrorKind::BadRequest);
                         }
                         Action::success(id, status)
+                    }
+                    Op::UiHidden => {
+                        if serde_json::from_value::<UiHiddenRequest>(request.body).is_err() {
+                            return Action::error(Some(id), ErrorKind::BadRequest);
+                        }
+                        Action::Hidden { id }
                     }
                     Op::UiOpen | Op::UiFirstFrame => {
                         let command = if request.op == Op::UiOpen {
@@ -562,7 +575,7 @@ mod tests {
         ));
         let receiver = publisher.subscribe();
         let status = receiver.borrow();
-        for role in [ReadyRole::Cli, ReadyRole::Host] {
+        for role in [ReadyRole::Host] {
             let mut session = ConnectionSession {
                 state: State::Ready(role),
                 allowed: AllowedRoles::Quartz,

@@ -165,6 +165,7 @@ fn handshake_status_and_ui_open_delivery() {
         connection,
         pid,
         state,
+        ..
     } = fixture
         .commands
         .recv_timeout(CONNECT_TIMEOUT)

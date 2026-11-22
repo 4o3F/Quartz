@@ -22,6 +22,8 @@ pub(crate) struct PublishedStatus {
     foreground: Option<ForegroundView>,
     language: UiLanguage,
     locale: Option<LocaleSettings>,
+    resident: quartz_protocol::ResidentSettings,
+    prewarm: quartz_protocol::PrewarmSettings,
     timed: quartz_protocol::TimedPolicies,
 }
 impl PublishedStatus {
@@ -42,6 +44,7 @@ impl PublishedStatus {
                 interval_start_utc_ms: view.start.utc.get().as_millisecond(),
             });
         StateSnapshot {
+            ui_resident: self.resident.enabled,
             logical_date: self.logical_date,
             timed_policies: self.timed,
             foreground,
@@ -66,6 +69,8 @@ impl StatusPublisher {
         Self::with_locale(
             instance_id,
             quartz_protocol::EffectiveUiSettings {
+                resident: Default::default(),
+                prewarm: Default::default(),
                 ui_language: UiLanguage::English,
                 locale: Some(LocaleSettings {
                     hour_cycle: quartz_protocol::HourCycle::H24,
@@ -88,6 +93,8 @@ impl StatusPublisher {
                 timed: quartz_protocol::TimedPolicies::default(),
                 language: settings.ui_language,
                 locale: settings.locale,
+                resident: settings.resident,
+                prewarm: settings.prewarm,
                 status: CoreStatusResponse {
                     recording: false,
                     stop_reason: Some(StopReason::Starting),
@@ -196,17 +203,25 @@ impl StatusPublisher {
     }
     pub(crate) fn set_ui_settings(&self, settings: quartz_protocol::EffectiveUiSettings) {
         self.sender.send_if_modified(|published| {
-            if published.language == settings.ui_language && published.locale == settings.locale {
+            if published.language == settings.ui_language
+                && published.locale == settings.locale
+                && published.resident == settings.resident
+                && published.prewarm == settings.prewarm
+            {
                 return false;
             }
             published.language = settings.ui_language;
             published.locale = settings.locale;
+            published.resident = settings.resident;
+            published.prewarm = settings.prewarm;
             true
         });
     }
     pub(crate) fn ui_settings(&self) -> quartz_protocol::EffectiveUiSettings {
         let published = self.sender.borrow();
         quartz_protocol::EffectiveUiSettings {
+            resident: published.resident,
+            prewarm: published.prewarm,
             ui_language: published.language,
             locale: published.locale,
         }
@@ -336,6 +351,8 @@ mod tests {
         let publisher = StatusPublisher::with_locale(
             InstanceId("rollover".into()),
             quartz_protocol::EffectiveUiSettings {
+                resident: Default::default(),
+                prewarm: Default::default(),
                 ui_language: UiLanguage::English,
                 locale: None,
             },
@@ -391,6 +408,8 @@ mod tests {
         let publisher = StatusPublisher::with_locale(
             InstanceId("calendar-settings".into()),
             quartz_protocol::EffectiveUiSettings {
+                resident: Default::default(),
+                prewarm: Default::default(),
                 ui_language: UiLanguage::English,
                 locale: None,
             },
@@ -448,6 +467,8 @@ mod tests {
         let publisher = StatusPublisher::with_locale(
             InstanceId("calendar-recovery".into()),
             quartz_protocol::EffectiveUiSettings {
+                resident: Default::default(),
+                prewarm: Default::default(),
                 ui_language: UiLanguage::English,
                 locale: None,
             },
@@ -563,6 +584,8 @@ mod tests {
         let publisher = StatusPublisher::with_locale(
             InstanceId("latest-offset".into()),
             quartz_protocol::EffectiveUiSettings {
+                resident: Default::default(),
+                prewarm: Default::default(),
                 ui_language: UiLanguage::English,
                 locale: None,
             },
@@ -652,6 +675,7 @@ mod tests {
                 assert_eq!(
                     body,
                     json!({
+                        "ui_resident":true,
                         "logical_date":receiver.borrow().snapshot().logical_date,
                         "foreground": {"app":expected_app, "title":title, "interval_start_utc_ms":123},
                         "timed_policies":{"pause_until_utc_ms":null,"privacy_mode":null,"keep_timing_until_utc_ms":null},"recording":true, "stop_reason":null, "browser_streams":[], "ui_language":"en",

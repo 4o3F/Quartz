@@ -362,26 +362,35 @@ impl PreviewOptions {
         let text_scale_source = self
             .text_scale
             .map_or(TextScaleSource::System, TextScaleSource::Fixed);
-        run_gpui(self.language, self.appearance, theme, move |cx| {
-            // The system setting is read through WinRT, which would initialize COM on this thread
-            // as a multithreaded apartment if GPUI had not made it a single-threaded one first.
-            let init = ShellInit {
-                day: sample.day,
-                formatter: Formatter::new(self.language),
-                tokens,
-                page: Page::Today,
-                details: initial.details,
-                range: self.state.range(),
-                text_scale: LiveTextScale::read(text_scale_source).context(ReadTextScaleSnafu)?,
-            };
-            match self.state {
-                PreviewState::Error(state) => self.open_error_window(state, init.text_scale, cx),
-                PreviewState::Today
-                | PreviewState::TodayDetails
-                | PreviewState::TodayHover
-                | PreviewState::TodayFullDay => self.open_window(init, initial.hover, cx),
-            }
-        })
+        run_gpui(
+            self.language,
+            self.appearance,
+            theme,
+            super::WindowClosePolicy::Quit,
+            move |cx| {
+                // The system setting is read through WinRT, which would initialize COM on this thread
+                // as a multithreaded apartment if GPUI had not made it a single-threaded one first.
+                let init = ShellInit {
+                    day: sample.day,
+                    formatter: Formatter::new(self.language),
+                    tokens,
+                    page: Page::Today,
+                    details: initial.details,
+                    range: self.state.range(),
+                    text_scale: LiveTextScale::read(text_scale_source)
+                        .context(ReadTextScaleSnafu)?,
+                };
+                match self.state {
+                    PreviewState::Error(state) => {
+                        self.open_error_window(state, init.text_scale, cx)
+                    }
+                    PreviewState::Today
+                    | PreviewState::TodayDetails
+                    | PreviewState::TodayHover
+                    | PreviewState::TodayFullDay => self.open_window(init, initial.hover, cx),
+                }
+            },
+        )
     }
 
     fn open_error_window(

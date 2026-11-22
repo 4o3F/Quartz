@@ -1,10 +1,11 @@
 //! Typed JSON access to configuration and persisted scheduler deadlines.
-use super::{Store, schema::settings};
+use super::{Store, schema::settings, versions::BumpVersionError};
 use crate::query::calendar::DayStartOffset;
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SqliteConnection};
 use quartz_domain::capture::{SchedulerKind, UtcInstant};
 use quartz_protocol::{
-    FirstDayOfWeekSetting, HourCycleSetting, SettingsSetRequest, UiLanguageSetting, UiSettings,
+    FirstDayOfWeekSetting, HourCycleSetting, PrewarmEnabled, PrewarmOnBattery, PrewarmSettings,
+    ResidentEnabled, ResidentSettings, SettingsSetRequest, UiLanguageSetting, UiSettings,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -18,6 +19,9 @@ pub(crate) enum SettingKey {
     IdleDeadline,
     RemovedPrivacyContextDeadline,
     MidnightDeadline,
+    UiResidentEnabled,
+    UiPrewarmEnabled,
+    UiPrewarmOnBattery,
     UiLanguage,
     UiHourCycle,
     UiFirstDayOfWeek,
@@ -32,6 +36,9 @@ impl SettingKey {
             Self::IdleDeadline => "capture.deadline.idle",
             Self::RemovedPrivacyContextDeadline => "capture.deadline.privacy_context",
             Self::MidnightDeadline => "capture.deadline.midnight",
+            Self::UiResidentEnabled => "ui.resident.enabled",
+            Self::UiPrewarmEnabled => "ui.prewarm.enabled",
+            Self::UiPrewarmOnBattery => "ui.prewarm.on_battery",
             Self::UiLanguage => "ui.language",
             Self::UiHourCycle => "ui.hour_cycle",
             Self::UiFirstDayOfWeek => "ui.first_day_of_week",
@@ -53,6 +60,8 @@ impl std::fmt::Display for SettingKey {
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module)]
 pub(crate) enum AccessSettingError {
+    #[snafu(display("could not version UI settings"))]
+    Version { source: Box<BumpVersionError> },
     #[snafu(display("could not access setting"))]
     Database { source: diesel::result::Error },
     #[snafu(display("invalid JSON value for setting {key}"))]
@@ -193,6 +202,19 @@ impl Settings<'_> {
     }
     pub(super) fn ui(&mut self) -> Result<UiSettings, AccessSettingError> {
         Ok(UiSettings {
+            resident: ResidentSettings {
+                enabled: self
+                    .get::<ResidentEnabled>(SettingKey::UiResidentEnabled)?
+                    .unwrap_or_default(),
+            },
+            prewarm: PrewarmSettings {
+                enabled: self
+                    .get::<PrewarmEnabled>(SettingKey::UiPrewarmEnabled)?
+                    .unwrap_or_default(),
+                on_battery: self
+                    .get::<PrewarmOnBattery>(SettingKey::UiPrewarmOnBattery)?
+                    .unwrap_or_default(),
+            },
             language: self
                 .get::<UiLanguageSetting>(SettingKey::UiLanguage)?
                 .unwrap_or_default(),
@@ -211,7 +233,7 @@ impl Settings<'_> {
         match self.get::<T>(key) {
             Ok(_) => Ok(()),
             Err(error @ AccessSettingError::Json { .. }) => {
-                tracing::warn!(%key, %error, "recovering corrupt UI setting to auto");
+                tracing::warn!(%key, %error, "recovering corrupt UI setting to its default");
                 self.put(key, &T::default())
             }
             Err(error) => Err(error),
@@ -221,6 +243,17 @@ impl Settings<'_> {
         &mut self,
         request: SettingsSetRequest,
     ) -> Result<UiSettings, AccessSettingError> {
+        if let Some(value) = request.resident.and_then(|resident| resident.enabled) {
+            self.put(SettingKey::UiResidentEnabled, &value)?;
+        }
+        if let Some(prewarm) = request.prewarm {
+            if let Some(value) = prewarm.enabled {
+                self.put(SettingKey::UiPrewarmEnabled, &value)?;
+            }
+            if let Some(value) = prewarm.on_battery {
+                self.put(SettingKey::UiPrewarmOnBattery, &value)?;
+            }
+        }
         if let Some(value) = request.language {
             self.put(SettingKey::UiLanguage, &value)?;
         }
@@ -268,6 +301,9 @@ impl Store {
     pub(crate) fn recover_ui_settings(&mut self) -> Result<UiSettings, AccessSettingError> {
         self.write(|tx| {
             let mut settings = Settings::new(tx.connection);
+            settings.recover_ui_value::<ResidentEnabled>(SettingKey::UiResidentEnabled)?;
+            settings.recover_ui_value::<PrewarmEnabled>(SettingKey::UiPrewarmEnabled)?;
+            settings.recover_ui_value::<PrewarmOnBattery>(SettingKey::UiPrewarmOnBattery)?;
             settings.recover_ui_value::<UiLanguageSetting>(SettingKey::UiLanguage)?;
             settings.recover_ui_value::<HourCycleSetting>(SettingKey::UiHourCycle)?;
             settings.recover_ui_value::<FirstDayOfWeekSetting>(SettingKey::UiFirstDayOfWeek)?;
@@ -278,7 +314,18 @@ impl Store {
         &mut self,
         request: SettingsSetRequest,
     ) -> Result<UiSettings, AccessSettingError> {
-        self.write(|tx| Settings::new(tx.connection).update_ui(request))
+        self.write(|tx| {
+            let before = Settings::new(tx.connection).ui()?;
+            let updated = Settings::new(tx.connection).update_ui(request)?;
+            if updated != before {
+                tx.effects.bump_metadata(tx.connection).map_err(|source| {
+                    AccessSettingError::Version {
+                        source: Box::new(source),
+                    }
+                })?;
+            }
+            Ok(updated)
+        })
     }
 }
 
@@ -405,6 +452,8 @@ mod tests {
                 SettingKey::UiLanguage,
                 SettingKey::UiHourCycle,
                 SettingKey::UiFirstDayOfWeek,
+                SettingKey::UiPrewarmEnabled,
+                SettingKey::UiPrewarmOnBattery,
             ] {
                 Settings::new(&mut store.writer)
                     .corrupt(key, "\"unknown\"")
@@ -428,10 +477,12 @@ mod tests {
             SettingKey::UiLanguage,
             SettingKey::UiHourCycle,
             SettingKey::UiFirstDayOfWeek,
+            SettingKey::UiPrewarmEnabled,
+            SettingKey::UiPrewarmOnBattery,
         ] {
             assert!(logged.contains(key.as_str()));
         }
-        assert!(logged.contains("recovering corrupt UI setting to auto"));
+        assert!(logged.contains("recovering corrupt UI setting to its default"));
     }
 
     #[test]
@@ -475,6 +526,146 @@ mod tests {
                 .deadline(SchedulerKind::Idle)
                 .expect("unchanged deadline"),
             None
+        );
+    }
+    #[test]
+    fn prewarm_settings_persist_defaults_partial_updates_and_metadata_versions() {
+        use quartz_protocol::PrewarmUpdate;
+        let directory = tempfile::tempdir().expect("isolated prewarm settings");
+        let data = DataDirectory::new(directory.path());
+        let mut store = Store::open(&data).expect("store");
+        assert_eq!(
+            store.ui_settings().expect("defaults").prewarm,
+            PrewarmSettings::default()
+        );
+        let before = Settings::new(&mut store.writer)
+            .metadata_version()
+            .expect("version");
+        let update = SettingsSetRequest {
+            prewarm: Some(PrewarmUpdate {
+                enabled: Some(PrewarmEnabled::Disabled),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let saved = store
+            .update_ui_settings(update)
+            .expect("save disabled prewarm");
+        assert_eq!(saved.prewarm.enabled, PrewarmEnabled::Disabled);
+        assert_eq!(saved.prewarm.on_battery, PrewarmOnBattery::Blocked);
+        assert_eq!(
+            Settings::new(&mut store.writer)
+                .metadata_version()
+                .expect("version"),
+            before + 1
+        );
+        store.update_ui_settings(update).expect("idempotent update");
+        assert_eq!(
+            Settings::new(&mut store.writer)
+                .metadata_version()
+                .expect("version"),
+            before + 1
+        );
+        store
+            .update_ui_settings(SettingsSetRequest {
+                prewarm: Some(PrewarmUpdate {
+                    on_battery: Some(PrewarmOnBattery::Allowed),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .expect("battery update");
+        assert_eq!(
+            Settings::new(&mut store.writer)
+                .metadata_version()
+                .expect("version"),
+            before + 2
+        );
+        drop(store);
+        let mut reopened = Store::open(&data).expect("reopen");
+        assert_eq!(
+            reopened.ui_settings().expect("persisted").prewarm,
+            PrewarmSettings {
+                enabled: PrewarmEnabled::Disabled,
+                on_battery: PrewarmOnBattery::Allowed
+            }
+        );
+        Settings::new(&mut reopened.writer)
+            .corrupt(SettingKey::UiPrewarmEnabled, "null")
+            .expect("corrupt prewarm setting");
+        assert!(reopened.ui_settings().is_err());
+        assert_eq!(
+            reopened
+                .recover_ui_settings()
+                .expect("repair")
+                .prewarm
+                .enabled,
+            PrewarmEnabled::Enabled
+        );
+    }
+    #[test]
+    fn prewarm_update_rolls_back_when_versioning_fails() {
+        let directory = tempfile::tempdir().expect("isolated version failure");
+        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
+        Settings::new(&mut store.writer)
+            .put_metadata_version(i64::MAX)
+            .expect("exhaust metadata version");
+        let result = store.update_ui_settings(SettingsSetRequest {
+            prewarm: Some(quartz_protocol::PrewarmUpdate {
+                enabled: Some(PrewarmEnabled::Disabled),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(matches!(result, Err(AccessSettingError::Version { .. })));
+        assert_eq!(
+            store.ui_settings().expect("rolled back").prewarm,
+            PrewarmSettings::default()
+        );
+    }
+    #[test]
+    fn resident_setting_defaults_versions_persists_and_recovers() {
+        let directory = tempfile::tempdir().expect("resident settings");
+        let data = DataDirectory::new(directory.path());
+        let mut store = Store::open(&data).expect("store");
+        assert_eq!(
+            store.ui_settings().expect("default").resident.enabled,
+            ResidentEnabled::Enabled
+        );
+        let before = Settings::new(&mut store.writer)
+            .metadata_version()
+            .expect("version");
+        let request = SettingsSetRequest {
+            resident: Some(quartz_protocol::ResidentUpdate {
+                enabled: Some(ResidentEnabled::Disabled),
+            }),
+            ..Default::default()
+        };
+        store.update_ui_settings(request).expect("update");
+        store.update_ui_settings(request).expect("idempotent");
+        assert_eq!(
+            Settings::new(&mut store.writer)
+                .metadata_version()
+                .expect("version"),
+            before + 1
+        );
+        drop(store);
+        let mut store = Store::open(&data).expect("reopen");
+        assert_eq!(
+            store.ui_settings().expect("stored").resident.enabled,
+            ResidentEnabled::Disabled
+        );
+        Settings::new(&mut store.writer)
+            .corrupt(SettingKey::UiResidentEnabled, "null")
+            .expect("corrupt");
+        assert!(store.ui_settings().is_err());
+        assert_eq!(
+            store
+                .recover_ui_settings()
+                .expect("recovered")
+                .resident
+                .enabled,
+            ResidentEnabled::Enabled
         );
     }
 }

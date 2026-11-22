@@ -43,6 +43,7 @@ impl PlatformPorts {
                 let message = match command {
                     crate::ipc::UiCommand::Open => tray::window::AppMessage::OpenUi,
                     crate::ipc::UiCommand::Registered { .. }
+                    | crate::ipc::UiCommand::Hidden { .. }
                     | crate::ipc::UiCommand::Unregistered { .. }
                     | crate::ipc::UiCommand::SettingsChanged(_) => {
                         tray::window::AppMessage::WakeWorkers

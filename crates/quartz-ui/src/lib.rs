@@ -38,6 +38,8 @@ mod layout;
 pub mod link;
 #[cfg(any(windows, test))]
 mod model;
+#[cfg(any(windows, test))]
+mod prewarm;
 #[cfg(all(feature = "preview", any(windows, test)))]
 mod sample;
 #[cfg(any(windows, test))]

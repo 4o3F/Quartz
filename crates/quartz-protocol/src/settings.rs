@@ -84,9 +84,118 @@ impl FirstDayOfWeekSetting {
         }
     }
 }
-/// All stored UI preferences, with auto for absent rows.
+/// Whether the UI remains running without a window.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "bool", into = "bool")]
+pub enum ResidentEnabled {
+    /// Keep the UI process ready for the next open request.
+    #[default]
+    Enabled,
+    /// Start the UI on demand and quit after its last window closes.
+    Disabled,
+}
+impl From<bool> for ResidentEnabled {
+    fn from(value: bool) -> Self {
+        if value { Self::Enabled } else { Self::Disabled }
+    }
+}
+impl From<ResidentEnabled> for bool {
+    fn from(value: ResidentEnabled) -> Self {
+        value == ResidentEnabled::Enabled
+    }
+}
+/// Stored and effective resident policy.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResidentSettings {
+    /// ui.resident.enabled, defaulting to true.
+    pub enabled: ResidentEnabled,
+}
+/// Partial resident policy update.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResidentUpdate {
+    /// Optional enablement change; explicit null is rejected.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enabled: Option<ResidentEnabled>,
+}
+/// Whether tray hover may launch a hidden UI process.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "bool", into = "bool")]
+pub enum PrewarmEnabled {
+    /// Hover may launch a prewarm process.
+    #[default]
+    Enabled,
+    /// Hover leaves the UI process stopped.
+    Disabled,
+}
+impl From<bool> for PrewarmEnabled {
+    fn from(value: bool) -> Self {
+        if value { Self::Enabled } else { Self::Disabled }
+    }
+}
+impl From<PrewarmEnabled> for bool {
+    fn from(value: PrewarmEnabled) -> Self {
+        value == PrewarmEnabled::Enabled
+    }
+}
+/// Whether prewarming is allowed while the machine runs on battery.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "bool", into = "bool")]
+pub enum PrewarmOnBattery {
+    /// Battery power permits prewarming.
+    Allowed,
+    /// Battery power prevents prewarming.
+    #[default]
+    Blocked,
+}
+impl From<bool> for PrewarmOnBattery {
+    fn from(value: bool) -> Self {
+        if value { Self::Allowed } else { Self::Blocked }
+    }
+}
+impl From<PrewarmOnBattery> for bool {
+    fn from(value: PrewarmOnBattery) -> Self {
+        value == PrewarmOnBattery::Allowed
+    }
+}
+/// Stored and effective prewarm policy; it does not depend on the system locale.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrewarmSettings {
+    /// ui.prewarm.enabled, defaulting to true.
+    pub enabled: PrewarmEnabled,
+    /// ui.prewarm.on_battery, defaulting to false.
+    pub on_battery: PrewarmOnBattery,
+}
+/// Partial prewarm updates; explicit null and non-boolean values are rejected.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrewarmUpdate {
+    /// Optional enablement change.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enabled: Option<PrewarmEnabled>,
+    /// Optional battery permission change.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub on_battery: Option<PrewarmOnBattery>,
+}
+/// Stored UI preferences with defaults for absent rows.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiSettings {
+    /// Keep the UI process running without a window.
+    #[serde(default)]
+    pub resident: ResidentSettings,
+    /// Tray hover prewarming policy.
+    #[serde(default)]
+    pub prewarm: PrewarmSettings,
     /// Catalog preference.
     pub language: UiLanguageSetting,
     /// Clock preference.
@@ -105,6 +214,8 @@ impl UiSettings {
             .first_day_of_week
             .resolve(system.locale.map(|locale| locale.first_day_of_week));
         EffectiveUiSettings {
+            resident: self.resident,
+            prewarm: self.prewarm,
             ui_language: self.language.resolve(system.ui_language),
             locale: match hour_cycle {
                 Some(hour_cycle) => first_day_of_week.map(|first_day_of_week| LocaleSettings {
@@ -119,6 +230,12 @@ impl UiSettings {
 /// Resolved values shared by the tray, state publisher, and settings replies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectiveUiSettings {
+    /// Effective UI process lifetime policy.
+    #[serde(default)]
+    pub resident: ResidentSettings,
+    /// Prewarming policy evaluated with the current power source on hover.
+    #[serde(default)]
+    pub prewarm: PrewarmSettings,
     /// Effective catalog.
     pub ui_language: UiLanguage,
     /// Absent when an automatic regional value could not be read.
@@ -127,9 +244,23 @@ pub struct EffectiveUiSettings {
 /// Empty settings.get body.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsGetRequest {}
-/// Partial settings.set body; supplied values must be valid enum strings.
+/// Partial settings.set body with typed preferences and nested prewarm updates.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsSetRequest {
+    /// Optional partial update to ui.resident.*.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resident: Option<ResidentUpdate>,
+    /// Optional partial update to ui.prewarm.*.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prewarm: Option<PrewarmUpdate>,
     /// Optional ui.language update.
     #[serde(
         default,
@@ -194,6 +325,8 @@ mod tests {
     #[test]
     fn explicit_preferences_override_system_and_auto_preserves_it() {
         let system = EffectiveUiSettings {
+            resident: Default::default(),
+            prewarm: Default::default(),
             ui_language: UiLanguage::English,
             locale: Some(LocaleSettings {
                 hour_cycle: HourCycle::H24,
@@ -202,6 +335,8 @@ mod tests {
         };
         assert_eq!(UiSettings::default().resolve(system), system);
         let settings = UiSettings {
+            resident: Default::default(),
+            prewarm: Default::default(),
             language: UiLanguageSetting::ZhCn,
             hour_cycle: HourCycleSetting::H12,
             first_day_of_week: FirstDayOfWeekSetting::Sunday,
@@ -209,6 +344,8 @@ mod tests {
         assert_eq!(
             settings.resolve(system),
             EffectiveUiSettings {
+                resident: Default::default(),
+                prewarm: Default::default(),
                 ui_language: UiLanguage::SimplifiedChinese,
                 locale: Some(LocaleSettings {
                     hour_cycle: HourCycle::H12,
@@ -226,5 +363,65 @@ mod tests {
             UiLanguageSetting::En.resolve(UiLanguage::SimplifiedChinese),
             UiLanguage::English
         );
+    }
+    #[test]
+    fn prewarm_defaults_and_boolean_partial_updates_are_validated() {
+        assert_eq!(
+            serde_json::to_value(PrewarmSettings::default()).expect("defaults"),
+            serde_json::json!({"enabled":true,"on_battery":false})
+        );
+        let update: SettingsSetRequest =
+            serde_json::from_value(serde_json::json!({"prewarm":{"on_battery":true}}))
+                .expect("partial prewarm update");
+        assert_eq!(
+            update.prewarm,
+            Some(PrewarmUpdate {
+                enabled: None,
+                on_battery: Some(PrewarmOnBattery::Allowed)
+            })
+        );
+        for body in [
+            serde_json::json!({"prewarm":null}),
+            serde_json::json!({"prewarm":{"enabled":null}}),
+            serde_json::json!({"prewarm":{"on_battery":"true"}}),
+            serde_json::json!({"prewarm":{"enabled":1}}),
+        ] {
+            assert!(serde_json::from_value::<SettingsSetRequest>(body).is_err());
+        }
+    }
+    #[test]
+    fn resident_defaults_validation_and_effective_values() {
+        assert_eq!(
+            UiSettings::default().resident.enabled,
+            ResidentEnabled::Enabled
+        );
+        for body in [
+            serde_json::json!({"resident":null}),
+            serde_json::json!({"resident":{"enabled":null}}),
+            serde_json::json!({"resident":{"enabled":"true"}}),
+            serde_json::json!({"resident":{"enabled":1}}),
+        ] {
+            assert!(serde_json::from_value::<SettingsSetRequest>(body).is_err());
+        }
+        let request: SettingsSetRequest =
+            serde_json::from_value(serde_json::json!({"resident":{"enabled":false}}))
+                .expect("resident update");
+        assert_eq!(
+            request.resident.expect("resident").enabled,
+            Some(ResidentEnabled::Disabled)
+        );
+        let settings = UiSettings {
+            resident: ResidentSettings {
+                enabled: ResidentEnabled::Disabled,
+            },
+            ..Default::default()
+        };
+        let effective = settings.resolve(EffectiveUiSettings {
+            resident: ResidentSettings::default(),
+            prewarm: PrewarmSettings::default(),
+            ui_language: UiLanguage::English,
+            locale: None,
+        });
+        assert_eq!(effective.resident, settings.resident);
     }
 }

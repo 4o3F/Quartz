@@ -155,14 +155,15 @@ mod pipe {
                 .expect("rejection");
         }
         async fn handshake(&mut self) {
+            self.handshake_phase(UiState::Starting).await;
+        }
+        async fn handshake_phase(&mut self, state: UiState) {
             let request = self.request(Op::Hello).await;
             let hello: Hello = serde_json::from_value(request.body.clone()).expect("UI hello");
             assert_eq!(
                 hello.role,
                 HelloRole::Ui {
-                    ui: quartz_protocol::UiHello {
-                        state: UiState::Starting
-                    }
+                    ui: quartz_protocol::UiHello { state }
                 }
             );
             self.ok(request, serde_json::json!({"proto":1,"core_version":"1.0","instance_id":"test-start","capabilities":[]})).await;
@@ -348,6 +349,56 @@ mod pipe {
         ui.stop().await;
     }
 
+    #[tokio::test]
+    async fn hidden_prewarm_uses_the_prewarming_hello_and_waits_for_show() {
+        use crate::prewarm::{PrewarmAction, PrewarmGate};
+        let listener = TestPipeServer::bind().expect("listener");
+        let (commands, receive) = mpsc::channel(BRIDGE_CAPACITY);
+        let (send, events) = mpsc::channel(BRIDGE_CAPACITY);
+        let mut worker = worker::Worker::new(receive, send, InitialConnection::Connect)
+            .with_hello_state(UiState::Prewarming);
+        worker.name = Some(listener.name().clone());
+        let mut ui = Harness {
+            link: Link { commands },
+            events: LinkEvents { receiver: events },
+            worker: tokio::spawn(worker.run()),
+        };
+        ui.connecting().await;
+        let mut core = Core::accept(listener).await;
+        core.handshake_phase(UiState::Prewarming).await;
+        ui.connected().await;
+        let mut gate = PrewarmGate::Hidden;
+        core.event(Topic::Control, serde_json::json!({"op":"ui.show"}))
+            .await;
+        let show = ui.events.recv().await.expect("show");
+        assert_eq!(gate.receive(&show), PrewarmAction::Open);
+        ui.link
+            .first_frame()
+            .await
+            .expect("window first frame hook");
+        let frame = core.request(Op::UiFirstFrame).await;
+        core.ok(frame, serde_json::json!({"accepted":true})).await;
+        ui.link.hidden().expect("last window close");
+        let hidden = core.request(Op::UiHidden).await;
+        core.ok(hidden, serde_json::json!({"accepted":true})).await;
+        gate = PrewarmGate::Hidden;
+        core.event(Topic::Control, serde_json::json!({"op":"ui.show"}))
+            .await;
+        assert_eq!(
+            gate.receive(&ui.events.recv().await.expect("reopen")),
+            PrewarmAction::Open
+        );
+        ui.link.first_frame().await.expect("reopened frame");
+        let frame = core.request(Op::UiFirstFrame).await;
+        core.ok(frame, serde_json::json!({"accepted":true})).await;
+        core.event(Topic::Control, serde_json::json!({"op":"ui.shutdown"}))
+            .await;
+        assert_eq!(
+            gate.receive(&ui.events.recv().await.expect("shutdown")),
+            PrewarmAction::Quit
+        );
+        ui.stop().await;
+    }
     #[tokio::test]
     async fn state_control_first_frame_and_transport_loss_deliver_exit() {
         let listener = TestPipeServer::bind().expect("listener");

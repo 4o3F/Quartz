@@ -14,14 +14,14 @@ use crate::{
     text_scale::{LiveTextScale, ReadTextScaleError, TextScaleChange, TextScaleSource},
 };
 use gpui_kit::{
-    AppContext as _, Bounds, Context, Div, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Size, StatefulInteractiveElement as _, Styled as _, Task, Window,
-    component::ActiveTheme as _, div, px, size,
+    AnyWindowHandle, AppContext as _, Bounds, Context, Div, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Size, StatefulInteractiveElement as _, Styled as _,
+    Window, component::ActiveTheme as _, div, px, size,
 };
 use quartz_i18n::{Language, ParseLanguageError};
 use quartz_protocol::{ControlOp, CoreError, StateSnapshot};
 use snafu::{ResultExt as _, Snafu};
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 /// Initial size of the main shell window.
 const MAIN_WINDOW_SIZE: Size<f32> = Size {
@@ -29,7 +29,7 @@ const MAIN_WINDOW_SIZE: Size<f32> = Size {
     height: 800.,
 };
 
-/// Selects a visible launch, startup failure, or the M3-E prewarm placeholder.
+/// Selects an immediate window, a startup failure, or hidden GPUI prewarming.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunOptions {
     Open {
@@ -39,7 +39,9 @@ pub enum RunOptions {
         language: &'static str,
         error: CoreError,
     },
-    Prewarm,
+    Prewarm {
+        language: &'static str,
+    },
 }
 /// Failures that prevent creating any UI window.
 #[derive(Debug, Snafu)]
@@ -75,7 +77,7 @@ pub(crate) struct LaunchWindow {
     shell: Option<Entity<AppShell>>,
     screen: Entity<FailureScreen>,
     activity: RecoveryActivity,
-    _events: Option<Task<()>>,
+    query_generations: crate::app::QueryGenerations,
 }
 impl Render for LaunchWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -273,6 +275,7 @@ impl LaunchWindow {
                     let shell = cx.new(|cx| {
                         let mut shell = AppShell::new(init, window, cx);
                         shell.connect(link, snapshot.clone(), cx);
+                        shell.resume_queries(self.query_generations);
                         shell
                     });
                     self.shell = Some(shell);
@@ -310,21 +313,29 @@ impl RunOptions {
     fn instance_policy(&self) -> crate::instance::InstancePolicy {
         match self {
             Self::CoreError { .. } => crate::instance::InstancePolicy::CoreError,
-            Self::Open { .. } | Self::Prewarm => crate::instance::InstancePolicy::Required,
+            Self::Open { .. } | Self::Prewarm { .. } => crate::instance::InstancePolicy::Required,
         }
     }
 
-    /// Runs one visible window until the last window closes or its established pipe disconnects.
+    /// Initializes GPUI, optionally waits without a window, and exits when its UI lifecycle ends.
     ///
     /// # Errors
     /// Returns mutex, language, theme, text-scale or GPUI window failures.
     pub fn run(self) -> Result<(), RunUiError> {
         let policy = self.instance_policy();
-        let (code, failure) = match self {
-            Self::Open { language } => (language, None),
-            Self::CoreError { language, error } => (language, Some(Failure::from_startup(error))),
-            // TODO(M3-E): Initialize D3D without a visible window and implement prewarming.
-            Self::Prewarm => return Ok(()),
+        let initial = if matches!(self, Self::Prewarm { .. }) {
+            InitialWindow::Hidden
+        } else {
+            InitialWindow::Visible
+        };
+        let code = match &self {
+            Self::Open { language }
+            | Self::Prewarm { language }
+            | Self::CoreError { language, .. } => *language,
+        };
+        let failure = match self {
+            Self::CoreError { error, .. } => Some(Failure::from_startup(error)),
+            Self::Open { .. } | Self::Prewarm { .. } => None,
         };
         let language: Language = code.parse().context(SelectLanguageSnafu)?;
         // Startup error windows must be shown even while a normal UI holds the session mutex.
@@ -341,100 +352,327 @@ impl RunOptions {
             Some(outcome)
         };
         let formatter = Formatter::new(language);
-        let bridge = match &failure {
-            None => Some(LinkBridge::start()),
-            Some(failure) if failure.severity() == Severity::Recoverable => {
-                Some(LinkBridge::for_failure())
-            }
-            Some(_) => None,
-        };
-        let mut connection = match failure {
-            Some(failure) => ConnectionState::Failed(failure),
-            None => ConnectionState::Connecting,
-        };
-        let bridge = match bridge {
-            Some(Ok(bridge)) => Some(bridge),
-            Some(Err(error)) => {
-                tracing::warn!(%error, "could not start UI pipe thread");
-                connection =
-                    ConnectionState::Failed(Failure::new(FailureKind::InterfaceUnavailable));
-                None
-            }
-            None => None,
-        };
         let theme = ThemeBundle::embedded().context(LoadThemeSnafu)?;
         let appearance = Appearance::System;
-        run_gpui(language, appearance, theme, move |cx| {
-            let text_scale =
-                LiveTextScale::read(TextScaleSource::System).context(ReadTextScaleSnafu)?;
-            let title = formatter.text(Msg::AppName);
-            let bounds = Bounds::centered(
-                None,
-                size(px(MAIN_WINDOW_SIZE.width), px(MAIN_WINDOW_SIZE.height)),
-                cx,
-            );
-            gpui_kit::open_window(
-                window_options(title.clone(), bounds, cx),
-                cx,
-                move |window, cx| {
-                    appearance.observe(window, cx);
-                    cx.new(|cx| {
-                        cx.observe_window_activation(window, |this: &mut LaunchWindow, _, cx| {
-                            crate::app::system_theme::SystemTheme::refresh(cx);
-                            if this.text_scale.refresh() == TextScaleChange::Changed {
-                                cx.notify();
-                            }
-                        })
-                        .detach();
-                        let failure = match &connection {
-                            ConnectionState::Failed(failure) => Some(failure.clone()),
-                            ConnectionState::Connecting | ConnectionState::Connected { .. } => None,
-                        };
-                        let screen = cx
-                            .new(|_| FailureScreen::new(failure, formatter, text_scale.current()));
-                        cx.subscribe_in(
-                            &screen,
-                            window,
-                            |this: &mut LaunchWindow, _, action, window, cx| {
-                                this.act(*action, window, cx)
-                            },
-                        )
-                        .detach();
-                        let mut view = LaunchWindow {
-                            title,
-                            formatter,
-                            text_scale,
-                            connection,
-                            link: bridge.as_ref().map(|bridge| bridge.link.clone()),
-                            snapshot: None,
-                            shell: None,
-                            screen,
-                            activity: RecoveryActivity::Idle,
-                            _events: None,
-                        };
-                        if let Some(bridge) = bridge {
-                            let mut events = bridge.events;
-                            view._events = Some(cx.spawn_in(window, async move |this, cx| {
-                                while let Some(event) = events.recv().await {
-                                    if this
-                                        .update_in(cx, |this, window, cx| {
-                                            this.receive(event, window, cx)
-                                        })
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                            }));
-                            view.acknowledge_frame(window, cx);
+        let deferred_error = Rc::new(RefCell::new(None));
+        let report = Rc::clone(&deferred_error);
+        let result = run_gpui(
+            language,
+            appearance,
+            theme,
+            crate::app::WindowClosePolicy::Managed,
+            move |cx| {
+                let bridge = match &failure {
+                    None => Some(match initial {
+                        InitialWindow::Visible => LinkBridge::start(),
+                        InitialWindow::Hidden => LinkBridge::prewarm(),
+                    }),
+                    Some(failure) if failure.severity() == Severity::Recoverable => {
+                        Some(LinkBridge::for_failure())
+                    }
+                    Some(_) => None,
+                };
+                let mut connection = match failure {
+                    Some(failure) => ConnectionState::Failed(failure),
+                    None => ConnectionState::Connecting,
+                };
+                let bridge = match bridge {
+                    Some(Ok(bridge)) => Some(bridge),
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "could not start UI pipe thread");
+                        connection = ConnectionState::Failed(Failure::new(
+                            FailureKind::InterfaceUnavailable,
+                        ));
+                        None
+                    }
+                    None => None,
+                };
+
+                let link = bridge.as_ref().map(|bridge| bridge.link.clone());
+                let session = Rc::new(RefCell::new(UiSession {
+                    formatter,
+                    connection,
+                    link,
+                    snapshot: None,
+                    window: None,
+                    gate: crate::prewarm::PrewarmGate::Hidden,
+                    policy,
+                    lifecycle: SessionLifecycle::Running,
+                    query_generations: Default::default(),
+                }));
+                let closed = Rc::clone(&session);
+                cx.on_window_closed(move |cx, _| {
+                    let closed = Rc::clone(&closed);
+                    cx.defer(move |cx| {
+                        if cx.windows().is_empty() {
+                            closed.borrow_mut().last_window_closed(cx);
                         }
-                        view
+                    });
+                })
+                .detach();
+                if initial == InitialWindow::Visible {
+                    session.borrow_mut().open(cx)?;
+                } else if bridge.is_none() {
+                    tracing::warn!("hidden UI link unavailable; exiting");
+                    cx.quit();
+                    return Ok(());
+                }
+                if let Some(mut bridge) = bridge {
+                    cx.spawn(async move |cx| {
+                        while let Some(event) = bridge.events.recv().await {
+                            cx.update(|cx| {
+                                if let Err(error) = session.borrow_mut().receive(event, cx) {
+                                    tracing::error!(%error, "could not reopen UI window");
+                                    *report.borrow_mut() = Some(error);
+                                    cx.quit();
+                                }
+                            });
+                        }
+                        cx.update(|cx| cx.quit());
                     })
-                },
-            )
-            .context(GpuiSnafu)
-            .context(OpenWindowSnafu)
-            .map(|_| ())
+                    .detach();
+                }
+                Ok(())
+            },
+        );
+        result?;
+        let error = deferred_error.borrow_mut().take();
+        error.map_or(Ok(()), Err)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitialWindow {
+    Visible,
+    Hidden,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionLifecycle {
+    Running,
+    Stopping,
+}
+struct UiSession {
+    formatter: Formatter,
+    connection: ConnectionState,
+    link: Option<Link>,
+    snapshot: Option<StateSnapshot>,
+    window: Option<UiWindow>,
+    gate: crate::prewarm::PrewarmGate,
+    policy: crate::instance::InstancePolicy,
+    lifecycle: SessionLifecycle,
+    query_generations: crate::app::QueryGenerations,
+}
+impl UiSession {
+    fn open(&mut self, cx: &mut gpui_kit::App) -> Result<(), RunUiError> {
+        let handle = WindowLaunch {
+            formatter: self.formatter,
+            connection: self.connection.clone(),
+            link: self.link.clone(),
+            snapshot: self.snapshot.clone(),
+            query_generations: self.query_generations,
+        }
+        .open(cx)?;
+        self.window = Some(handle);
+        self.gate = crate::prewarm::PrewarmGate::Opened;
+        Ok(())
+    }
+    fn last_window_closed(&mut self, cx: &mut gpui_kit::App) {
+        if self.lifecycle == SessionLifecycle::Stopping {
+            self.window = None;
+            cx.quit();
+            return;
+        }
+        let Some(window) = self.window.take() else {
+            return;
+        };
+        if let Some(shell) = &window.view.read(cx).shell {
+            self.query_generations = shell.read(cx).query_generations();
+        }
+        drop(window);
+        let resident = if self.policy == crate::instance::InstancePolicy::CoreError {
+            quartz_protocol::ResidentEnabled::Disabled
+        } else {
+            self.snapshot
+                .as_ref()
+                .map_or(quartz_protocol::ResidentEnabled::Enabled, |state| {
+                    state.ui_resident
+                })
+        };
+        match crate::prewarm::LastWindowAction::decide(resident, &self.connection) {
+            crate::prewarm::LastWindowAction::Quit => {
+                self.lifecycle = SessionLifecycle::Stopping;
+                cx.quit();
+            }
+            crate::prewarm::LastWindowAction::HideAndNotify => {
+                self.gate = crate::prewarm::PrewarmGate::Hidden;
+                if let Some(link) = &self.link {
+                    if let Err(error) = link.hidden() {
+                        tracing::warn!(%error, "could not queue UI hidden notification");
+                        self.lifecycle = SessionLifecycle::Stopping;
+                        cx.quit();
+                    }
+                } else {
+                    tracing::warn!("resident UI has no pipe handle; exiting");
+                    cx.quit();
+                }
+            }
+        }
+    }
+    fn receive(&mut self, event: LinkEvent, cx: &mut gpui_kit::App) -> Result<(), RunUiError> {
+        match &event {
+            LinkEvent::Connection(connection) => self.connection = connection.clone(),
+            LinkEvent::State(snapshot) => {
+                let language = match snapshot.ui_language {
+                    quartz_protocol::UiLanguage::English => Language::English,
+                    quartz_protocol::UiLanguage::SimplifiedChinese => Language::SimplifiedChinese,
+                };
+                #[cfg(debug_assertions)]
+                let language = if self.formatter.language() == Language::PseudoEnglish {
+                    Language::PseudoEnglish
+                } else {
+                    language
+                };
+                self.formatter = Formatter::new(language);
+                self.snapshot = Some(snapshot.clone());
+            }
+            LinkEvent::Disconnected | LinkEvent::Control(ControlOp::UiShutdown) => {
+                self.lifecycle = SessionLifecycle::Stopping
+            }
+            LinkEvent::Day(_)
+            | LinkEvent::DayLoading { .. }
+            | LinkEvent::DayLoaded { .. }
+            | LinkEvent::DetailLoading { .. }
+            | LinkEvent::DetailLoaded { .. }
+            | LinkEvent::Control(
+                ControlOp::UiShow
+                | ControlOp::UiActivate
+                | ControlOp::BrowserAck
+                | ControlOp::BrowserPolicy
+                | ControlOp::BrowserPurge
+                | ControlOp::CoreOffline,
+            ) => {}
+        }
+        let action = event.window_action();
+        if let Some(window) = &self.window {
+            let view = window.view.clone();
+            if let Err(error) = window.handle.update(cx, |_, window, cx| {
+                view.update(cx, |view, cx| view.receive(event, window, cx))
+            }) {
+                tracing::debug!(%error, "UI window closed before event delivery");
+                self.last_window_closed(cx);
+                match action {
+                    crate::link::WindowAction::Quit => {
+                        self.lifecycle = SessionLifecycle::Stopping;
+                        cx.quit();
+                    }
+                    crate::link::WindowAction::Activate
+                        if self.lifecycle == SessionLifecycle::Running =>
+                    {
+                        self.open(cx)?
+                    }
+                    crate::link::WindowAction::Activate | crate::link::WindowAction::Observe => {}
+                }
+            }
+        } else {
+            match self.gate.receive(&event) {
+                crate::prewarm::PrewarmAction::Wait => {}
+                crate::prewarm::PrewarmAction::Open => self.open(cx)?,
+                crate::prewarm::PrewarmAction::Quit => {
+                    self.lifecycle = SessionLifecycle::Stopping;
+                    cx.quit();
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct UiWindow {
+    handle: AnyWindowHandle,
+    view: Entity<LaunchWindow>,
+}
+
+#[derive(Debug)]
+struct WindowLaunch {
+    formatter: Formatter,
+    connection: ConnectionState,
+    link: Option<Link>,
+    snapshot: Option<StateSnapshot>,
+    query_generations: crate::app::QueryGenerations,
+}
+impl WindowLaunch {
+    fn open(self, cx: &mut gpui_kit::App) -> Result<UiWindow, RunUiError> {
+        let Self {
+            formatter,
+            connection,
+            link,
+            snapshot,
+            query_generations,
+        } = self;
+        let appearance = Appearance::System;
+        let text_scale =
+            LiveTextScale::read(TextScaleSource::System).context(ReadTextScaleSnafu)?;
+        let title = formatter.text(Msg::AppName);
+        let bounds = Bounds::centered(
+            None,
+            size(px(MAIN_WINDOW_SIZE.width), px(MAIN_WINDOW_SIZE.height)),
+            cx,
+        );
+        gpui_kit::open_window(
+            window_options(title.clone(), bounds, cx),
+            cx,
+            move |window, cx| {
+                appearance.observe(window, cx);
+                cx.new(|cx| {
+                    cx.observe_window_activation(window, |this: &mut LaunchWindow, _, cx| {
+                        crate::app::system_theme::SystemTheme::refresh(cx);
+                        if this.text_scale.refresh() == TextScaleChange::Changed {
+                            cx.notify();
+                        }
+                    })
+                    .detach();
+                    let failure = match &connection {
+                        ConnectionState::Failed(failure) => Some(failure.clone()),
+                        ConnectionState::Connecting | ConnectionState::Connected { .. } => None,
+                    };
+                    let screen =
+                        cx.new(|_| FailureScreen::new(failure, formatter, text_scale.current()));
+                    cx.subscribe_in(
+                        &screen,
+                        window,
+                        |this: &mut LaunchWindow, _, action, window, cx| {
+                            this.act(*action, window, cx)
+                        },
+                    )
+                    .detach();
+                    let mut view = LaunchWindow {
+                        title,
+                        formatter,
+                        text_scale,
+                        connection,
+                        link,
+                        snapshot: None,
+                        shell: None,
+                        screen,
+                        activity: RecoveryActivity::Idle,
+                        query_generations,
+                    };
+                    if view.link.is_some() {
+                        view.acknowledge_frame(window, cx);
+                    }
+                    if let Some(snapshot) = snapshot {
+                        view.receive(LinkEvent::State(snapshot), window, cx);
+                    }
+                    view
+                })
+            },
+        )
+        .context(GpuiSnafu)
+        .context(OpenWindowSnafu)
+        .map(|opened| UiWindow {
+            handle: opened.0,
+            view: opened.1,
         })
     }
 }
@@ -450,7 +688,7 @@ mod tests {
             InstancePolicy::Required
         );
         assert_eq!(
-            RunOptions::Prewarm.instance_policy(),
+            RunOptions::Prewarm { language: "en" }.instance_policy(),
             InstancePolicy::Required
         );
         assert_eq!(
@@ -461,12 +699,6 @@ mod tests {
             .instance_policy(),
             InstancePolicy::CoreError
         );
-    }
-    #[test]
-    fn prewarm_exits_without_starting_a_window_loop() {
-        RunOptions::Prewarm
-            .run()
-            .expect("prewarm placeholder has no window");
     }
     #[test]
     fn an_unknown_language_is_reported_before_any_window_opens() {

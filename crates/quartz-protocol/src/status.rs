@@ -16,6 +16,10 @@ pub struct UiOpenRequest {}
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiFirstFrameRequest {}
 
+/// UI notification that its last window has closed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiHiddenRequest {}
+
 /// An acknowledgement that always serializes as `{"accepted":true}`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptedBody;

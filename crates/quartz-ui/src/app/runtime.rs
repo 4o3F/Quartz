@@ -144,8 +144,22 @@ pub(crate) fn window_options(title: String, bounds: Bounds<Pixels>, cx: &App) ->
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowClosePolicy {
+    Quit,
+    Managed,
+}
+impl WindowClosePolicy {
+    fn quit_mode(self) -> gpui_kit::QuitMode {
+        match self {
+            Self::Quit => gpui_kit::QuitMode::LastWindowClosed,
+            Self::Managed => gpui_kit::QuitMode::Explicit,
+        }
+    }
+}
+
 /// Starts GPUI in `language` and `appearance` with `theme`, lets `open` open the windows and runs
-/// until the last window closes.
+/// until the selected window lifecycle quits the application.
 ///
 /// # Errors
 /// Returns the error of `open`, which also quits the application.
@@ -153,6 +167,7 @@ pub(crate) fn run_gpui<E: 'static>(
     language: Language,
     appearance: Appearance,
     theme: ThemeBundle,
+    close_policy: WindowClosePolicy,
     open: impl FnOnce(&mut App) -> Result<(), E> + 'static,
 ) -> Result<(), E> {
     language.set_global();
@@ -161,6 +176,7 @@ pub(crate) fn run_gpui<E: 'static>(
     let report = Rc::clone(&failure);
     gpui_kit::application()
         .with_assets(AppAssets)
+        .with_quit_mode(close_policy.quit_mode())
         .run(move |cx| {
             gpui_kit::init(cx);
             LayoutDirection::from_locale(language.code()).set_global(cx);
@@ -169,12 +185,6 @@ pub(crate) fn run_gpui<E: 'static>(
             SystemTheme::install(theme, cx);
             appearance.apply(cx);
             SystemTheme::apply_components(cx);
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
             if let Err(error) = open(cx) {
                 report.set(Some(error));
                 cx.quit();
@@ -186,6 +196,18 @@ pub(crate) fn run_gpui<E: 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_lifecycle_disables_gpui_automatic_quit_on_last_window_close() {
+        assert_eq!(
+            WindowClosePolicy::Managed.quit_mode(),
+            gpui_kit::QuitMode::Explicit
+        );
+        assert_eq!(
+            WindowClosePolicy::Quit.quit_mode(),
+            gpui_kit::QuitMode::LastWindowClosed
+        );
+    }
 
     #[test]
     fn embedded_theme_loads() {

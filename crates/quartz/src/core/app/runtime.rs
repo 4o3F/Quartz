@@ -190,6 +190,8 @@ impl CoreRuntime {
             }
         };
         let system = quartz_protocol::EffectiveUiSettings {
+            resident: Default::default(),
+            prewarm: Default::default(),
             ui_language: language,
             locale: ports.locale,
         };

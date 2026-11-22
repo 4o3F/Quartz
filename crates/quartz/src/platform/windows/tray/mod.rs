@@ -37,6 +37,7 @@ impl Default for TrayState {
 pub(super) enum TrayCommand {
     CalendarChanged,
     OpenUi,
+    Hover,
     Annotate(crate::core::app::annotation::AnnotationChoice),
     Timed(crate::ipc::TimedCommand),
     Exit,
@@ -147,6 +148,7 @@ impl Tray {
                 }
                 CoreEvent::Hover => {
                     self.refresh_summary();
+                    commands.push(TrayCommand::Hover);
                 }
                 CoreEvent::ShowTrayMenu => {
                     self.refresh_summary();

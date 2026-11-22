@@ -55,6 +55,7 @@ enum RegistryMessage {
         id: ConnectionId,
         peer: ConnectionPeer,
         outbox: OutboxHandle,
+        registered_at: std::time::Instant,
     },
     Unregister {
         id: ConnectionId,
@@ -131,7 +132,12 @@ impl RegistryHandle {
                         .expect("u64 counter cannot overflow in practice")
                 }),
         );
-        self.send(RegistryMessage::Register { id, peer, outbox })?;
+        self.send(RegistryMessage::Register {
+            id,
+            peer,
+            outbox,
+            registered_at: std::time::Instant::now(),
+        })?;
         Ok(Registration {
             id,
             registry: self.clone(),
@@ -293,12 +299,18 @@ impl ConnectionRegistry {
     }
     async fn receive(&mut self, message: RegistryMessage) {
         match message {
-            RegistryMessage::Register { id, peer, outbox } => {
+            RegistryMessage::Register {
+                id,
+                peer,
+                outbox,
+                registered_at,
+            } => {
                 if let ConnectionPeer::Ui(ui) = peer
                     && let Err(error) = (self.ui)(UiCommand::Registered {
                         connection: id,
                         pid: ui.pid,
                         state: ui.state,
+                        registered_at,
                     })
                 {
                     tracing::warn!(%error, "could not report UI registration");
@@ -360,7 +372,10 @@ impl ConnectionRegistry {
                 }
             }
             RegistryMessage::TargetControl { connection, op } => {
-                if !matches!(op, ControlOp::UiShow | ControlOp::UiActivate) {
+                if !matches!(
+                    op,
+                    ControlOp::UiShow | ControlOp::UiActivate | ControlOp::UiShutdown
+                ) {
                     tracing::warn!(?op, "rejected unsupported targeted control");
                     return;
                 }

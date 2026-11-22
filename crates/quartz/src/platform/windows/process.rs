@@ -11,7 +11,10 @@ use windows::{
 };
 
 use super::handle::OwnedHandle;
-use crate::process_id::ProcessId;
+use crate::{
+    process_id::ProcessId,
+    ui_state::{LaunchIntent, PowerSource},
+};
 
 /// Failures while resolving the executable and creating the UI child.
 #[derive(Debug, Snafu)]
@@ -42,7 +45,7 @@ impl UiProcess {
     ///
     /// # Errors
     /// Returns executable-path lookup or CreateProcessW failures.
-    pub(super) fn launch() -> Result<Self, LaunchUiError> {
+    pub(super) fn launch(intent: LaunchIntent) -> Result<Self, LaunchUiError> {
         let executable = std::env::current_exe().context(ResolveExecutableSnafu)?;
         let application: Vec<_> = executable
             .as_os_str()
@@ -52,10 +55,16 @@ impl UiProcess {
         let mut command = OsString::from("\"");
         command.push(executable.as_os_str());
         command.push("\" ui");
+        if matches!(intent, LaunchIntent::Prewarm | LaunchIntent::Resident) {
+            command.push(" --prewarm");
+        }
         let mut command: Vec<_> = command.encode_wide().chain(Some(0)).collect();
         let startup = STARTUPINFOW {
             cb: const { super::structure_size::<STARTUPINFOW>() },
-            dwFlags: STARTF_FORCEONFEEDBACK,
+            dwFlags: match intent {
+                LaunchIntent::Show => STARTF_FORCEONFEEDBACK,
+                LaunchIntent::Prewarm | LaunchIntent::Resident => Default::default(),
+            },
             ..Default::default()
         };
         let mut information = PROCESS_INFORMATION::default();
@@ -81,7 +90,7 @@ impl UiProcess {
         // SAFETY: CreateProcessW transferred the separate thread handle as well.
         let _thread = unsafe { OwnedHandle::from_raw(information.hThread) };
         let pid = ProcessId::new(information.dwProcessId);
-        tracing::info!(%pid, "UI child started");
+        tracing::info!(%pid, ?intent, "UI child started");
         Ok(Self {
             handle: process,
             pid,
@@ -153,5 +162,52 @@ impl<'error> CoreErrorUi<'error> {
         tracing::info!(pid=child.id(),code=%self.error.code,backup_paths=?self.error.backup_paths,"core error UI started");
         // Dropping Child closes its process handle without terminating the UI.
         Ok(())
+    }
+}
+
+/// ACLineStatus values from SYSTEM_POWER_STATUS.
+const AC_OFFLINE: u8 = 0;
+const AC_ONLINE: u8 = 1;
+#[derive(Debug, Snafu)]
+#[snafu(module(read_power_source_error))]
+pub(super) enum ReadPowerSourceError {
+    #[snafu(display("could not read power source (GetSystemPowerStatus)"))]
+    Read { source: windows::core::Error },
+    #[snafu(display("unknown AC line status: {status}"))]
+    Unknown { status: u8 },
+}
+impl PowerSource {
+    pub(super) fn read() -> Result<Self, ReadPowerSourceError> {
+        use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+        let mut status = SYSTEM_POWER_STATUS::default();
+        // SAFETY: status is writable storage for the complete native power status structure.
+        unsafe { GetSystemPowerStatus(&mut status) }.context(read_power_source_error::ReadSnafu)?;
+        Self::from_ac_line_status(status.ACLineStatus)
+    }
+    fn from_ac_line_status(status: u8) -> Result<Self, ReadPowerSourceError> {
+        match status {
+            AC_OFFLINE => Ok(Self::Battery),
+            AC_ONLINE => Ok(Self::Ac),
+            status => Err(ReadPowerSourceError::Unknown { status }),
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn power_source_codes_are_typed_and_unknown_is_an_error() {
+        assert_eq!(
+            PowerSource::from_ac_line_status(AC_ONLINE).expect("AC"),
+            PowerSource::Ac
+        );
+        assert_eq!(
+            PowerSource::from_ac_line_status(AC_OFFLINE).expect("battery"),
+            PowerSource::Battery
+        );
+        assert!(matches!(
+            PowerSource::from_ac_line_status(u8::MAX),
+            Err(ReadPowerSourceError::Unknown { .. })
+        ));
     }
 }

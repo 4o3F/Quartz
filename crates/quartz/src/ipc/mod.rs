@@ -67,6 +67,7 @@ impl UiCommands {
                     settings_sender.send_replace(Some(effective));
                 }
                 UiCommand::Open
+                | UiCommand::Hidden { .. }
                 | UiCommand::FirstFrame { .. }
                 | UiCommand::Registered { .. }
                 | UiCommand::Unregistered { .. } => sender.try_send(command).map_err(|error| {
@@ -111,6 +112,8 @@ mod tests {
             (channel.port)(UiCommand::Open).expect("fill UI queue");
         }
         let english = quartz_protocol::EffectiveUiSettings {
+            resident: Default::default(),
+            prewarm: Default::default(),
             ui_language: quartz_protocol::UiLanguage::English,
             locale: None,
         };

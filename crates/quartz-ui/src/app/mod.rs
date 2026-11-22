@@ -27,7 +27,7 @@ pub use preview::{
     PlaceWindowError, PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, RunPreviewError,
 };
 pub use runtime::{Appearance, GpuiError, LoadThemeError};
-pub(crate) use runtime::{GpuiSnafu, ThemeBundle, run_gpui, window_options};
-pub(crate) use shell::{AppShell, Page, RangeChoice, ShellInit};
+pub(crate) use runtime::{GpuiSnafu, ThemeBundle, WindowClosePolicy, run_gpui, window_options};
+pub(crate) use shell::{AppShell, Page, QueryGenerations, RangeChoice, ShellInit};
 pub use tokens::LoadPaletteError;
 pub(crate) use widgets::{RampExt, Widgets};

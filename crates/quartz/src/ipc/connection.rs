@@ -110,6 +110,25 @@ impl Connection {
                     )
                 }
 
+                Action::Hidden { id } => {
+                    let connection = registration
+                        .as_ref()
+                        .expect("hidden notification follows hello")
+                        .id;
+                    Some(
+                        match (self.services.ui)(super::UiCommand::Hidden { connection }) {
+                            Ok(()) => Action::success_response(id, quartz_protocol::AcceptedBody),
+                            Err(error) => {
+                                tracing::warn!(%error, "could not queue UI hidden notification");
+                                Action::error_response(
+                                    Some(id),
+                                    ProtocolError::new(ErrorKind::Internal),
+                                )
+                            }
+                        },
+                    )
+                }
+
                 Action::Timed { id, command } => Some(match self.services.timed.call(command) {
                     Ok(response) => Action::success_response(id, response),
                     Err(error) => Action::error_response(Some(id), error),
@@ -470,6 +489,7 @@ mod tests {
                 connection: registered,
                 pid,
                 state,
+                ..
             } = commands.recv().await.expect("UI registration")
             else {
                 panic!("registered command")
@@ -509,6 +529,21 @@ mod tests {
                     connection: registered
                 })
             );
+            first
+                .request(3, quartz_protocol::Op::UiHidden, serde_json::json!({}))
+                .await;
+            assert_eq!(
+                commands.recv().await,
+                Some(UiCommand::Hidden {
+                    connection: registered
+                })
+            );
+            registry
+                .target_control(registered, ControlOp::UiShutdown)
+                .expect("expire selected prewarm connection");
+            first.control(ControlOp::UiShutdown).await;
+            second.quiet().await;
+            cli.quiet().await;
             registry
                 .control(ControlOp::UiShutdown)
                 .expect("broadcast shutdown");
@@ -530,7 +565,9 @@ mod tests {
                 .expect("unknown target");
             registry
                 .target_control(other, ControlOp::UiShutdown)
-                .expect("reject targeted shutdown");
+                .expect("targeted prewarm shutdown");
+            second.control(ControlOp::UiShutdown).await;
+            cli.quiet().await;
             registry
                 .control(ControlOp::UiActivate)
                 .expect("reject broadcast activation");

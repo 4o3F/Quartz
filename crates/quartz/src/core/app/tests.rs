@@ -1232,6 +1232,8 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
         "settings-integration".into(),
     ));
     let system = EffectiveUiSettings {
+        resident: Default::default(),
+        prewarm: Default::default(),
         ui_language: UiLanguage::English,
         locale: Some(LocaleSettings {
             hour_cycle: HourCycle::H24,
@@ -1296,8 +1298,16 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
         let mut cli = AnnotationClient::connect(services.clone(), registry.clone(), Role::Cli).await;
         for op in [Op::SettingsGet, Op::SettingsSet] {
             cli.send(2, op, serde_json::json!({})).await;
-            assert_eq!(cli.response(2).await, quartz_protocol::ResponseOutcome::Err { error: quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::Forbidden) });
+            let response: SettingsResponse = serde_json::from_value(cli.success(2).await).expect("CLI settings response");
+            assert_eq!(response.ui, automatic.ui);
         }
+        cli.send(7, Op::SettingsSet, serde_json::json!({"prewarm":{"enabled":false,"on_battery":true}})).await;
+        let prewarm: SettingsResponse = serde_json::from_value(cli.success(7).await).expect("CLI prewarm update");
+        assert_eq!(prewarm.ui.prewarm.enabled, quartz_protocol::PrewarmEnabled::Disabled);
+        assert_eq!(prewarm.effective.prewarm.on_battery, quartz_protocol::PrewarmOnBattery::Allowed);
+        let effective = channel.commands.take_settings_change().expect("committed prewarm notification");
+        status.apply_ui_settings(effective, |_| {});
+        assert_eq!(status.ui_settings().prewarm, prewarm.ui.prewarm);
         cli.close().await;
         ui.close().await;
         subscriber.close().await;
@@ -1307,6 +1317,13 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
     let mut reopened =
         Store::open(&DataDirectory::new(directory.path())).expect("reopen committed settings");
     let settings = reopened.ui_settings().expect("stored UI settings");
+    assert_eq!(
+        settings.prewarm,
+        quartz_protocol::PrewarmSettings {
+            enabled: quartz_protocol::PrewarmEnabled::Disabled,
+            on_battery: quartz_protocol::PrewarmOnBattery::Allowed
+        }
+    );
     assert_eq!(settings.language, quartz_protocol::UiLanguageSetting::Auto);
     assert_eq!(settings.hour_cycle, quartz_protocol::HourCycleSetting::H12);
     assert_eq!(
@@ -1323,9 +1340,14 @@ fn core_runtime_starts_with_stored_preferences_overriding_platform_values() {
         let mut store = Store::open(&data).expect("store");
         let expected = store
             .update_ui_settings(quartz_protocol::SettingsSetRequest {
+                resident: None,
                 language: Some(quartz_protocol::UiLanguageSetting::ZhCn),
                 hour_cycle: Some(quartz_protocol::HourCycleSetting::H12),
                 first_day_of_week: Some(quartz_protocol::FirstDayOfWeekSetting::Sunday),
+                prewarm: Some(quartz_protocol::PrewarmUpdate {
+                    enabled: Some(quartz_protocol::PrewarmEnabled::Disabled),
+                    on_battery: Some(quartz_protocol::PrewarmOnBattery::Allowed),
+                }),
             })
             .expect("saved preferences");
         drop(store);
@@ -1334,6 +1356,8 @@ fn core_runtime_starts_with_stored_preferences_overriding_platform_values() {
         assert_eq!(
             runtime.status.ui_settings(),
             expected.resolve(quartz_protocol::EffectiveUiSettings {
+                resident: Default::default(),
+                prewarm: Default::default(),
                 ui_language: quartz_protocol::UiLanguage::English,
                 locale: None
             })

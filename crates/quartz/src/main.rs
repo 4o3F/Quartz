@@ -104,6 +104,11 @@ enum CliCommand {
     },
     /// Show core status.
     Status,
+    /// Read or update UI preferences.
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommand,
+    },
     /// Generate a year of data in an independent simulation database.
     GenData {
         #[arg(long)]
@@ -182,11 +187,59 @@ impl std::fmt::Display for CliCommand {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Subcommand)]
+enum SettingsCommand {
+    Get,
+    Set {
+        #[arg(long, action = clap::ArgAction::Set)]
+        prewarm_enabled: Option<bool>,
+        #[arg(long, action = clap::ArgAction::Set)]
+        resident_enabled: Option<bool>,
+        #[arg(long, action = clap::ArgAction::Set)]
+        prewarm_on_battery: Option<bool>,
+    },
+}
+impl SettingsCommand {
+    #[cfg(windows)]
+    fn run<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        self,
+        mut client: quartz_pipe::CoreClient<T>,
+    ) -> Result<(), quartz_pipe::CallCoreError> {
+        let response = match self {
+            Self::Get => client.call(&quartz_protocol::SettingsGetRequest {})?,
+            Self::Set {
+                prewarm_enabled,
+                resident_enabled,
+                prewarm_on_battery,
+            } => {
+                let update = quartz_protocol::SettingsSetRequest {
+                    resident: resident_enabled.map(|enabled| quartz_protocol::ResidentUpdate {
+                        enabled: Some(enabled.into()),
+                    }),
+                    prewarm: Some(quartz_protocol::PrewarmUpdate {
+                        enabled: prewarm_enabled.map(Into::into),
+                        on_battery: prewarm_on_battery.map(Into::into),
+                    }),
+                    ..Default::default()
+                };
+                client.call(&update)?
+            }
+        };
+        let response =
+            serde_json::to_value(response).map_err(quartz_pipe::CallCoreError::encode_body)?;
+        println!("{response}");
+        Ok(())
+    }
+}
+
 #[derive(Debug, Snafu)]
 enum DispatchCommandError {
     #[cfg(windows)]
     #[snafu(display("{source}"))]
     Status { source: quartz_pipe::CallCoreError },
+    #[cfg(windows)]
+    #[snafu(display("could not access UI settings: {source}"))]
+    Settings { source: quartz_pipe::CallCoreError },
     #[snafu(display("{source}"))]
     Dump { source: dump::DumpDayError },
     #[snafu(display("{source}"))]
@@ -222,6 +275,12 @@ impl CliCommand {
     fn dispatch(self) -> Result<(), DispatchCommandError> {
         use snafu::ResultExt as _;
         let command = match self {
+            #[cfg(windows)]
+            Self::Settings { command } => {
+                return command
+                    .run(quartz_pipe::CoreClient::connect().context(SettingsSnafu)?)
+                    .context(SettingsSnafu);
+            }
             #[cfg(windows)]
             Self::Status => {
                 return ipc::client::print_status(
@@ -318,7 +377,9 @@ fn main() -> ExitCode {
                 }
             } else {
                 match UiLaunch::from(prewarm) {
-                    UiLaunch::Prewarm => quartz_ui::RunOptions::Prewarm,
+                    UiLaunch::Prewarm => quartz_ui::RunOptions::Prewarm {
+                        language: platform::detect_ui_language().code(),
+                    },
                     UiLaunch::Open => quartz_ui::RunOptions::Open {
                         language: platform::detect_ui_language().code(),
                     },
@@ -610,6 +671,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn resident_setting_flag_parses_without_running_the_core() {
+        let args =
+            Args::try_parse_from(["quartz", "settings", "set", "--resident-enabled", "false"])
+                .expect("resident CLI");
+        assert!(matches!(
+            args.command,
+            Some(Command::Cli(CliCommand::Settings {
+                command: SettingsCommand::Set {
+                    resident_enabled: Some(false),
+                    ..
+                }
+            }))
+        ));
+        assert!(
+            Args::try_parse_from(["quartz", "settings", "set", "--resident-enabled", "yes"])
+                .is_err()
+        );
+    }
+    #[test]
+    fn settings_prewarm_flags_parse_without_running_the_core() {
+        let parsed = Args::try_parse_from([
+            "quartz",
+            "settings",
+            "set",
+            "--prewarm-enabled",
+            "false",
+            "--prewarm-on-battery",
+            "true",
+        ])
+        .expect("settings command");
+        assert_eq!(
+            parsed.command,
+            Some(Command::Cli(CliCommand::Settings {
+                command: SettingsCommand::Set {
+                    resident_enabled: None,
+                    prewarm_enabled: Some(false),
+                    prewarm_on_battery: Some(true)
+                }
+            }))
+        );
+        assert!(
+            Args::try_parse_from(["quartz", "settings", "set", "--prewarm-enabled", "yes"])
+                .is_err()
+        );
+    }
     #[test]
     fn restore_confirmation_is_an_explicit_flag() {
         for args in [

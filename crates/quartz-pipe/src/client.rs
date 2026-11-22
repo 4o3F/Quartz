@@ -378,6 +378,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> CoreClient<T> {
         })?;
         Ok(Self { client, runtime })
     }
+    /// Executes a request with its associated response schema on the caller's runtime.
+    ///
+    /// # Errors
+    /// Returns request encoding, transport, deadline, protocol, or response decoding failures.
+    pub fn call<R: CoreRequest>(&mut self, request: &R) -> Result<R::Response, CallCoreError> {
+        self.runtime.block_on(self.client.call(request))
+    }
     /// Requests current core status.
     pub fn status(&mut self) -> Result<CoreStatusResponse, CallCoreError> {
         self.runtime.block_on(self.client.status())
