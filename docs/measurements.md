@@ -763,3 +763,22 @@ Windows 11 build 26300.9974，150% 缩放，`AdvancedEffectsEnabled=true`，节�
 
 结论：GPUI 的 DirectComposition 路径能在 Mica 上合成，H11 的 Mica 项通过；字体光学尺寸与 `tnum` 待 M3 后续步骤验证。
 
+
+## 2026-11-22 M3-E/F：常驻界面实测与空闲唤醒调查
+
+用户实机（i7-14700HX、RTX 4060 Laptop 独显直连、165 Hz、150%），release `604da9b`，独立数据目录，界面默认常驻。按命令行区分进程，关窗稳定后采样 30 秒；采样期间未保证无输入。
+
+| 进程 | Private Bytes | 线程 | 30 s CPU | 预算（08） |
+|---|---|---|---|---|
+| 核心 | 5.5 MiB | 7 | 140 ms | 空闲 ≤ 150 ms / 10 min；活跃 ≤ 3 s / h |
+| 隐藏常驻 UI（`Hidden`） | 109.4 MiB | 58 | 78 ms | ≤ 100 MiB；≤ 20 ms / 30 s |
+
+从 `Hidden` 打开到首帧 `click_to_first_frame_ms=106`；独显直连下冷启动约 4 s（M0 spike 同因：D3D11 设备创建）。独显直连时核显不可用，按显卡偏好选择适配器的方案不适用。
+
+M3-F 源码调查（只读，未改代码）结论：
+
+- 可见静态 UI（M2 测得 781 ms / 30 s）：GPUI Windows 后端按刷新率持续唤醒 VSync 线程与 UI 主线程，静态页也执行帧回调；Quartz 代码中没有固定刷新循环。
+- 隐藏 UI：最后窗口销毁后平台 D3D 设备与 `VSyncProvider` 仍在，继续按刷新率唤醒；共享 D3D11 context 在窗口销毁时未 `ClearState`/`Flush`，可能保留窗口资源。关窗后未退订 day topic。
+- 核心：未见毫秒级轮询，三类主循环期限（逻辑日、预热 TTL、常驻重启）不会退化为零等待。周期工作为 59 s 采集维护、60 s 托盘摘要（另随数据库提交触发，可能相邻两次完整查询）、idle 后每 5 s 检查恢复。140 ms 样本可能含输入驱动的采集，需十分钟无输入复测。
+
+用户决定：隐藏 UI 的 CPU 与内存超出部分暂时接受，功能完整后再优化；暂不对 `gpui-pre-windows` 打补丁，可见静态 UI 的空闲 CPU 偏差保留。候选优化（按需启停 VSync 的依赖补丁、隐藏后进入 Headless 或延迟进入、清理共享 context 绑定、隐藏时退订 day、合并托盘摘要触发）留待届时按实测选择。`scripts/measure.ts` 仍按关窗即退出的生命周期验收，常驻模式下需在 M3-G 更新。
