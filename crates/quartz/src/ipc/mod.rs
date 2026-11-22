@@ -2,10 +2,12 @@
 
 pub(crate) mod client;
 pub(crate) mod connection;
+mod logical_day;
 pub(crate) mod outbox;
 pub(crate) mod registry;
 mod session;
 mod status;
+pub(crate) use logical_day::{LogicalDay, RefreshLogicalDay};
 pub(crate) mod summary;
 mod timed;
 pub(crate) use timed::{TimedCommand, TimedDeadline, TimedPolicyPort};

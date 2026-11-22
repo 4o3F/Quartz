@@ -1,7 +1,13 @@
 //! Main-thread publication of status independently of SQLite and client writes.
 
+use super::{LogicalDay, RefreshLogicalDay, logical_day::RefreshLogicalDayError};
+use crate::{core::sources::ClockReader, query::calendar::DayStartOffset};
 use quartz_domain::capture::{CaptureState, SessionReadiness, StopReason as CaptureStop};
 use quartz_protocol::{CoreStatusResponse, CoreVersion, DatabaseState, InstanceId, StopReason};
+use std::{
+    cell::{Cell, RefCell},
+    time::Duration,
+};
 use tokio::sync::watch;
 
 use crate::persistence::PersistenceState;
@@ -11,6 +17,7 @@ use quartz_protocol::{ForegroundState, LocaleSettings, StateSnapshot, UiLanguage
 /// Main-thread facts; the registry constructs wire state only when subscribed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishedStatus {
+    logical_date: quartz_protocol::LocalDate,
     pub(crate) status: CoreStatusResponse,
     foreground: Option<ForegroundView>,
     language: UiLanguage,
@@ -35,6 +42,7 @@ impl PublishedStatus {
                 interval_start_utc_ms: view.start.utc.get().as_millisecond(),
             });
         StateSnapshot {
+            logical_date: self.logical_date,
             timed_policies: self.timed,
             foreground,
             recording: self.status.recording,
@@ -49,30 +57,37 @@ impl PublishedStatus {
 #[derive(Debug)]
 pub(crate) struct StatusPublisher {
     sender: watch::Sender<PublishedStatus>,
+    logical_day: RefCell<LogicalDay>,
+    pending_offset: Cell<Option<DayStartOffset>>,
 }
 impl StatusPublisher {
     #[cfg(test)]
     pub(crate) fn new(instance_id: InstanceId) -> Self {
         Self::with_locale(
             instance_id,
-            UiLanguage::English,
-            Some(LocaleSettings {
-                hour_cycle: quartz_protocol::HourCycle::H24,
-                first_day_of_week: quartz_protocol::Weekday::Monday,
-            }),
+            quartz_protocol::EffectiveUiSettings {
+                ui_language: UiLanguage::English,
+                locale: Some(LocaleSettings {
+                    hour_cycle: quartz_protocol::HourCycle::H24,
+                    first_day_of_week: quartz_protocol::Weekday::Monday,
+                }),
+            },
+            LogicalDay::new(jiff::Timestamp::UNIX_EPOCH, DayStartOffset::MIDNIGHT)
+                .expect("test logical day"),
         )
     }
     pub(crate) fn with_locale(
         instance_id: InstanceId,
-        language: UiLanguage,
-        locale: Option<LocaleSettings>,
+        settings: quartz_protocol::EffectiveUiSettings,
+        logical_day: LogicalDay,
     ) -> Self {
         Self {
             sender: watch::Sender::new(PublishedStatus {
+                logical_date: logical_day.date(),
                 foreground: None,
                 timed: quartz_protocol::TimedPolicies::default(),
-                language,
-                locale,
+                language: settings.ui_language,
+                locale: settings.locale,
                 status: CoreStatusResponse {
                     recording: false,
                     stop_reason: Some(StopReason::Starting),
@@ -83,7 +98,93 @@ impl StatusPublisher {
                     core_version: CoreVersion(env!("CARGO_PKG_VERSION").into()),
                 },
             }),
+            logical_day: RefCell::new(logical_day),
+            pending_offset: Cell::new(None),
         }
+    }
+    /// Retries failed reads on main-thread wakes, keeping the last successful date and boundary.
+    pub(crate) fn update_logical_day(
+        &self,
+        change: RefreshLogicalDay,
+        clock: &dyn ClockReader,
+        zone: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
+    ) -> Option<Duration> {
+        self.request_logical_day(change);
+        self.read_logical_day(clock, zone)
+    }
+    pub(crate) fn request_logical_day(&self, change: RefreshLogicalDay) {
+        match change {
+            RefreshLogicalDay::CheckDeadline => {}
+            RefreshLogicalDay::ResetZone => {
+                self.pending_offset.set(Some(self.desired_day_offset()));
+            }
+            RefreshLogicalDay::SetOffset(offset) => self.pending_offset.set(Some(offset)),
+        }
+    }
+    fn read_logical_day(
+        &self,
+        clock: &dyn ClockReader,
+        zone: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
+    ) -> Option<Duration> {
+        let now = match clock.read() {
+            Ok(at) => at.utc.get(),
+            Err(source) => {
+                self.retain_logical_day(RefreshLogicalDayError::ReadClock { source });
+                return None;
+            }
+        };
+        let next = match self.pending_offset.get() {
+            Some(offset) => zone()
+                .map_err(crate::query::RunQueryError::from)
+                .and_then(|zone| LogicalDay::in_zone(now, offset, zone))
+                .map(Some),
+            None if self.logical_day.borrow().is_due(now) => {
+                self.logical_day.borrow().advance(now).map(Some)
+            }
+            None => Ok(None),
+        };
+        match next {
+            Ok(day) => {
+                if let Some(day) = day {
+                    self.publish_logical_day(day);
+                }
+                self.pending_offset.set(None);
+                Some(self.logical_day.borrow().wait(now))
+            }
+            Err(source) => {
+                self.retain_logical_day(RefreshLogicalDayError::ResolveCalendar { source });
+                let previous = self.logical_day.borrow();
+                // An expired boundary stays stored, but cannot arm a zero-delay retry loop.
+                if previous.is_due(now) {
+                    None
+                } else {
+                    Some(previous.wait(now))
+                }
+            }
+        }
+    }
+    fn desired_day_offset(&self) -> DayStartOffset {
+        self.pending_offset
+            .get()
+            .unwrap_or_else(|| self.logical_day.borrow().offset())
+    }
+    fn retain_logical_day(&self, error: RefreshLogicalDayError) {
+        self.pending_offset.set(Some(self.desired_day_offset()));
+        tracing::warn!(
+            ?error,
+            "retaining logical day until the next main-thread wake"
+        );
+    }
+    fn publish_logical_day(&self, day: LogicalDay) {
+        let date = day.date();
+        self.logical_day.replace(day);
+        self.sender.send_if_modified(|published| {
+            if published.logical_date == date {
+                return false;
+            }
+            published.logical_date = date;
+            true
+        });
     }
     pub(crate) fn apply_ui_settings(
         &self,
@@ -206,6 +307,291 @@ mod tests {
     use super::*;
     use quartz_domain::capture::{GapReason, IntervalFact, NoForegroundReason};
 
+    enum TestClock {
+        At(jiff::Timestamp),
+        Failed,
+    }
+    impl ClockReader for TestClock {
+        fn read(
+            &self,
+        ) -> Result<quartz_domain::capture::Timestamp, crate::core::sources::ReadClockError>
+        {
+            match self {
+                Self::At(now) => Ok(quartz_domain::capture::Timestamp {
+                    utc: quartz_domain::capture::UtcInstant::new(*now),
+                    mono: quartz_domain::capture::MonoInstant::from_millis(0),
+                }),
+                Self::Failed => Err(crate::core::sources::ReadClockError::Interrupt {
+                    source: Box::new(std::io::Error::other("injected clock failure")),
+                }),
+            }
+        }
+    }
+
+    #[test]
+    fn rollover_deadline_republishes_without_capture_changes() {
+        let zone = jiff::tz::TimeZone::get("America/Los_Angeles").expect("time zone");
+        let before = "2026-03-08T10:59:59.999Z".parse().expect("before 04:00");
+        let boundary = "2026-03-08T11:00:00Z".parse().expect("04:00");
+        let publisher = StatusPublisher::with_locale(
+            InstanceId("rollover".into()),
+            quartz_protocol::EffectiveUiSettings {
+                ui_language: UiLanguage::English,
+                locale: None,
+            },
+            LogicalDay::in_zone(
+                before,
+                DayStartOffset::try_from(240).expect("offset"),
+                zone.clone(),
+            )
+            .expect("logical day"),
+        );
+        let mut receiver = publisher.subscribe();
+        assert_eq!(
+            receiver.borrow().snapshot().logical_date,
+            "2026-03-07"
+                .parse::<quartz_protocol::LocalDate>()
+                .expect("date")
+        );
+        assert_eq!(
+            publisher.update_logical_day(
+                RefreshLogicalDay::CheckDeadline,
+                &TestClock::At(before),
+                || Ok(zone.clone())
+            ),
+            Some(Duration::from_millis(1))
+        );
+        assert!(!receiver.has_changed().expect("publisher alive"));
+        assert_eq!(
+            publisher.update_logical_day(
+                RefreshLogicalDay::CheckDeadline,
+                &TestClock::At(boundary),
+                || Ok(zone.clone())
+            ),
+            Some(Duration::from_hours(24))
+        );
+        assert!(receiver.has_changed().expect("date change published"));
+        assert_eq!(
+            receiver.borrow_and_update().snapshot().logical_date,
+            "2026-03-08"
+                .parse::<quartz_protocol::LocalDate>()
+                .expect("date")
+        );
+        publisher.update_logical_day(
+            RefreshLogicalDay::CheckDeadline,
+            &TestClock::At(boundary),
+            || Ok(zone),
+        );
+        assert!(!receiver.has_changed().expect("no duplicate publication"));
+    }
+
+    #[test]
+    fn timezone_and_offset_changes_replace_date_and_rollover_deadline() {
+        let now = "2026-11-21T02:00:00Z".parse().expect("UTC time");
+        let publisher = StatusPublisher::with_locale(
+            InstanceId("calendar-settings".into()),
+            quartz_protocol::EffectiveUiSettings {
+                ui_language: UiLanguage::English,
+                locale: None,
+            },
+            LogicalDay::in_zone(now, DayStartOffset::MIDNIGHT, jiff::tz::TimeZone::UTC)
+                .expect("UTC day"),
+        );
+        let mut receiver = publisher.subscribe();
+        let offset = DayStartOffset::try_from(240).expect("offset");
+        assert_eq!(
+            publisher.update_logical_day(
+                RefreshLogicalDay::SetOffset(offset),
+                &TestClock::At(now),
+                || Ok(jiff::tz::TimeZone::UTC)
+            ),
+            Some(Duration::from_hours(2))
+        );
+        assert_eq!(
+            receiver.borrow_and_update().snapshot().logical_date,
+            "2026-11-20"
+                .parse::<quartz_protocol::LocalDate>()
+                .expect("previous date")
+        );
+        assert_eq!(
+            publisher.update_logical_day(RefreshLogicalDay::ResetZone, &TestClock::At(now), || {
+                jiff::tz::TimeZone::get("Asia/Tokyo")
+            }),
+            Some(Duration::from_hours(17))
+        );
+        assert!(receiver.has_changed().expect("zone publishes"));
+        assert_eq!(
+            receiver.borrow_and_update().snapshot().logical_date,
+            "2026-11-21"
+                .parse::<quartz_protocol::LocalDate>()
+                .expect("new date")
+        );
+        assert_eq!(
+            publisher.update_logical_day(
+                RefreshLogicalDay::SetOffset(DayStartOffset::MIDNIGHT),
+                &TestClock::At(now),
+                || jiff::tz::TimeZone::get("Asia/Tokyo")
+            ),
+            Some(Duration::from_hours(13))
+        );
+        assert!(
+            !receiver
+                .has_changed()
+                .expect("same date suppresses snapshot")
+        );
+    }
+
+    #[test]
+    fn failed_zone_and_clock_reads_retain_state_and_retry_on_the_next_wake() {
+        let now = "2026-11-21T02:00:00Z".parse().expect("UTC time");
+        let offset = DayStartOffset::try_from(240).expect("offset");
+        let publisher = StatusPublisher::with_locale(
+            InstanceId("calendar-recovery".into()),
+            quartz_protocol::EffectiveUiSettings {
+                ui_language: UiLanguage::English,
+                locale: None,
+            },
+            LogicalDay::in_zone(now, DayStartOffset::MIDNIGHT, jiff::tz::TimeZone::UTC)
+                .expect("UTC day"),
+        );
+        let mut receiver = publisher.subscribe();
+        let previous_date = receiver.borrow().snapshot().logical_date;
+        let previous_deadline = publisher.logical_day.borrow().next_start_utc_ms();
+        assert_eq!(
+            publisher.update_logical_day(
+                RefreshLogicalDay::SetOffset(offset),
+                &TestClock::At(now),
+                || jiff::tz::TimeZone::get("Invalid/InjectedFailure")
+            ),
+            Some(Duration::from_hours(22)),
+            "the existing future deadline remains armed"
+        );
+        assert_eq!(
+            publisher.logical_day.borrow().next_start_utc_ms(),
+            previous_deadline
+        );
+        assert_eq!(
+            publisher.update_logical_day(
+                RefreshLogicalDay::ResetZone,
+                &TestClock::Failed,
+                || panic!("clock failure must skip the zone read")
+            ),
+            None
+        );
+        assert_eq!(
+            publisher.pending_offset.get(),
+            Some(offset),
+            "reset preserves the pending committed offset"
+        );
+        assert_eq!(receiver.borrow().snapshot().logical_date, previous_date);
+        assert_eq!(
+            publisher.logical_day.borrow().next_start_utc_ms(),
+            previous_deadline
+        );
+        assert!(
+            !receiver
+                .has_changed()
+                .expect("failures keep the last publication")
+        );
+        publisher.publish(
+            Some(&CaptureState::NoForeground(NoForegroundReason::Empty)),
+            PersistenceState::Ready,
+        );
+        assert!(
+            receiver
+                .has_changed()
+                .expect("capture publication continues during recovery")
+        );
+        assert_eq!(
+            receiver.borrow_and_update().status.stop_reason,
+            Some(StopReason::NoForeground)
+        );
+        assert_eq!(
+            publisher.update_logical_day(
+                RefreshLogicalDay::CheckDeadline,
+                &TestClock::At(now),
+                || Ok(jiff::tz::TimeZone::UTC)
+            ),
+            Some(Duration::from_hours(2))
+        );
+        assert_eq!(publisher.pending_offset.get(), None);
+        assert_eq!(
+            receiver.borrow_and_update().snapshot().logical_date,
+            "2026-11-20"
+                .parse::<quartz_protocol::LocalDate>()
+                .expect("offset date")
+        );
+        let boundary = "2026-11-21T04:00:00Z".parse().expect("boundary");
+        let previous_deadline = publisher.logical_day.borrow().next_start_utc_ms();
+        assert_eq!(
+            publisher.update_logical_day(
+                RefreshLogicalDay::ResetZone,
+                &TestClock::At(boundary),
+                || jiff::tz::TimeZone::get("Invalid/InjectedFailure")
+            ),
+            None,
+            "an expired retained deadline cannot trigger a polling loop"
+        );
+        assert_eq!(
+            publisher.logical_day.borrow().next_start_utc_ms(),
+            previous_deadline
+        );
+        assert!(
+            !receiver
+                .has_changed()
+                .expect("expired failure keeps the previous date")
+        );
+        assert_eq!(
+            publisher.update_logical_day(
+                RefreshLogicalDay::CheckDeadline,
+                &TestClock::At(boundary),
+                || Ok(jiff::tz::TimeZone::UTC)
+            ),
+            Some(Duration::from_hours(24))
+        );
+        assert_eq!(
+            receiver.borrow().snapshot().logical_date,
+            "2026-11-21"
+                .parse::<quartz_protocol::LocalDate>()
+                .expect("recovered date")
+        );
+    }
+
+    #[test]
+    fn a_new_offset_event_replaces_the_offset_pending_after_failure() {
+        let now = "2026-11-21T02:00:00Z".parse().expect("UTC time");
+        let publisher = StatusPublisher::with_locale(
+            InstanceId("latest-offset".into()),
+            quartz_protocol::EffectiveUiSettings {
+                ui_language: UiLanguage::English,
+                locale: None,
+            },
+            LogicalDay::in_zone(now, DayStartOffset::MIDNIGHT, jiff::tz::TimeZone::UTC)
+                .expect("UTC day"),
+        );
+        publisher.update_logical_day(
+            RefreshLogicalDay::SetOffset(DayStartOffset::try_from(240).expect("offset")),
+            &TestClock::Failed,
+            || Ok(jiff::tz::TimeZone::UTC),
+        );
+        publisher.update_logical_day(
+            RefreshLogicalDay::SetOffset(DayStartOffset::MIDNIGHT),
+            &TestClock::Failed,
+            || Ok(jiff::tz::TimeZone::UTC),
+        );
+        assert_eq!(
+            publisher.update_logical_day(
+                RefreshLogicalDay::CheckDeadline,
+                &TestClock::At(now),
+                || Ok(jiff::tz::TimeZone::UTC)
+            ),
+            Some(Duration::from_hours(22))
+        );
+        assert_eq!(
+            publisher.logical_day.borrow().offset(),
+            DayStartOffset::MIDNIGHT
+        );
+    }
     #[test]
     fn projected_foreground_preserves_state_body_identity_title_and_interval_start() {
         use quartz_domain::capture::{
@@ -266,6 +652,7 @@ mod tests {
                 assert_eq!(
                     body,
                     json!({
+                        "logical_date":receiver.borrow().snapshot().logical_date,
                         "foreground": {"app":expected_app, "title":title, "interval_start_utc_ms":123},
                         "timed_policies":{"pause_until_utc_ms":null,"privacy_mode":null,"keep_timing_until_utc_ms":null},"recording":true, "stop_reason":null, "browser_streams":[], "ui_language":"en",
                         "locale":{"hour_cycle":"h24", "first_day_of_week":"monday"}

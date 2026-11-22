@@ -33,8 +33,11 @@ impl QueryFixture {
         let directory = tempfile::tempdir().expect("query fixture directory");
         let mut store =
             Store::open(&DataDirectory::new(directory.path())).expect("query fixture store");
-        let calendar =
-            DayCalendar::new(FIXTURE_DATE.parse().expect("fixture date"), 0).expect("fixture day");
+        let calendar = DayCalendar::new(
+            FIXTURE_DATE.parse().expect("fixture date"),
+            crate::query::calendar::DayStartOffset::MIDNIGHT,
+        )
+        .expect("fixture day");
         let start = calendar.range.start;
         store
             .writer

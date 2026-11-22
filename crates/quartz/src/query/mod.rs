@@ -29,7 +29,7 @@ use serde::Serialize;
 use timing::{QueryStage, QueryTimer, QueryTimings};
 
 /// Increment whenever slicing, duration, aggregation, or projection semantics change.
-pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 2;
+pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 3;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
 const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
 
@@ -71,6 +71,11 @@ impl From<pipeline::DeriveSegmentsError> for RunQueryError {
 impl From<jiff::Error> for RunQueryError {
     fn from(source: jiff::Error) -> Self {
         Self::Calendar { source }
+    }
+}
+impl From<calendar::ParseDayStartOffsetError> for RunQueryError {
+    fn from(_: calendar::ParseDayStartOffsetError) -> Self {
+        Self::InvalidDayOffset
     }
 }
 impl From<serde_json::Error> for RunQueryError {
@@ -203,13 +208,12 @@ impl QueryJob {
         let settings = snapshot.settings()?;
         let calendar = match request {
             QueryRequest::Facts(_) => None,
-            QueryRequest::Day(day) => Some(DayCalendar::new(
-                day.local_date,
-                settings.day_start_offset_min,
-            )?),
+            QueryRequest::Day(day) => {
+                Some(DayCalendar::new(day.local_date, settings.day_start_offset)?)
+            }
             QueryRequest::PendingAway(away) => Some(DayCalendar::new(
                 away.local_date,
-                settings.day_start_offset_min,
+                settings.day_start_offset,
             )?),
             QueryRequest::Timeline(_) => None,
         };

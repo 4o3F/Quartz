@@ -1035,9 +1035,12 @@ fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
         let registry = services.start_registry();
         let uuid = "00000000-0000-4000-8000-000000000001";
         let date: quartz_protocol::LocalDate = "2025-01-02".parse().expect("date");
-        let range = crate::query::calendar::DayCalendar::new(date, 0)
-            .expect("day")
-            .range;
+        let range = crate::query::calendar::DayCalendar::new(
+            date,
+            crate::query::calendar::DayStartOffset::MIDNIGHT,
+        )
+        .expect("day")
+        .range;
         let body = serde_json::json!({
             "entities": [{
                 "uuid": uuid,
@@ -1356,7 +1359,10 @@ fn timed_ipc_admits_typed_capture_events_and_reports_busy_and_invalid_deadlines(
     };
     let services = crate::ipc::Services {
         summary: None,
-        timed: ingress.timed_port(Arc::new(TestClock(at(10))), 0),
+        timed: ingress.timed_port(
+            Arc::new(TestClock(at(10))),
+            crate::query::calendar::DayStartOffset::MIDNIGHT,
+        ),
         queries: runtime.workers.queries.clone(),
         writes: runtime.workers.writes.clone(),
         versions: runtime.workers.versions.clone(),

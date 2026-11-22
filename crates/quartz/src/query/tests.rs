@@ -35,6 +35,7 @@ fn window(id: i64, start: i64, end: i64) -> InputRow {
         ForegroundKind::Window,
         CaptureLevel::Full,
         quartz_domain::facts::ForegroundContent {
+            window_instance: Some(quartz_domain::facts::WindowInstanceId(id)),
             app: Some(
                 ApplicationRef {
                     id: ApplicationId(id),
@@ -56,6 +57,7 @@ fn edit_foreground(
     edit: impl FnOnce(&mut quartz_domain::facts::ForegroundContent),
 ) {
     let mut content = quartz_domain::facts::ForegroundContent {
+        window_instance: row.visible_window_instance(),
         app: row.visible_app().cloned(),
         title: row.visible_title().map(str::to_owned),
         title_id: row.visible_title_id(),
@@ -122,7 +124,11 @@ fn idle_masks_window_and_overlapping_stop_reasons_slice_boundaries() {
                 reasons: vec![QueryStopReason::Locked, QueryStopReason::Paused],
             }
     }));
-    let calendar = DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("calendar");
+    let calendar = DayCalendar::new(
+        "1970-01-01".parse().expect("date"),
+        crate::query::calendar::DayStartOffset::MIDNIGHT,
+    )
+    .expect("calendar");
     let aggregate = DayAggregation::new(calendar, &segments);
     assert_eq!(aggregate.metrics.active_ms, 40);
     assert_eq!(aggregate.metrics.unclassified_ms, 40);
@@ -161,7 +167,11 @@ fn active_union_does_not_double_count_overlapping_windows_and_clock_utc_repeats(
 }
 #[test]
 fn ordinary_day_hours_cover_the_logical_range() {
-    let day = DayCalendar::new("2025-01-02".parse().expect("date"), 0).expect("day");
+    let day = DayCalendar::new(
+        "2025-01-02".parse().expect("date"),
+        crate::query::calendar::DayStartOffset::MIDNIGHT,
+    )
+    .expect("day");
     assert_eq!(day.hours.len(), 24);
     assert_eq!(
         day.hours.first().expect("hour").start_utc_ms,
@@ -173,7 +183,11 @@ fn ordinary_day_hours_cover_the_logical_range() {
             .windows(2)
             .all(|pair| pair[0].end_utc_ms == pair[1].start_utc_ms)
     );
-    let shifted = DayCalendar::new("2025-01-02".parse().expect("date"), 240).expect("shifted day");
+    let shifted = DayCalendar::new(
+        "2025-01-02".parse().expect("date"),
+        crate::query::calendar::DayStartOffset::try_from(240).expect("offset"),
+    )
+    .expect("shifted day");
     assert_eq!(shifted.range.start - day.range.start, 14_400_000);
 }
 #[test]
@@ -213,6 +227,175 @@ fn timeline_merge_is_strictly_subpixel_and_respects_projection_and_activity() {
         3,
         "different apps remain distinct"
     );
+}
+
+#[test]
+fn timeline_merge_keeps_window_instances_and_raw_title_boundaries() {
+    use quartz_domain::facts::WindowInstanceId;
+    use quartz_protocol::{TimelineDetail, WindowInstanceRef};
+    struct Case {
+        second_window: WindowInstanceId,
+        expected_app_segments: usize,
+    }
+    for case in [
+        Case {
+            second_window: WindowInstanceId(1),
+            expected_app_segments: 1,
+        },
+        Case {
+            second_window: WindowInstanceId(2),
+            expected_app_segments: 2,
+        },
+    ] {
+        let first = window(1, 0, 10);
+        let mut second = window(2, 10, 20);
+        let InputRow::Foreground(first_row) = &first else {
+            panic!("foreground")
+        };
+        let InputRow::Foreground(second_row) = &mut second else {
+            panic!("foreground")
+        };
+        edit_foreground(second_row, CaptureLevel::Full, |content| {
+            content.app = first_row.visible_app().cloned();
+            content.window_instance = Some(case.second_window);
+        });
+        let segments = derive(
+            vec![clock(1, 0, 0, 20), first, second],
+            QueryRange { start: 0, end: 20 },
+        );
+        for detail in [
+            TimelineDetail::Category,
+            TimelineDetail::App,
+            TimelineDetail::Raw,
+        ] {
+            let mut projection = TimelineProjection::default();
+            for segment in &segments.segments {
+                projection.push(segment, &segments.facts, detail, 100);
+            }
+            let result = projection.into_segments();
+            let expected = match detail {
+                TimelineDetail::Category => 1,
+                TimelineDetail::App | TimelineDetail::Raw => case.expected_app_segments,
+            };
+            assert_eq!(
+                result.len(),
+                expected,
+                "detail {detail:?} window {:?}",
+                case.second_window
+            );
+            assert_eq!(
+                result
+                    .iter()
+                    .map(|segment| segment.duration_ms)
+                    .sum::<i64>(),
+                20
+            );
+            let first = result.first().expect("first segment");
+            match detail {
+                TimelineDetail::Category => assert!(first.window_instance.is_none()),
+                TimelineDetail::App | TimelineDetail::Raw => assert_eq!(
+                    first.window_instance,
+                    Some(WindowInstanceRef::from_stored_id(
+                        quartz_protocol::facts::WindowInstanceId(1)
+                    ))
+                ),
+            }
+            assert_eq!(first.title.is_some(), detail == TimelineDetail::Raw);
+        }
+    }
+    let first = window(1, 0, 10);
+    let mut second = window(2, 10, 20);
+    let InputRow::Foreground(first_row) = &first else {
+        panic!("foreground")
+    };
+    let InputRow::Foreground(second_row) = &mut second else {
+        panic!("foreground")
+    };
+    edit_foreground(second_row, CaptureLevel::Full, |content| {
+        content.app = first_row.visible_app().cloned();
+        content.window_instance = first_row.visible_window_instance();
+        content.title = Some("another title".into());
+    });
+    let segments = derive(
+        vec![clock(1, 0, 0, 20), first, second],
+        QueryRange { start: 0, end: 20 },
+    );
+    let mut projection = TimelineProjection::default();
+    for segment in &segments.segments {
+        projection.push(segment, &segments.facts, TimelineDetail::Raw, 100);
+    }
+    assert_eq!(
+        projection.into_segments().len(),
+        2,
+        "raw preserves title boundaries in the same window"
+    );
+}
+
+#[test]
+fn window_identity_obeys_privacy_and_is_absent_from_non_foreground_states() {
+    use quartz_protocol::TimelineDetail;
+    for level in [
+        CaptureLevel::Full,
+        CaptureLevel::TitleHidden,
+        CaptureLevel::Excluded,
+    ] {
+        let mut foreground = window(1, 0, 40);
+        let InputRow::Foreground(row) = &mut foreground else {
+            panic!("foreground")
+        };
+        edit_foreground(row, level, |_| {});
+        assert_eq!(
+            row.visible_window_instance().is_some(),
+            level != CaptureLevel::Excluded
+        );
+        let segments = derive(
+            vec![
+                clock(1, 0, 0, 40),
+                foreground,
+                InputRow::Availability {
+                    span: span(2, 10, 20),
+                    state: Availability::Idle,
+                },
+                InputRow::Availability {
+                    span: span(3, 20, 30),
+                    state: Availability::Stopped(StopReason::Locked),
+                },
+            ],
+            QueryRange { start: 0, end: 40 },
+        );
+        for detail in [
+            TimelineDetail::Category,
+            TimelineDetail::App,
+            TimelineDetail::Raw,
+        ] {
+            for segment in &segments.segments {
+                let projected = TimelineProjection::project(segment, &segments.facts, detail);
+                let expected = detail != TimelineDetail::Category
+                    && level != CaptureLevel::Excluded
+                    && projected.activity == Activity::Active;
+                assert_eq!(
+                    projected.window_instance.is_some(),
+                    expected,
+                    "level {level:?}, detail {detail:?}, activity {:?}",
+                    projected.activity
+                );
+                assert_eq!(
+                    projected.title.is_some(),
+                    detail == TimelineDetail::Raw && level == CaptureLevel::Full
+                );
+            }
+        }
+    }
+    let mut row = window(1, 0, 10);
+    let InputRow::Foreground(foreground) = &mut row else {
+        panic!("foreground")
+    };
+    foreground.kind = ForegroundKind::NoForeground;
+    let segments = derive(
+        vec![clock(1, 0, 0, 10), row],
+        QueryRange { start: 0, end: 10 },
+    );
+    assert!(segments.display(0).window_instance.is_none());
 }
 
 #[test]
@@ -682,7 +865,11 @@ fn day_tendencies_and_focus_continuity_and_category_projection_use_classificatio
 }
 
 fn test_day_calendar() -> DayCalendar {
-    let mut calendar = DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("calendar");
+    let mut calendar = DayCalendar::new(
+        "1970-01-01".parse().expect("date"),
+        crate::query::calendar::DayStartOffset::MIDNIGHT,
+    )
+    .expect("calendar");
     let offset = calendar.range.start;
     calendar.range.start -= offset;
     calendar.range.end -= offset;
@@ -703,8 +890,9 @@ fn read_errors_day_offsets_and_missing_readers_keep_internal_protocol_codes() {
         assert!(matches!(error, RunQueryError::Read { .. }));
         assert_eq!(error.kind(), quartz_protocol::ErrorKind::Internal);
     }
-    let error =
-        DayCalendar::new("2025-01-02".parse().expect("date"), -1).expect_err("invalid offset");
+    let error = RunQueryError::from(
+        crate::query::calendar::DayStartOffset::try_from(-1).expect_err("invalid offset"),
+    );
     assert!(matches!(error, RunQueryError::InvalidDayOffset));
     assert_eq!(error.kind(), quartz_protocol::ErrorKind::Internal);
     let request = QueryRequest::Day(QueryDayRequest {
@@ -815,7 +1003,11 @@ fn annotation_categories_restore_allowed_idle_and_preserve_ineligible_slices() {
     );
     assert_eq!(segments.display(4).activity, Activity::NoForeground);
     let day = DayAggregation::new(
-        DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("day"),
+        DayCalendar::new(
+            "1970-01-01".parse().expect("date"),
+            crate::query::calendar::DayStartOffset::MIDNIGHT,
+        )
+        .expect("day"),
         &segments,
     );
     assert_eq!(day.metrics.active_ms, 40);
@@ -854,7 +1046,11 @@ fn active_override_uses_optional_category_or_rule_and_only_restores_idle() {
         Activity::Stopped { .. }
     ));
     let day = DayAggregation::new(
-        DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("day"),
+        DayCalendar::new(
+            "1970-01-01".parse().expect("date"),
+            crate::query::calendar::DayStartOffset::MIDNIGHT,
+        )
+        .expect("day"),
         &segments,
     );
     assert_eq!(day.metrics.active_ms, 60);
@@ -921,7 +1117,11 @@ fn offline_activity_fills_idle_stopped_gap_no_foreground_and_core_offline_as_a_u
         CategoryRef::Unclassified
     );
     let day = DayAggregation::new(
-        DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("day"),
+        DayCalendar::new(
+            "1970-01-01".parse().expect("date"),
+            crate::query::calendar::DayStartOffset::MIDNIGHT,
+        )
+        .expect("day"),
         &segments,
     );
     assert_eq!(day.metrics.active_ms, 130);
@@ -962,7 +1162,11 @@ fn notes_and_dismissals_only_split_boundaries_and_annotation_sources_never_merge
         QueryRange { start: 0, end: 100 },
         classifier(&[]),
     );
-    let calendar = DayCalendar::new("1970-01-01".parse().expect("date"), 0).expect("day");
+    let calendar = DayCalendar::new(
+        "1970-01-01".parse().expect("date"),
+        crate::query::calendar::DayStartOffset::MIDNIGHT,
+    )
+    .expect("day");
     assert_eq!(
         DayAggregation::new(calendar.clone(), &original).metrics,
         DayAggregation::new(calendar, &segments).metrics

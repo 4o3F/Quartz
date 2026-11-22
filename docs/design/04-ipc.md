@@ -91,7 +91,7 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 } }
 ```
 
-协议只传键、编码、数字与原始数据，不传翻译后的句子（10 第 3 节）。
+协议只传键、编码、数字与原始数据，不传翻译后的句子（10 第 3 节）。UI 完成握手后订阅 `state`，从首个快照的 `logical_date` 取得核心当前逻辑日期，字段见第 7 节。
 
 协议版本和数据库 schema 版本分开演进。协议版本范围没有交集时，核心返回 `proto_mismatch`，并在响应里附上自己的版本，让界面能提示"核心与界面版本不一致，请重启 Quartz"。
 
@@ -159,11 +159,11 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 `query.pending_away` 只读取 idle 可用状态范围，锁屏、睡眠、断开和暂停范围不纳入；`offline_activity`、`active_override`、`note`、`dismissed_away` 覆盖的部分视为已标注，`category_override` 不计。部分覆盖时先扣除覆盖范围，再返回剩余连续片段中至少 15 分钟的部分。响应为 `{ranges: [{start_utc_ms, end_utc_ms, duration_ms}], versions, next_cursor}`，按开始时间排序，时长为 UTC 端点差，分页沿用版本化游标。
 
-逻辑日按 `day.start_offset_min`（默认 0 分钟）加到本地日期后交给 jiff 转换，小时桶由 jiff 逐小时推进，携带 UTC 起止、本地时间标签和 `categories: [{category, duration_ms}]` 分类堆叠。`query.timeline` 使用 UTC 范围，最长 366 天；返回 `segments`、`versions`、`next_cursor`。每个片段携带 UTC 起止、按单调时间计算的 `duration_ms`、时钟段 ID、活动状态、分类及来源；`app` / `raw` 细节附应用 ID、exe 名、显示名和 AUMID，`raw` 仅在 Full 采集级别附标题。
+逻辑日按 `day.start_offset_min`（默认 0 分钟）加到本地日期后交给 jiff 转换，小时桶由 jiff 逐小时推进，携带 UTC 起止、本地时间标签和 `categories: [{category, duration_ms}]` 分类堆叠。`query.timeline` 使用 UTC 范围，最长 366 天；返回 `segments`、`versions`、`next_cursor`。每个片段携带 UTC 起止、按单调时间计算的 `duration_ms`、时钟段 ID、活动状态、分类及来源；`app` / `raw` 细节附应用 ID、exe 名、显示名和 AUMID，以及不透明的持久窗口实例引用 `window_instance`；客户端仅比较和回传该引用，不解释其序列化整数。`category` 细节、已排除区间和非前台活动状态省略 `window_instance`。`raw` 仅在 Full 采集级别附标题。M3 的应用泳道使用 `raw` 细节显示窗口实例和可用的原始标题。
 
 分类引用为 `{kind:"unclassified"}` 或 `{kind:"classified", id, uuid, builtin_key, name, color, tendency}`。`builtin_key` 是稳定内置键，`name` 为用户输入或 null；名称为 null 时由界面翻译 `category.builtin.<key>`。规则来源为 `{kind:"rule", rule:"<规则集>/<规则>@<版本>"}`，注解来源为 `{kind:"annotation", annotation:"<UUID>"}`，未分类来源为 `{kind:"unclassified"}`。活动状态新增 `{kind:"active_override", annotation:"<UUID>"}` 和 `{kind:"offline_activity", annotation:"<UUID>"}`。分类元数据从查询的数据库快照读取，求值使用生成游标规则哈希的同一规则快照。
 
-时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，`raw` 还要求来自同一前台事实。合并保留单调时长之和。
+时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`raw` 还要求标题相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。查询语义版本为 3，版本摘要包含该版本，因此此前语义生成的游标返回 `stale_cursor`。
 
 游标是 `quartz-protocol::QueryCursor` 的 JSON 对象，私有字段保存 `versions`、类型化的 `query` 参数和下一项 `position`，客户端原样保存和回传。
 
@@ -273,7 +273,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 | topic | 推送内容 | 节流 |
 |---|---|---|
-| `state` | 当前前台应用、标题（受隐私级别约束）、是否在记录、停止原因、扩展连接状态、当前界面语言与区域设置（10 第 1 节） | 变化即推送，最多每 250 ms 一次，只保留最新值 |
+| `state` | 当前前台应用、标题（受隐私级别约束）、是否在记录、停止原因、扩展连接状态、当前界面语言与区域设置（10 第 1 节）、当前逻辑日期 | 变化即推送，最多每 250 ms 一次，只保留最新值 |
 | `day:<日期>` | 当天数据有变化的提示，带新的版本号 | 最多每 5 秒一次；界面收到后自行重新请求需要的查询 |
 | `control` | `body.op` 指定的界面或浏览器控制消息 | 不节流，不合并 |
 
@@ -291,6 +291,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 | 字段 | 类型与来源 |
 |---|---|
+| `logical_date` | `YYYY-MM-DD`；核心按当前系统时区和有效 `day.start_offset_min`，使用与 `query.day` 相同的日历转换计算当前逻辑日期；UI 用于“今天”和禁止选择未来日期 |
 | `foreground` | 未跟踪时为 `null`；否则包含已清洗 `IntervalFact` 中的 `app`、`title`，以及实际区间边界 `interval_start_utc_ms`（UTC 毫秒） |
 | `foreground.app` | 被隐私规则移除时为 `null`；否则为 `{kind, value}`，`kind` 是 `exe`、`aumid` 或 `unresolved`，`value` 是字符串 |
 | `foreground.title` | 隐私处理后的标题，移除时为 `null` |
@@ -299,6 +300,8 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 | `browser_streams` | 与 `core.status` 共用的类型化列表，M5 前为空 |
 | `ui_language` | 与托盘采用相同的 Windows 首选语言协商，生产值为 `zh-CN` 或 `en`；调试伪语言使用 `en` 的协议身份 |
 | `locale` | `{hour_cycle, first_day_of_week}`，值分别为 `h12` 或 `h24`，以及 `monday` 至 `sunday` 的英文星期名；分别解析用户区域的 `LOCALE_STIMEFORMAT`、`LOCALE_IFIRSTDAYOFWEEK`；读取失败时记录警告并发送 `null` |
+
+逻辑日的下次 UTC 起点保存在主线程 `StatusPublisher` 持有的 `LogicalDay::next_start_utc_ms`，作为 `MsgWaitForMultipleObjects` 的等待期限；到期后重新计算日期和下次起点，并仅在日期变化时通过原有 watch 发布状态。Windows 时钟变更、恢复和系统设置变更通知会清除时区缓存并重算；数据库线程在已提交版本变化中发现日起点偏移改变时通知主线程重算。已有日期后，读取时区或时钟失败时记录类型化警告，保留上次发布的日期、期限和待应用的偏移，在下一条时钟、日历、偏移事件或主线程唤醒时重试；已过期的保留期限在恢复期间不触发零等待循环。首次启动尚无日期时，初始计算失败作为启动错误返回。该期限独立于采集线程用于存储拆分的 UTC 午夜期限，无需轮询或采集状态变化。
 
 主线程通过 watch 发布已清洗的区间和状态；有 state 订阅者时，注册表在每次变化后构造一份状态快照并立即转发到各连接的最新值槽，day 变化也立即转发到对应槽。每个连接的 outbox 从实际写入完成时计时，按上述间隔限流，并仅保留各槽的最新值。主线程将 `ui.show`、`ui.activate` 连同首个已登记 UI 的连接标识非阻塞地投递给注册表，注册表仅向该连接的 outbox 发送；后续 UI 登记不替换首个连接。托盘退出向全部 UI 连接广播 `ui.shutdown`，停止管道前在现有关闭期限内尽力写出控制消息。控制事件不要求显式订阅 `control`。
 

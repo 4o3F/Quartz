@@ -40,7 +40,7 @@ impl TestDatabase {
                     recv(receive) -> write => match write {
                         Ok(TestWrite::Append { reply }) => {
                             fixture.append_fact();
-                            publisher.publish(&mut fixture.store);
+                            publisher.publish(&mut fixture.store).expect("publish versions");
                             reply.send(()).expect("write receipt");
                         }
                         Ok(TestWrite::Stop) | Err(_) => return,

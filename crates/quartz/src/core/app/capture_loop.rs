@@ -323,6 +323,10 @@ impl CaptureLoop {
             observation.at = self.at;
         }
         self.at = observation.at;
+        let calendar_change = match observation.event {
+            CaptureEvent::ClockChanged(_) => Some(MainCommand::ClockChanged),
+            _ => None,
+        };
         let policy_changed = matches!(
             observation.event,
             CaptureEvent::PolicyChanged(_)
@@ -340,6 +344,9 @@ impl CaptureLoop {
             })
             .map_err(|source| RunCaptureLoopError::Step { source })?;
         self.publish(step, observation.at, settlement)?;
+        if let Some(command) = calendar_change {
+            self.main.send(command)?;
+        }
         if policy_changed {
             self.main.send(MainCommand::PolicyChanged)?;
         }
@@ -827,7 +834,10 @@ mod tests {
             sender,
             overloaded: overloaded.clone(),
         };
-        let port = ingress.timed_port(Arc::new(TestClock(at(10))), 0);
+        let port = ingress.timed_port(
+            Arc::new(TestClock(at(10))),
+            crate::query::calendar::DayStartOffset::MIDNIGHT,
+        );
         port.call(TimedCommand::Pause(TimedDeadline::UtcMillis(100)))
             .expect("pause admitted");
         port.call(TimedCommand::Resume).expect("resume admitted");

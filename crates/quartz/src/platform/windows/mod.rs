@@ -16,7 +16,7 @@ use crate::{
         Autostart, CoreRuntime, MainCommand, PlatformPorts, RuntimeExit, StartCoreError,
         StopCoreError, Worker,
     },
-    ipc::{StatusPublisher, UiCommand},
+    ipc::{RefreshLogicalDay, StatusPublisher, UiCommand},
     persistence::PersistenceState,
 };
 use quartz_domain::capture::{CaptureEffect, CaptureState};
@@ -40,6 +40,9 @@ pub(crate) use instance::{AcquireInstance, AcquireInstanceError};
 use tray::{CreateTrayError, Tray, TrayCommand, TrayIconState, TrayState, TrayTooltip};
 
 pub(crate) use language::detect_ui_language;
+
+/// Largest finite Win32 wait: INFINITE is a sentinel, and each wake re-evaluates the deadline.
+const MAX_LOGICAL_DAY_WAIT: u32 = INFINITE - 1;
 
 #[derive(Debug, Snafu)]
 enum RunCoreError {
@@ -311,13 +314,18 @@ impl CoreProcess {
                 // Native dispatch can enqueue another batch of semantic commands.
             }
             let handles = self.ui.process().map(|process| [process.raw()]);
+            let wait_ms = Self::logical_day_wait(status.update_logical_day(
+                RefreshLogicalDay::CheckDeadline,
+                &sources::SystemClock,
+                jiff::tz::TimeZone::try_system,
+            ));
             // SAFETY: The optional process handle stays owned throughout the wait. Waiting for any
             // message or process exit on this thread needs neither polling nor a worker thread.
             let result = unsafe {
                 WindowsAndMessaging::MsgWaitForMultipleObjects(
                     handles.as_ref().map(|handles| handles.as_slice()),
                     false,
-                    INFINITE,
+                    wait_ms,
                     QS_ALLINPUT,
                 )
             };
@@ -336,6 +344,20 @@ impl CoreProcess {
                     self.refresh_tray(tray, status, TrayRefresh::UiExited);
                 }
             }
+        }
+    }
+    fn refresh_logical_day(&self, status: &StatusPublisher, change: RefreshLogicalDay) {
+        if matches!(change, RefreshLogicalDay::ResetZone) {
+            jiff::tz::reset_system_time_zone_cache();
+        }
+        status.request_logical_day(change);
+    }
+    fn logical_day_wait(wait: Option<std::time::Duration>) -> u32 {
+        match wait {
+            Some(wait) => u32::try_from(wait.as_millis())
+                .unwrap_or(MAX_LOGICAL_DAY_WAIT)
+                .min(MAX_LOGICAL_DAY_WAIT),
+            None => INFINITE,
         }
     }
     fn handle_ui_command(&mut self, command: UiCommand, tray: &mut Tray, runtime: &CoreRuntime) {
@@ -393,6 +415,12 @@ impl CoreProcess {
         sources: &mut Sources,
     ) -> Result<(), WaitCoreEventsError> {
         match command {
+            MainCommand::ClockChanged => {
+                self.refresh_logical_day(status, RefreshLogicalDay::ResetZone)
+            }
+            MainCommand::DayOffsetChanged { offset } => {
+                self.refresh_logical_day(status, RefreshLogicalDay::SetOffset(offset))
+            }
             MainCommand::IdleAvailability(change) => self.annotation.observe(change),
             MainCommand::PolicyChanged => {
                 if let Some(summary) = &self.summary {
@@ -486,6 +514,9 @@ impl CoreProcess {
         runtime: &CoreRuntime,
     ) -> Result<Option<CoreExit>, WaitCoreEventsError> {
         match event {
+            TrayCommand::CalendarChanged => {
+                self.refresh_logical_day(status, RefreshLogicalDay::ResetZone)
+            }
             TrayCommand::Exit => return Ok(Some(CoreExit::UserExit)),
             TrayCommand::EndSession => return Ok(Some(CoreExit::SessionEnded)),
             TrayCommand::Deadline(at) => sources.fired(at).context(wait_error::ObserveSnafu)?,
@@ -671,6 +702,25 @@ impl TrayState {
 mod tests {
     use super::*;
     use std::error::Error;
+
+    #[test]
+    fn logical_day_wait_clamps_finite_values_below_the_infinite_sentinel() {
+        use std::time::Duration;
+        assert_eq!(CoreProcess::logical_day_wait(Some(Duration::ZERO)), 0);
+        assert_eq!(
+            CoreProcess::logical_day_wait(Some(Duration::from_millis(1))),
+            1
+        );
+        assert_eq!(
+            CoreProcess::logical_day_wait(Some(Duration::from_millis(u64::from(INFINITE)))),
+            MAX_LOGICAL_DAY_WAIT
+        );
+        assert_eq!(
+            CoreProcess::logical_day_wait(Some(Duration::MAX)),
+            MAX_LOGICAL_DAY_WAIT
+        );
+        assert_eq!(CoreProcess::logical_day_wait(None), INFINITE);
+    }
 
     #[test]
     fn offline_web_privacy_keeps_titles_out_of_database_state_logs_and_tray() {

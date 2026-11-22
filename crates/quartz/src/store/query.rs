@@ -375,6 +375,9 @@ impl ReadSnapshot {
                 },
                 level,
                 quartz_domain::facts::ForegroundContent {
+                    window_instance: row
+                        .window_instance_id
+                        .map(quartz_domain::facts::WindowInstanceId),
                     app,
                     title: details.title,
                     title_id: row.title_id.map(quartz_domain::facts::TitleId),

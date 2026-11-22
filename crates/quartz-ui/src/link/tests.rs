@@ -189,7 +189,7 @@ mod pipe {
                 .expect("event");
         }
         fn snapshot() -> JsonValue {
-            serde_json::json!({"foreground":{"app":{"kind":"exe","value":"test.exe"},"title":null,"interval_start_utc_ms":123},"timed_policies":{"pause_until_utc_ms":null,"privacy_mode":null,"keep_timing_until_utc_ms":null},"recording":true,"stop_reason":null,"browser_streams":[],"ui_language":"en","locale":null})
+            serde_json::json!({"logical_date":"2026-11-21","foreground":{"app":{"kind":"exe","value":"test.exe"},"title":null,"interval_start_utc_ms":123},"timed_policies":{"pause_until_utc_ms":null,"privacy_mode":null,"keep_timing_until_utc_ms":null},"recording":true,"stop_reason":null,"browser_streams":[],"ui_language":"en","locale":null})
         }
     }
     fn absent_name() -> PipeName {

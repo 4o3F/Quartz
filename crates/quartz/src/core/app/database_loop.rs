@@ -103,6 +103,16 @@ enum DrainProgress {
     Waiting,
 }
 impl DatabaseLoop {
+    fn publish_versions(&mut self) -> Result<(), RunDatabaseLoopError> {
+        if let Some(offset) = self
+            .versions
+            .publish(&mut self.store)
+            .map_err(|source| RunDatabaseLoopError::Query { source })?
+        {
+            self.main.send(MainCommand::DayOffsetChanged { offset })?;
+        }
+        Ok(())
+    }
     fn checkpoint_collection(&self) -> CheckpointCollection {
         if tracing::enabled!(tracing::Level::DEBUG) {
             CheckpointCollection::Collect
@@ -115,7 +125,7 @@ impl DatabaseLoop {
     }
     fn publish(&mut self, result: PersistenceResult) -> Result<(), RunDatabaseLoopError> {
         self.trace_commit_latency(&result);
-        self.versions.publish(&mut self.store);
+        self.publish_versions()?;
         if let Some(error) = result.failure() {
             tracing::error!(%error, "capture write failed");
         }
@@ -333,7 +343,7 @@ impl DatabaseLoop {
         let mut result = self.execute_write(command.request, system);
         self.store.limit_write_wait(Duration::MAX);
         if result.is_ok() {
-            self.versions.publish(&mut self.store);
+            self.publish_versions()?;
         }
         if settings_changed
             && let Ok(crate::persistence::dispatch::WriteResponse::Settings(response)) = &result
@@ -371,7 +381,7 @@ impl DatabaseLoop {
             .now()
             .map_err(|source| RunDatabaseLoopError::Clock { source })?;
         let result = self.registry.run(&mut self.store, now.utc, command);
-        self.versions.publish(&mut self.store);
+        self.publish_versions()?;
         if result.as_ref().is_ok_and(|result| result.event.is_some()) {
             self.feedback
                 .send(Feedback::RulesChanged)
@@ -479,6 +489,48 @@ mod tests {
         _directory: tempfile::TempDir,
         _commands: Receiver<MainCommand>,
         _feedback: Receiver<Feedback>,
+    }
+    #[test]
+    fn committed_day_offset_wakes_main_once_and_updates_query_versions() {
+        let mut fixture = Fixture::new();
+        fixture
+            .database
+            .publish_versions()
+            .expect("initial versions");
+        fixture
+            .database
+            .store
+            .test_day_offset_write(240)
+            .expect("committed offset");
+        fixture
+            .database
+            .publish_versions()
+            .expect("publish changed offset");
+        assert!(matches!(
+            fixture._commands.try_recv().expect("main notified"),
+            MainCommand::DayOffsetChanged { offset } if offset.minutes() == 240
+        ));
+        fixture
+            .database
+            .publish_versions()
+            .expect("unchanged versions");
+        assert!(
+            fixture._commands.try_recv().is_err(),
+            "unchanged offset does not notify main"
+        );
+        fixture
+            .database
+            .store
+            .test_day_offset_write(0)
+            .expect("restore midnight");
+        fixture
+            .database
+            .publish_versions()
+            .expect("publish restored offset");
+        assert!(matches!(
+            fixture._commands.try_recv().expect("main notified"),
+            MainCommand::DayOffsetChanged { offset } if offset == crate::query::calendar::DayStartOffset::MIDNIGHT
+        ));
     }
     impl Fixture {
         fn new() -> Self {

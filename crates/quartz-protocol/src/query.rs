@@ -132,6 +132,16 @@ pub struct ApplicationId(pub i64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ClockSegmentId(pub i64);
+/// Opaque persistent window identity; clients compare and return it without interpreting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WindowInstanceRef(i64);
+impl WindowInstanceRef {
+    /// Projects an identity supplied by the stored-facts boundary.
+    pub fn from_stored_id(id: crate::facts::WindowInstanceId) -> Self {
+        Self(id.0)
+    }
+}
 /// Safe application display fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationRef {
@@ -364,6 +374,9 @@ pub struct TimelineSegment {
     pub category_source: CategorySource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<ApplicationRef>,
+    /// Present only for captured windows in app/raw projections, after privacy filtering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_instance: Option<WindowInstanceRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
@@ -384,6 +397,16 @@ pub struct DayChanged {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn window_instance_reference_round_trips_without_exposing_a_scalar_accessor() {
+        let identity = WindowInstanceRef::from_stored_id(crate::facts::WindowInstanceId(42));
+        let encoded = serde_json::to_value(identity).expect("window identity");
+        assert_eq!(encoded, serde_json::json!(42));
+        assert_eq!(
+            serde_json::from_value::<WindowInstanceRef>(encoded).expect("opaque identity"),
+            identity
+        );
+    }
     #[test]
     fn facts_request_response_and_cursor_preserve_raw_wire_fields() {
         let request: QueryFactsRequest =
@@ -490,6 +513,9 @@ mod tests {
                             .expect("rule revision"),
                     },
                     app: Some(golden_app()),
+                    window_instance: Some(WindowInstanceRef::from_stored_id(
+                        crate::facts::WindowInstanceId(5),
+                    )),
                     title: Some("document".into()),
                 },
                 TimelineSegment {
@@ -501,6 +527,7 @@ mod tests {
                     category: CategoryRef::Unclassified,
                     category_source: CategorySource::Unclassified,
                     app: None,
+                    window_instance: None,
                     title: None,
                 },
             ],
@@ -539,6 +566,7 @@ mod tests {
                     category: CategoryRef::Unclassified,
                     category_source: CategorySource::Annotation { annotation: id(1) },
                     app: None,
+                    window_instance: None,
                     title: None,
                 },
                 TimelineSegment {
@@ -550,6 +578,7 @@ mod tests {
                     category: CategoryRef::Unclassified,
                     category_source: CategorySource::Annotation { annotation: id(2) },
                     app: None,
+                    window_instance: None,
                     title: None,
                 },
             ],

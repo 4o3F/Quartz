@@ -21,6 +21,9 @@ pub struct ApplicationRef {
 /// Persistent title dictionary identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TitleId(pub i64);
+/// Persistent window-instance identity, independent of capture's per-run window sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WindowInstanceId(pub i64);
 
 /// Persistent row identity, independent of capture's per-run row sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -92,6 +95,7 @@ pub enum ForegroundKind {
 /// Application and title values supplied by the persistence reader.
 #[derive(Debug, Clone, Default)]
 pub struct ForegroundContent {
+    pub window_instance: Option<WindowInstanceId>,
     pub app: Option<std::sync::Arc<ApplicationRef>>,
     pub title: Option<String>,
     pub title_id: Option<TitleId>,
@@ -115,6 +119,9 @@ impl Foreground {
         if level == CaptureLevel::Excluded {
             content.app = None;
         }
+        if level == CaptureLevel::Excluded || matches!(kind, ForegroundKind::NoForeground) {
+            content.window_instance = None;
+        }
         if level != CaptureLevel::Full {
             content.title = None;
             content.title_id = None;
@@ -133,6 +140,10 @@ impl Foreground {
     /// Returns application metadata after the read-time privacy projection.
     pub fn visible_app(&self) -> Option<&std::sync::Arc<ApplicationRef>> {
         self.content.app.as_ref()
+    }
+    /// Returns the persisted window identity after the read-time privacy projection.
+    pub fn visible_window_instance(&self) -> Option<WindowInstanceId> {
+        self.content.window_instance
     }
     /// Returns title text after the read-time privacy projection.
     pub fn visible_title(&self) -> Option<&str> {

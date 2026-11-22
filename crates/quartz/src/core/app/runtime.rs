@@ -58,6 +58,10 @@ pub(crate) struct PlatformPorts {
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module)]
 pub(crate) enum StartCoreError {
+    #[snafu(display("could not read logical-day startup clock"))]
+    ReadClock { source: ReadClockError },
+    #[snafu(display("could not resolve logical day"))]
+    ResolveLogicalDay { source: crate::query::RunQueryError },
     #[snafu(display("could not open core database"))]
     OpenStore {
         source: store::OpenStoreError,
@@ -193,11 +197,13 @@ impl CoreRuntime {
             .recover_ui_settings()
             .map_err(|source| StartCoreError::LoadSettings { source })?;
         let effective = ui.resolve(system);
-        let status = StatusPublisher::with_locale(
-            ports.instance_id,
-            effective.ui_language,
-            effective.locale,
-        );
+        let now = ports
+            .clock
+            .read()
+            .map_err(|source| StartCoreError::ReadClock { source })?;
+        let logical_day = crate::ipc::LogicalDay::new(now.utc.get(), day_offset)
+            .map_err(|source| StartCoreError::ResolveLogicalDay { source })?;
+        let status = StatusPublisher::with_locale(ports.instance_id, effective, logical_day);
         let crate::ipc::UiCommandChannel {
             port: ui_port,
             commands: ui_commands,

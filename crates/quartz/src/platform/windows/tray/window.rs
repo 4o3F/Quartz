@@ -66,6 +66,7 @@ pub(super) enum CoreEvent {
     Quit,
     EndSession,
     Deadline(quartz_domain::capture::Timestamp),
+    CalendarChanged,
 }
 
 impl CoreEvent {
@@ -86,6 +87,7 @@ impl CoreEvent {
                 | AppMessage::UiFirstFrame,
             ) => None,
             None if message == taskbar_created => Some(Self::RestoreTray),
+            None if message == WindowsAndMessaging::WM_SETTINGCHANGE => Some(Self::CalendarChanged),
             None if matches!(message, WM_CLOSE | WM_DESTROY) => Some(Self::Quit),
             None => None,
         }
@@ -418,6 +420,14 @@ unsafe extern "system" fn window_procedure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn settings_broadcast_requests_calendar_refresh_without_a_capture_event() {
+        assert!(matches!(
+            CoreEvent::from_message(WindowsAndMessaging::WM_SETTINGCHANGE, LPARAM(0), WM_APP),
+            Some(CoreEvent::CalendarChanged)
+        ));
+        assert!(!WindowRole::Tray.observes(WindowsAndMessaging::WM_SETTINGCHANGE));
+    }
     use windows::Win32::UI::{Shell::NIN_POPUPOPEN, WindowsAndMessaging::WM_MOUSEMOVE};
 
     #[test]

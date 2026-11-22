@@ -43,10 +43,13 @@ pub(crate) struct SummaryTask {
     requests: watch::Receiver<()>,
     published: watch::Sender<Option<Arc<TraySummary>>>,
     wake: Arc<dyn Fn() + Send + Sync>,
-    offset: i64,
+    offset: crate::query::calendar::DayStartOffset,
 }
 impl SummaryTask {
-    pub(crate) fn channel(offset: i64, wake: Arc<dyn Fn() + Send + Sync>) -> SummaryChannel {
+    pub(crate) fn channel(
+        offset: crate::query::calendar::DayStartOffset,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> SummaryChannel {
         let (requests, received) = watch::channel(());
         let (published, latest) = watch::channel(None);
         SummaryChannel {
@@ -232,7 +235,10 @@ mod tests {
         };
         let now_ms = fixture.start + RECENT_WINDOW_MS;
         let channel = QueryChannel::new();
-        let summary = SummaryTask::channel(0, Arc::new(|| {}));
+        let summary = SummaryTask::channel(
+            crate::query::calendar::DayStartOffset::MIDNIGHT,
+            Arc::new(|| {}),
+        );
         let compute = summary.task.compute(&channel.port, date, now_ms);
         tokio::pin!(compute);
         let result = loop {
@@ -278,7 +284,10 @@ mod tests {
     async fn main_requests_and_write_admission_return_while_summary_query_is_slow() {
         let database = TestDatabase::start();
         let queries = QueryChannel::new();
-        let channel = SummaryTask::channel(0, Arc::new(|| {}));
+        let channel = SummaryTask::channel(
+            crate::query::calendar::DayStartOffset::MIDNIGHT,
+            Arc::new(|| {}),
+        );
         let task = tokio::spawn(
             channel
                 .task

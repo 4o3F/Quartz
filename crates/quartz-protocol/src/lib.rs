@@ -56,6 +56,7 @@ pub use query::{
     QueryCursor, QueryDayRequest, QueryDayResponse, QueryFactsRequest, QueryFactsResponse,
     QueryGapReason, QueryPendingAwayRequest, QueryPendingAwayResponse, QueryStopReason,
     QueryTimelineRequest, QueryTimelineResponse, QueryVersions, TimelineDetail, TimelineSegment,
+    WindowInstanceRef,
 };
 
 pub use annotations::{

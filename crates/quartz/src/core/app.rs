@@ -59,6 +59,10 @@ impl From<ObservedEvent> for Observation {
 
 #[derive(Debug)]
 pub(crate) enum MainCommand {
+    ClockChanged,
+    DayOffsetChanged {
+        offset: crate::query::calendar::DayStartOffset,
+    },
     IdleAvailability(annotation::IdleAvailability),
     PolicyChanged,
     CaptureSnapshot {

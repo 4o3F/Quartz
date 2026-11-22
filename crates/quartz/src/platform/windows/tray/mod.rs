@@ -35,6 +35,7 @@ impl Default for TrayState {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TrayCommand {
+    CalendarChanged,
     OpenUi,
     Annotate(crate::core::app::annotation::AnnotationChoice),
     Timed(crate::ipc::TimedCommand),
@@ -134,6 +135,7 @@ impl Tray {
         let mut commands = Vec::new();
         for event in self.window.drain_events() {
             match event {
+                CoreEvent::CalendarChanged => commands.push(TrayCommand::CalendarChanged),
                 CoreEvent::EndSession => commands.push(TrayCommand::EndSession),
                 CoreEvent::Deadline(at) => commands.push(TrayCommand::Deadline(at)),
                 CoreEvent::Quit => commands.push(TrayCommand::Exit),

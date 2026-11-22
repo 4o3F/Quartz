@@ -742,7 +742,6 @@ impl DayAccumulator {
 #[derive(Debug, Default)]
 pub(crate) struct TimelineProjection {
     segments: Vec<TimelineSegment>,
-    last_interval: Option<FactId>,
 }
 impl TimelineProjection {
     pub(crate) fn project(
@@ -814,6 +813,22 @@ impl TimelineProjection {
             } else {
                 facts.app(segment).map(SegmentFacts::project_app)
             },
+            window_instance: if detail != TimelineDetail::Category
+                && matches!(
+                    segment.activity,
+                    Activity::Active | Activity::ActiveOverride(_)
+                ) {
+                facts
+                    .foreground(segment)
+                    .and_then(Foreground::visible_window_instance)
+                    .map(|id| {
+                        quartz_protocol::WindowInstanceRef::from_stored_id(
+                            quartz_protocol::facts::WindowInstanceId(id.0),
+                        )
+                    })
+            } else {
+                None
+            },
             title: if detail == TimelineDetail::Raw {
                 facts
                     .foreground(segment)
@@ -833,7 +848,6 @@ impl TimelineProjection {
     ) {
         let current = Self::project(segment, facts, detail);
         if let Some(last) = self.segments.last_mut()
-            && (detail != TimelineDetail::Raw || self.last_interval == segment.interval_id)
             && last.end_utc_ms == current.start_utc_ms
             && last.clock_segment_id == current.clock_segment_id
             && last.activity == current.activity
@@ -849,6 +863,7 @@ impl TimelineProjection {
                         quartz_protocol::CategorySource::Annotation { .. }
                     )))
             && last.app == current.app
+            && last.window_instance == current.window_instance
             && last.title == current.title
             && u64::try_from(current.end_utc_ms - last.start_utc_ms)
                 .is_ok_and(|width| width < pixel_ms)
@@ -863,7 +878,6 @@ impl TimelineProjection {
                 .expect("adjacent slices stay within one clock segment");
             return;
         }
-        self.last_interval = segment.interval_id;
         self.segments.push(current);
     }
     pub(crate) fn into_segments(self) -> Vec<TimelineSegment> {

@@ -264,12 +264,12 @@ impl<'path> BenchQuery<'path> {
             .query_settings()
             .map_err(crate::query::RunQueryError::from)
             .context(QuerySnafu)?
-            .day_start_offset_min;
+            .day_start_offset;
         let calendar =
             crate::query::calendar::DayCalendar::new(local_date, offset).context(QuerySnafu)?;
         // 60 seconds per pixel gives a 1,440-pixel daily timeline.
         const BENCH_PIXEL_MS: u64 = 60_000;
-        writeln!(output, "pipeline local_date={local_date} system_zone={:?} day_start_offset_min={offset} from_utc_ms={} day_to_utc_ms={} ms_per_pixel={BENCH_PIXEL_MS}", jiff::tz::TimeZone::system(), calendar.range.start, calendar.range.end).context(OutputSnafu)?;
+        writeln!(output, "pipeline local_date={local_date} system_zone={:?} day_start_offset_min={} from_utc_ms={} day_to_utc_ms={} ms_per_pixel={BENCH_PIXEL_MS}", jiff::tz::TimeZone::system(), offset.minutes(), calendar.range.start, calendar.range.end).context(OutputSnafu)?;
         let timeline = |days| {
             QueryRequest::Timeline(QueryTimelineRequest {
                 start_utc_ms: calendar.range.start,

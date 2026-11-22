@@ -568,6 +568,28 @@ fn user_category_uuid_and_metadata_are_returned_by_the_query() {
 #[test]
 fn store_read_projects_private_fields_before_returning_foreground_facts() {
     let mut fixture = QueryFixture::new(2);
+    for id in 1..=fixture.count {
+        diesel::insert_into(crate::store::schema::window_instances::table)
+            .values(crate::store::rows::WindowInstancesRow {
+                id: Some(id),
+                run_id: 1,
+                app_id: id,
+                pid: id,
+                process_created_utc_ms: None,
+                hwnd: id,
+                generation: 1,
+                retired_utc_ms: None,
+                window_class: None,
+                first_seen_utc_ms: fixture.start,
+                last_seen_utc_ms: fixture.start,
+            })
+            .execute(&mut fixture.store.writer)
+            .expect("stored window instance");
+        diesel::update(intervals::table.filter(intervals::id.eq(Some(id))))
+            .set(intervals::window_instance_id.eq(Some(id)))
+            .execute(&mut fixture.store.writer)
+            .expect("link stored window instance");
+    }
     for level in [
         enums::CaptureLevel::Full,
         enums::CaptureLevel::TitleHidden,
@@ -592,6 +614,11 @@ fn store_read_projects_private_fields_before_returning_foreground_facts() {
                     assert_eq!(
                         row.visible_app().is_some(),
                         level != enums::CaptureLevel::Excluded
+                    );
+                    assert_eq!(
+                        row.visible_window_instance(),
+                        (level != enums::CaptureLevel::Excluded)
+                            .then_some(quartz_domain::facts::WindowInstanceId(row.span.id.0))
                     );
                     assert_eq!(
                         row.visible_title().is_some(),
@@ -950,8 +977,11 @@ fn facts_pages_reassemble_dump_range_and_reject_stale_and_mismatched_cursors() {
         &crate::data_directory::DataDirectory::new(fixture.directory.path()).database(),
     )
     .expect("offline reader");
-    let calendar = crate::query::calendar::DayCalendar::new(FIXTURE_DATE.parse().expect("date"), 0)
-        .expect("calendar");
+    let calendar = crate::query::calendar::DayCalendar::new(
+        FIXTURE_DATE.parse().expect("date"),
+        crate::query::calendar::DayStartOffset::MIDNIGHT,
+    )
+    .expect("calendar");
     let expected: Vec<_> = reader
         .dump_range(calendar.range.start, calendar.range.end)
         .expect("dump range")

@@ -1,5 +1,6 @@
 //! Typed JSON access to configuration and persisted scheduler deadlines.
 use super::{Store, schema::settings};
+use crate::query::calendar::DayStartOffset;
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SqliteConnection};
 use quartz_domain::capture::{SchedulerKind, UtcInstant};
 use quartz_protocol::{
@@ -83,9 +84,10 @@ impl<'connection> Settings<'connection> {
     }
 }
 /// Missing day offset means local midnight (03 §1).
-pub(crate) const DEFAULT_DAY_START_OFFSET_MIN: i64 = 0;
+pub(crate) const DEFAULT_DAY_START_OFFSET_MIN: i64 = DayStartOffset::MIDNIGHT.minutes();
 /// Maximum logical day offset in minutes (03 §1).
-pub(crate) const MAX_DAY_START_OFFSET_MIN: i64 = 720;
+#[cfg(test)]
+pub(crate) const MAX_DAY_START_OFFSET_MIN: i64 = DayStartOffset::MAX_MINUTES;
 impl Settings<'_> {
     fn get<T: DeserializeOwned>(
         &mut self,
@@ -150,18 +152,17 @@ impl Settings<'_> {
         }
         self.put(SettingKey::MetadataVersion, &value)
     }
-    pub(super) fn day_start_offset(&mut self) -> Result<i64, AccessSettingError> {
+    pub(super) fn day_start_offset(&mut self) -> Result<DayStartOffset, AccessSettingError> {
         let value = self
             .get(SettingKey::DayStartOffset)?
             .unwrap_or(DEFAULT_DAY_START_OFFSET_MIN);
-        Self::validate_day_start_offset(value)?;
-        Ok(value)
+        DayStartOffset::try_from(value).map_err(|_| AccessSettingError::DayStartOffset)
     }
+    #[cfg(test)]
     fn validate_day_start_offset(value: i64) -> Result<(), AccessSettingError> {
-        if !(DEFAULT_DAY_START_OFFSET_MIN..=MAX_DAY_START_OFFSET_MIN).contains(&value) {
-            return Err(AccessSettingError::DayStartOffset);
-        }
-        Ok(())
+        DayStartOffset::try_from(value)
+            .map(|_| ())
+            .map_err(|_| AccessSettingError::DayStartOffset)
     }
     #[cfg(test)]
     fn put_day_start_offset(&mut self, value: i64) -> Result<(), AccessSettingError> {
@@ -248,7 +249,17 @@ impl Settings<'_> {
     }
 }
 impl Store {
-    pub(crate) fn day_start_offset(&mut self) -> Result<i64, AccessSettingError> {
+    #[cfg(test)]
+    pub(crate) fn test_day_offset_write(
+        &mut self,
+        offset_min: i64,
+    ) -> Result<(), super::versions::BumpVersionError> {
+        self.write(|tx| {
+            Settings::new(tx.connection).put_day_start_offset(offset_min)?;
+            tx.effects.bump_metadata(tx.connection)
+        })
+    }
+    pub(crate) fn day_start_offset(&mut self) -> Result<DayStartOffset, AccessSettingError> {
         Settings::new(&mut self.writer).day_start_offset()
     }
     pub(crate) fn ui_settings(&mut self) -> Result<UiSettings, AccessSettingError> {
@@ -283,7 +294,7 @@ mod tests {
         let mut settings = Settings::new(&mut store.writer);
         assert_eq!(settings.ui().expect("defaults"), UiSettings::default());
         assert_eq!(
-            settings.day_start_offset().expect("default day"),
+            settings.day_start_offset().expect("default day").minutes(),
             DEFAULT_DAY_START_OFFSET_MIN
         );
         settings.put_metadata_version(42).expect("metadata write");
@@ -299,7 +310,7 @@ mod tests {
             .put_day_start_offset(MAX_DAY_START_OFFSET_MIN)
             .expect("day write");
         assert_eq!(
-            settings.day_start_offset().expect("day read"),
+            settings.day_start_offset().expect("day read").minutes(),
             MAX_DAY_START_OFFSET_MIN
         );
         assert!(

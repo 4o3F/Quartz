@@ -20,7 +20,7 @@ impl CaptureSender {
     pub(super) fn timed_port(
         &self,
         clock: Arc<dyn ClockReader>,
-        day_offset: i64,
+        day_offset: crate::query::calendar::DayStartOffset,
     ) -> TimedPolicyPort {
         let sender = self.clone();
         TimedPolicyPort::new(move |command| {
@@ -39,7 +39,11 @@ impl CaptureSender {
     }
 }
 impl TimedDeadline {
-    fn resolve(self, at: Timestamp, day_offset: i64) -> Result<UtcInstant, ProtocolError> {
+    fn resolve(
+        self,
+        at: Timestamp,
+        day_offset: crate::query::calendar::DayStartOffset,
+    ) -> Result<UtcInstant, ProtocolError> {
         let invalid = || ProtocolError::new(ErrorKind::BadRequest);
         let until = match self {
             Self::UtcMillis(value) => UtcInstant::try_from(value).map_err(|_| invalid())?,
@@ -59,7 +63,11 @@ impl TimedDeadline {
     }
 }
 impl TimedCommand {
-    fn event(self, at: Timestamp, day_offset: i64) -> Result<CaptureEvent, ProtocolError> {
+    fn event(
+        self,
+        at: Timestamp,
+        day_offset: crate::query::calendar::DayStartOffset,
+    ) -> Result<CaptureEvent, ProtocolError> {
         let policy = match self {
             Self::Resume => return Ok(CaptureEvent::CancelTimedPolicy(TimedPolicyKind::Pause)),
             Self::DisablePrivacy => {
@@ -183,7 +191,10 @@ mod tests {
                 sender,
                 overloaded: overloaded.clone(),
             }
-            .timed_port(clock.clone(), 0);
+            .timed_port(
+                clock.clone(),
+                crate::query::calendar::DayStartOffset::MIDNIGHT,
+            );
             let mut harness = Self {
                 core: CaptureCore::start(RunId::new(1), at(0))
                     .expect("start capture")

@@ -111,15 +111,30 @@ impl VersionPublisher {
         }
         let _ = command.reply.send(result);
     }
-    pub(crate) fn publish(&mut self, store: &mut Store) {
+    pub(crate) fn publish(
+        &mut self,
+        store: &mut Store,
+    ) -> Result<Option<crate::query::calendar::DayStartOffset>, RunQueryError> {
+        self.publish_days(store, VersionState::day)
+    }
+    fn publish_days(
+        &mut self,
+        store: &mut Store,
+        day: impl Fn(&VersionState, LocalDate) -> Result<DayChanged, RunQueryError>,
+    ) -> Result<Option<crate::query::calendar::DayStartOffset>, RunQueryError> {
         let changes = store.take_committed_versions();
         let hash = self.classification_hash();
         if changes.facts.is_empty()
             && changes.metadata_version.is_none()
             && self.state.classification_hash == hash
         {
-            return;
+            return Ok(None);
         }
+        let offset = store
+            .day_start_offset()
+            .map_err(crate::store::query_error::ReadQueryError::from)?;
+        let changed_offset = (offset != self.state.settings.day_start_offset).then_some(offset);
+        self.state.settings.day_start_offset = offset;
         for fact in changes.facts {
             self.state.days.insert(fact.key, fact.version);
         }
@@ -130,17 +145,18 @@ impl VersionPublisher {
         let dates: Vec<_> = self.published.borrow().days.keys().copied().collect();
         let mut days = BTreeMap::new();
         for date in dates {
-            match self.state.day(date) {
+            match day(&self.state, date) {
                 Ok(changed) => {
                     days.insert(date, changed);
                 }
                 Err(error) => {
-                    tracing::error!(%error, "could not update day subscription");
-                    return;
+                    tracing::warn!(?error, "could not refresh day subscriptions");
+                    return Ok(changed_offset);
                 }
             }
         }
         self.published.send_replace(PublishedVersions { days });
+        Ok(changed_offset)
     }
 }
 pub(crate) struct VersionChannel {
@@ -156,6 +172,48 @@ mod tests {
         versions::{UtcDay, VersionKey, VersionSource},
     };
     use quartz_domain::rules::registry::RuleRegistry;
+
+    #[test]
+    fn failed_calendar_projection_keeps_subscriptions_and_delivers_committed_offset() {
+        let mut fixture = QueryFixture::new(4);
+        let snapshots = RuleRegistry::from_state(Default::default())
+            .expect("rules")
+            .snapshots();
+        let VersionChannel {
+            mut publisher,
+            port,
+        } = VersionPublisher::open(&mut fixture.store, snapshots).expect("publisher");
+        let date = "2025-01-02".parse().expect("date");
+        let first = set_days(&mut publisher, BTreeSet::from([date]));
+        fixture
+            .store
+            .test_day_offset_write(240)
+            .expect("committed offset");
+        let offset = publisher
+            .publish_days(&mut fixture.store, |_, _| {
+                Err(jiff::tz::TimeZone::get("Invalid/InjectedFailure")
+                    .expect_err("injected zone failure")
+                    .into())
+            })
+            .expect("calendar failure does not stop database publication");
+        assert_eq!(
+            offset,
+            Some(crate::query::calendar::DayStartOffset::try_from(240).expect("offset"))
+        );
+        assert_eq!(
+            port.updates.borrow().days[&date],
+            first.days[&date],
+            "keep the previous subscription snapshot"
+        );
+        fixture.bump_fact_version();
+        publisher
+            .publish(&mut fixture.store)
+            .expect("retry on next commit");
+        assert_ne!(
+            port.updates.borrow().days[&date].versions,
+            first.days[&date].versions
+        );
+    }
 
     fn set_days(publisher: &mut VersionPublisher, dates: BTreeSet<LocalDate>) -> PublishedVersions {
         let (reply, received) = oneshot::channel();
@@ -196,16 +254,22 @@ mod tests {
         assert_eq!(first.days.len(), 1);
         assert_eq!(port.updates.borrow().days.len(), 1);
         fixture.bump_fact_version();
-        publisher.publish(&mut fixture.store);
+        publisher
+            .publish(&mut fixture.store)
+            .expect("publish versions");
         let fact = port.updates.borrow().days[&date].clone();
         assert_ne!(first.days[&date].versions, fact.versions);
         fixture.bump_metadata();
-        publisher.publish(&mut fixture.store);
+        publisher
+            .publish(&mut fixture.store)
+            .expect("publish versions");
         assert_ne!(fact.versions, port.updates.borrow().days[&date].versions);
         set_days(&mut publisher, BTreeSet::new());
         assert!(port.updates.borrow().days.is_empty());
         fixture.bump_fact_version();
-        publisher.publish(&mut fixture.store);
+        publisher
+            .publish(&mut fixture.store)
+            .expect("publish versions");
         assert!(port.updates.borrow().days.is_empty());
     }
     #[test]
@@ -252,7 +316,9 @@ mod tests {
         );
         let before = port.updates.borrow().days[&today].clone();
         fixture.bump_fact_version();
-        publisher.publish(&mut fixture.store);
+        publisher
+            .publish(&mut fixture.store)
+            .expect("publish versions");
         assert_ne!(port.updates.borrow().days[&today].versions, before.versions);
     }
     #[test]
@@ -269,7 +335,9 @@ mod tests {
             mut publisher,
             port,
         } = VersionPublisher::open(&mut fixture.store, shell.snapshots()).expect("publisher");
-        publisher.publish(&mut fixture.store);
+        publisher
+            .publish(&mut fixture.store)
+            .expect("publish versions");
         let date = "2025-01-02".parse().expect("date");
         let first = set_days(&mut publisher, BTreeSet::from([date]));
         let changed =
@@ -290,13 +358,17 @@ mod tests {
                 RegistryCommand::InstallBuiltin { set, revision: 2 },
             )
             .expect("builtin upgrade");
-        publisher.publish(&mut fixture.store);
+        publisher
+            .publish(&mut fixture.store)
+            .expect("publish versions");
         assert_ne!(
             first.days[&date].versions,
             port.updates.borrow().days[&date].versions
         );
         let upgraded = port.updates.borrow().days[&date].versions.clone();
-        publisher.publish(&mut fixture.store);
+        publisher
+            .publish(&mut fixture.store)
+            .expect("publish versions");
         assert_eq!(upgraded, port.updates.borrow().days[&date].versions);
     }
 }

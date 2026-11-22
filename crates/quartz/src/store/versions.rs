@@ -87,7 +87,7 @@ pub(crate) struct StoredVersions {
 }
 #[derive(Debug, Clone)]
 pub(crate) struct QuerySettings {
-    pub day_start_offset_min: i64,
+    pub day_start_offset: crate::query::calendar::DayStartOffset,
     pub metadata_version: i64,
 }
 
@@ -97,7 +97,7 @@ impl ReadOnlyStore {
         let offset = settings.day_start_offset()?;
         let metadata = settings.metadata_version()?;
         Ok(QuerySettings {
-            day_start_offset_min: offset,
+            day_start_offset: offset,
             metadata_version: metadata,
         })
     }
