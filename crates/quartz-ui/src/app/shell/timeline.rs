@@ -268,11 +268,17 @@ impl AppShell {
         div()
             .flex()
             .flex_row()
+            .flex_wrap()
+            .min_w(px(0.))
             .items_center()
             .gap(ui.metrics.space.s)
             .child(
                 div()
-                    .flex_1()
+                    .flex_auto()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .ramp(ui, Ramp::Subtitle)
                     .child(self.formatter.text(Msg::TimelineTitle)),
             )
@@ -280,6 +286,9 @@ impl AppShell {
                 // The span the plot shows, which is not the activity range after a zoom, in
                 // the full-day view, or with the activity margins (07 section 4.1).
                 div()
+                    .flex_shrink_0()
+                    .max_w_full()
+                    .whitespace_nowrap()
                     .ramp(ui, Ramp::Caption)
                     .text_color(ui.palette.text_secondary)
                     .mr(ui.metrics.space.s)
@@ -301,10 +310,12 @@ impl AppShell {
             ))
             .child(
                 ui.button("zoom-out", density, ButtonContent::Icon(IconName::Minus))
+                    .flex_shrink_0()
                     .on_click(cx.listener(|this, _, _, cx| this.zoom(ZoomStep::Out, cx))),
             )
             .child(
                 ui.button("zoom-in", density, ButtonContent::Icon(IconName::Plus))
+                    .flex_shrink_0()
                     .on_click(cx.listener(|this, _, _, cx| this.zoom(ZoomStep::In, cx))),
             )
             .child(
@@ -317,6 +328,8 @@ impl AppShell {
                         Msg::TimelineFullDay
                     })),
                 )
+                .max_w_full()
+                .flex_shrink_0()
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_full_day(cx))),
             )
     }
@@ -861,6 +874,8 @@ impl AppShell {
             .flex_row()
             .items_center()
             .self_start()
+            .min_w(px(0.))
+            .max_w_full()
             .gap(ui.metrics.space.s)
             .px(ui.metrics.space.s)
             .min_h(px(CHIP_HEIGHT))
@@ -871,7 +886,12 @@ impl AppShell {
                 ui.swatch(ui.palette.category(category.color)),
                 category.color,
             ))
-            .child(self.formatter.category_name(&category.name))
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .whitespace_normal()
+                    .child(self.formatter.category_name(&category.name)),
+            )
     }
 }
 

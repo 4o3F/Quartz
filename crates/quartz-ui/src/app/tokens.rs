@@ -472,6 +472,92 @@ mod tests {
     }
 
     #[test]
+    fn high_contrast_info_bars_use_system_window_pairs_for_every_style() {
+        use crate::{
+            app::widgets::{InfoBarStyle, Widgets},
+            text_scale::TextScale,
+        };
+
+        let tokens = Tokens::from_theme_json(THEME).expect("embedded tokens");
+        let dark: SystemColors =
+            serde_json::from_str(include_str!("../../themes/preview-high-contrast.json"))
+                .expect("system colors");
+        let mut light = dark.clone();
+        std::mem::swap(&mut light.window, &mut light.window_text);
+        light.button_face = light.window;
+        for system in [dark, light] {
+            let palette = Palette::high_contrast(&system);
+            let ui = Widgets {
+                palette: &palette,
+                metrics: tokens.metrics(),
+                text_scale: TextScale::UNSCALED,
+            };
+            for style in [InfoBarStyle::Neutral, InfoBarStyle::Critical] {
+                let colors = ui.info_bar_colors(style);
+                assert_eq!(colors.background, system.window);
+                for foreground in [
+                    colors.foreground,
+                    colors.secondary,
+                    colors.icon,
+                    colors.border,
+                ] {
+                    assert_eq!(foreground, system.window_text);
+                    assert!(contrast(foreground, colors.background) >= MIN_BODY_CONTRAST);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn high_contrast_status_and_accent_surfaces_keep_matching_text_colors() {
+        let system: SystemColors =
+            serde_json::from_str(include_str!("../../themes/preview-high-contrast.json"))
+                .expect("system colors");
+        let palette = Palette::high_contrast(&system);
+        assert!(contrast(system.gray_text, system.window) >= MIN_CATEGORY_CONTRAST);
+        struct TextPair {
+            foreground: Hsla,
+            background: Hsla,
+        }
+        for pair in [
+            TextPair {
+                foreground: palette.text_on_accent,
+                background: palette.accent_fill,
+            },
+            TextPair {
+                foreground: palette.text_on_accent,
+                background: palette.accent_fill_hover,
+            },
+            TextPair {
+                foreground: palette.text_on_accent,
+                background: palette.status_caution_bg,
+            },
+            TextPair {
+                foreground: palette.text_on_accent,
+                background: palette.status_critical_bg,
+            },
+            TextPair {
+                foreground: palette.status_success,
+                background: palette.status_success_bg,
+            },
+            TextPair {
+                foreground: palette.text_on_success,
+                background: palette.status_success,
+            },
+            TextPair {
+                foreground: palette.text_on_caution,
+                background: palette.status_caution,
+            },
+            TextPair {
+                foreground: palette.text_on_critical,
+                background: palette.status_critical,
+            },
+        ] {
+            assert!(contrast(pair.foreground, pair.background) >= MIN_BODY_CONTRAST);
+        }
+    }
+
+    #[test]
     fn embedded_categories_and_body_text_meet_wcag_contrast() {
         let theme: serde_json::Value = serde_json::from_str(THEME).expect("embedded JSON");
         let tokens = Tokens::from_theme_json(THEME).expect("embedded tokens");

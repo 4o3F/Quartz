@@ -84,6 +84,27 @@ enum ButtonStyle {
     Accent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InfoBarStyle {
+    Neutral,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InfoBarColors {
+    pub(crate) background: Hsla,
+    pub(crate) border: Hsla,
+    pub(crate) foreground: Hsla,
+    pub(crate) secondary: Hsla,
+    pub(crate) icon: Hsla,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SkeletonTone {
+    Strong,
+    Subtle,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ButtonColors {
     rest: Hsla,
@@ -149,6 +170,50 @@ pub(crate) struct Widgets<'a> {
 }
 
 impl<'a> Widgets<'a> {
+    pub(crate) fn info_bar_colors(&self, style: InfoBarStyle) -> InfoBarColors {
+        let palette = self.palette;
+        if palette.contrast == ContrastMode::High {
+            return InfoBarColors {
+                background: palette.bg_base,
+                border: palette.stroke_card,
+                foreground: palette.text_primary,
+                secondary: palette.text_primary,
+                icon: palette.text_primary,
+            };
+        }
+        let mut colors = InfoBarColors {
+            background: palette.fill_card,
+            border: palette.stroke_card,
+            foreground: palette.text_primary,
+            secondary: palette.text_secondary,
+            icon: palette.text_secondary,
+        };
+        if style == InfoBarStyle::Critical {
+            colors.background = palette.status_critical_bg;
+            colors.border = palette
+                .status_critical
+                .opacity(self.metrics.opacity.notice_border);
+            colors.icon = palette.status_critical;
+        }
+        colors
+    }
+
+    pub(crate) fn skeleton_block(&self, tone: SkeletonTone) -> Div {
+        if self.palette.contrast == ContrastMode::High {
+            return div()
+                .bg(self.palette.bg_base)
+                .border(self.metrics.layout.divider)
+                .border_color(self.palette.text_tertiary);
+        }
+        div().bg(match tone {
+            SkeletonTone::Strong => self
+                .palette
+                .text_tertiary
+                .opacity(self.metrics.opacity.skeleton),
+            SkeletonTone::Subtle => self.palette.fill_subtle_hover,
+        })
+    }
+
     /// The widgets of the `mode` appearance with text scaled by `text_scale`.
     pub(crate) const fn new(tokens: &'a Tokens, mode: ThemeMode, text_scale: TextScale) -> Self {
         Self {
@@ -494,6 +559,8 @@ impl<'a> Widgets<'a> {
         let space = &self.metrics.space;
         let control = div()
             .id(id)
+            .min_w(px(0.))
+            .max_w_full()
             .flex()
             .flex_row()
             .items_center()
@@ -509,6 +576,10 @@ impl<'a> Widgets<'a> {
             div()
                 .id(item.id)
                 .flex()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
                 .items_center()
                 .min_h(px(SEGMENTED_ITEM_HEIGHT))
                 .px(px(SEGMENTED_ITEM_PADDING))
@@ -571,7 +642,31 @@ impl From<Glyph> for IconName {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::runtime::ThemeBundle;
+    use crate::app::{runtime::ThemeBundle, tokens::SystemColors};
+
+    #[test]
+    fn high_contrast_skeletons_have_opaque_system_surfaces_and_gray_text_borders() {
+        let theme = ThemeBundle::embedded().expect("embedded theme");
+        let tokens = theme.tokens();
+        let system: SystemColors =
+            serde_json::from_str(include_str!("../../themes/preview-high-contrast.json"))
+                .expect("system colors");
+        let palette = Palette::high_contrast(&system);
+        let ui = Widgets {
+            palette: &palette,
+            metrics: tokens.metrics(),
+            text_scale: TextScale::UNSCALED,
+        };
+        for tone in [SkeletonTone::Strong, SkeletonTone::Subtle] {
+            let mut skeleton = ui.skeleton_block(tone);
+            assert_eq!(skeleton.style().background, Some(system.window.into()));
+            assert_eq!(skeleton.style().border_color, Some(system.gray_text));
+            assert_eq!(
+                skeleton.style().border_widths.top,
+                Some(tokens.metrics().layout.divider.into())
+            );
+        }
+    }
 
     #[test]
     fn every_button_constructor_builds_without_a_window() {

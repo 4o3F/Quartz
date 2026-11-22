@@ -3,7 +3,7 @@ use super::{AppShell, OpenDetails, PanelContent};
 use crate::{
     app::{
         metrics::{Density, Ramp},
-        widgets::{ButtonContent, RampExt as _, Widgets},
+        widgets::{ButtonContent, RampExt as _, SkeletonTone, Widgets},
     },
     format::Msg,
     layout::PanelPlacement,
@@ -163,16 +163,16 @@ impl AppShell {
             match &panel.phase {
                 DetailPhase::Loading => div().flex().flex_col().gap(ui.metrics.space.m).children(
                     (0..SKELETON_ROWS).map(|_| {
-                        div()
+                        ui.skeleton_block(SkeletonTone::Subtle)
                             .h(px(SKELETON_ROW_HEIGHT))
                             .w_full()
                             .rounded(ui.metrics.radius.control)
-                            .bg(ui.palette.fill_subtle_hover)
                     }),
                 ),
                 DetailPhase::Failed(error) => div()
                     .flex()
                     .flex_col()
+                    .min_w(px(0.))
                     .gap(ui.metrics.space.s)
                     .child(
                         div()
@@ -209,6 +209,7 @@ impl AppShell {
             .id("details-panel")
             .flex()
             .flex_col()
+            .min_w(px(0.))
             .flex_shrink_0()
             .w(ui.metrics.layout.panel_width)
             .h_full()
@@ -242,16 +243,19 @@ impl AppShell {
                             .flex_1()
                             .min_w(px(0.))
                             .child(
-                                div().ramp(ui, Ramp::BodyStrong).child(
-                                    panel.heading.clone().unwrap_or_else(|| {
+                                div()
+                                    .min_w(px(0.))
+                                    .whitespace_normal()
+                                    .ramp(ui, Ramp::BodyStrong)
+                                    .child(panel.heading.clone().unwrap_or_else(|| {
                                         self.formatter.text(Msg::DetailsIntervals)
-                                    }),
-                                ),
+                                    })),
                             )
                             .children(panel.exe.as_ref().map(|exe| {
                                 div()
                                     .ramp(ui, Ramp::Caption)
                                     .text_color(ui.palette.text_secondary)
+                                    .whitespace_normal()
                                     .child(exe.clone())
                             })),
                     )
@@ -273,6 +277,7 @@ impl AppShell {
                     .flex_1()
                     .min_h(px(0.))
                     .overflow_y_scroll()
+                    .min_w(px(0.))
                     .px(ui.metrics.space.l)
                     .pb(ui.metrics.space.l)
                     .child(body),
@@ -282,6 +287,8 @@ impl AppShell {
     fn detail_category(&self, ui: &Widgets<'_>, category: &CategoryDisplay) -> Div {
         div()
             .flex()
+            .min_w(px(0.))
+            .max_w_full()
             .items_center()
             .gap(ui.metrics.space.xs)
             .ramp(ui, Ramp::Caption)
@@ -291,7 +298,12 @@ impl AppShell {
                     .rounded_full()
                     .bg(ui.palette.category(category.color)),
             )
-            .child(self.formatter.category_name(&category.name))
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .whitespace_normal()
+                    .child(self.formatter.category_name(&category.name)),
+            )
     }
     fn live_detail_body(
         &self,
@@ -308,11 +320,14 @@ impl AppShell {
                         .p(ui.metrics.space.m)
                         .flex()
                         .flex_col()
+                        .min_w(px(0.))
                         .gap(ui.metrics.space.xs)
                         .child(
                             div()
                                 .flex()
                                 .flex_wrap()
+                                .min_w(px(0.))
+                                .gap(ui.metrics.space.s)
                                 .justify_between()
                                 .ramp(ui, Ramp::BodyStrong)
                                 .child(format!(
@@ -322,23 +337,30 @@ impl AppShell {
                                 ))
                                 .child(self.formatter.detail_duration(interval.duration)),
                         )
-                        .children(
-                            interval
-                                .app
-                                .as_ref()
-                                .map(|app| div().ramp(ui, Ramp::Caption).child(app.clone())),
-                        )
-                        .children(
-                            interval
-                                .title
-                                .as_ref()
-                                .map(|title| div().ramp(ui, Ramp::Caption).child(title.clone())),
-                        )
+                        .children(interval.app.as_ref().map(|app| {
+                            div()
+                                .min_w(px(0.))
+                                .w_full()
+                                .whitespace_normal()
+                                .ramp(ui, Ramp::Caption)
+                                .child(app.clone())
+                        }))
+                        .children(interval.title.as_ref().map(|title| {
+                            div()
+                                .min_w(px(0.))
+                                .w_full()
+                                .whitespace_normal()
+                                .ramp(ui, Ramp::Caption)
+                                .child(title.clone())
+                        }))
                         .child(self.detail_category(ui, &interval.category))
                         .child(
                             div()
                                 .ramp(ui, Ramp::Caption)
                                 .text_color(ui.palette.text_secondary)
+                                .min_w(px(0.))
+                                .w_full()
+                                .whitespace_normal()
                                 .child(self.formatter.detail_source(&interval.source)),
                         )
                 }),
@@ -387,6 +409,8 @@ impl AppShell {
                     .flex_1()
                     .min_w(px(0.))
                     .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .ramp(ui, Ramp::Caption)
                     .text_color(ui.palette.text_secondary)
                     .child(
@@ -476,7 +500,14 @@ impl AppShell {
                                 .justify_end()
                                 .ramp(ui, Ramp::Caption)
                                 .text_color(ui.palette.text_secondary)
-                                .child(duration),
+                                .child(
+                                    div()
+                                        .min_w(px(0.))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(duration),
+                                ),
                         )
                 }),
             );
@@ -492,30 +523,37 @@ impl AppShell {
                     titles
                 },
             ));
-            let rules =
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(ui.metrics.space.s)
-                    .children(entity.rules.iter().map(|rule| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(ui.metrics.space.xs)
-                            .child(
-                                div()
-                                    .ramp(ui, Ramp::Caption)
-                                    .child(self.formatter.rule_label(&rule.label)),
-                            )
-                            .child(
-                                div()
-                                    .ramp(ui, Ramp::Caption)
-                                    .font(ui.mono_font())
-                                    .text_color(ui.palette.text_secondary)
-                                    .child(rule.identity.as_str().to_owned()),
-                            )
-                            .child(self.detail_category(ui, &rule.category))
-                    }));
+            let rules = div()
+                .flex()
+                .flex_col()
+                .min_w(px(0.))
+                .gap(ui.metrics.space.s)
+                .children(entity.rules.iter().map(|rule| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w(px(0.))
+                        .gap(ui.metrics.space.xs)
+                        .child(
+                            div()
+                                .ramp(ui, Ramp::Caption)
+                                .min_w(px(0.))
+                                .w_full()
+                                .whitespace_normal()
+                                .child(self.formatter.rule_label(&rule.label)),
+                        )
+                        .child(
+                            div()
+                                .ramp(ui, Ramp::Caption)
+                                .font(ui.mono_font())
+                                .text_color(ui.palette.text_secondary)
+                                .min_w(px(0.))
+                                .w_full()
+                                .whitespace_normal()
+                                .child(rule.identity.as_str().to_owned()),
+                        )
+                        .child(self.detail_category(ui, &rule.category))
+                }));
             body = body.child(self.section(
                 ui,
                 Msg::DetailsRules,

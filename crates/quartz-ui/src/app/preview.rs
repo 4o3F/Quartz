@@ -40,6 +40,10 @@ const HOVER_POSITION: Point<Pixels> = point(px(900.), px(330.));
 /// A screen coordinate outside every display.
 const FAR_AWAY: i32 = -32000;
 
+/// A newer core and protocol deliberately disagree with the UI in the error fixture.
+const MISMATCH_CORE_VERSION: &str = "0.1.0";
+const MISMATCH_CORE_PROTOCOL: quartz_protocol::ProtoVersion = quartz_protocol::ProtoVersion(2);
+
 /// Which screen state a preview opens in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PreviewState {
@@ -119,13 +123,11 @@ impl ErrorPreviewState {
                 Failure::from_connection(&quartz_pipe::CallCoreError::Protocol {
                     kind: quartz_protocol::ErrorKind::ProtoMismatch {
                         supported: quartz_protocol::ProtoRange::new(
-                            quartz_protocol::PROTOCOL_VERSION,
-                            quartz_protocol::PROTOCOL_VERSION,
+                            MISMATCH_CORE_PROTOCOL,
+                            MISMATCH_CORE_PROTOCOL,
                         )
-                        .expect("current range"),
-                        core_version: quartz_protocol::CoreVersion(
-                            env!("CARGO_PKG_VERSION").into(),
-                        ),
+                        .expect("preview protocol range"),
+                        core_version: quartz_protocol::CoreVersion(MISMATCH_CORE_VERSION.into()),
                     },
                 })
             }
@@ -615,6 +617,35 @@ impl Render for ErrorPreviewWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_mismatch_fixture_displays_different_core_and_ui_versions() {
+        use crate::failure::{DetailLine, FailurePresentation};
+
+        assert_ne!(MISMATCH_CORE_VERSION, env!("CARGO_PKG_VERSION"));
+        assert_ne!(MISMATCH_CORE_PROTOCOL, quartz_protocol::PROTOCOL_VERSION);
+        let failure = ErrorPreviewState::VersionMismatch
+            .failure()
+            .expect("version mismatch fixture");
+        let formatter = Formatter::new(Language::English);
+        let presentation = FailurePresentation::new(&failure, formatter);
+        for expected in [
+            DetailLine::Value {
+                label: formatter.text(Msg::FailureCoreVersion),
+                value: MISMATCH_CORE_VERSION.into(),
+            },
+            DetailLine::Value {
+                label: formatter.text(Msg::FailureUiVersion),
+                value: env!("CARGO_PKG_VERSION").into(),
+            },
+            DetailLine::Value {
+                label: formatter.text(Msg::FailureProtocol),
+                value: format!("{}–{}", MISMATCH_CORE_PROTOCOL.0, MISMATCH_CORE_PROTOCOL.0),
+            },
+        ] {
+            assert!(presentation.details.contains(&expected));
+        }
+    }
 
     #[test]
     fn every_error_fixture_uses_the_shared_model_without_creating_a_window() {

@@ -85,7 +85,7 @@ pub(crate) struct Timeline {
     pub(crate) hatch_spacing: f32,
 }
 
-/// Opacities of timeline states (11 section 3.4).
+/// Opacities of timeline states, notices and loading placeholders.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 pub(crate) struct Opacity {
     /// Idle spans over the category color.
@@ -94,6 +94,10 @@ pub(crate) struct Opacity {
     pub(crate) neutral_state: f32,
     /// Selected range over `accent.fill`.
     pub(crate) selection: f32,
+    /// Critical InfoBar border in standard themes.
+    pub(crate) notice_border: f32,
+    /// Strong loading placeholders in standard themes.
+    pub(crate) skeleton: f32,
 }
 
 /// Steps of the type ramp (11 section 4.2).

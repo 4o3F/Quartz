@@ -49,9 +49,11 @@ impl AppShell {
             .track_scroll(&self.details_scroll)
             .flex()
             .flex_col()
+            .min_w(px(0.))
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll()
+            .w_full()
             .gap(space.l)
             .px(space.l)
             .pb(space.l)
@@ -76,6 +78,7 @@ impl AppShell {
             .id("details-panel")
             .flex()
             .flex_col()
+            .min_w(px(0.))
             .flex_shrink_0()
             .w(ui.metrics.layout.panel_width)
             .h_full()
@@ -121,11 +124,19 @@ impl AppShell {
                         div()
                             .flex()
                             .flex_col()
-                            .child(div().ramp(ui, Ramp::BodyStrong).child(app.name.clone()))
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(
+                                div()
+                                    .whitespace_normal()
+                                    .ramp(ui, Ramp::BodyStrong)
+                                    .child(app.name.clone()),
+                            )
                             .child(
                                 div()
                                     .ramp(ui, Ramp::Caption)
                                     .text_color(palette.text_secondary)
+                                    .whitespace_normal()
                                     .child(app.exe.clone()),
                             ),
                     ),
@@ -166,7 +177,8 @@ impl AppShell {
                     density,
                     ButtonContent::Label(self.formatter.text(Msg::DetailsClassify)),
                 )
-                .flex_none(),
+                .flex_none()
+                .max_w_full(),
             )
             .child(
                 ui.disabled_button(
@@ -177,7 +189,8 @@ impl AppShell {
                         self.formatter.text(Msg::DetailsPrivacy),
                     ),
                 )
-                .flex_none(),
+                .flex_none()
+                .max_w_full(),
             )
             .child(
                 ui.disabled_button(
@@ -188,7 +201,8 @@ impl AppShell {
                         self.formatter.text(Msg::DetailsDelete),
                     ),
                 )
-                .flex_none(),
+                .flex_none()
+                .max_w_full(),
             )
     }
 
@@ -196,6 +210,7 @@ impl AppShell {
         div()
             .flex()
             .flex_col()
+            .min_w(px(0.))
             .gap(ui.metrics.space.s)
             .child(
                 div()
@@ -215,12 +230,15 @@ impl AppShell {
         ui.card()
             .flex()
             .flex_col()
+            .min_w(px(0.))
             .gap(space.s)
             .p(space.m)
             .child(
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
+                    .gap(space.s)
                     .justify_between()
                     .items_baseline()
                     .child(
@@ -235,18 +253,30 @@ impl AppShell {
                             .child(self.formatter.duration(interval.span.duration())),
                     ),
             )
-            .child(div().ramp(ui, Ramp::Caption).child(interval.title.clone()))
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .w_full()
+                    .whitespace_normal()
+                    .ramp(ui, Ramp::Caption)
+                    .child(interval.title.clone()),
+            )
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .items_center()
+                    .flex_wrap()
+                    .min_w(px(0.))
+                    .items_start()
                     .gap(space.s)
                     .child(self.category_chip(ui, interval.category))
                     .child(
                         div()
                             .ramp(ui, Ramp::Caption)
                             .text_color(palette.text_secondary)
+                            .min_w(px(0.))
+                            .max_w_full()
+                            .whitespace_normal()
                             .child(rule),
                     ),
             )
@@ -254,6 +284,8 @@ impl AppShell {
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
+                    .min_w(px(0.))
                     .items_center()
                     .gap(space.xs)
                     .ramp(ui, Ramp::Caption)
@@ -318,7 +350,11 @@ impl AppShell {
                     };
                     div()
                         .flex_1()
+                        .min_w(px(0.))
                         .flex()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .justify_center()
                         .ramp(ui, Ramp::Caption)
                         .text_color(text_color)
@@ -327,6 +363,7 @@ impl AppShell {
         div()
             .flex()
             .flex_col()
+            .min_w(px(0.))
             .child(ui.plot_area().p(ui.metrics.space.s).child(bars))
             .child(labels)
     }
@@ -355,6 +392,7 @@ impl AppShell {
         div()
             .flex()
             .flex_col()
+            .min_w(px(0.))
             .gap(ui.metrics.space.xs)
             .children(rows().zip(durations).map(|(row, duration)| {
                 div()
@@ -433,38 +471,56 @@ impl AppShell {
         div()
             .flex()
             .flex_col()
+            .min_w(px(0.))
+            .w_full()
             .gap(space.xs)
             .ramp(ui, Ramp::Caption)
             .child(
                 div()
                     .flex()
-                    .flex_row()
-                    .items_center()
+                    .items_start()
                     .gap(space.s)
                     .child(check(palette.text_secondary))
                     .child(
                         div()
-                            .ramp(ui, Ramp::Caption)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(self.formatter.text_with(
-                                Msg::DetailsRulePriority,
-                                &[
-                                    Arg::Rule.with(&why.rule.name),
-                                    Arg::Priority.with(&why.rule.priority.to_string()),
-                                ],
-                            )),
-                    )
-                    .child(
-                        div()
-                            .px(space.s)
-                            .rounded(ui.metrics.radius.control)
-                            .bg(palette.status_success_bg)
-                            .text_color(palette.status_success)
-                            .child(self.formatter.text(Msg::DetailsEffective)),
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_wrap()
+                            .items_baseline()
+                            .gap(space.s)
+                            .child(
+                                div()
+                                    .min_w(px(0.))
+                                    .max_w_full()
+                                    .whitespace_normal()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(self.formatter.text_with(
+                                        Msg::DetailsRulePriority,
+                                        &[
+                                            Arg::Rule.with(&why.rule.name),
+                                            Arg::Priority.with(&why.rule.priority.to_string()),
+                                        ],
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .min_w(px(0.))
+                                    .max_w_full()
+                                    .whitespace_normal()
+                                    .px(space.s)
+                                    .rounded(ui.metrics.radius.control)
+                                    .bg(palette.status_success_bg)
+                                    .text_color(palette.status_success)
+                                    .child(self.formatter.text(Msg::DetailsEffective)),
+                            ),
                     ),
             )
             .child(
                 div()
+                    .min_w(px(0.))
+                    .w_full()
+                    .whitespace_normal()
                     .pl(text_indent)
                     .text_color(palette.text_secondary)
                     .child(
@@ -476,6 +532,7 @@ impl AppShell {
                 div()
                     .flex()
                     .flex_col()
+                    .min_w(px(0.))
                     .gap(space.xxs)
                     .ml(text_indent)
                     .pl(space.s)
@@ -484,12 +541,15 @@ impl AppShell {
                     .child(
                         div()
                             .flex()
-                            .flex_row()
-                            .items_center()
+                            .min_w(px(0.))
+                            .items_start()
                             .gap(space.s)
                             .child(check(palette.status_success))
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .whitespace_normal()
                                     .font(ui.mono_font())
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(self.formatter.rule_condition(&why.rule.condition)),
@@ -497,6 +557,9 @@ impl AppShell {
                     )
                     .child(
                         div()
+                            .min_w(px(0.))
+                            .w_full()
+                            .whitespace_normal()
                             .pl(text_indent)
                             .text_color(palette.text_secondary)
                             .child(
@@ -507,6 +570,9 @@ impl AppShell {
             )
             .child(
                 div()
+                    .min_w(px(0.))
+                    .w_full()
+                    .whitespace_normal()
                     .text_color(palette.text_secondary)
                     .child(self.formatter.text(Msg::DetailsNoShadowed)),
             )

@@ -169,11 +169,13 @@ impl AppShell {
                     .flex()
                     .flex_row()
                     .flex_wrap()
+                    .min_w(px(0.))
                     .items_center()
                     .gap(ui.metrics.space.s)
                     .child(
                         div()
-                            .flex_1()
+                            .flex_auto()
+                            .min_w(px(0.))
                             .ramp(ui, Ramp::Subtitle)
                             .child(self.formatter.text(Msg::RankingTitle)),
                     )

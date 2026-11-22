@@ -3,7 +3,7 @@ use super::{AppShell, Frame, RangeChoice};
 use crate::{
     app::{
         metrics::{Density, Ramp},
-        widgets::{ButtonContent, RampExt as _, Widgets},
+        widgets::{ButtonContent, InfoBarStyle, RampExt as _, SkeletonTone, Widgets},
     },
     format::{Formatter, Msg},
     link::{DayFailure, DayGeneration, DayLoad, DayRequest, DayView, Link},
@@ -23,7 +23,6 @@ const RECORDING_PILL_HEIGHT: f32 = 24.;
 const RECORDING_DOT_SIZE: f32 = 6.;
 const PROGRESS_RING_SIZE: f32 = 14.;
 const PROGRESS_RING_GAP: f32 = 6.;
-const CRITICAL_BORDER_OPACITY: f32 = 0.28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LoadPhase {
@@ -362,22 +361,20 @@ impl AppShell {
             StopReason::Ended => Msg::StopEnded,
         };
         let critical = reason == StopReason::PersistenceFailed;
+        let colors = ui.info_bar_colors(if critical {
+            InfoBarStyle::Critical
+        } else {
+            InfoBarStyle::Neutral
+        });
         let mut bar = ui
             .card()
             .flex()
             .items_center()
             .gap(ui.metrics.space.m)
             .p(ui.metrics.space.l)
-            .bg(if critical {
-                ui.palette.status_critical_bg
-            } else {
-                ui.palette.fill_card
-            })
-            .border_color(if critical {
-                ui.palette.status_critical.opacity(CRITICAL_BORDER_OPACITY)
-            } else {
-                ui.palette.stroke_card
-            })
+            .bg(colors.background)
+            .border_color(colors.border)
+            .text_color(colors.foreground)
             .child(ui.icon(
                 if critical {
                     IconName::CircleX
@@ -385,15 +382,12 @@ impl AppShell {
                     IconName::Clock
                 },
                 Density::Compact,
-                if critical {
-                    ui.palette.status_critical
-                } else {
-                    ui.palette.text_secondary
-                },
+                colors.icon,
             ))
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.))
                     .flex()
                     .flex_wrap()
                     .items_baseline()
@@ -406,7 +400,7 @@ impl AppShell {
                     .child(
                         div()
                             .ramp(ui, Ramp::Body)
-                            .text_color(ui.palette.text_secondary)
+                            .text_color(colors.secondary)
                             .child(self.formatter.text(message)),
                     ),
             );
@@ -603,7 +597,6 @@ impl AppShell {
         const LANE_COUNT: usize = 4;
         // Static bars and their heights come from the approved loading state.
         const BAR_HEIGHTS: [f32; 11] = [28., 86., 72., 60., 34., 52., 82., 48., 66., 26., 36.];
-        let fill = ui.palette.text_tertiary.opacity(0.18);
         let labels = [
             Msg::StatActive,
             Msg::StatFocus,
@@ -632,15 +625,14 @@ impl AppShell {
                         .items_end()
                         .pb(px(4.))
                         .child(
-                            div()
+                            ui.skeleton_block(SkeletonTone::Strong)
                                 .h(px(VALUE_HEIGHT))
                                 .w(px(if label == Msg::StatActive {
                                     ACTIVE_WIDTH
                                 } else {
                                     VALUE_WIDTH
                                 }))
-                                .rounded(ui.metrics.radius.control)
-                                .bg(fill),
+                                .rounded(ui.metrics.radius.control),
                         ),
                 )
                 .child(
@@ -666,23 +658,21 @@ impl AppShell {
                 ui.metrics.space.m,
             ))
             .child(
-                div()
+                ui.skeleton_block(SkeletonTone::Subtle)
                     .h(px(8.))
                     .w_full()
-                    .rounded_full()
-                    .bg(ui.palette.fill_subtle_hover),
+                    .rounded_full(),
             )
             .child(
-                div()
+                ui.skeleton_block(SkeletonTone::Subtle)
                     .h(px(12.))
                     .w(px(240.))
-                    .rounded(ui.metrics.radius.control)
-                    .bg(ui.palette.fill_subtle_hover),
+                    .rounded(ui.metrics.radius.control),
             );
         let label_width = self.label_column_width(ui, frame.measure);
         let timeline = ui
             .card()
-            .h(px(TIMELINE_HEIGHT))
+            .min_h(px(TIMELINE_HEIGHT))
             .p(ui.metrics.space.l)
             .flex()
             .flex_col()
@@ -690,11 +680,14 @@ impl AppShell {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
+                    .min_w(px(0.))
                     .items_center()
                     .gap(ui.metrics.space.s)
                     .child(
                         div()
-                            .flex_1()
+                            .flex_auto()
+                            .min_w(px(0.))
                             .ramp(ui, Ramp::Subtitle)
                             .child(self.formatter.text(Msg::TimelineTitle)),
                     )
@@ -728,15 +721,18 @@ impl AppShell {
                             .gap(ui.metrics.space.m)
                             .child(
                                 div()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .ramp(ui, Ramp::Caption)
                                     .child(self.formatter.text(Msg::TimelineMainTrack)),
                             )
                             .children((0..LANE_COUNT).map(|_| {
-                                div()
+                                ui.skeleton_block(SkeletonTone::Subtle)
                                     .h(px(12.))
                                     .w_full()
                                     .rounded(ui.metrics.radius.control)
-                                    .bg(ui.palette.fill_subtle_hover)
                             })),
                     )
                     .child(
@@ -748,18 +744,16 @@ impl AppShell {
                             .flex_col()
                             .gap(ui.metrics.space.s)
                             .child(
-                                div()
+                                ui.skeleton_block(SkeletonTone::Strong)
                                     .h(px(28.))
                                     .w_full()
-                                    .rounded(ui.metrics.radius.control)
-                                    .bg(fill),
+                                    .rounded(ui.metrics.radius.control),
                             )
                             .children((0..LANE_COUNT).map(|_| {
-                                div()
+                                ui.skeleton_block(SkeletonTone::Subtle)
                                     .h(px(18.))
                                     .w_full()
                                     .rounded(ui.metrics.radius.control)
-                                    .bg(ui.palette.fill_subtle_hover)
                             }))
                             .child(self.measure_plot(cx)),
                     ),
@@ -802,7 +796,10 @@ impl AppShell {
                             .justify_between()
                             .gap(ui.metrics.space.s)
                             .children(BAR_HEIGHTS.map(|height| {
-                                div().flex_1().max_w(px(30.)).h(px(height)).bg(fill)
+                                ui.skeleton_block(SkeletonTone::Strong)
+                                    .flex_1()
+                                    .max_w(px(30.))
+                                    .h(px(height))
                             })),
                     ),
             );
@@ -826,24 +823,21 @@ impl AppShell {
                     .items_center()
                     .gap(ui.metrics.space.m)
                     .child(
-                        div()
+                        ui.skeleton_block(SkeletonTone::Subtle)
                             .size(px(16.))
-                            .rounded(ui.metrics.radius.control)
-                            .bg(ui.palette.fill_subtle_hover),
+                            .rounded(ui.metrics.radius.control),
                     )
                     .child(
-                        div()
+                        ui.skeleton_block(SkeletonTone::Strong)
                             .flex_1()
                             .h(px(12.))
-                            .rounded(ui.metrics.radius.control)
-                            .bg(fill),
+                            .rounded(ui.metrics.radius.control),
                     )
                     .child(
-                        div()
+                        ui.skeleton_block(SkeletonTone::Subtle)
                             .w(px(56.))
                             .h(px(12.))
-                            .rounded(ui.metrics.radius.control)
-                            .bg(ui.palette.fill_subtle_hover),
+                            .rounded(ui.metrics.radius.control),
                     )
             }));
         let charts = match frame.layout.class.chart_arrangement() {
