@@ -25,6 +25,7 @@ pub(crate) use metrics::Ramp;
 pub use preview::{
     ErrorPreviewState, ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError,
     PlaceWindowError, PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, RunPreviewError,
+    TodayPreviewState,
 };
 pub use runtime::{Appearance, GpuiError, LoadThemeError};
 pub(crate) use runtime::{GpuiSnafu, ThemeBundle, WindowClosePolicy, run_gpui, window_options};

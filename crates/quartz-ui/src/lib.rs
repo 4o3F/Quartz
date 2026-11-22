@@ -53,7 +53,7 @@ pub use app::{Appearance, GpuiError, LoadPaletteError, LoadThemeError};
 pub use app::{
     ErrorPreviewState, ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError,
     PlaceWindowError, PreviewOptions, PreviewPlacement, PreviewSize, PreviewState, PreviewTheme,
-    RunPreviewError,
+    RunPreviewError, TodayPreviewState,
 };
 #[cfg(windows)]
 pub use launch::{RunOptions, RunUiError};

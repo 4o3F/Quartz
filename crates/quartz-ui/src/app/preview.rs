@@ -51,8 +51,25 @@ pub enum PreviewState {
     TodayHover,
     /// Today with the timeline showing the whole day, where short intervals become markers.
     TodayFullDay,
+    /// Today data states with a fixed snapshot and no connection.
+    TodayData(TodayPreviewState),
+    /// Today with application details.
+    TodayAppDetails,
     /// The shared failure/connecting screen, without a core or pipe.
     Error(ErrorPreviewState),
+}
+
+/// Fixture-only Today presentation states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TodayPreviewState {
+    Loading,
+    EmptyToday,
+    EmptyPast,
+    Paused,
+    PersistenceFailed,
+    QueryFailed,
+    DatePicker,
+    TodayNav,
 }
 
 /// Approved error mockup fixtures. All data and recovery actions stay inside the preview.
@@ -72,6 +89,10 @@ pub enum ErrorPreviewState {
     HandshakeRejected,
     InvalidResponse,
     InterfaceUnavailable,
+    CoreNotRunningExpanded,
+    ConnectFailedExpanded,
+    OtherSessionExpanded,
+    CoreNotRunningStartingExpanded,
 }
 impl ErrorPreviewState {
     fn failure(self) -> Option<crate::failure::Failure> {
@@ -79,11 +100,14 @@ impl ErrorPreviewState {
         use quartz_protocol::{CoreError, CoreErrorCode};
         Some(match self {
             Self::Connecting => return None,
-            Self::CoreNotRunning | Self::CoreNotRunningStarting => {
-                Failure::new(FailureKind::CoreNotRunning)
-            }
+            Self::CoreNotRunning
+            | Self::CoreNotRunningStarting
+            | Self::CoreNotRunningExpanded
+            | Self::CoreNotRunningStartingExpanded => Failure::new(FailureKind::CoreNotRunning),
             Self::CoreStartFailed => Failure::new(FailureKind::CoreStartFailed),
-            Self::ConnectFailed => Failure::new(FailureKind::ConnectTimeout),
+            Self::ConnectFailed | Self::ConnectFailedExpanded => {
+                Failure::new(FailureKind::ConnectTimeout)
+            }
             Self::MigrationFailed => Failure::from_startup(CoreError::new(
                 CoreErrorCode::MigrationFailed,
                 vec![std::path::PathBuf::from(
@@ -105,7 +129,9 @@ impl ErrorPreviewState {
                     },
                 })
             }
-            Self::OtherSession => Failure::new(FailureKind::OtherSession),
+            Self::OtherSession | Self::OtherSessionExpanded => {
+                Failure::new(FailureKind::OtherSession)
+            }
             Self::IdentityRejected => Failure::new(FailureKind::IdentityRejected),
             Self::HandshakeRejected => Failure::new(FailureKind::HandshakeRejected),
             Self::InvalidResponse => Failure::new(FailureKind::InvalidResponse),
@@ -114,7 +140,7 @@ impl ErrorPreviewState {
     }
 }
 
-/// A preview state name is not one of `today`, `today-details`, `today-hover` or `today-full-day`.
+/// A preview state name does not identify a Today or error fixture.
 #[derive(Debug, Clone, PartialEq, Eq, Snafu)]
 #[snafu(display(
     "unknown preview state {name:?}; expected a Today or error-screen state from the mockups README"
@@ -129,6 +155,25 @@ impl FromStr for PreviewState {
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
             "today" => Ok(Self::Today),
+            "today-app-details" => Ok(Self::TodayAppDetails),
+            "loading" => Ok(Self::TodayData(TodayPreviewState::Loading)),
+            "empty-today" => Ok(Self::TodayData(TodayPreviewState::EmptyToday)),
+            "empty-past" => Ok(Self::TodayData(TodayPreviewState::EmptyPast)),
+            "stopped-paused" => Ok(Self::TodayData(TodayPreviewState::Paused)),
+            "stopped-persistence-failed" => {
+                Ok(Self::TodayData(TodayPreviewState::PersistenceFailed))
+            }
+            "query-failed" => Ok(Self::TodayData(TodayPreviewState::QueryFailed)),
+            "date-picker" => Ok(Self::TodayData(TodayPreviewState::DatePicker)),
+            "today-nav" => Ok(Self::TodayData(TodayPreviewState::TodayNav)),
+            "core-not-running-starting-expanded" => Ok(Self::Error(
+                ErrorPreviewState::CoreNotRunningStartingExpanded,
+            )),
+            "core-not-running-expanded" => {
+                Ok(Self::Error(ErrorPreviewState::CoreNotRunningExpanded))
+            }
+            "connect-failed-expanded" => Ok(Self::Error(ErrorPreviewState::ConnectFailedExpanded)),
+            "other-session-expanded" => Ok(Self::Error(ErrorPreviewState::OtherSessionExpanded)),
             "today-details" => Ok(Self::TodayDetails),
             "today-hover" => Ok(Self::TodayHover),
             "today-full-day" => Ok(Self::TodayFullDay),
@@ -326,16 +371,28 @@ impl PreviewState {
     const fn range(self) -> RangeChoice {
         match self {
             Self::TodayFullDay => RangeChoice::FullDay,
-            Self::Today | Self::TodayDetails | Self::TodayHover | Self::Error(_) => {
-                RangeChoice::Activity
-            }
+            Self::Today
+            | Self::TodayDetails
+            | Self::TodayAppDetails
+            | Self::TodayData(_)
+            | Self::TodayHover
+            | Self::Error(_) => RangeChoice::Activity,
         }
     }
 
     /// The details subject and hovered segment this state opens on the sample day.
     fn initial_view(self, sample: &SampleDay) -> InitialView {
         match self {
-            Self::Today | Self::TodayFullDay | Self::Error(_) => InitialView::default(),
+            Self::Today | Self::TodayFullDay | Self::TodayData(_) | Self::Error(_) => {
+                InitialView::default()
+            }
+            Self::TodayAppDetails => InitialView {
+                details: sample
+                    .day
+                    .segment(sample.details_segment)
+                    .map(|segment| DetailsSubject::App(segment.app)),
+                hover: None,
+            },
             Self::TodayDetails => InitialView {
                 details: Some(DetailsSubject::Segment(sample.details_segment)),
                 hover: None,
@@ -384,10 +441,7 @@ impl PreviewOptions {
                     PreviewState::Error(state) => {
                         self.open_error_window(state, init.text_scale, cx)
                     }
-                    PreviewState::Today
-                    | PreviewState::TodayDetails
-                    | PreviewState::TodayHover
-                    | PreviewState::TodayFullDay => self.open_window(init, initial.hover, cx),
+                    _ => self.open_window(init, initial.hover, cx),
                 }
             },
         )
@@ -425,7 +479,20 @@ impl PreviewOptions {
                         formatter,
                         scale.current(),
                     );
-                    if state == ErrorPreviewState::CoreNotRunningStarting {
+                    if matches!(
+                        state,
+                        ErrorPreviewState::CoreNotRunningExpanded
+                            | ErrorPreviewState::ConnectFailedExpanded
+                            | ErrorPreviewState::OtherSessionExpanded
+                            | ErrorPreviewState::CoreNotRunningStartingExpanded
+                    ) {
+                        screen.expand_preview_details();
+                    }
+                    if matches!(
+                        state,
+                        ErrorPreviewState::CoreNotRunningStarting
+                            | ErrorPreviewState::CoreNotRunningStartingExpanded
+                    ) {
                         screen.set_activity(
                             super::failure_screen::RecoveryActivity::StartingCore,
                             cx,
@@ -491,6 +558,7 @@ impl PreviewOptions {
             self.appearance.observe(window, cx);
             cx.new(|cx| {
                 let mut shell = AppShell::new(init, window, cx);
+                shell.configure_preview(self.state);
                 if let Some(segment) = hover {
                     shell.show_tooltip(segment, HOVER_POSITION);
                 }
@@ -562,6 +630,10 @@ mod tests {
             "handshake-rejected",
             "invalid-response",
             "interface-unavailable",
+            "core-not-running-expanded",
+            "connect-failed-expanded",
+            "other-session-expanded",
+            "core-not-running-starting-expanded",
         ];
         assert_eq!(names.len(), ErrorPreviewState::VARIANTS.len());
         for (name, &state) in names.into_iter().zip(ErrorPreviewState::VARIANTS) {
@@ -600,6 +672,46 @@ mod tests {
                 details: None,
                 hover: Some(sample.hover_segment),
             }
+        );
+    }
+
+    #[test]
+    fn data_states_and_application_details_are_typed_fixtures() {
+        let states = [
+            ("loading", TodayPreviewState::Loading),
+            ("empty-today", TodayPreviewState::EmptyToday),
+            ("empty-past", TodayPreviewState::EmptyPast),
+            ("stopped-paused", TodayPreviewState::Paused),
+            (
+                "stopped-persistence-failed",
+                TodayPreviewState::PersistenceFailed,
+            ),
+            ("query-failed", TodayPreviewState::QueryFailed),
+            ("date-picker", TodayPreviewState::DatePicker),
+            ("today-nav", TodayPreviewState::TodayNav),
+        ];
+        let sample = SampleDay::new();
+        for (name, state) in states {
+            assert_eq!(
+                name.parse::<PreviewState>(),
+                Ok(PreviewState::TodayData(state))
+            );
+            assert_eq!(
+                PreviewState::TodayData(state).initial_view(&sample),
+                InitialView::default()
+            );
+        }
+        let selected = sample
+            .day
+            .segment(sample.details_segment)
+            .expect("details sample segment");
+        assert_eq!(
+            "today-app-details".parse::<PreviewState>(),
+            Ok(PreviewState::TodayAppDetails)
+        );
+        assert_eq!(
+            PreviewState::TodayAppDetails.initial_view(&sample).details,
+            Some(DetailsSubject::App(selected.app))
         );
     }
 

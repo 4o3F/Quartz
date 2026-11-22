@@ -1308,6 +1308,51 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
         let effective = channel.commands.take_settings_change().expect("committed prewarm notification");
         status.apply_ui_settings(effective, |_| {});
         assert_eq!(status.ui_settings().prewarm, prewarm.ui.prewarm);
+        let quartz_protocol::Envelope::Event(event) = subscriber.receive().await else {
+            panic!("state push after prewarm update");
+        };
+        let mut previous_state: quartz_protocol::StateSnapshot =
+            serde_json::from_value(event.body).expect("prewarm state");
+        assert_eq!(previous_state.ui_language, UiLanguage::English);
+        for (request_id, preference, expected) in [
+            (
+                8,
+                quartz_protocol::UiLanguageSetting::ZhCn,
+                UiLanguage::SimplifiedChinese,
+            ),
+            (9, quartz_protocol::UiLanguageSetting::Auto, system.ui_language),
+        ] {
+            let update = quartz_protocol::SettingsSetRequest {
+                language: Some(preference),
+                ..Default::default()
+            };
+            cli.send(
+                request_id,
+                Op::SettingsSet,
+                serde_json::to_value(update).expect("CLI language update"),
+            ).await;
+            let response: SettingsResponse = serde_json::from_value(cli.success(request_id).await)
+                .expect("CLI language response");
+            assert_eq!(response.ui.language, preference);
+            assert_eq!(response.effective.ui_language, expected);
+            let effective = channel.commands.take_settings_change()
+                .expect("CLI language notification after commit");
+            let mut tray_language = None;
+            status.apply_ui_settings(effective, |language| tray_language = Some(language));
+            assert_eq!(tray_language, Some(expected));
+            let quartz_protocol::Envelope::Event(event) = subscriber.receive().await else {
+                panic!("state push after CLI language update");
+            };
+            assert_eq!(event.topic, quartz_protocol::Topic::State);
+            let state: quartz_protocol::StateSnapshot =
+                serde_json::from_value(event.body).expect("CLI language state");
+            previous_state.ui_language = expected;
+            assert_eq!(
+                state, previous_state,
+                "language updates preserve other state fields"
+            );
+            assert_eq!(channel.commands.take_settings_change(), None);
+        }
         cli.close().await;
         ui.close().await;
         subscriber.close().await;

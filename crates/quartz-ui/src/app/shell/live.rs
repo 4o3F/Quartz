@@ -48,6 +48,27 @@ pub(super) struct LivePage {
     timer: Option<Task<()>>,
 }
 impl AppShell {
+    pub(super) fn day_snapshot(&self) -> Option<&StateSnapshot> {
+        #[cfg(feature = "preview")]
+        if let Some(preview) = &self.preview {
+            return Some(&preview.snapshot);
+        }
+        self.live.as_ref().map(|live| &live.snapshot)
+    }
+    fn load_phase(&self) -> Option<LoadPhase> {
+        #[cfg(feature = "preview")]
+        if let Some(preview) = &self.preview {
+            return Some(preview.phase);
+        }
+        self.live.as_ref().map(|live| live.phase)
+    }
+    fn day_failure(&self) -> Option<&DayFailure> {
+        #[cfg(feature = "preview")]
+        if let Some(preview) = &self.preview {
+            return preview.failure.as_ref();
+        }
+        self.live.as_ref().and_then(|live| live.failure.as_ref())
+    }
     pub(super) fn clock_label(&self, time: TimeOfDay) -> String {
         let Some(local) = self.day.local_clock(time) else {
             return time.to_string();
@@ -323,11 +344,11 @@ impl AppShell {
         cx.notify();
     }
     pub(super) fn stop_bar(&self, ui: &Widgets<'_>, cx: &Context<Self>) -> Option<AnyElement> {
-        let live = self.live.as_ref()?;
-        if live.snapshot.recording {
+        let snapshot = self.day_snapshot()?;
+        if snapshot.recording {
             return None;
         }
-        let reason = live.snapshot.stop_reason?;
+        let reason = snapshot.stop_reason?;
         let message = match reason {
             StopReason::Starting => Msg::StopStarting,
             StopReason::PersistenceFailed => Msg::StopPersistence,
@@ -427,8 +448,7 @@ impl AppShell {
         frame: &Frame<'_>,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
-        let live = self.live.as_ref()?;
-        if let Some(error) = &live.failure {
+        if let Some(error) = self.day_failure() {
             return Some(
                 ui.card()
                     .flex()
@@ -475,11 +495,12 @@ impl AppShell {
                     .into_any_element(),
             );
         }
-        if live.phase == LoadPhase::Loading {
+        if self.load_phase() == Some(LoadPhase::Loading) {
             return Some(self.skeleton(ui, frame, cx));
         }
+        let snapshot = self.day_snapshot()?;
         if self.day.summary().active.is_zero() && self.day.pending_ranges().is_empty() {
-            let today = self.day.date() == live.snapshot.logical_date;
+            let today = self.day.date() == snapshot.logical_date;
             let mut inner = ui
                 .card()
                 .flex()
@@ -531,7 +552,7 @@ impl AppShell {
                             Msg::EmptyPastMessage
                         })),
                 );
-            if today && live.snapshot.recording {
+            if today && snapshot.recording {
                 inner = inner.child(
                     div()
                         .flex()

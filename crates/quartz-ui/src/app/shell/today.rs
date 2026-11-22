@@ -233,9 +233,8 @@ impl AppShell {
     fn render_date_bar(&self, ui: &Widgets<'_>, cx: &Context<Self>) -> impl IntoElement {
         let density = Density::Standard;
         let on_today = self
-            .live
-            .as_ref()
-            .is_none_or(|live| self.day.date() >= live.snapshot.logical_date);
+            .day_snapshot()
+            .is_none_or(|snapshot| self.day.date() >= snapshot.logical_date);
         div()
             .relative()
             .flex()

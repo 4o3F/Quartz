@@ -42,7 +42,7 @@ mod ui_state;
 
 use std::{path::PathBuf, process::ExitCode};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 #[cfg(windows)]
 use snafu::ResultExt;
 use snafu::Snafu;
@@ -187,10 +187,78 @@ impl std::fmt::Display for CliCommand {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum LanguageArg {
+    Auto,
+    #[value(name = "zh-CN")]
+    ZhCn,
+    En,
+}
+impl From<LanguageArg> for quartz_protocol::UiLanguageSetting {
+    fn from(value: LanguageArg) -> Self {
+        match value {
+            LanguageArg::Auto => Self::Auto,
+            LanguageArg::ZhCn => Self::ZhCn,
+            LanguageArg::En => Self::En,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum HourCycleArg {
+    Auto,
+    H12,
+    H24,
+}
+impl From<HourCycleArg> for quartz_protocol::HourCycleSetting {
+    fn from(value: HourCycleArg) -> Self {
+        match value {
+            HourCycleArg::Auto => Self::Auto,
+            HourCycleArg::H12 => Self::H12,
+            HourCycleArg::H24 => Self::H24,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum FirstDayOfWeekArg {
+    Auto,
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+impl From<FirstDayOfWeekArg> for quartz_protocol::FirstDayOfWeekSetting {
+    fn from(value: FirstDayOfWeekArg) -> Self {
+        match value {
+            FirstDayOfWeekArg::Auto => Self::Auto,
+            FirstDayOfWeekArg::Monday => Self::Monday,
+            FirstDayOfWeekArg::Tuesday => Self::Tuesday,
+            FirstDayOfWeekArg::Wednesday => Self::Wednesday,
+            FirstDayOfWeekArg::Thursday => Self::Thursday,
+            FirstDayOfWeekArg::Friday => Self::Friday,
+            FirstDayOfWeekArg::Saturday => Self::Saturday,
+            FirstDayOfWeekArg::Sunday => Self::Sunday,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 enum SettingsCommand {
     Get,
     Set {
+        /// UI language; auto follows the Windows preferred languages.
+        #[arg(long, value_enum)]
+        language: Option<LanguageArg>,
+        /// Clock format; auto follows Windows regional settings.
+        #[arg(long, value_enum)]
+        hour_cycle: Option<HourCycleArg>,
+        /// Calendar week start; auto follows Windows regional settings.
+        #[arg(long, value_enum)]
+        first_day_of_week: Option<FirstDayOfWeekArg>,
         #[arg(long, action = clap::ArgAction::Set)]
         prewarm_enabled: Option<bool>,
         #[arg(long, action = clap::ArgAction::Set)]
@@ -208,11 +276,17 @@ impl SettingsCommand {
         let response = match self {
             Self::Get => client.call(&quartz_protocol::SettingsGetRequest {})?,
             Self::Set {
+                language,
+                hour_cycle,
+                first_day_of_week,
                 prewarm_enabled,
                 resident_enabled,
                 prewarm_on_battery,
             } => {
                 let update = quartz_protocol::SettingsSetRequest {
+                    language: language.map(Into::into),
+                    hour_cycle: hour_cycle.map(Into::into),
+                    first_day_of_week: first_day_of_week.map(Into::into),
                     resident: resident_enabled.map(|enabled| quartz_protocol::ResidentUpdate {
                         enabled: Some(enabled.into()),
                     }),
@@ -220,7 +294,6 @@ impl SettingsCommand {
                         enabled: prewarm_enabled.map(Into::into),
                         on_battery: prewarm_on_battery.map(Into::into),
                     }),
-                    ..Default::default()
                 };
                 client.call(&update)?
             }
@@ -672,6 +745,149 @@ mod tests {
     }
 
     #[test]
+    fn locale_setting_flags_parse_into_protocol_preferences() {
+        use quartz_protocol::{FirstDayOfWeekSetting, HourCycleSetting, UiLanguageSetting};
+        for (value, expected) in [
+            ("auto", UiLanguageSetting::Auto),
+            ("zh-CN", UiLanguageSetting::ZhCn),
+            ("en", UiLanguageSetting::En),
+        ] {
+            let args = Args::try_parse_from(["quartz", "settings", "set", "--language", value])
+                .expect("supported language");
+            let Some(Command::Cli(CliCommand::Settings {
+                command: SettingsCommand::Set { language, .. },
+            })) = args.command
+            else {
+                panic!("expected settings set");
+            };
+            assert_eq!(
+                language.map(UiLanguageSetting::from),
+                Some(expected),
+                "{value}"
+            );
+        }
+        for (value, expected) in [
+            ("auto", HourCycleSetting::Auto),
+            ("h12", HourCycleSetting::H12),
+            ("h24", HourCycleSetting::H24),
+        ] {
+            let args = Args::try_parse_from(["quartz", "settings", "set", "--hour-cycle", value])
+                .expect("supported hour cycle");
+            let Some(Command::Cli(CliCommand::Settings {
+                command: SettingsCommand::Set { hour_cycle, .. },
+            })) = args.command
+            else {
+                panic!("expected settings set");
+            };
+            assert_eq!(
+                hour_cycle.map(HourCycleSetting::from),
+                Some(expected),
+                "{value}"
+            );
+        }
+        for (value, expected) in [
+            ("auto", FirstDayOfWeekSetting::Auto),
+            ("monday", FirstDayOfWeekSetting::Monday),
+            ("tuesday", FirstDayOfWeekSetting::Tuesday),
+            ("wednesday", FirstDayOfWeekSetting::Wednesday),
+            ("thursday", FirstDayOfWeekSetting::Thursday),
+            ("friday", FirstDayOfWeekSetting::Friday),
+            ("saturday", FirstDayOfWeekSetting::Saturday),
+            ("sunday", FirstDayOfWeekSetting::Sunday),
+        ] {
+            let args =
+                Args::try_parse_from(["quartz", "settings", "set", "--first-day-of-week", value])
+                    .expect("supported weekday");
+            let Some(Command::Cli(CliCommand::Settings {
+                command:
+                    SettingsCommand::Set {
+                        first_day_of_week, ..
+                    },
+            })) = args.command
+            else {
+                panic!("expected settings set");
+            };
+            assert_eq!(
+                first_day_of_week.map(FirstDayOfWeekSetting::from),
+                Some(expected),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn locale_settings_combine_with_lifecycle_flags_and_preserve_omitted_fields() {
+        let args = Args::try_parse_from([
+            "quartz",
+            "settings",
+            "set",
+            "--language",
+            "zh-CN",
+            "--hour-cycle",
+            "h12",
+            "--first-day-of-week",
+            "sunday",
+            "--resident-enabled",
+            "false",
+            "--prewarm-enabled",
+            "true",
+        ])
+        .expect("combined UI preferences");
+        assert_eq!(
+            args.command,
+            Some(Command::Cli(CliCommand::Settings {
+                command: SettingsCommand::Set {
+                    language: Some(LanguageArg::ZhCn),
+                    hour_cycle: Some(HourCycleArg::H12),
+                    first_day_of_week: Some(FirstDayOfWeekArg::Sunday),
+                    resident_enabled: Some(false),
+                    prewarm_enabled: Some(true),
+                    prewarm_on_battery: None,
+                },
+            }))
+        );
+        let args = Args::try_parse_from(["quartz", "settings", "set", "--language", "auto"])
+            .expect("language-only update");
+        assert_eq!(
+            args.command,
+            Some(Command::Cli(CliCommand::Settings {
+                command: SettingsCommand::Set {
+                    language: Some(LanguageArg::Auto),
+                    hour_cycle: None,
+                    first_day_of_week: None,
+                    resident_enabled: None,
+                    prewarm_enabled: None,
+                    prewarm_on_battery: None,
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn locale_setting_flags_reject_unsupported_or_missing_values() {
+        for (flag, value) in [
+            ("--language", "en-XA"),
+            ("--language", "fr"),
+            ("--language", "zh-cn"),
+            ("--hour-cycle", "24"),
+            ("--hour-cycle", "h23"),
+            ("--first-day-of-week", "1"),
+            ("--first-day-of-week", "mon"),
+        ] {
+            assert!(
+                Args::try_parse_from(["quartz", "settings", "set", flag, value]).is_err(),
+                "{flag} {value}"
+            );
+        }
+        for flag in ["--language", "--hour-cycle", "--first-day-of-week"] {
+            assert!(
+                Args::try_parse_from(["quartz", "settings", "set", flag]).is_err(),
+                "{flag} requires a value"
+            );
+        }
+    }
+
+    #[test]
     fn resident_setting_flag_parses_without_running_the_core() {
         let args =
             Args::try_parse_from(["quartz", "settings", "set", "--resident-enabled", "false"])
@@ -706,6 +922,9 @@ mod tests {
             parsed.command,
             Some(Command::Cli(CliCommand::Settings {
                 command: SettingsCommand::Set {
+                    language: None,
+                    hour_cycle: None,
+                    first_day_of_week: None,
                     resident_enabled: None,
                     prewarm_enabled: Some(false),
                     prewarm_on_battery: Some(true)

@@ -7,6 +7,8 @@ mod live;
 mod live_details;
 mod nav;
 mod pending;
+#[cfg(feature = "preview")]
+mod preview;
 mod ranking;
 mod stat_grid;
 mod timeline;
@@ -249,6 +251,8 @@ impl OpenDetails {
 #[derive(Debug)]
 pub(crate) struct AppShell {
     live: Option<live::LivePage>,
+    #[cfg(feature = "preview")]
+    preview: Option<preview::PreviewDay>,
     calendar: Option<calendar::CalendarMonth>,
     day: Day,
     formatter: Formatter,
@@ -306,6 +310,8 @@ impl AppShell {
             .and_then(|subject| open_details(&init.day, subject));
         Self {
             live: None,
+            #[cfg(feature = "preview")]
+            preview: None,
             calendar: None,
             day: init.day,
             formatter: init.formatter,

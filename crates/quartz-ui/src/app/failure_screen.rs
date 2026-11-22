@@ -64,6 +64,10 @@ impl FailureScreen {
             text_scale,
         }
     }
+    #[cfg(feature = "preview")]
+    pub(super) fn expand_preview_details(&mut self) {
+        self.expansion = DetailsExpansion::Expanded;
+    }
     pub(crate) fn set_failure(&mut self, failure: Option<Failure>, cx: &mut Context<Self>) {
         self.expansion = failure
             .as_ref()

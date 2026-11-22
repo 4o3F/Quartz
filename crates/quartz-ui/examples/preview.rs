@@ -17,7 +17,7 @@
 //! Build and capture the appearance/language matrix without starting the core (run in a Windows terminal):
 //! ```text
 //! cargo build -p quartz-ui --example preview --features preview --target-dir target/windows
-//! deno run --frozen --allow-read --allow-write=target/m3a-screenshots --allow-env=QUARTZ_PREVIEW_THEME,QUARTZ_PREVIEW_STATE,QUARTZ_PREVIEW_LANG,QUARTZ_PREVIEW_OFFSCREEN,QUARTZ_PREVIEW_SIZE,QUARTZ_PREVIEW_TEXT_SCALE,QUARTZ_PREVIEW_MICA_FALLBACK,QUARTZ_PREVIEW_HIGH_CONTRAST,QUARTZ_PREVIEW_DIAGNOSTICS --allow-ffi scripts/preview-screenshots.ts --mica-wallpaper=reference
+//! deno task preview-screenshots --mica-wallpaper=reference
 //! ```
 //! The final capture activates the preview and reads desktop pixels. `--mica-wallpaper=reference` temporarily applies a blue wallpaper for that capture and restores the original wallpaper before returning. `--mica-wallpaper=current` keeps the current wallpaper. Earlier captures use the off-screen window helper.
 //!

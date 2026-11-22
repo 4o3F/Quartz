@@ -35,7 +35,7 @@ pub(super) struct CalendarMonth {
     first: Date,
 }
 impl CalendarMonth {
-    fn new(selected: Date) -> Self {
+    pub(super) fn new(selected: Date) -> Self {
         Self {
             first: selected.first_of_month(),
         }
@@ -69,9 +69,8 @@ impl CalendarMonth {
 impl AppShell {
     pub(super) fn toggle_calendar(&mut self, cx: &mut Context<Self>) {
         if self
-            .live
-            .as_ref()
-            .and_then(|live| live.snapshot.locale)
+            .day_snapshot()
+            .and_then(|snapshot| snapshot.locale)
             .is_none()
         {
             return;
@@ -93,9 +92,8 @@ impl AppShell {
         };
         if let Ok(date) = month.first.checked_add(span)
             && self
-                .live
-                .as_ref()
-                .is_some_and(|live| date <= live.snapshot.logical_date.first_of_month())
+                .day_snapshot()
+                .is_some_and(|snapshot| date <= snapshot.logical_date.first_of_month())
         {
             self.calendar = Some(CalendarMonth::new(date));
             cx.notify();
@@ -107,8 +105,8 @@ impl AppShell {
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
         let month = self.calendar?;
-        let live = self.live.as_ref()?;
-        let locale = live.snapshot.locale?;
+        let snapshot = self.day_snapshot()?;
+        let locale = snapshot.locale?;
         let first = match locale.first_day_of_week {
             quartz_protocol::Weekday::Monday => Weekday::Monday,
             quartz_protocol::Weekday::Tuesday => Weekday::Tuesday,
@@ -118,7 +116,7 @@ impl AppShell {
             quartz_protocol::Weekday::Saturday => Weekday::Saturday,
             quartz_protocol::Weekday::Sunday => Weekday::Sunday,
         };
-        let today = live.snapshot.logical_date;
+        let today = snapshot.logical_date;
         let selected = self.day.date();
         let next = if month.first >= today.first_of_month() {
             ui.disabled_button(

@@ -6,7 +6,32 @@ import { Windows } from "./windows.ts";
 const sleep = (milliseconds: number) =>
   new Promise<void>((done) => setTimeout(done, milliseconds));
 // 07 section 2: default window size; 11 section 9.3: appearance and language matrix.
-const previewSize = "1280x800";
+export const languages = ["zh-CN", "en", "en-XA"] as const;
+export const scenarios = [
+  "today",
+  "loading",
+  "empty-today",
+  "empty-past",
+  "stopped-paused",
+  "stopped-persistence-failed",
+  "query-failed",
+  "date-picker",
+  "today-nav",
+  "today-details",
+  "today-app-details",
+  "core-not-running",
+  "core-not-running-starting",
+  "core-start-failed",
+  "connect-failed",
+  "migration-failed",
+  "newer-database",
+  "version-mismatch",
+  "other-session",
+  "core-not-running-expanded",
+  "connect-failed-expanded",
+  "other-session-expanded",
+  "core-not-running-starting-expanded",
+] as const;
 const closeMessage = 0x10;
 const windowDeadlineMs = 30000;
 const settleMs = 1200;
@@ -114,7 +139,7 @@ async function main(): Promise<void> {
   if (!exe.toLowerCase().endsWith("\\preview.exe")) {
     throw new Error("Use the mock-data preview.exe");
   }
-  const destination = resolve("target/m3a-screenshots");
+  const destination = resolve("target/m3-screenshots");
   await Deno.mkdir(destination, { recursive: true });
   const windows = new Windows();
   const results: {
@@ -137,13 +162,21 @@ async function main(): Promise<void> {
     "DIAGNOSTICS",
   ].map((name) => `QUARTZ_PREVIEW_${name}`);
   const previous = new Map(variables.map((name) => [name, Deno.env.get(name)]));
-  const capture = async (shot: Shot, state: string, language: string) => {
+  const capture = async (
+    shot: Shot,
+    state: string,
+    language: string,
+    minimum = false,
+  ) => {
+    const width = minimum ? 640 : 1280;
+    const height = minimum ? 480 : 800;
+    await Deno.mkdir(join(destination, language), { recursive: true });
     const settings: Record<string, string> = {
       THEME: shot.theme,
       STATE: state,
       LANG: language,
       OFFSCREEN: shot.placement,
-      SIZE: previewSize,
+      SIZE: `${width}x${height}`,
       TEXT_SCALE: "1",
       MICA_FALLBACK: shot.fallback,
       HIGH_CONTRAST: shot.contrast,
@@ -175,10 +208,12 @@ async function main(): Promise<void> {
         windows.activate(window);
       }
       await sleep(settleMs);
-      const file = `${shot.name}-${state}-${language}-1280x800.png`;
+      const file = `${language}/${state}${
+        minimum ? "-640x480" : ""
+      }-${shot.name}.png`;
       await windows.saveWindow(window, join(destination, file), mode, {
-        width: 1280,
-        height: 800,
+        width,
+        height,
       });
       const observation = {
         file,
@@ -208,9 +243,16 @@ async function main(): Promise<void> {
   };
   try {
     for (const variant of variants) {
-      for (const state of ["today", "today-details"]) {
-        for (const language of ["zh-CN", "en"]) {
+      for (const state of scenarios) {
+        for (const language of languages) {
           await capture(variant, state, language);
+        }
+      }
+    }
+    for (const variant of variants) {
+      for (const language of languages) {
+        for (const state of ["today", "migration-failed"]) {
+          await capture(variant, state, language, true);
         }
       }
     }
@@ -231,6 +273,17 @@ async function main(): Promise<void> {
       await Deno.writeFile(fixture, referenceWallpaper());
       await windows.withDesktopWallpaper(fixture, captureMica);
     } else await captureMica();
+    await Deno.writeTextFile(
+      join(destination, "index.md"),
+      "# M3 screenshot review\n\n" +
+        languages.map((language) =>
+          `## ${language}\n\n` +
+          results.filter((result) => result.file.startsWith(`${language}/`))
+            .map((result) =>
+              `### ${result.file}\n\n![${result.file}](${result.file})\n`
+            ).join("\n")
+        ).join("\n"),
+    );
     await Deno.writeTextFile(
       join(destination, "observations.json"),
       JSON.stringify(results, null, 2) + "\n",
