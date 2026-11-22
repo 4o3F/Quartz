@@ -58,6 +58,26 @@ pub(crate) mod test_support;
 mod tests {
     use super::*;
     #[test]
+    fn detail_queries_round_trip_through_database_dispatch() {
+        let fixture = crate::store::query::test_support::QueryFixture::new(4);
+        let start = fixture.start;
+        let database = test_support::TestDatabase::with_fixture(fixture);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let response = database.port.call(QueryRequest::SegmentDetail(quartz_protocol::QuerySegmentDetailRequest {
+                start_utc_ms: start, end_utc_ms: start + 4000, app: None, window_instance: None, cursor: None,
+            })).await.expect("segment dispatcher response");
+            assert!(matches!(response, QueryResponse::SegmentDetail(page) if page.intervals.len() == 4));
+            let response = database.port.call(QueryRequest::EntityDetail(quartz_protocol::QueryEntityDetailRequest {
+                entity: quartz_protocol::DetailEntity::App { id: quartz_protocol::ApplicationId(1) },
+                local_date: crate::store::query::test_support::FIXTURE_DATE.parse().expect("date"), cursor: None,
+            })).await.expect("entity dispatcher response");
+            assert!(matches!(response, QueryResponse::EntityDetail(page) if page.daily.as_ref().is_some_and(|daily| daily.len() == quartz_protocol::ENTITY_DETAIL_DAYS)));
+        });
+    }
+    #[test]
     fn full_query_channel_reports_busy_without_waiting_for_database() {
         let channel = QueryChannel::new();
         let request = QueryRequest::Day(quartz_protocol::QueryDayRequest {

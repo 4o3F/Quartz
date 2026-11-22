@@ -96,6 +96,28 @@ impl SegmentFacts {
             std::sync::Arc::make_mut(category).name = Some(name.into());
         }
     }
+    pub(super) fn captured_duration_within(
+        &self,
+        segment: &DerivedSegment,
+        range: QueryRange,
+    ) -> i64 {
+        self.foreground(segment)
+            .expect("captured application activity has a foreground fact")
+            .span
+            .duration_within(range)
+    }
+    pub(super) fn rule_details(
+        &self,
+        segment: &DerivedSegment,
+    ) -> Option<quartz_protocol::EntityClassificationRule> {
+        match &segment.category_source {
+            CategorySource::Rule(id) => Some(
+                self.classifier
+                    .rule_details(id, self.category(segment).clone()),
+            ),
+            CategorySource::Annotation(_) | CategorySource::Unclassified => None,
+        }
+    }
     fn foreground(&self, segment: &DerivedSegment) -> Option<&Foreground> {
         segment
             .foreground

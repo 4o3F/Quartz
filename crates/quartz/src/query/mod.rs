@@ -2,6 +2,7 @@
 
 pub(crate) mod calendar;
 pub(crate) mod classification;
+mod details;
 #[cfg(any(windows, test))]
 pub(crate) mod dispatch;
 pub(crate) mod input;
@@ -17,13 +18,16 @@ pub(crate) mod versions;
 
 use crate::store::{ReadOnlyStore, query::ReadSnapshot, query_error::ReadQueryError};
 use calendar::DayCalendar;
+use details::{EntityCalendar, EntityDetailAccumulator, SegmentDetailProjection};
 use input::QueryRange;
 use paging::{PageBudget, PagePosition};
 use pipeline::{DayAccumulator, DerivedSegment, Pipeline, QUERY_BATCH_ROWS, TimelineProjection};
 use quartz_protocol::{
-    CursorQuery, ErrorKind, QueryCursor, QueryDayRequest, QueryDayResponse, QueryFactsRequest,
-    QueryFactsResponse, QueryPendingAwayRequest, QueryPendingAwayResponse, QueryTimelineRequest,
-    QueryTimelineResponse, QueryVersions,
+    CursorQuery, ErrorKind, QueryCursor, QueryDayRequest, QueryDayResponse,
+    QueryEntityDetailRequest, QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse,
+    QueryPendingAwayRequest, QueryPendingAwayResponse, QuerySegmentDetailRequest,
+    QuerySegmentDetailResponse, QueryTimelineRequest, QueryTimelineResponse, QueryVersions,
+    SEGMENT_DETAIL_MAX_SPAN_MS,
 };
 use serde::Serialize;
 use timing::{QueryStage, QueryTimer, QueryTimings};
@@ -37,6 +41,8 @@ const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS
 pub(crate) enum RunQueryError {
     #[snafu(display("invalid query range"))]
     InvalidRange,
+    #[snafu(display("segment detail range exceeds its bound or has invalid endpoints"))]
+    InvalidDetailRange,
     #[snafu(display("invalid query cursor"))]
     InvalidCursor,
     #[snafu(display("query input versions changed"))]
@@ -87,7 +93,7 @@ impl RunQueryError {
     pub(crate) fn kind(&self) -> ErrorKind {
         match self {
             Self::InvalidRange | Self::Calendar { .. } => ErrorKind::InvalidRange,
-            Self::InvalidCursor => ErrorKind::BadRequest,
+            Self::InvalidCursor | Self::InvalidDetailRange => ErrorKind::BadRequest,
             Self::StaleCursor => ErrorKind::StaleCursor,
             _ => ErrorKind::Internal,
         }
@@ -99,6 +105,8 @@ pub(crate) enum QueryRequest {
     Day(QueryDayRequest),
     PendingAway(QueryPendingAwayRequest),
     Timeline(QueryTimelineRequest),
+    SegmentDetail(QuerySegmentDetailRequest),
+    EntityDetail(QueryEntityDetailRequest),
 }
 impl QueryRequest {
     #[cfg(any(windows, test))]
@@ -111,6 +119,12 @@ impl QueryRequest {
             quartz_protocol::Op::QueryDay => serde_json::from_value(body).map(Self::Day),
             quartz_protocol::Op::QueryPendingAway => {
                 serde_json::from_value(body).map(Self::PendingAway)
+            }
+            quartz_protocol::Op::QuerySegmentDetail => {
+                serde_json::from_value(body).map(Self::SegmentDetail)
+            }
+            quartz_protocol::Op::QueryEntityDetail => {
+                serde_json::from_value(body).map(Self::EntityDetail)
             }
             quartz_protocol::Op::QueryTimeline => serde_json::from_value(body).map(Self::Timeline),
             _ => Err(<serde_json::Error as serde::de::Error>::custom(
@@ -125,6 +139,8 @@ impl QueryRequest {
             Self::Day(day) => CursorQuery::from(day),
             Self::PendingAway(away) => CursorQuery::from(away),
             Self::Timeline(timeline) => CursorQuery::from(timeline),
+            Self::SegmentDetail(detail) => CursorQuery::from(detail),
+            Self::EntityDetail(detail) => CursorQuery::from(detail),
         }
     }
 }
@@ -135,6 +151,8 @@ pub(crate) enum QueryResponse {
     Day(QueryDayResponse),
     PendingAway(QueryPendingAwayResponse),
     Timeline(QueryTimelineResponse),
+    SegmentDetail(QuerySegmentDetailResponse),
+    EntityDetail(QueryEntityDetailResponse),
 }
 #[derive(Debug)]
 enum Stage {
@@ -153,6 +171,8 @@ enum Aggregation {
     Day(DayAccumulator),
     PendingAway(pending_away::PendingAwayAccumulator),
     Timeline(TimelineProjection),
+    SegmentDetail(SegmentDetailProjection),
+    EntityDetail(EntityDetailAccumulator),
 }
 #[derive(Debug)]
 pub(crate) struct QueryJob {
@@ -163,6 +183,7 @@ pub(crate) struct QueryJob {
     parameters: CursorQuery,
     position: PagePosition,
     calendar: Option<DayCalendar>,
+    entity_calendar: Option<EntityCalendar>,
     stage: Stage,
 }
 impl QueryJob {
@@ -183,6 +204,7 @@ impl QueryJob {
                 parameters: prepared.parameters,
                 position: prepared.position,
                 calendar: prepared.calendar,
+                entity_calendar: prepared.entity_calendar,
                 stage: if matches!(request, QueryRequest::Facts(_)) {
                     Stage::Facts(Vec::new())
                 } else {
@@ -215,7 +237,16 @@ impl QueryJob {
                 away.local_date,
                 settings.day_start_offset,
             )?),
-            QueryRequest::Timeline(_) => None,
+            QueryRequest::Timeline(_)
+            | QueryRequest::SegmentDetail(_)
+            | QueryRequest::EntityDetail(_) => None,
+        };
+        let entity_calendar = match request {
+            QueryRequest::EntityDetail(detail) => Some(EntityCalendar::new(
+                detail.local_date,
+                settings.day_start_offset,
+            )?),
+            _ => None,
         };
         let range = match request {
             QueryRequest::Day(_) | QueryRequest::PendingAway(_) => {
@@ -235,6 +266,24 @@ impl QueryJob {
                         .to_zoned_datetime(zone)?
                         .timestamp()
                         .as_millisecond(),
+                }
+            }
+            QueryRequest::EntityDetail(_) => {
+                entity_calendar.as_ref().expect("entity calendar").range
+            }
+            QueryRequest::SegmentDetail(detail) => {
+                detail
+                    .end_utc_ms
+                    .checked_sub(detail.start_utc_ms)
+                    .filter(|duration| (1..=SEGMENT_DETAIL_MAX_SPAN_MS).contains(duration))
+                    .ok_or(RunQueryError::InvalidDetailRange)?;
+                jiff::Timestamp::from_millisecond(detail.start_utc_ms)
+                    .map_err(|_| RunQueryError::InvalidDetailRange)?;
+                jiff::Timestamp::from_millisecond(detail.end_utc_ms)
+                    .map_err(|_| RunQueryError::InvalidDetailRange)?;
+                QueryRange {
+                    start: detail.start_utc_ms,
+                    end: detail.end_utc_ms,
                 }
             }
             QueryRequest::Timeline(timeline) => QueryRange {
@@ -268,6 +317,8 @@ impl QueryJob {
             QueryRequest::Day(day) => day.cursor.as_ref(),
             QueryRequest::PendingAway(away) => away.cursor.as_ref(),
             QueryRequest::Timeline(timeline) => timeline.cursor.as_ref(),
+            QueryRequest::SegmentDetail(detail) => detail.cursor.as_ref(),
+            QueryRequest::EntityDetail(detail) => detail.cursor.as_ref(),
         };
         let position = if matches!(request, QueryRequest::Facts(_)) {
             // Raw run endpoints and timed policies are included after the staged scan.
@@ -283,6 +334,7 @@ impl QueryJob {
             parameters,
             position,
             calendar,
+            entity_calendar,
         })
     }
     /// The shell services capture writes between these bounded read/sweep turns.
@@ -376,6 +428,17 @@ impl QueryJob {
                     QueryRequest::PendingAway(_) => {
                         Aggregation::PendingAway(pending_away::PendingAwayAccumulator::default())
                     }
+                    QueryRequest::SegmentDetail(_) => {
+                        Aggregation::SegmentDetail(SegmentDetailProjection::default())
+                    }
+                    QueryRequest::EntityDetail(detail) => {
+                        Aggregation::EntityDetail(EntityDetailAccumulator::new(
+                            detail.entity,
+                            self.entity_calendar
+                                .take()
+                                .expect("entity calendar retained"),
+                        ))
+                    }
                     QueryRequest::Timeline(_) => {
                         Aggregation::Timeline(TimelineProjection::default())
                     }
@@ -398,6 +461,13 @@ impl QueryJob {
                         match &mut output {
                             Aggregation::Day(day) => day.push(&segment, &facts),
                             Aggregation::PendingAway(away) => away.push(&segment),
+                            Aggregation::SegmentDetail(detail) => {
+                                let QueryRequest::SegmentDetail(request) = &self.request else {
+                                    unreachable!("segment detail aggregation")
+                                };
+                                detail.push(&segment, &facts, request);
+                            }
+                            Aggregation::EntityDetail(detail) => detail.push(&segment, &facts),
                             Aggregation::Timeline(timeline) => {
                                 let QueryRequest::Timeline(request) = &self.request else {
                                     unreachable!("timeline aggregation")
@@ -449,6 +519,16 @@ impl QueryJob {
                     next_cursor: None,
                 })
             }
+            Aggregation::SegmentDetail(detail) => {
+                QueryResponse::SegmentDetail(QuerySegmentDetailResponse {
+                    intervals: detail.finish(),
+                    versions: self.versions.clone(),
+                    next_cursor: None,
+                })
+            }
+            Aggregation::EntityDetail(detail) => {
+                QueryResponse::EntityDetail(detail.finish(self.versions.clone(), self.position))
+            }
             Aggregation::Timeline(projection) => QueryResponse::Timeline(QueryTimelineResponse {
                 segments: projection.into_segments(),
                 versions: self.versions.clone(),
@@ -480,6 +560,22 @@ impl QueryJob {
                 let page = PageBudget::new(away)?.page(items, self.position)?;
                 away.ranges = page.items;
                 away.next_cursor = page.next.map(|position| {
+                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
+                });
+            }
+            QueryResponse::SegmentDetail(detail) => {
+                let items = std::mem::take(&mut detail.intervals);
+                let page = PageBudget::new(detail)?.page(items, self.position)?;
+                detail.intervals = page.items;
+                detail.next_cursor = page.next.map(|position| {
+                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
+                });
+            }
+            QueryResponse::EntityDetail(detail) => {
+                let items = std::mem::take(&mut detail.rules);
+                let page = PageBudget::new(detail)?.page(items, self.position)?;
+                detail.rules = page.items;
+                detail.next_cursor = page.next.map(|position| {
                     QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
                 });
             }
@@ -527,4 +623,5 @@ struct PreparedQuery {
     parameters: CursorQuery,
     position: PagePosition,
     calendar: Option<DayCalendar>,
+    entity_calendar: Option<EntityCalendar>,
 }

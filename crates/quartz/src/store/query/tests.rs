@@ -1080,3 +1080,372 @@ fn facts_cursor_tracks_full_run_endpoints_and_timed_policies() {
         Err(RunQueryError::StaleCursor)
     ));
 }
+
+fn segment_request(fixture: &QueryFixture) -> quartz_protocol::QuerySegmentDetailRequest {
+    quartz_protocol::QuerySegmentDetailRequest {
+        start_utc_ms: fixture.start,
+        end_utc_ms: fixture.start + fixture.count * 1000,
+        app: None,
+        window_instance: None,
+        cursor: None,
+    }
+}
+fn segment_page(
+    fixture: &mut QueryFixture,
+    request: quartz_protocol::QuerySegmentDetailRequest,
+) -> quartz_protocol::QuerySegmentDetailResponse {
+    let QueryResponse::SegmentDetail(page) = fixture
+        .run(QueryRequest::SegmentDetail(request))
+        .expect("segment detail")
+    else {
+        panic!("segment detail response")
+    };
+    page
+}
+fn entity_request(id: i64) -> quartz_protocol::QueryEntityDetailRequest {
+    quartz_protocol::QueryEntityDetailRequest {
+        entity: quartz_protocol::DetailEntity::App {
+            id: quartz_protocol::ApplicationId(id),
+        },
+        local_date: FIXTURE_DATE.parse().expect("date"),
+        cursor: None,
+    }
+}
+fn entity_page(
+    fixture: &mut QueryFixture,
+    request: quartz_protocol::QueryEntityDetailRequest,
+) -> quartz_protocol::QueryEntityDetailResponse {
+    let QueryResponse::EntityDetail(page) = fixture
+        .run(QueryRequest::EntityDetail(request))
+        .expect("entity detail")
+    else {
+        panic!("entity detail response")
+    };
+    page
+}
+#[test]
+fn segment_detail_unmerges_clips_filters_and_preserves_capture_privacy() {
+    let mut fixture = QueryFixture::new(3);
+    diesel::update(intervals::table)
+        .set(intervals::app_id.eq(Some(1_i64)))
+        .execute(&mut fixture.store.writer)
+        .expect("one app");
+    for id in 1..=2_i64 {
+        diesel::insert_into(crate::store::schema::window_instances::table)
+            .values(crate::store::rows::WindowInstancesRow {
+                id: Some(id),
+                run_id: 1,
+                app_id: 1,
+                pid: 1,
+                process_created_utc_ms: None,
+                hwnd: id,
+                generation: 1,
+                retired_utc_ms: None,
+                window_class: None,
+                first_seen_utc_ms: fixture.start,
+                last_seen_utc_ms: fixture.start,
+            })
+            .execute(&mut fixture.store.writer)
+            .expect("window instance");
+    }
+    diesel::update(intervals::table)
+        .set(intervals::window_instance_id.eq(Some(1_i64)))
+        .execute(&mut fixture.store.writer)
+        .expect("window lane");
+    let QueryRequest::Timeline(mut timeline) = fixture.request_timeline() else {
+        panic!("timeline")
+    };
+    timeline.end_utc_ms = fixture.start + 3000;
+    timeline.ms_per_pixel =
+        quartz_protocol::MillisecondsPerPixel(std::num::NonZeroU64::new(4000).expect("pixel"));
+    let QueryResponse::Timeline(merged) = fixture
+        .run(QueryRequest::Timeline(timeline))
+        .expect("merged block")
+    else {
+        panic!("timeline")
+    };
+    assert_eq!(merged.segments.len(), 1);
+    let mut request = segment_request(&fixture);
+    request.start_utc_ms += 250;
+    request.end_utc_ms -= 250;
+    let page = segment_page(&mut fixture, request.clone());
+    assert_eq!(page.intervals.len(), 3);
+    assert_eq!(page.intervals[0].start_utc_ms, request.start_utc_ms);
+    assert_eq!(page.intervals[2].end_utc_ms, request.end_utc_ms);
+    assert_eq!(
+        page.intervals
+            .iter()
+            .map(|interval| interval.duration_ms)
+            .sum::<i64>(),
+        2500
+    );
+    diesel::update(intervals::table.filter(intervals::id.eq(Some(3_i64))))
+        .set(intervals::window_instance_id.eq(Some(2_i64)))
+        .execute(&mut fixture.store.writer)
+        .expect("second lane");
+    request.app = Some(quartz_protocol::ApplicationId(1));
+    request.window_instance = Some(quartz_protocol::WindowInstanceRef::from_stored_id(
+        quartz_protocol::facts::WindowInstanceId(1),
+    ));
+    assert_eq!(
+        segment_page(&mut fixture, request.clone()).intervals.len(),
+        2
+    );
+    request.app = Some(quartz_protocol::ApplicationId(2));
+    assert!(
+        segment_page(&mut fixture, request.clone())
+            .intervals
+            .is_empty()
+    );
+    request.app = None;
+    request.window_instance = None;
+    fixture.redact_titles(enums::CaptureLevel::TitleHidden);
+    assert!(
+        segment_page(&mut fixture, request.clone())
+            .intervals
+            .iter()
+            .all(|interval| interval.title.is_none())
+    );
+    fixture.redact_titles(enums::CaptureLevel::Excluded);
+    let page = segment_page(&mut fixture, request);
+    assert!(
+        page.intervals
+            .iter()
+            .all(|interval| interval.activity == Activity::Excluded
+                && interval.app.is_none()
+                && interval.window_instance.is_none()
+                && interval.title.is_none())
+    );
+}
+#[test]
+fn segment_detail_pages_bound_ranges_and_reject_changed_versions_and_parameters() {
+    let mut fixture = QueryFixture::new(1500);
+    let mut request = segment_request(&fixture);
+    let mut count = 0;
+    loop {
+        let page = segment_page(&mut fixture, request.clone());
+        assert!(serde_json::to_vec(&page).expect("page encoding").len() <= QUERY_PAGE_BYTES);
+        count += page.intervals.len();
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        request.cursor = Some(cursor);
+    }
+    assert_eq!(count, 1500);
+    request.cursor = None;
+    let page = segment_page(&mut fixture, request.clone());
+    request.cursor = page.next_cursor;
+    assert!(request.cursor.is_some());
+    let mut mismatched = request.clone();
+    mismatched.app = Some(quartz_protocol::ApplicationId(1));
+    assert_eq!(
+        fixture
+            .run(QueryRequest::SegmentDetail(mismatched))
+            .expect_err("changed lane")
+            .kind(),
+        ErrorKind::BadRequest
+    );
+    fixture.bump_fact_version();
+    assert_eq!(
+        fixture
+            .run(QueryRequest::SegmentDetail(request.clone()))
+            .expect_err("stale facts")
+            .kind(),
+        ErrorKind::StaleCursor
+    );
+    request.cursor = None;
+    request.end_utc_ms = request.start_utc_ms + quartz_protocol::SEGMENT_DETAIL_MAX_SPAN_MS + 1;
+    assert_eq!(
+        fixture
+            .run(QueryRequest::SegmentDetail(request.clone()))
+            .expect_err("span limit")
+            .kind(),
+        ErrorKind::BadRequest
+    );
+    request.end_utc_ms = request.start_utc_ms;
+    assert_eq!(
+        fixture
+            .run(QueryRequest::SegmentDetail(request))
+            .expect_err("empty range")
+            .kind(),
+        ErrorKind::BadRequest
+    );
+}
+#[test]
+fn entity_detail_aggregates_app_activity_rules_titles_and_unknown_apps() {
+    let mut fixture = QueryFixture::new(3);
+    diesel::update(applications::table.filter(applications::id.eq(Some(1_i64))))
+        .set(applications::exe_name.eq("code.exe"))
+        .execute(&mut fixture.store.writer)
+        .expect("classified app");
+    fixture.mask_idle(200, 600);
+    let request = entity_request(1);
+    let page = entity_page(&mut fixture, request.clone());
+    let daily = page.daily.as_ref().expect("first-page daily totals");
+    let titles = page.titles.as_ref().expect("first-page top titles");
+    assert_eq!(daily.len(), quartz_protocol::ENTITY_DETAIL_DAYS);
+    assert_eq!(daily.last().expect("last day").active_ms, 600);
+    assert_eq!(
+        daily.last().expect("last day").local_date,
+        request.local_date
+    );
+    assert!(daily[..6].iter().all(|day| day.active_ms == 0));
+    assert_eq!(titles[0].duration_ms, 600);
+    assert_eq!(page.rules.len(), 1);
+    assert_eq!(
+        page.rules[0].rule.as_str(),
+        "builtin.classification/vscode@1"
+    );
+    assert!(page.rules[0].label.is_some() || page.rules[0].label_key.is_some());
+    let unknown = entity_page(&mut fixture, entity_request(i64::MAX));
+    let daily = unknown.daily.expect("first-page daily totals");
+    assert_eq!(daily.len(), quartz_protocol::ENTITY_DETAIL_DAYS);
+    assert!(daily.iter().all(|day| day.active_ms == 0));
+    assert!(
+        unknown.titles.expect("first-page empty titles").is_empty() && unknown.rules.is_empty()
+    );
+    for level in [
+        enums::CaptureLevel::TitleHidden,
+        enums::CaptureLevel::Excluded,
+    ] {
+        fixture.redact_titles(level);
+        let page = entity_page(&mut fixture, request.clone());
+        assert!(page.titles.expect("first-page empty titles").is_empty());
+        if level == enums::CaptureLevel::Excluded {
+            assert!(page.rules.is_empty());
+            assert!(
+                page.daily
+                    .expect("first-page daily totals")
+                    .iter()
+                    .all(|day| day.active_ms == 0)
+            );
+        }
+    }
+}
+
+#[test]
+fn entity_detail_pages_rule_metadata_and_invalidates_versions() {
+    use quartz_domain::{capture::UtcInstant, rules::registry::RegistryCommand};
+    let mut fixture = QueryFixture::new(24);
+    diesel::update(intervals::table)
+        .set(intervals::app_id.eq(Some(1_i64)))
+        .execute(&mut fixture.store.writer)
+        .expect("one app");
+    let mut text = String::from(
+        "format='quartz-rules/1'\n[set]\nkey='user.details'\nkind='classification'\nname='Details'\n",
+    );
+    let label = "x".repeat(12_000);
+    for id in 1..=24_i64 {
+        let title = format!("detail-title-{id}");
+        diesel::insert_into(titles::table)
+            .values(crate::store::rows::TitlesRow {
+                id: Some(id + 1),
+                text: title.clone(),
+            })
+            .execute(&mut fixture.store.writer)
+            .expect("title");
+        diesel::update(intervals::table.filter(intervals::id.eq(Some(id))))
+            .set(intervals::title_id.eq(Some(id + 1)))
+            .execute(&mut fixture.store.writer)
+            .expect("title reference");
+        text.push_str(&format!("[[rule]]\nid='r-{id}'\nlabel='{label}'\ncategory='builtin:learning'\nwhen=[{{field='title.raw',op='equals',value='{title}'}}]\n"));
+    }
+    let now = UtcInstant::try_from(0).expect("UTC");
+    let mut shell =
+        crate::rules::registry::RegistryShell::open(&mut fixture.store, now).expect("rules");
+    let key = "user.details".parse().expect("set key");
+    shell
+        .run(
+            &mut fixture.store,
+            now,
+            RegistryCommand::Apply {
+                key,
+                file: "details.toml".into(),
+                text,
+                base_version: 0,
+            },
+        )
+        .expect("classification rules");
+    let mut request = entity_request(1);
+    let first = entity_page(&mut fixture, request.clone());
+    assert_eq!(
+        first.daily.as_ref().expect("first-page daily totals").len(),
+        quartz_protocol::ENTITY_DETAIL_DAYS
+    );
+    assert_eq!(
+        first.titles.as_ref().expect("first-page top titles").len(),
+        quartz_protocol::ENTITY_DETAIL_TOP_TITLES
+    );
+    let encoded = serde_json::to_value(&first).expect("encoded first page");
+    assert!(
+        encoded
+            .get("daily")
+            .is_some_and(serde_json::Value::is_array)
+    );
+    assert!(
+        encoded
+            .get("titles")
+            .is_some_and(serde_json::Value::is_array)
+    );
+    let cursor = first.next_cursor.clone().expect("rules exceed one page");
+    let mut rules = first.rules.clone();
+    request.cursor = Some(cursor);
+    loop {
+        let page = entity_page(&mut fixture, request.clone());
+        assert!(serde_json::to_vec(&page).expect("encoded response").len() <= QUERY_PAGE_BYTES);
+        assert!(page.daily.is_none());
+        assert!(page.titles.is_none());
+        let encoded = serde_json::to_value(&page).expect("encoded continuation page");
+        assert!(encoded.get("daily").is_none());
+        assert!(encoded.get("titles").is_none());
+        rules.extend(page.rules);
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        request.cursor = Some(cursor);
+    }
+    assert_eq!(rules.len(), 24);
+    assert!(rules.windows(2).all(|pair| pair[0].rule < pair[1].rule));
+    request.cursor = first.next_cursor;
+    fixture.bump_metadata();
+    assert_eq!(
+        fixture
+            .run(QueryRequest::EntityDetail(request.clone()))
+            .expect_err("metadata changed")
+            .kind(),
+        ErrorKind::StaleCursor
+    );
+    request.cursor = None;
+    let page = entity_page(&mut fixture, request.clone());
+    request.cursor = page.next_cursor;
+    let previous_day = (fixture.start - 3 * UTC_DAY_MS).div_euclid(UTC_DAY_MS);
+    diesel::insert_into(crate::store::schema::data_day_versions::table)
+        .values((
+            crate::store::schema::data_day_versions::source.eq(enums::DataSource::Intervals),
+            crate::store::schema::data_day_versions::utc_date.eq(previous_day),
+            crate::store::schema::data_day_versions::version.eq(1_i64),
+        ))
+        .execute(&mut fixture.store.writer)
+        .expect("previous logical day's input changed");
+    assert_eq!(
+        fixture
+            .run(QueryRequest::EntityDetail(request.clone()))
+            .expect_err("earlier UTC day changed")
+            .kind(),
+        ErrorKind::StaleCursor
+    );
+    request.cursor = None;
+    let page = entity_page(&mut fixture, request.clone());
+    request.cursor = page.next_cursor;
+    shell.run(&mut fixture.store, now, RegistryCommand::Apply {
+        key: "user.other".parse().expect("set key"), file: "other.toml".into(),
+        text: "format='quartz-rules/1'\n[set]\nkey='user.other'\nkind='classification'\nname='Other'\n[[rule]]\nid='other'\nlabel='Other'\ncategory='builtin:learning'\nwhen=[{field='app.exe_name',op='equals',value='unmatched.exe'}]".into(), base_version: 0,
+    }).expect("new rule hash");
+    assert_eq!(
+        fixture
+            .run(QueryRequest::EntityDetail(request))
+            .expect_err("rules changed")
+            .kind(),
+        ErrorKind::StaleCursor
+    );
+}

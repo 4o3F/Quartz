@@ -271,12 +271,15 @@ impl ConnectionSession {
                         };
                         Action::Unsubscribe { id, subscription }
                     }
-                    Op::QueryFacts | Op::QueryDay | Op::QueryTimeline | Op::QueryPendingAway => {
-                        Action::from_query(
-                            id,
-                            crate::query::QueryRequest::decode(request.op, request.body),
-                        )
-                    }
+                    Op::QueryFacts
+                    | Op::QueryDay
+                    | Op::QueryTimeline
+                    | Op::QueryPendingAway
+                    | Op::QuerySegmentDetail
+                    | Op::QueryEntityDetail => Action::from_query(
+                        id,
+                        crate::query::QueryRequest::decode(request.op, request.body),
+                    ),
                     Op::SettingsGet
                     | Op::SettingsSet
                     | Op::AnnotationsCreate
@@ -292,8 +295,6 @@ impl ConnectionSession {
                     }
                     Op::Hello
                     | Op::QueryRange
-                    | Op::QuerySegmentDetail
-                    | Op::QueryEntityDetail
                     | Op::QueryUnclassified
                     | Op::RuleSetsTree
                     | Op::RuleSetsGet
@@ -353,6 +354,62 @@ mod tests {
             op,
             body,
         })
+    }
+    #[test]
+    fn detail_queries_reach_dispatch_for_ui_and_cli() {
+        let publisher =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("details".into()));
+        let receiver = publisher.subscribe();
+        for role in [
+            ReadyRole::Ui {
+                state: UiState::Visible,
+            },
+            ReadyRole::Cli,
+        ] {
+            let mut session = ConnectionSession {
+                state: State::Ready(role),
+                allowed: AllowedRoles::Quartz,
+            };
+            let segment = session.receive(
+                request(
+                    2,
+                    Op::QuerySegmentDetail,
+                    serde_json::json!({"start_utc_ms":0,"end_utc_ms":1000}),
+                ),
+                &receiver.borrow().status,
+            );
+            assert!(matches!(
+                segment,
+                Action::Query {
+                    request: crate::query::QueryRequest::SegmentDetail(_),
+                    ..
+                }
+            ));
+            let entity = session.receive(
+                request(
+                    3,
+                    Op::QueryEntityDetail,
+                    serde_json::json!({"entity":{"kind":"app","id":1},"local_date":"2026-11-21"}),
+                ),
+                &receiver.borrow().status,
+            );
+            assert!(matches!(
+                entity,
+                Action::Query {
+                    request: crate::query::QueryRequest::EntityDetail(_),
+                    ..
+                }
+            ));
+            for kind in ["document", "domain"] {
+                let response = session.receive(request(4, Op::QueryEntityDetail, serde_json::json!({"entity":{"kind":kind,"id":1},"local_date":"2026-11-21"})), &receiver.borrow().status);
+                assert_eq!(
+                    response.reply().outcome,
+                    ResponseOutcome::Err {
+                        error: ProtocolError::new(ErrorKind::BadRequest)
+                    }
+                );
+            }
+        }
     }
     #[test]
     fn pure_session_requires_hello_and_authorizes_without_io() {

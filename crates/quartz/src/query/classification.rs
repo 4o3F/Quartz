@@ -152,6 +152,29 @@ impl Classifier {
     pub(super) fn result(&self, id: ClassificationId) -> &Classification {
         &self.results[id.0]
     }
+    pub(super) fn rule_details(
+        &self,
+        id: &quartz_domain::rules::ExplanationId,
+        category: CategoryRef,
+    ) -> quartz_protocol::EntityClassificationRule {
+        let rule = self
+            .rules
+            .classification()
+            .rule(id)
+            .expect("classification source belongs to retained rule snapshot");
+        quartz_protocol::EntityClassificationRule {
+            rule: id
+                .as_str()
+                .parse()
+                .expect("domain revision satisfies wire grammar"),
+            label: rule.label.clone(),
+            label_key: rule
+                .builtin
+                .as_ref()
+                .and_then(|metadata| metadata.label_key.clone()),
+            category,
+        }
+    }
     pub(super) fn classify(&mut self, row: &Foreground) -> ClassificationId {
         if row.capture_level() == CaptureLevel::Excluded
             || !matches!(row.kind, ForegroundKind::Window)

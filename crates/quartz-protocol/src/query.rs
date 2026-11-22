@@ -46,6 +46,18 @@ pub enum CursorQuery {
     Day { local_date: LocalDate },
     /// Pending idle pieces in a logical day.
     PendingAway { local_date: LocalDate },
+    /// Unmerged slices within a bounded UTC range and optional lane.
+    SegmentDetail {
+        start_utc_ms: i64,
+        end_utc_ms: i64,
+        app: Option<ApplicationId>,
+        window_instance: Option<WindowInstanceRef>,
+    },
+    /// Seven logical days of an application's activity.
+    EntityDetail {
+        entity: DetailEntity,
+        local_date: LocalDate,
+    },
     /// A UTC range and its display projection.
     Timeline {
         start_utc_ms: i64,
@@ -84,6 +96,95 @@ impl From<&QueryFactsRequest> for CursorQuery {
             local_date: request.local_date,
         }
     }
+}
+/// Maximum detail range: two UTC days accommodate local-day boundaries and DST.
+pub const SEGMENT_DETAIL_MAX_SPAN_MS: i64 = 48 * 60 * 60 * 1000;
+/// Number of logical days included in an entity detail response.
+pub const ENTITY_DETAIL_DAYS: usize = 7;
+/// Five maximum-length escaped titles leave room inside the 200 KiB page budget.
+pub const ENTITY_DETAIL_TOP_TITLES: usize = 5;
+
+/// Unmerged raw projection for a clicked timeline range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuerySegmentDetailRequest {
+    pub start_utc_ms: i64,
+    pub end_utc_ms: i64,
+    #[serde(default)]
+    pub app: Option<ApplicationId>,
+    #[serde(default)]
+    pub window_instance: Option<WindowInstanceRef>,
+    #[serde(default)]
+    pub cursor: Option<QueryCursor>,
+}
+impl From<&QuerySegmentDetailRequest> for CursorQuery {
+    fn from(request: &QuerySegmentDetailRequest) -> Self {
+        Self::SegmentDetail {
+            start_utc_ms: request.start_utc_ms,
+            end_utc_ms: request.end_utc_ms,
+            app: request.app,
+            window_instance: request.window_instance,
+        }
+    }
+}
+/// One page of clipped slices, preserving the timeline's clock-segment order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuerySegmentDetailResponse {
+    pub intervals: Vec<TimelineSegment>,
+    pub versions: QueryVersions,
+    pub next_cursor: Option<QueryCursor>,
+}
+/// Entity identities supported by M3 details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DetailEntity {
+    App { id: ApplicationId },
+}
+/// Seven logical days ending at the requested date, inclusive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryEntityDetailRequest {
+    pub entity: DetailEntity,
+    pub local_date: LocalDate,
+    #[serde(default)]
+    pub cursor: Option<QueryCursor>,
+}
+impl From<&QueryEntityDetailRequest> for CursorQuery {
+    fn from(request: &QueryEntityDetailRequest) -> Self {
+        Self::EntityDetail {
+            entity: request.entity,
+            local_date: request.local_date,
+        }
+    }
+}
+/// Active elapsed duration in one logical day.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntityDailyDuration {
+    pub local_date: LocalDate,
+    pub active_ms: i64,
+}
+/// A retained Full-level title ranked by active elapsed duration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntityTitleDuration {
+    pub title: String,
+    pub duration_ms: i64,
+}
+/// A rule that supplied the final classification, with current display metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntityClassificationRule {
+    pub rule: ClassificationRuleId,
+    pub label: Option<String>,
+    pub label_key: Option<String>,
+    pub category: CategoryRef,
+}
+/// First-page daily totals and top titles; rules continue with the cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryEntityDetailResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily: Option<Vec<EntityDailyDuration>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub titles: Option<Vec<EntityTitleDuration>>,
+    pub rules: Vec<EntityClassificationRule>,
+    pub versions: QueryVersions,
+    pub next_cursor: Option<QueryCursor>,
 }
 /// Raw stored facts intersecting a calendar day in the core's system time zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,7 +289,7 @@ pub struct Category {
     pub tendency: CategoryTendency,
 }
 /// Revision-qualified classification source in `<set>/<rule>@<revision>` form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ClassificationRuleId(std::sync::Arc<str>);
 /// A classification source contains an invalid target or revision.
@@ -397,6 +498,51 @@ pub struct DayChanged {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn detail_requests_and_cursors_preserve_typed_filters() {
+        let wire =
+            serde_json::json!({"start_utc_ms":100,"end_utc_ms":200,"app":3,"window_instance":5});
+        let request: QuerySegmentDetailRequest =
+            serde_json::from_value(wire).expect("segment request");
+        assert_eq!(request.app, Some(ApplicationId(3)));
+        assert_eq!(
+            request.window_instance,
+            Some(WindowInstanceRef::from_stored_id(
+                crate::facts::WindowInstanceId(5)
+            ))
+        );
+        let cursor = QueryCursor::new(
+            QueryVersions("detail-version".into()),
+            CursorQuery::from(&request),
+            2,
+        );
+        let encoded = serde_json::to_value(&cursor).expect("cursor");
+        assert_eq!(encoded["query"]["kind"], "segment_detail");
+        assert_eq!(encoded["query"]["app"], 3);
+        assert_eq!(encoded["query"]["window_instance"], 5);
+        assert_eq!(
+            serde_json::from_value::<QueryCursor>(encoded).expect("cursor round trip"),
+            cursor
+        );
+        let wire = serde_json::json!({"entity":{"kind":"app","id":3},"local_date":"2026-11-21"});
+        let request: QueryEntityDetailRequest =
+            serde_json::from_value(wire).expect("entity request");
+        let cursor = QueryCursor::new(
+            QueryVersions("entity-version".into()),
+            CursorQuery::from(&request),
+            1,
+        );
+        assert_eq!(
+            serde_json::to_value(cursor).expect("cursor")["query"],
+            serde_json::json!({"kind":"entity_detail","entity":{"kind":"app","id":3},"local_date":"2026-11-21"})
+        );
+        for kind in ["document", "domain"] {
+            assert!(
+                serde_json::from_value::<DetailEntity>(serde_json::json!({"kind":kind,"id":3}))
+                    .is_err()
+            );
+        }
+    }
     #[test]
     fn window_instance_reference_round_trips_without_exposing_a_scalar_accessor() {
         let identity = WindowInstanceRef::from_stored_id(crate::facts::WindowInstanceId(42));

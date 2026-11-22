@@ -144,8 +144,8 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 | `query.day` | `local_date`、可选 `cursor`（日起点偏移取自设置，见 03 第 1 节） | 状态行指标、每小时分类堆叠、排行（应用、域名、文档，完整列表分页）、未分类时长 |
 | `query.timeline` | UTC 毫秒范围 `start_utc_ms` / `end_utc_ms`、`detail`（`category` / `app` / `raw`）、正整数 `ms_per_pixel`、可选 `cursor` | 时间轴片段；小于一个像素对应时长的相邻片段由核心合并，界面传入"每像素毫秒数" |
 | `query.range` | 起止逻辑日期、时区、维度 | 按天或按周聚合 |
-| `query.segment_detail` | 时间点或片段 ID | 原始区间、标题、网页上下文、分类来源（规则 ID 或标注 ID）、提取结果 |
-| `query.entity_detail` | 应用、域名或文档 | 近 7 天每日时长、常见标题、命中的规则 |
+| `query.segment_detail` | `start_utc_ms`、`end_utc_ms`，可选 `app`（ApplicationId）、`window_instance`、`cursor` | 裁剪后的未合并区间 `intervals`、`versions`、`next_cursor` |
+| `query.entity_detail` | `entity: {kind:"app", id: ApplicationId}`、`local_date`，可选 `cursor` | `daily`、`titles`、`rules`、`versions`、`next_cursor` |
 | `query.unclassified` | 时间范围 | 未分类的条目，按时长降序 |
 | `query.pending_away` | `local_date`、可选 `cursor`，与 `query.day` 使用相同的时区和日起点设置 | 未标注且至少 15 分钟的连续 idle 片段 |
 
@@ -156,6 +156,12 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 查询结果按页返回，每页不超过 200 KiB。分页用不透明游标，响应和游标都绑定事实、规则、元数据与查询语义的输入版本。数据库线程用只读连接持有 WAL 快照分批计算；版本变化返回 `stale_cursor`，客户端丢弃旧分页并重查（03 第 4.1 节）。
 
 `query.day` 返回 `metrics`（`active_ms`、`focus_ratio`、`distract_ratio`、`unclassified_ms`、`longest_focus_ms`、`switches_per_hour`）、`hours`、`applications`、`versions` 和 `next_cursor`。`metrics` 和 `hours` 仅出现在第一页，应用排行按活跃时长降序、同值按应用 ID 排序，完整列表可继续分页。专注与分心占比按分类倾向时长除以活跃时长计算，最长连续专注段按同一时钟段内首尾相接的专注活跃片段累计（03 第 5.3 节）；每小时切换次数为连续活跃片段之间的应用切换次数除以活跃小时数，活跃时长为 0 时返回 0。有效活动覆盖与离线活动同样计入活跃时长、分类堆叠和上述指标；应用排行只累计采集到的应用，离线活动不列入应用排行。计算切换次数时，每个离线活动 UUID 作为一个应用身份，同一注解的连续切片不产生切换。
+
+`query.segment_detail` 读取点击块的半开 UTC 范围 `[start_utc_ms, end_utc_ms)`，要求正时长且不超过 `SEGMENT_DETAIL_MAX_SPAN_MS`（48 小时）。固定上限为跨 UTC 日期、夏令时和日起点偏移下的完整逻辑日留出空间；超限、逆序、空范围或无效时间戳返回 `bad_request`。它复用时间轴的原始投影、可用状态掩码和标注切片，保留每条前台事实及状态边界，不做像素合并，按时间轴的时钟段和边界顺序输出。每项为 `{start_utc_ms, end_utc_ms, duration_ms, clock_segment_id, activity, app?, window_instance?, title?, category, category_source}`，端点裁剪到请求范围，时长沿用单调时间裁剪。`app` 与 `window_instance` 都按隐私投影后可见的字段精确过滤，同时提供时取交集；与泳道无关的状态可通过省略过滤器查询。排除区间省略应用、窗口实例和标题，标题仅来自 Full 采集事实。一天内大量事实或长标题可以超过 200 KiB，因此区间列表沿用版本化游标分页。M3 响应不含网页上下文和提取结果，分别在 M5、M4 接入。
+
+`query.entity_detail` 的实体枚举在 M3 仅含 `app`；`document` 在 M4、`domain` 在 M5 加入。它读取截至 `local_date` 当天的 7 个逻辑日（`ENTITY_DETAIL_DAYS`），各日都按当前系统时区和 `day.start_offset_min` 分别转换 UTC 边界，保留夏令时导致的日长度变化。第一页的 `daily: [{local_date, active_ms}]` 按日期升序返回 7 项，应用活跃时长与 `query.day` 应用排行一致，包含有效活动覆盖。未知应用的第一页返回 7 个零时长日、空标题和空规则。
+
+`titles: [{title, duration_ms}]` 只累计这些活跃切片中 Full 级别的可见标题，按时长降序、同值按标题文本升序取前 `ENTITY_DETAIL_TOP_TITLES`（5）项；只有较低采集级别的事实时为空。五个长度上限为 4,096 个 UTF-16 单元的标题即使需要 JSON 转义，也为第一页的日统计和规则留有空间。`rules: [{rule, label, label_key, category}]` 仅包含实际为该应用活跃时间提供最终分类的规则，按修订限定规则 ID 升序去重；`rule` 为 `<规则集>/<规则>@<版本>`，`label`、`label_key` 为当前规则快照的显示字段，可为 null，`category` 使用下述分类引用。分类标注覆盖掉的规则不进入列表。规则数量没有固定上限，因此规则列表分页，`daily` 和 `titles` 仅出现在第一页，后续页省略这两个字段，客户端保留第一页的数据并拼接各页 `rules`。两种详情操作允许 UI 和 CLI，使用同一个数据库读事务中的事实、应用和分类元数据及持有的规则快照，标题不写入日志。
 
 `query.pending_away` 只读取 idle 可用状态范围，锁屏、睡眠、断开和暂停范围不纳入；`offline_activity`、`active_override`、`note`、`dismissed_away` 覆盖的部分视为已标注，`category_override` 不计。部分覆盖时先扣除覆盖范围，再返回剩余连续片段中至少 15 分钟的部分。响应为 `{ranges: [{start_utc_ms, end_utc_ms, duration_ms}], versions, next_cursor}`，按开始时间排序，时长为 UTC 端点差，分页沿用版本化游标。
 

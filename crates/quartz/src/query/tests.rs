@@ -1244,3 +1244,185 @@ fn pending_away_uses_idle_availability_even_without_a_window_and_subtracts_stops
         ]
     );
 }
+
+#[test]
+fn segment_details_keep_all_activity_states_without_display_merging() {
+    use quartz_protocol::AnnotationKind;
+    let mut excluded = window(2, 70, 80);
+    if let InputRow::Foreground(row) = &mut excluded {
+        edit_foreground(row, CaptureLevel::Excluded, |_| {});
+    }
+    let derived = derive(
+        vec![
+            clock(1, 0, 0, 100),
+            window(1, 0, 70),
+            excluded,
+            InputRow::Foreground(Foreground::new(
+                span(3, 80, 100),
+                ForegroundKind::NoForeground,
+                CaptureLevel::Full,
+                Default::default(),
+            )),
+            InputRow::Availability {
+                span: span(4, 10, 40),
+                state: Availability::Idle,
+            },
+            InputRow::Availability {
+                span: span(5, 40, 60),
+                state: Availability::Stopped(StopReason::Locked),
+            },
+            annotation(1, AnnotationKind::ActiveOverride, 20, 30, None),
+            annotation(2, AnnotationKind::OfflineActivity, 50, 60, None),
+        ],
+        QueryRange { start: 0, end: 100 },
+    );
+    let request = QuerySegmentDetailRequest {
+        start_utc_ms: 0,
+        end_utc_ms: 100,
+        app: None,
+        window_instance: None,
+        cursor: None,
+    };
+    let mut projection = details::SegmentDetailProjection::default();
+    for segment in &derived.segments {
+        projection.push(segment, &derived.facts, &request);
+    }
+    let intervals = projection.finish();
+    assert_eq!(
+        intervals
+            .iter()
+            .map(|interval| &interval.activity)
+            .collect::<Vec<_>>(),
+        vec![
+            &Activity::Active,
+            &Activity::Idle,
+            &Activity::ActiveOverride {
+                annotation: quartz_protocol::AnnotationId(
+                    "abcdef00-0000-4000-8000-000000000001"
+                        .parse()
+                        .expect("UUID")
+                )
+            },
+            &Activity::Idle,
+            &Activity::Stopped {
+                reasons: vec![QueryStopReason::Locked]
+            },
+            &Activity::OfflineActivity {
+                annotation: quartz_protocol::AnnotationId(
+                    "abcdef00-0000-4000-8000-000000000002"
+                        .parse()
+                        .expect("UUID")
+                )
+            },
+            &Activity::Active,
+            &Activity::Excluded,
+            &Activity::NoForeground,
+        ]
+    );
+}
+#[test]
+fn entity_details_use_seven_offset_days_across_dst_and_rank_titles() {
+    let date: quartz_protocol::LocalDate = "2026-03-10".parse().expect("ending date");
+    let offset = calendar::DayStartOffset::try_from(240).expect("04:00 offset");
+    let zone = jiff::tz::TimeZone::get("America/Los_Angeles").expect("zone");
+    let calendar =
+        details::EntityCalendar::in_zone(date, offset, zone.clone()).expect("seven days");
+    let range = calendar.range;
+    let first: quartz_protocol::LocalDate = "2026-03-04".parse().expect("first date");
+    let mut rows = vec![clock(1, range.start, range.start, range.end - range.start)];
+    let mut day = first;
+    let mut expected = Vec::new();
+    for index in 0..quartz_protocol::ENTITY_DETAIL_DAYS {
+        let boundary = DayCalendar::in_zone(day, offset, zone.clone()).expect("day");
+        let mut row = window(1, boundary.range.start, boundary.range.end);
+        if let InputRow::Foreground(foreground) = &mut row {
+            edit_foreground(foreground, CaptureLevel::Full, |content| {
+                content.title = Some(format!("title-{index}"));
+                content.title_id = Some(quartz_domain::facts::TitleId(
+                    i64::try_from(index).expect("title id"),
+                ));
+            });
+        }
+        rows.push(row);
+        expected.push(quartz_protocol::EntityDailyDuration {
+            local_date: day,
+            active_ms: boundary.range.end - boundary.range.start,
+        });
+        day = day.tomorrow().expect("next date");
+    }
+    let derived = derive(rows, range);
+    let mut accumulator = details::EntityDetailAccumulator::new(
+        quartz_protocol::DetailEntity::App {
+            id: quartz_protocol::ApplicationId(1),
+        },
+        calendar,
+    );
+    for segment in &derived.segments {
+        accumulator.push(segment, &derived.facts);
+    }
+    let response = accumulator.finish(QueryVersions("test".into()), PagePosition::First);
+    let daily = response.daily.expect("first-page daily totals");
+    let titles = response.titles.expect("first-page top titles");
+    assert_eq!(daily, expected);
+    assert_eq!(daily[3].active_ms, 23 * 60 * 60 * 1000);
+    assert_eq!(titles.len(), quartz_protocol::ENTITY_DETAIL_TOP_TITLES);
+    assert_eq!(
+        titles
+            .iter()
+            .map(|title| title.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["title-0", "title-1", "title-2", "title-4", "title-5"]
+    );
+    assert!(
+        titles
+            .windows(2)
+            .all(|pair| pair[0].duration_ms >= pair[1].duration_ms)
+    );
+}
+
+#[test]
+fn entity_daily_duration_matches_day_queries_at_integer_clipping_boundaries() {
+    let date = "2026-03-10".parse().expect("date");
+    let zone = jiff::tz::TimeZone::get("America/Los_Angeles").expect("zone");
+    let offset = calendar::DayStartOffset::try_from(240).expect("offset");
+    let calendar = details::EntityCalendar::in_zone(date, offset, zone.clone()).expect("week");
+    let range = calendar.range;
+    let first = DayCalendar::in_zone("2026-03-04".parse().expect("date"), offset, zone.clone())
+        .expect("first day");
+    let boundary = first.range.end;
+    let mut foreground = window(1, boundary - 40, boundary + 60);
+    if let InputRow::Foreground(row) = &mut foreground {
+        row.span.end_mono_ms = row.span.start_mono_ms + 3;
+    }
+    let rows = vec![
+        clock(1, range.start, range.start, range.end - range.start),
+        foreground,
+        annotation(
+            1,
+            quartz_protocol::AnnotationKind::Note,
+            boundary - 20,
+            boundary + 60,
+            None,
+        ),
+    ];
+    let derived = derive(rows.clone(), range);
+    let mut accumulator = details::EntityDetailAccumulator::new(
+        quartz_protocol::DetailEntity::App {
+            id: quartz_protocol::ApplicationId(1),
+        },
+        calendar,
+    );
+    for segment in &derived.segments {
+        accumulator.push(segment, &derived.facts);
+    }
+    let response = accumulator.finish(QueryVersions("test".into()), PagePosition::First);
+    let daily = response.daily.expect("first-page daily totals");
+    for daily in &daily {
+        let calendar = DayCalendar::in_zone(daily.local_date, offset, zone.clone()).expect("day");
+        let segments = derive(rows.clone(), calendar.range);
+        let day = DayAggregation::new(calendar, &segments);
+        assert_eq!(daily.active_ms, day.metrics.active_ms);
+    }
+    assert_eq!(daily[0].active_ms, 1);
+    assert_eq!(daily[1].active_ms, 2);
+}

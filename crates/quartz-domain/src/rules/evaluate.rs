@@ -387,6 +387,15 @@ impl CompiledRules {
         None
     }
 
+    /// Borrows effective contents by the revision-qualified explanation identity.
+    pub fn rule(&self, explanation_id: &ExplanationId) -> Option<&super::Rule> {
+        self.effective
+            .rules
+            .iter()
+            .find(|entry| entry.explanation_id() == explanation_id.as_str())
+            .map(|entry| &entry.rule)
+    }
+
     /// Returns the label snapshot for a revision-qualified privacy explanation.
     pub fn privacy_label(&self, explanation_id: &ExplanationId) -> Option<PrivacyLabelSnapshot> {
         self.effective

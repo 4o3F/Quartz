@@ -51,12 +51,14 @@ pub use status::{
 pub use query::{
     Activity, ApplicationId, ApplicationRank, ApplicationRef, BuiltinCategory, Category,
     CategoryDuration, CategoryId, CategoryRef, CategorySource, CategoryTendency, CategoryUuid,
-    ClassificationRuleId, ClockSegmentId, CursorQuery, DayChanged, DayMetrics, HourStack,
-    MillisecondsPerPixel, ParseClassificationRuleIdError, PendingAway, QUERY_PAGE_BYTES,
-    QueryCursor, QueryDayRequest, QueryDayResponse, QueryFactsRequest, QueryFactsResponse,
-    QueryGapReason, QueryPendingAwayRequest, QueryPendingAwayResponse, QueryStopReason,
-    QueryTimelineRequest, QueryTimelineResponse, QueryVersions, TimelineDetail, TimelineSegment,
-    WindowInstanceRef,
+    ClassificationRuleId, ClockSegmentId, CursorQuery, DayChanged, DayMetrics, DetailEntity,
+    ENTITY_DETAIL_DAYS, ENTITY_DETAIL_TOP_TITLES, EntityClassificationRule, EntityDailyDuration,
+    EntityTitleDuration, HourStack, MillisecondsPerPixel, ParseClassificationRuleIdError,
+    PendingAway, QUERY_PAGE_BYTES, QueryCursor, QueryDayRequest, QueryDayResponse,
+    QueryEntityDetailRequest, QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse,
+    QueryGapReason, QueryPendingAwayRequest, QueryPendingAwayResponse, QuerySegmentDetailRequest,
+    QuerySegmentDetailResponse, QueryStopReason, QueryTimelineRequest, QueryTimelineResponse,
+    QueryVersions, SEGMENT_DETAIL_MAX_SPAN_MS, TimelineDetail, TimelineSegment, WindowInstanceRef,
 };
 
 pub use annotations::{
