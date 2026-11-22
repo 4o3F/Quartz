@@ -279,6 +279,16 @@ impl LaunchWindow {
                 }
                 self.snapshot = Some(snapshot);
             }
+            LinkEvent::DetailLoading { generation } => {
+                if let Some(shell) = &self.shell {
+                    shell.update(cx, |shell, cx| shell.detail_loading(generation, cx));
+                }
+            }
+            LinkEvent::DetailLoaded { generation, result } => {
+                if let Some(shell) = &self.shell {
+                    shell.update(cx, |shell, cx| shell.detail_loaded(generation, result, cx));
+                }
+            }
             LinkEvent::Day(_) => {} // The link worker coalesces day invalidations.
             LinkEvent::DayLoading { generation } => {
                 if let Some(shell) = &self.shell {

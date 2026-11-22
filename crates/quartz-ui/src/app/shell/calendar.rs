@@ -1,10 +1,17 @@
 //! A small CalendarDatePicker flyout: the component calendar does not expose day-cell styling.
-use super::*;
+use super::AppShell;
 use crate::{
-    app::{metrics::Density, widgets::ButtonContent},
-    format::Arg,
+    app::{
+        metrics::{Density, Ramp},
+        widgets::{ButtonContent, RampExt as _, Widgets},
+    },
+    format::{Arg, Msg},
 };
-use gpui_kit::{MouseButton, StatefulInteractiveElement as _};
+use gpui_kit::{
+    AnyElement, Context, InteractiveElement as _, IntoElement as _, MouseButton,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, assets::IconName, deferred,
+    div, px,
+};
 use jiff::{
     ToSpan as _,
     civil::{Date, Weekday},

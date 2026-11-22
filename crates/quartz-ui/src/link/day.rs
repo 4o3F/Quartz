@@ -135,7 +135,7 @@ impl DayFailure {
             Self::StaleExhausted => DayFailureCode::Local(LocalFailureCode::StaleExhausted),
         }
     }
-    fn is_stale(&self) -> bool {
+    pub(super) fn is_stale(&self) -> bool {
         matches!(
             self,
             Self::Request {
@@ -270,7 +270,7 @@ impl Link {
             pending,
         })
     }
-    fn stale_day() -> DayFailure {
+    pub(super) fn stale_day() -> DayFailure {
         DayFailure::from(RequestCoreError::Call {
             source: CallCoreError::Protocol {
                 kind: ErrorKind::StaleCursor,

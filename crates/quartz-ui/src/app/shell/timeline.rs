@@ -493,8 +493,8 @@ impl AppShell {
         view: View,
         geometry: &PlotGeometry,
     ) -> Option<Div> {
-        let interval = self.details.as_ref()?.content.interval.as_ref()?;
-        let span = geometry.grid.span(view.place(interval.span)?);
+        let selected = self.details.as_ref()?.span(&self.day)?;
+        let span = geometry.grid.span(view.place(selected)?);
         let accent = ui.palette.accent_fill;
         Some(
             div()
@@ -556,7 +556,15 @@ impl AppShell {
                 }
                 MainBlock::State(state) => self.state_block(ui, measure, body, state, pixels),
             };
-            let tile = tile(("main-block", index), pixels).child(body);
+            let tile = tile(("main-block", index), pixels)
+                .child(body)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    layer.listen(|_, _, _, cx| cx.stop_propagation()),
+                )
+                .on_click(layer.listen(move |this, _, window, cx| {
+                    this.select(DetailsSubject::MainBlock(span), window, cx)
+                }));
             intervals.push(Interval {
                 placement: pixels,
                 duration: span.duration(),

@@ -5,6 +5,7 @@ mod worker;
 
 mod annotation;
 mod day;
+mod details;
 use crate::failure::Failure;
 pub(crate) use annotation::AwayAction;
 pub(crate) use day::REFRESH_INDICATOR_DELAY;
@@ -12,6 +13,7 @@ pub use day::{
     DayData, DayFailure, DayFailureCode, DayGeneration, DayLoad, DayRequest, DayView,
     LocalFailureCode, UtcRange,
 };
+pub use details::{DetailData, DetailGeneration, DetailRequest, DetailTarget, EntityData};
 use quartz_pipe::CallCoreError;
 use quartz_protocol::{
     ControlOp, CoreRequest, CoreVersion, DayChanged, InstanceId, JsonValue, Op, StateSnapshot,
@@ -40,6 +42,13 @@ pub enum ConnectionState {
 /// Wire events and link lifecycle notices delivered in receive order.
 #[derive(Debug)]
 pub enum LinkEvent {
+    DetailLoading {
+        generation: DetailGeneration,
+    },
+    DetailLoaded {
+        generation: DetailGeneration,
+        result: Result<DetailData, DayFailure>,
+    },
     State(StateSnapshot),
     Day(DayChanged),
     Control(ControlOp),
@@ -64,7 +73,9 @@ impl LinkEvent {
         match self {
             Self::Disconnected | Self::Control(ControlOp::UiShutdown) => WindowAction::Quit,
             Self::Control(ControlOp::UiShow | ControlOp::UiActivate) => WindowAction::Activate,
-            Self::DayLoading { .. }
+            Self::DetailLoading { .. }
+            | Self::DetailLoaded { .. }
+            | Self::DayLoading { .. }
             | Self::DayLoaded { .. }
             | Self::State(_)
             | Self::Day(_)
@@ -138,6 +149,12 @@ impl StartCoreError {
 
 type Reply = oneshot::Sender<Result<JsonValue, RequestCoreError>>;
 enum Command {
+    SelectDetails {
+        request: Option<DetailRequest>,
+        generation: DetailGeneration,
+        link: Link,
+        reply: oneshot::Sender<Result<(), RequestCoreError>>,
+    },
     LoadDay {
         request: DayRequest,
         generation: DayGeneration,
@@ -239,6 +256,23 @@ impl LinkBridge {
     }
 }
 impl Link {
+    pub async fn select_details(
+        &self,
+        request: Option<DetailRequest>,
+        generation: DetailGeneration,
+    ) -> Result<(), RequestCoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::SelectDetails {
+                request,
+                generation,
+                link: self.clone(),
+                reply,
+            })
+            .await
+            .map_err(|_| RequestCoreError::Closed)?;
+        receive.await.map_err(|_| RequestCoreError::Closed)?
+    }
     pub async fn load_day(
         &self,
         request: DayRequest,

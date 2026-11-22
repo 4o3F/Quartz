@@ -57,6 +57,7 @@ pub(super) struct Worker {
     frame: FrameStatus,
     pending: BTreeMap<RequestId, Pending>,
     day: Option<super::day::DayLoader>,
+    details: Option<super::details::DetailLoader>,
     #[cfg(test)]
     pub(super) name: Option<quartz_pipe::PipeName>,
     #[cfg(test)]
@@ -78,6 +79,7 @@ impl Worker {
             frame: FrameStatus::Awaiting,
             pending: BTreeMap::new(),
             day: None,
+            details: None,
             #[cfg(test)]
             name: None,
             #[cfg(test)]
@@ -172,6 +174,12 @@ impl Worker {
     }
     async fn handle_idle_command(&mut self, command: Command) -> Result<Option<Client>, UiClosed> {
         match command {
+            Command::SelectDetails { reply, .. } => {
+                if reply.send(Err(RequestCoreError::Disconnected)).is_err() {
+                    tracing::debug!("detail selection cancelled");
+                }
+                Ok(None)
+            }
             Command::LoadDay { generation, .. } => {
                 self.emit(LinkEvent::DayLoaded {
                     generation,
@@ -287,6 +295,23 @@ impl Worker {
         command: Command,
     ) -> Result<(), CallCoreError> {
         match command {
+            Command::SelectDetails {
+                request,
+                generation,
+                link,
+                reply,
+            } => {
+                let loader = self.details.get_or_insert_with(|| {
+                    super::details::DetailLoader::start(link, self.events.clone())
+                });
+                let result = loader.select(super::details::DetailIntent {
+                    request,
+                    generation,
+                });
+                if reply.send(result).is_err() {
+                    tracing::debug!("detail selection cancelled");
+                }
+            }
             Command::LoadDay {
                 request,
                 generation,
@@ -400,6 +425,11 @@ impl Worker {
                     Ok(event) => {
                         if let LinkEvent::Day(changed) = &event
                             && let Some(loader) = &self.day
+                        {
+                            loader.changed(changed.date);
+                        }
+                        if let LinkEvent::Day(changed) = &event
+                            && let Some(loader) = &self.details
                         {
                             loader.changed(changed.date);
                         }

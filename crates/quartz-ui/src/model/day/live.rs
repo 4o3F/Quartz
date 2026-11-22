@@ -1,14 +1,18 @@
-//! Protocol projections retain core aggregates and leave D2 details absent.
-use super::*;
+//! Protocol projections retain core day aggregates and application identities.
+use super::{Day, DaySource, Derived};
 use crate::{
     link::{DayData, UtcRange},
     model::{
-        AwayLabel, BuiltinCategory, CategoryColor, CategoryName, ClockAnomaly, Glyph, PaletteSlot,
-        Share, Tendency,
+        AppId, AppInfo, AwayLabel, BuiltinCategory, Category, CategoryId, ClassificationSource,
+        ClockAnomaly, DaySummary, Glyph, HourlyBar, MainBlock, RankRow, Segment, SegmentId, Share,
+        StateBlock, StateKind, Tendency, TimeOfDay, TimeSpan, ranking::Rankings,
+        summary::CategoryTotal,
     },
 };
+use jiff::civil::Date;
 use num_traits::ToPrimitive as _;
 use quartz_protocol::{self as wire, CategoryRef};
+use std::{collections::BTreeMap, time::Duration};
 
 #[derive(Debug, Clone, PartialEq, Eq, snafu::Snafu)]
 #[snafu(display("could not map the core day response"))]
@@ -16,6 +20,7 @@ pub(crate) struct BuildLiveDayError;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LiveDay {
     pub(super) ranking: Vec<RankRow>,
+    app_ids: BTreeMap<AppId, wire::ApplicationId>,
     bounds: UtcRange,
     pending: Vec<PendingAwaySpan>,
     switches_per_hour: u64,
@@ -58,31 +63,12 @@ impl Mapping {
         let category = match value {
             CategoryRef::Unclassified => Category::builtin(id, BuiltinCategory::Uncategorized),
             CategoryRef::Classified { category } => {
-                let name = match (&category.name, category.builtin_key) {
-                    (Some(name), _) => CategoryName::Custom(name.clone()),
-                    (None, Some(key)) => CategoryName::Builtin(match key {
-                        wire::BuiltinCategory::Development => BuiltinCategory::Development,
-                        wire::BuiltinCategory::Learning => BuiltinCategory::Learning,
-                        wire::BuiltinCategory::Communication => BuiltinCategory::Communication,
-                        wire::BuiltinCategory::Entertainment => BuiltinCategory::Entertainment,
-                        wire::BuiltinCategory::System => BuiltinCategory::System,
-                    }),
-                    (None, None) => return Err(BuildLiveDayError),
-                };
-                let color = if category.color == "neutral" {
-                    CategoryColor::Neutral
-                } else {
-                    CategoryColor::Palette(
-                        PaletteSlot::ALL
-                            .into_iter()
-                            .find(|slot| slot.token_key() == category.color)
-                            .ok_or(BuildLiveDayError)?,
-                    )
-                };
+                let display = crate::model::live_details::CategoryDisplay::from_protocol(value)
+                    .map_err(|_| BuildLiveDayError)?;
                 Category {
                     id,
-                    name,
-                    color,
+                    name: display.name,
+                    color: display.color,
                     tendency: match category.tendency {
                         wire::CategoryTendency::Focus => Tendency::Focus,
                         wire::CategoryTendency::Neutral => Tendency::Neutral,
@@ -327,14 +313,54 @@ impl Day {
             .reduce(|span, next| {
                 TimeSpan::new(span.start().min(next.start()), span.end().max(next.end()))
             });
+        let mut app_ids = BTreeMap::new();
+        for (protocol, local) in map.app_ids {
+            app_ids.insert(local, protocol);
+        }
         day.source = DaySource::Live(LiveDay {
             ranking,
+            app_ids,
             bounds: data.bounds,
             pending,
             switches_per_hour,
             zone,
         });
         Ok(day)
+    }
+    pub(crate) fn protocol_app(&self, app: AppId) -> Option<wire::ApplicationId> {
+        match &self.source {
+            DaySource::Live(live) => live.app_ids.get(&app).copied(),
+            DaySource::Fixture | DaySource::Loading => None,
+        }
+    }
+    /// Rebase a retained UTC selection onto the current logical-day coordinates.
+    pub(crate) fn span_for_utc(&self, range: UtcRange) -> Option<TimeSpan> {
+        let DaySource::Live(live) = &self.source else {
+            return None;
+        };
+        if range.start < live.bounds.start || range.end > live.bounds.end {
+            return None;
+        }
+        TimeSpan::try_new(
+            TimeOfDay::from_elapsed_millis(
+                u32::try_from(range.start.checked_sub(live.bounds.start)?).ok()?,
+            ),
+            TimeOfDay::from_elapsed_millis(
+                u32::try_from(range.end.checked_sub(live.bounds.start)?).ok()?,
+            ),
+        )
+        .ok()
+    }
+    pub(crate) fn local_clock_at(&self, utc: i64) -> Option<jiff::civil::Time> {
+        let DaySource::Live(live) = &self.source else {
+            return None;
+        };
+        Some(
+            jiff::Timestamp::from_millisecond(utc)
+                .expect("validated detail timestamp")
+                .to_zoned_datetime(live.zone.clone())
+                .time(),
+        )
     }
     pub(crate) fn switches_per_hour(&self) -> u64 {
         match &self.source {
@@ -387,6 +413,7 @@ impl Day {
 mod tests {
     use super::*;
     use crate::format::Formatter;
+    use crate::model::{CategoryColor, PaletteSlot, RankingKind};
     use quartz_i18n::Language;
     fn data() -> DayData {
         let category = wire::CategoryRef::Classified {
@@ -532,9 +559,8 @@ mod tests {
         assert!(segment.window_instance.is_some());
         assert_eq!(segment.title, "raw title");
         assert!(
-            day.details(crate::model::DetailsSubject::Segment(segment.id))
-                .is_none(),
-            "D2 data remains absent"
+            day.detail_request(crate::model::DetailsSubject::Segment(segment.id))
+                .is_some()
         );
     }
     #[test]
@@ -659,6 +685,57 @@ mod tests {
         assert_eq!(day.utc_range(pending.span), Some(expected));
         assert!(day.history.is_empty());
         assert!(day.rules.is_empty());
+    }
+    #[test]
+    fn detail_intents_keep_protocol_app_and_window_instance_filters() {
+        use crate::{link::DetailTarget, model::DetailsSubject};
+        let day = Day::from_protocol(data()).expect("live day");
+        let segment = day.segments.first().expect("segment");
+        let request = day
+            .detail_request(DetailsSubject::Segment(segment.id))
+            .expect("swimlane intent");
+        assert_eq!(
+            request.target,
+            DetailTarget::Segment {
+                range: UtcRange {
+                    start: 1,
+                    end: 2001
+                },
+                app: Some(wire::ApplicationId(91)),
+                window_instance: segment.window_instance
+            }
+        );
+        assert_eq!(
+            day.detail_request(DetailsSubject::App(segment.app))
+                .expect("ranking intent")
+                .target,
+            DetailTarget::App(wire::ApplicationId(91))
+        );
+        assert_eq!(
+            day.span_for_utc(UtcRange {
+                start: 1,
+                end: 2001
+            }),
+            Some(segment.span)
+        );
+        assert!(
+            day.span_for_utc(UtcRange {
+                start: -1,
+                end: 2001
+            })
+            .is_none()
+        );
+        let span = day.main_track().first().expect("main block").span();
+        assert_eq!(
+            day.detail_request(DetailsSubject::MainBlock(span))
+                .expect("main intent")
+                .target,
+            DetailTarget::Segment {
+                range: day.utc_range(span).expect("core UTC"),
+                app: None,
+                window_instance: None
+            }
+        );
     }
     #[test]
     fn invalid_palette_and_negative_metrics_report_mapping_errors() {

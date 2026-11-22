@@ -448,3 +448,42 @@ clock.afternoon:
 
 today.locale_unavailable:
   en: "Regional settings unavailable; times use 24-hour format"
+
+details.intervals:
+  en: "Raw intervals"
+
+details.failed:
+  en: "Couldn’t load details"
+
+details.empty:
+  en: "No intervals in this range"
+
+details.no_titles:
+  en: "No titles recorded"
+
+details.rules:
+  en: "Deciding rules"
+
+details.unclassified:
+  en: "Unclassified"
+
+details.action.delete:
+  en: "Delete related data"
+
+details.failed_message:
+  en: "Could not read details for this selection. Try again."
+
+details.duration.milliseconds:
+  en: "%{value} ms"
+
+details.duration.seconds:
+  en: "%{value} s"
+
+details.duration.minutes_seconds:
+  en: "%{minutes} min %{value} s"
+
+details.duration.hours_minutes_seconds:
+  en: "%{hours} h %{minutes} min %{value} s"
+
+details.clock.twelve:
+  en: "%{hours}:%{minutes}:%{value} %{name}"

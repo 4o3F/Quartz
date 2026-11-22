@@ -4,6 +4,7 @@ mod calendar;
 mod charts;
 mod details;
 mod live;
+mod live_details;
 mod nav;
 mod pending;
 mod ranking;
@@ -205,10 +206,29 @@ pub(crate) struct ShellInit {
 }
 
 /// The open details sidebar: its subject and the content computed when it opened.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct OpenDetails {
-    pub(crate) subject: DetailsSubject,
-    pub(crate) content: Details,
+#[derive(Debug)]
+enum PanelContent {
+    Fixture(Details),
+    Live(live_details::LivePanel),
+}
+#[derive(Debug)]
+struct OpenDetails {
+    subject: DetailsSubject,
+    content: PanelContent,
+}
+
+impl OpenDetails {
+    fn span(&self, day: &Day) -> Option<crate::model::TimeSpan> {
+        match &self.content {
+            PanelContent::Fixture(details) => {
+                details.interval.as_ref().map(|interval| interval.span)
+            }
+            PanelContent::Live(panel) => match panel.request.target {
+                crate::link::DetailTarget::Segment { range, .. } => day.span_for_utc(range),
+                crate::link::DetailTarget::App(_) => None,
+            },
+        }
+    }
 }
 
 /// Root view of the main window.
@@ -223,6 +243,7 @@ pub(crate) struct AppShell {
     /// The navigation the user chose; the layout may show the rail instead (07 section 2).
     nav: NavLayout,
     details: Option<OpenDetails>,
+    detail_generation: crate::link::DetailGeneration,
     text_scale: LiveTextScale,
     /// Scroll position of the details panel, kept across beside and overlay placement.
     details_scroll: ScrollHandle,
@@ -262,6 +283,7 @@ impl AppShell {
             page: init.page,
             nav: NavLayout::Expanded,
             details,
+            detail_generation: crate::link::DetailGeneration::default(),
             text_scale: init.text_scale,
             details_scroll: ScrollHandle::new(),
             placement: PanelPlacement::Closed,
@@ -286,7 +308,14 @@ impl AppShell {
 
     /// The subject of the open details sidebar.
     fn details_subject(&self) -> Option<DetailsSubject> {
-        self.details.as_ref().map(|details| details.subject)
+        self.details
+            .as_ref()
+            .and_then(|details| match &details.content {
+                PanelContent::Fixture(_) => Some(details.subject),
+                PanelContent::Live(panel) => (self.day.detail_request(details.subject)
+                    == Some(panel.request))
+                .then_some(details.subject),
+            })
     }
 
     /// The layout of a window `window` wide with the current navigation choice and panel.
@@ -298,7 +327,11 @@ impl AppShell {
         };
         ShellLayout::resolve(
             f32::from(window.viewport_size().width),
-            self.nav,
+            if self.details.is_some() {
+                NavLayout::Rail
+            } else {
+                self.nav
+            },
             panel,
             &self.tokens.metrics().shell_sizes(),
         )
@@ -329,7 +362,11 @@ impl AppShell {
     }
 
     fn select(&mut self, subject: DetailsSubject, window: &mut Window, cx: &mut Context<Self>) {
-        self.details = open_details(&self.day, subject);
+        if matches!(self.day.source(), DaySource::Live(_)) {
+            self.select_live_details(subject, cx);
+        } else {
+            self.details = open_details(&self.day, subject);
+        }
         self.hover = None;
         if self.details.is_some() {
             window.focus(&self.panel_focus, cx);
@@ -338,7 +375,7 @@ impl AppShell {
     }
 
     fn close_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.details = None;
+        self.cancel_details(cx);
         window.focus(&self.root_focus, cx);
         cx.notify();
     }
@@ -350,9 +387,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.key == "escape"
-            && self.layout_in(window).panel == PanelPlacement::Overlay
-        {
+        if event.keystroke.key == "escape" && self.details.is_some() {
             self.close_details(window, cx);
             cx.stop_propagation();
         }
@@ -367,6 +402,7 @@ impl AppShell {
         if self.page != page {
             self.page = page;
             self.hover = None;
+            self.cancel_details(cx);
             cx.notify();
         }
     }
@@ -388,8 +424,10 @@ impl AppShell {
 
 /// Opens the details of `subject`; `None` when it is not part of `day`, so no panel is open.
 fn open_details(day: &Day, subject: DetailsSubject) -> Option<OpenDetails> {
-    day.details(subject)
-        .map(|content| OpenDetails { subject, content })
+    day.fixture_details(subject).map(|content| OpenDetails {
+        subject,
+        content: PanelContent::Fixture(content),
+    })
 }
 
 impl Render for AppShell {
@@ -420,10 +458,14 @@ impl Render for AppShell {
             (Page::Today, PanelPlacement::Overlay)
             | (Page::Week | Page::Rules | Page::Settings, _) => None,
         };
-        let panel = self
-            .details
-            .as_ref()
-            .map(|details| self.render_details(&ui, &measure, &details.content, layout.panel, cx));
+        let panel = self.details.as_ref().map(|details| match &details.content {
+            PanelContent::Fixture(content) => {
+                self.render_details(&ui, &measure, content, layout.panel, cx)
+            }
+            PanelContent::Live(panel) => {
+                self.render_live_details(&ui, &measure, panel, layout.panel, cx)
+            }
+        });
         let (beside, overlay) = match layout.panel {
             PanelPlacement::Closed => (None, None),
             PanelPlacement::Beside => (panel, None),

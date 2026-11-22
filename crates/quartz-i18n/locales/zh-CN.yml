@@ -448,3 +448,42 @@ clock.afternoon:
 
 today.locale_unavailable:
   zh-CN: "区域设置暂时不可用，时间使用 24 小时格式"
+
+details.intervals:
+  zh-CN: "原始区间"
+
+details.failed:
+  zh-CN: "暂时无法加载详情"
+
+details.empty:
+  zh-CN: "此范围没有原始区间"
+
+details.no_titles:
+  zh-CN: "未记录标题"
+
+details.rules:
+  zh-CN: "决定分类的规则"
+
+details.unclassified:
+  zh-CN: "未分类"
+
+details.action.delete:
+  zh-CN: "删除相关数据"
+
+details.failed_message:
+  zh-CN: "无法读取所选项目的详情，请重试。"
+
+details.duration.milliseconds:
+  zh-CN: "%{value} 毫秒"
+
+details.duration.seconds:
+  zh-CN: "%{value} 秒"
+
+details.duration.minutes_seconds:
+  zh-CN: "%{minutes} 分 %{value} 秒"
+
+details.duration.hours_minutes_seconds:
+  zh-CN: "%{hours} 小时 %{minutes} 分 %{value} 秒"
+
+details.clock.twelve:
+  zh-CN: "%{name}%{hours}:%{minutes}:%{value}"

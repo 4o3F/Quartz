@@ -1,10 +1,18 @@
 //! Live Today state and intents. All I/O runs through the pipe thread.
-use super::*;
+use super::{AppShell, Frame, RangeChoice};
 use crate::{
-    app::{metrics::Density, widgets::ButtonContent},
+    app::{
+        metrics::{Density, Ramp},
+        widgets::{ButtonContent, RampExt as _, Widgets},
+    },
+    format::{Formatter, Msg},
     link::{DayFailure, DayGeneration, DayLoad, DayRequest, DayView, Link},
+    model::{Day, DaySource, TimeOfDay},
 };
-use gpui_kit::{StatefulInteractiveElement as _, Task, assets::IconName};
+use gpui_kit::{
+    AnyElement, Canvas, Context, IntoElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Task, assets::IconName, canvas, div, px,
+};
 use quartz_protocol::{StateSnapshot, StopReason};
 
 // Dimensions from the approved Today data states mockup.
@@ -44,6 +52,50 @@ impl AppShell {
         let Some(local) = self.day.local_clock(time) else {
             return time.to_string();
         };
+        self.format_local_clock(local)
+    }
+    pub(super) fn clock_utc(&self, utc: i64) -> String {
+        let local = self
+            .day
+            .local_clock_at(utc)
+            .expect("loaded details have core time zone context");
+        if local.second() == 0 && local.millisecond() == 0 {
+            return self.format_local_clock(local);
+        }
+        let seconds = if local.millisecond() == 0 {
+            format!("{:02}", local.second())
+        } else {
+            format!("{:02}.{:03}", local.second(), local.millisecond())
+        };
+        match self
+            .live
+            .as_ref()
+            .and_then(|live| live.snapshot.locale)
+            .map(|locale| locale.hour_cycle)
+        {
+            Some(quartz_protocol::HourCycle::H12) => {
+                let hour = local.hour();
+                self.formatter.text_with(
+                    Msg::DetailsClockTwelve,
+                    &[
+                        crate::format::Arg::Hours
+                            .with(&if hour % 12 == 0 { 12 } else { hour % 12 }.to_string()),
+                        crate::format::Arg::Minutes.with(&format!("{:02}", local.minute())),
+                        crate::format::Arg::Value.with(&seconds),
+                        crate::format::Arg::Name.with(&self.formatter.text(if hour < 12 {
+                            Msg::ClockMorning
+                        } else {
+                            Msg::ClockAfternoon
+                        })),
+                    ],
+                )
+            }
+            Some(quartz_protocol::HourCycle::H24) | None => {
+                format!("{:02}:{:02}:{seconds}", local.hour(), local.minute())
+            }
+        }
+    }
+    fn format_local_clock(&self, local: jiff::civil::Time) -> String {
         match self
             .live
             .as_ref()
@@ -91,15 +143,19 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         self.formatter = formatter;
-        if let Some(live) = &mut self.live {
-            let follow = (self.day.date() == live.snapshot.logical_date
+        let follow = self.live.as_ref().is_some_and(|live| {
+            (self.day.date() == live.snapshot.logical_date
                 && snapshot.logical_date != live.snapshot.logical_date)
-                || self.day.date() > snapshot.logical_date;
+                || self.day.date() > snapshot.logical_date
+        });
+        if follow {
+            self.cancel_details(cx);
+        }
+        if let Some(live) = &mut self.live {
             live.snapshot = snapshot;
             if follow {
                 self.calendar = None;
                 self.hover = None;
-                self.details = None;
                 self.pan = None;
                 self.range = RangeChoice::FullDay;
                 self.day = Day::empty(live.snapshot.logical_date);
@@ -257,7 +313,7 @@ impl AppShell {
         live.indicator = Indicator::Hidden;
         self.day = Day::empty(date);
         self.hover = None;
-        self.details = None;
+        self.cancel_details(cx);
         self.range = RangeChoice::FullDay;
         if let Some(mut request) = previous {
             request.date = date;

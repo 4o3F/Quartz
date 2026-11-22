@@ -18,6 +18,7 @@ use super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DetailsSubject {
     Segment(SegmentId),
+    MainBlock(TimeSpan),
     App(AppId),
 }
 
@@ -71,7 +72,7 @@ impl Day {
     /// Details sidebar content for a clicked interval or ranking row; `None` when the subject is
     /// not part of this day.
     #[must_use]
-    pub(crate) fn details(&self, subject: DetailsSubject) -> Option<Details> {
+    pub(crate) fn fixture_details(&self, subject: DetailsSubject) -> Option<Details> {
         if !matches!(self.source(), super::DaySource::Fixture) {
             return None;
         }
@@ -81,6 +82,7 @@ impl Day {
                 (segment.app, Some(segment))
             }
             DetailsSubject::App(id) => (self.has_app(id).then_some(id)?, None),
+            DetailsSubject::MainBlock(_) => return None,
         };
         let app_segments: Vec<&Segment> = self
             .segments
@@ -193,7 +195,7 @@ mod tests {
         })
         .expect("valid day");
         let details = day
-            .details(DetailsSubject::App(EDITOR))
+            .fixture_details(DetailsSubject::App(EDITOR))
             .expect("editor details");
         let days: Vec<BarDay> = details.week.iter().map(|bar| bar.day).collect();
         assert_eq!(
@@ -228,7 +230,7 @@ mod tests {
         let unmatched = segment(2, EDITOR, NONE, (10, 0), (10, 10));
         let day = day(vec![ruled, unmatched.clone()], vec![]);
         let of_segment = day
-            .details(DetailsSubject::Segment(unmatched.id))
+            .fixture_details(DetailsSubject::Segment(unmatched.id))
             .expect("segment details");
         assert_eq!(of_segment.category, NONE);
         assert_eq!(of_segment.explanation, None);
@@ -237,7 +239,7 @@ mod tests {
             Some(unmatched.span)
         );
         let of_app = day
-            .details(DetailsSubject::App(EDITOR))
+            .fixture_details(DetailsSubject::App(EDITOR))
             .expect("app details");
         assert_eq!(of_app.category, WORK);
         assert_eq!(
@@ -252,12 +254,15 @@ mod tests {
     fn subjects_outside_the_day_have_no_details() {
         let day = day(vec![segment(1, EDITOR, WORK, (9, 0), (9, 30))], vec![]);
         assert_eq!(
-            day.details(DetailsSubject::Segment(SegmentId::new(9))),
+            day.fixture_details(DetailsSubject::Segment(SegmentId::new(9))),
             None
         );
-        assert_eq!(day.details(DetailsSubject::App(AppId::new(9))), None);
         assert_eq!(
-            day.details(DetailsSubject::App(BROWSER)),
+            day.fixture_details(DetailsSubject::App(AppId::new(9))),
+            None
+        );
+        assert_eq!(
+            day.fixture_details(DetailsSubject::App(BROWSER)),
             None,
             "no time today"
         );

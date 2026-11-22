@@ -555,6 +555,9 @@ mod pipe {
             ui.stop().await;
         }
     }
+    mod detail_queries {
+        include!("detail_tests.rs");
+    }
     mod day_queries {
         include!("day_tests.rs");
     }

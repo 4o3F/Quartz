@@ -51,6 +51,79 @@ pub(crate) enum SourceText<'a> {
 }
 
 impl Formatter {
+    /// Raw intervals retain seconds and milliseconds instead of rounding short facts to minutes.
+    pub(crate) fn detail_duration(self, duration: Duration) -> String {
+        let seconds_per_minute = u64::from(crate::model::SECONDS_PER_MINUTE);
+        let seconds = duration.as_secs();
+        let millis = duration.subsec_millis();
+        if seconds == 0 && millis > 0 {
+            return self.text_with(
+                Msg::DetailsDurationMillis,
+                &[Arg::Value.with(&duration.as_millis().to_string())],
+            );
+        }
+        if millis == 0 && seconds.is_multiple_of(seconds_per_minute) {
+            return self.duration(duration);
+        }
+        let remainder = seconds % seconds_per_minute;
+        let second_text = if millis == 0 {
+            remainder.to_string()
+        } else {
+            format!("{remainder}.{millis:03}")
+                .trim_end_matches('0')
+                .to_owned()
+        };
+        let hours = seconds / Duration::from_hours(1).as_secs();
+        let minutes = (seconds / seconds_per_minute) % u64::from(crate::model::MINUTES_PER_HOUR);
+        if hours > 0 {
+            self.text_with(
+                Msg::DetailsDurationHoursMinutesSeconds,
+                &[
+                    Arg::Hours.with(&hours.to_string()),
+                    Arg::Minutes.with(&minutes.to_string()),
+                    Arg::Value.with(&second_text),
+                ],
+            )
+        } else if minutes > 0 {
+            self.text_with(
+                Msg::DetailsDurationMinutesSeconds,
+                &[
+                    Arg::Minutes.with(&minutes.to_string()),
+                    Arg::Value.with(&second_text),
+                ],
+            )
+        } else {
+            self.text_with(
+                Msg::DetailsDurationSeconds,
+                &[Arg::Value.with(&second_text)],
+            )
+        }
+    }
+    pub(crate) fn rule_label(self, label: &crate::model::live_details::RuleLabel) -> String {
+        use crate::model::live_details::RuleLabel;
+        match label {
+            RuleLabel::Text(text) => text.clone(),
+            RuleLabel::Key(key) => self
+                .language
+                .translate(quartz_i18n::MessageKey::new(key))
+                .into_owned(),
+            RuleLabel::Identity(id) => id.as_str().to_owned(),
+        }
+    }
+    pub(crate) fn detail_source(self, source: &crate::model::live_details::DetailSource) -> String {
+        use crate::model::live_details::DetailSource;
+        match source {
+            DetailSource::Rule(label) => self.text_with(
+                Msg::DetailsRuleLine,
+                &[Arg::Condition.with(&self.rule_label(label))],
+            ),
+            DetailSource::Manual => self.text(Msg::TooltipManual),
+            DetailSource::Unclassified => self.text(Msg::DetailsUnclassified),
+            DetailSource::Mixed => self.text(Msg::TooltipMixed),
+        }
+    }
+}
+impl Formatter {
     #[cfg(debug_assertions)]
     pub(crate) fn language(self) -> Language {
         self.language
@@ -280,6 +353,18 @@ mod tests {
         Duration::from_secs(total * 60)
     }
 
+    #[test]
+    fn detail_durations_preserve_subminute_elapsed_time() {
+        assert_eq!(ZH.detail_duration(Duration::from_millis(75)), "75 毫秒");
+        assert_eq!(EN.detail_duration(Duration::from_millis(75)), "75 ms");
+        assert_eq!(ZH.detail_duration(Duration::from_millis(1500)), "1.5 秒");
+        assert_eq!(EN.detail_duration(Duration::from_secs(65)), "1 min 5 s");
+        assert_eq!(
+            ZH.detail_duration(Duration::from_secs(3605)),
+            "1 小时 0 分 5 秒"
+        );
+        assert_eq!(ZH.detail_duration(Duration::from_secs(60)), "1 分");
+    }
     #[test]
     fn durations_follow_each_language() {
         assert_eq!(ZH.duration(minutes(205)), "3 小时 25 分");

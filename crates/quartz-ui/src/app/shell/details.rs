@@ -29,7 +29,7 @@ const TITLE_ROW_HEIGHT: f32 = 28.;
 const TITLE_BAR_HEIGHT: f32 = 4.;
 /// The duration column of the common titles: at least a short duration, at most a long one
 /// (11 section 5.6).
-const TITLE_VALUE_RANGE: ColumnRange = ColumnRange::new(32., 96.);
+pub(super) const TITLE_VALUE_RANGE: ColumnRange = ColumnRange::new(32., 96.);
 
 impl AppShell {
     /// The panel; `placement` decides whether it takes width from the main area or floats over it.
@@ -151,7 +151,8 @@ impl AppShell {
     // The actions are inert until classification and privacy rules can be edited.
     // Compact density; the row wraps instead of truncating labels when the
     // translated actions are wider than the panel (English needs two rows).
-    fn details_actions(&self, ui: &Widgets<'_>) -> Div {
+    pub(super) fn details_actions(&self, ui: &Widgets<'_>) -> Div {
+        // TODO(M4): classification, privacy rules and deletion are read-only in M3.
         let density = Density::Compact;
         div()
             .flex()
@@ -160,7 +161,7 @@ impl AppShell {
             .gap(ui.metrics.space.s)
             .p(ui.metrics.space.l)
             .child(
-                ui.button(
+                ui.disabled_button(
                     "action-classify",
                     density,
                     ButtonContent::Label(self.formatter.text(Msg::DetailsClassify)),
@@ -168,7 +169,7 @@ impl AppShell {
                 .flex_none(),
             )
             .child(
-                ui.button(
+                ui.disabled_button(
                     "action-privacy",
                     density,
                     ButtonContent::IconLabel(
@@ -179,17 +180,19 @@ impl AppShell {
                 .flex_none(),
             )
             .child(
-                ui.button(
+                ui.disabled_button(
                     "action-delete",
                     density,
-                    ButtonContent::Icon(IconName::Trash),
+                    ButtonContent::IconLabel(
+                        IconName::Trash,
+                        self.formatter.text(Msg::DetailsDelete),
+                    ),
                 )
-                .flex_none()
-                .text_color(ui.palette.status_critical),
+                .flex_none(),
             )
     }
 
-    fn section(&self, ui: &Widgets<'_>, title: Msg, content: Div) -> Div {
+    pub(super) fn section(&self, ui: &Widgets<'_>, title: Msg, content: Div) -> Div {
         div()
             .flex()
             .flex_col()

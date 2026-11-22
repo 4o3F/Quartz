@@ -10,7 +10,11 @@ fn every_failure_kind_has_the_approved_severity_and_actions() {
         actions: &'static [FailureAction],
     }
     use FailureAction::{CopyDetails, Exit, RetryConnection, RetryStartCore, StartCore};
-    use FailureKind::*;
+    use FailureKind::{
+        ConnectIo, ConnectTimeout, CoreNotRunning, CoreStartFailed, HandshakeRejected,
+        IdentityRejected, InterfaceUnavailable, InvalidResponse, MigrationFailed, NewerDatabase,
+        OtherSession, PipeBusy, VersionMismatch,
+    };
     use Severity::{Recoverable, Unrecoverable};
     let cases = [
         Case {
@@ -200,7 +204,11 @@ fn pseudo_locale_uses_the_same_screen_model() {
 #[test]
 fn expansion_and_copy_placement_cover_every_kind() {
     use DetailsExpansion::{Collapsed, Expanded};
-    use FailureKind::*;
+    use FailureKind::{
+        ConnectIo, ConnectTimeout, CoreNotRunning, CoreStartFailed, HandshakeRejected,
+        IdentityRejected, InterfaceUnavailable, InvalidResponse, MigrationFailed, NewerDatabase,
+        OtherSession, PipeBusy, VersionMismatch,
+    };
     struct ExpansionCase {
         kind: FailureKind,
         expansion: DetailsExpansion,
