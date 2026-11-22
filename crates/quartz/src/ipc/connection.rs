@@ -48,8 +48,20 @@ impl Connection {
         R: AsyncRead + Unpin,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        let mut writer = OutboxTask::spawn(write);
+        let result = self
+            .run_session(read, &mut writer, session, hello_deadline)
+            .await;
+        result.and(writer.stop().await)
+    }
+    async fn run_session<R: AsyncRead + Unpin>(
+        &self,
+        read: R,
+        writer: &mut OutboxTask,
+        session: &mut ConnectionSession,
+        hello_deadline: tokio::time::Instant,
+    ) -> io::Result<()> {
         let mut reader = FramedRead::new(read, frame_codec());
-        let writer = OutboxTask::spawn(write);
         let outbox = writer.handle.clone();
         let mut registration = None;
         loop {
@@ -186,7 +198,6 @@ impl Connection {
                 return self.finish_closing(writer).await;
             }
         }
-        drop(writer);
         Ok(())
     }
     async fn next_frame<R: AsyncRead + Unpin>(
@@ -207,7 +218,7 @@ impl Connection {
             reader.next().await
         }
     }
-    async fn finish_closing(&self, writer: OutboxTask) -> io::Result<()> {
+    async fn finish_closing(&self, writer: &mut OutboxTask) -> io::Result<()> {
         let deadline = tokio::time::Instant::now() + self.timeouts.close_flush;
         let outcome = tokio::time::timeout(self.timeouts.close_flush, writer.finish()).await;
         match outcome {
@@ -276,7 +287,7 @@ mod tests {
             let database = TestDatabase::start();
             let status = StatusPublisher::new(quartz_protocol::InstanceId("memory-test".into()));
             let (write, _read) = tokio::io::duplex(1);
-            let writer = OutboxTask::spawn(write);
+            let mut writer = OutboxTask::spawn(write);
             writer
                 .handle
                 .response(quartz_protocol::Response {
@@ -288,10 +299,10 @@ mod tests {
                 .expect("queue final response");
             let outbox = writer.handle.clone();
             connection(&database, &status)
-                .finish_closing(writer)
+                .finish_closing(&mut writer)
                 .await
                 .expect("bounded close");
-            tokio::task::yield_now().await;
+            writer.stop().await.expect("cancel timed-out writer");
             assert!(
                 outbox.is_closed(),
                 "timed-out writer releases its transport"

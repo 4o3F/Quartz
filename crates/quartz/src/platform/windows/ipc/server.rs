@@ -1,6 +1,5 @@
 //! One current-thread runtime owns all pipe instances and client I/O tasks.
 
-use super::super::handle::OwnedHandle;
 use super::{
     CheckPeerError, CreatePipeSecurityError, PipeName, ProcessIdentity, security::PipeSecurity,
     win32_error::Win32ErrorCode,
@@ -8,27 +7,23 @@ use super::{
 pub(crate) use crate::ipc::connection::ConnectionTimeouts;
 use crate::ipc::{ConnectionSession, Services, connection::Connection, registry::RegistryHandle};
 use crossbeam_channel::{Receiver, bounded};
-use snafu::{ResultExt, Snafu};
+use snafu::{Report, ResultExt, Snafu};
 use std::{
     io,
     os::windows::io::AsRawHandle,
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll, ready},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 use tokio::{
-    io::split,
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::JoinSet,
 };
-use windows::Win32::{
-    Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE},
-    System::{
-        Pipes::{DisconnectNamedPipe, GetNamedPipeClientProcessId},
-        Threading::GetCurrentProcess,
-    },
-};
+use windows::Win32::{Foundation::HANDLE, System::Pipes::GetNamedPipeClientProcessId};
 
 /// Maximum simultaneous connections from 04 §1, including clients awaiting hello.
 const PIPE_INSTANCES: usize = 8;
@@ -89,18 +84,28 @@ impl PipeServerConfig {
 pub(crate) enum StartPipeServerError {
     #[snafu(display("could not identify pipe owner"))]
     Identity { source: CheckPeerError },
-    #[snafu(display("could not create pipe security"))]
-    Security { source: CreatePipeSecurityError },
+    #[snafu(display("could not create pipe instance"))]
+    CreateInstance { source: CreatePipeInstanceError },
     #[snafu(display("could not start pipe runtime"))]
     Io { source: io::Error },
     #[snafu(display("pipe name is already owned by another process"))]
-    NameOccupied { source: io::Error },
+    NameOccupied { source: CreatePipeInstanceError },
     #[snafu(display("pipe startup did not complete before its deadline"))]
     Startup,
     #[snafu(display("could not publish pipe readiness"))]
     Readiness {
         source: quartz_pipe::WaitCorePipeError,
     },
+}
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub(crate) enum CreatePipeInstanceError {
+    #[snafu(display("could not create pipe security"))]
+    Security { source: CreatePipeSecurityError },
+    #[snafu(display("CreateNamedPipeW failed because the pipe name is already owned"))]
+    NameOccupied { source: io::Error },
+    #[snafu(display("CreateNamedPipeW failed"))]
+    Create { source: io::Error },
 }
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -246,9 +251,9 @@ struct PipeListener {
     owner: ProcessIdentity,
 }
 impl PipeListener {
-    fn create(&self, order: InstanceOrder) -> Result<NamedPipeServer, StartPipeServerError> {
-        let security =
-            PipeSecurity::new(self.owner.sid()).context(start_pipe_server_error::SecuritySnafu)?;
+    fn create(&self, order: InstanceOrder) -> Result<NamedPipeServer, CreatePipeInstanceError> {
+        let security = PipeSecurity::new(self.owner.sid())
+            .context(create_pipe_instance_error::SecuritySnafu)?;
         let mut attributes = security.attributes();
         let mut options = ServerOptions::new();
         options
@@ -266,9 +271,9 @@ impl PipeListener {
             use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY};
             let occupied = source.is_win32(ERROR_ACCESS_DENIED) || source.is_win32(ERROR_PIPE_BUSY);
             if matches!(order, InstanceOrder::First) && occupied {
-                StartPipeServerError::NameOccupied { source }
+                CreatePipeInstanceError::NameOccupied { source }
             } else {
-                StartPipeServerError::Io { source }
+                CreatePipeInstanceError::Create { source }
             }
         })
     }
@@ -293,9 +298,23 @@ impl IoThread {
             .context(start_pipe_server_error::IoSnafu)?;
         let _entered = runtime.enter();
         let mut pipes = Vec::with_capacity(PIPE_INSTANCES);
-        pipes.push(self.listener.create(InstanceOrder::First)?);
+        pipes.push(
+            self.listener
+                .create(InstanceOrder::First)
+                .map_err(|source| {
+                    if matches!(source, CreatePipeInstanceError::NameOccupied { .. }) {
+                        StartPipeServerError::NameOccupied { source }
+                    } else {
+                        StartPipeServerError::CreateInstance { source }
+                    }
+                })?,
+        );
         for _ in 1..PIPE_INSTANCES {
-            pipes.push(self.listener.create(InstanceOrder::Additional)?);
+            pipes.push(
+                self.listener
+                    .create(InstanceOrder::Additional)
+                    .context(start_pipe_server_error::CreateInstanceSnafu)?,
+            );
         }
         if ready.send(Ok(())).is_err() {
             tracing::warn!("pipe startup caller left before startup completed");
@@ -304,32 +323,36 @@ impl IoThread {
         runtime.block_on(self.serve(pipes));
         Ok(())
     }
-    fn slot(&self, registry: &RegistryHandle) -> Slot {
+    fn slot(&self, registry: &RegistryHandle, life: &watch::Receiver<ServerLife>) -> Slot {
         Slot {
             registry: registry.clone(),
             services: self.services.clone(),
             listener: Arc::clone(&self.listener),
             timeouts: self.timeouts,
+            life: life.clone(),
         }
     }
     async fn serve(mut self, pipes: Vec<NamedPipeServer>) {
         let registry = self.services.start_registry();
+        let (life, state) = watch::channel(ServerLife::Serving);
         let mut slots = JoinSet::new();
         for pipe in pipes {
-            slots.spawn(self.slot(&registry).run(Some(pipe)));
+            slots.spawn(self.slot(&registry, &state).run(Some(pipe)));
         }
         loop {
             tokio::select! {
+                biased;
                 _ = &mut self.stopping => break,
                 message = self.controls.recv() => {
                     if let Some(message) = message { Self::server_message(message, &registry).await; }
                 }
                 failure = slots.join_next() => {
                     tracing::error!(?failure, "pipe slot task ended; restarting slot");
-                    slots.spawn(self.slot(&registry).run(None));
+                    slots.spawn(self.slot(&registry, &state).run(None));
                 }
             }
         }
+        life.send_replace(ServerLife::Stopping);
         while let Ok(message) = self.controls.try_recv() {
             Self::server_message(message, &registry).await;
         }
@@ -410,46 +433,51 @@ impl SlotBackoff {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServerLife {
+    Serving,
+    Stopping,
+}
+
 struct Slot {
     services: Services,
     registry: RegistryHandle,
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
+    life: watch::Receiver<ServerLife>,
 }
 impl Slot {
-    async fn run(self, mut initial: Option<NamedPipeServer>) {
+    async fn run(self, initial: Option<NamedPipeServer>) {
+        let mut initial = initial.map(Arc::new);
         let mut backoff = SlotBackoff::new();
-        loop {
+        while *self.life.borrow() == ServerLife::Serving {
             let pipe = match initial.take() {
                 Some(pipe) => pipe,
                 None => match self.listener.create(InstanceOrder::Additional) {
-                    Ok(pipe) => pipe,
+                    Ok(pipe) => Arc::new(pipe),
                     Err(error) => {
-                        tracing::error!(%error, "could not recreate pipe slot; retrying");
+                        tracing::error!(error = %Report::from_error(&error), "could not recreate pipe slot; retrying");
                         tokio::time::sleep(backoff.next_delay()).await;
                         continue;
                     }
                 },
             };
-            let disconnect = match PipeDisconnect::new(&pipe) {
-                Ok(disconnect) => disconnect,
-                Err(error) => {
-                    tracing::error!(%error, "could not retain pipe handle for bounded close; retrying");
-                    tokio::time::sleep(backoff.next_delay()).await;
-                    continue;
-                }
-            };
-            let outcome = self.serve_connection(pipe).await;
-            // Disconnect also releases the instance when the client retains its handle.
-            if let Err(error) = disconnect.close() {
+            let outcome = self.serve_connection(Arc::clone(&pipe)).await;
+            // Reuse the slot's instance; pending completion packets can retain a closed handle.
+            if let Err(error) = pipe.disconnect() {
                 use windows::Win32::Foundation::{ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED};
                 if error.is_win32(ERROR_PIPE_NOT_CONNECTED) || error.is_win32(ERROR_NO_DATA) {
                     tracing::debug!(%error, "pipe client already disconnected");
                 } else {
-                    tracing::error!(%error, "could not disconnect pipe slot before replacement");
+                    tracing::error!(error = %Report::from_error(&error), "could not disconnect pipe slot before replacement");
+                    tokio::time::sleep(backoff.next_delay()).await;
+                    continue;
                 }
             }
-            drop(disconnect);
+            if *self.life.borrow() == ServerLife::Stopping {
+                return;
+            }
+            initial = Some(pipe);
             match outcome {
                 Ok(()) => backoff.reset(),
                 Err(error) => {
@@ -459,7 +487,7 @@ impl Slot {
             }
         }
     }
-    async fn serve_connection(&self, pipe: NamedPipeServer) -> io::Result<()> {
+    async fn serve_connection(&self, pipe: Arc<NamedPipeServer>) -> io::Result<()> {
         if let Err(error) = pipe.connect().await {
             use windows::Win32::Foundation::{
                 ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED,
@@ -489,7 +517,8 @@ impl Slot {
         match peer {
             Ok(allowed) => {
                 let mut session = ConnectionSession::new(allowed);
-                let (read, write) = split(pipe);
+                let read = PipeTransport(Arc::clone(&pipe));
+                let write = PipeTransport(pipe);
                 if let Err(error) = (Connection {
                     services: self.services.clone(),
                     registry: self.registry.clone(),
@@ -508,34 +537,46 @@ impl Slot {
     }
 }
 
-/// Keeps a duplicate server handle alive so bounded close can disconnect split I/O halves.
-struct PipeDisconnect {
-    handle: std::fs::File,
-}
-impl PipeDisconnect {
-    fn new(pipe: &NamedPipeServer) -> io::Result<Self> {
-        let mut duplicate = HANDLE::default();
-        // SAFETY: The live pipe handle belongs to this process; duplicate is writable output storage.
-        unsafe {
-            let process = GetCurrentProcess();
-            DuplicateHandle(
-                process,
-                HANDLE(pipe.as_raw_handle()),
-                process,
-                &mut duplicate,
-                0,
-                false,
-                DUPLICATE_SAME_ACCESS,
-            )
+/// Shares one instance between the slot and its sole reader and writer.
+struct PipeTransport(Arc<NamedPipeServer>);
+impl AsyncRead for PipeTransport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if buffer.remaining() == 0 {
+            return Poll::Ready(Ok(()));
         }
-        .map_err(io::Error::from)?;
-        // SAFETY: DuplicateHandle transferred unique ownership of a valid kernel handle.
-        let handle = unsafe { OwnedHandle::from_raw(duplicate) }.into_file();
-        Ok(Self { handle })
+        loop {
+            ready!(self.0.poll_read_ready(cx))?;
+            match self.0.try_read_buf(buffer) {
+                Ok(_) => return Poll::Ready(Ok(())),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+        }
     }
-    fn close(&self) -> io::Result<()> {
-        // SAFETY: The duplicate keeps this server pipe instance alive until after disconnection.
-        unsafe { DisconnectNamedPipe(HANDLE(self.handle.as_raw_handle())) }.map_err(io::Error::from)
+}
+impl AsyncWrite for PipeTransport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        loop {
+            ready!(self.0.poll_write_ready(cx))?;
+            match self.0.try_write(buffer) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                result => return Poll::Ready(result),
+            }
+        }
+    }
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(cx)
     }
 }
 
@@ -543,14 +584,164 @@ impl PipeDisconnect {
 mod tests {
     use super::*;
     use crate::ipc::StatusPublisher;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+    use tokio_util::codec::Framed;
 
     /// Bounds lifecycle unit tests independently of production connection deadlines.
     const TEST_CLOSE_TIMEOUT: Duration = Duration::from_millis(20);
+    /// Bounds instance replacement independently of the production hello deadline.
+    const TEST_RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+    async fn connect(name: &PipeName) -> NamedPipeClient {
+        tokio::time::timeout(TEST_RECONNECT_TIMEOUT, async {
+            loop {
+                match ClientOptions::new().open(name) {
+                    Ok(client) => return client,
+                    Err(error) if error.is_win32(windows::Win32::Foundation::ERROR_PIPE_BUSY) => {
+                        tokio::time::sleep(TEST_CLOSE_TIMEOUT).await;
+                    }
+                    Err(error) => panic!("open test client: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("slot becomes available")
+    }
+
+    async fn handshake(
+        client: NamedPipeClient,
+    ) -> Framed<NamedPipeClient, tokio_util::codec::LengthDelimitedCodec> {
+        let mut framed = Framed::new(client, quartz_protocol::frame_codec());
+        let hello = quartz_protocol::encode_json(&serde_json::json!({
+            "t": "req", "id": 1, "op": "hello", "body": {
+                "proto": {"min": 1, "max": 1},
+                "client_version": "test", "role": "cli"
+            }
+        }))
+        .expect("hello frame");
+        framed.send(hello.as_slice()).await.expect("send hello");
+        framed
+            .next()
+            .await
+            .expect("hello response")
+            .expect("read hello");
+        framed
+    }
+
+    #[test]
+    fn client_disconnect_recreates_slot_without_error_or_backoff() {
+        let log = tempfile::NamedTempFile::new().expect("slot log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(std::sync::Mutex::new(log.reopen().expect("log writer")))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            runtime().block_on(async {
+                let fixture = slot();
+                let listener = Arc::clone(&fixture.slot.listener);
+                let pipe = listener
+                    .create(InstanceOrder::First)
+                    .expect("first instance");
+                let mut client = connect(&listener.name).await;
+                let mut pipes = Vec::new();
+                let mut occupied = Vec::new();
+                for _ in 1..PIPE_INSTANCES {
+                    pipes.push(
+                        listener
+                            .create(InstanceOrder::Additional)
+                            .expect("instance"),
+                    );
+                    occupied.push(connect(&listener.name).await);
+                }
+                let task = tokio::spawn(fixture.slot.run(Some(pipe)));
+                for _ in 0..PIPE_INSTANCES {
+                    let framed = handshake(client).await;
+                    drop(framed);
+                    client = connect(&listener.name).await;
+                }
+                drop(client);
+                task.abort();
+                assert!(task.await.expect_err("cancel slot").is_cancelled());
+            });
+        });
+        let errors = std::fs::read_to_string(log.path()).expect("captured slot errors");
+        assert!(
+            errors.is_empty(),
+            "slot must recycle without errors/backoff: {errors}"
+        );
+    }
+
+    #[test]
+    fn shutdown_with_disconnecting_client_does_not_recreate_or_log_errors() {
+        let log = tempfile::NamedTempFile::new().expect("shutdown log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(std::sync::Mutex::new(log.reopen().expect("log writer")))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            runtime().block_on(async {
+                let fixture = slot();
+                let listener = Arc::clone(&fixture.slot.listener);
+                let mut pipes = Vec::with_capacity(PIPE_INSTANCES);
+                pipes.push(
+                    listener
+                        .create(InstanceOrder::First)
+                        .expect("first instance"),
+                );
+                for _ in 1..PIPE_INSTANCES {
+                    pipes.push(
+                        listener
+                            .create(InstanceOrder::Additional)
+                            .expect("instance"),
+                    );
+                }
+                let (stop, stopping) = oneshot::channel();
+                let (_control, controls) = mpsc::channel(CONTROL_MAILBOX_CAPACITY);
+                let server = IoThread {
+                    services: fixture.slot.services.clone(),
+                    listener: Arc::clone(&listener),
+                    timeouts: ConnectionTimeouts {
+                        hello: fixture.slot.timeouts.hello,
+                        close_flush: TEST_RECONNECT_TIMEOUT,
+                    },
+                    stopping,
+                    controls,
+                };
+                let task = tokio::spawn(server.serve(pipes));
+                let client = handshake(connect(&listener.name).await).await;
+                stop.send(()).expect("request shutdown");
+                tokio::time::sleep(TEST_CLOSE_TIMEOUT).await;
+                drop(client);
+                tokio::time::sleep(TEST_CLOSE_TIMEOUT).await;
+                let replacement = listener
+                    .create(InstanceOrder::Additional)
+                    .expect("stopping slot releases its instance without accepting again");
+                assert!(matches!(listener.create(InstanceOrder::Additional),
+                    Err(CreatePipeInstanceError::Create { source })
+                    if source.is_win32(windows::Win32::Foundation::ERROR_PIPE_BUSY)));
+                drop(replacement);
+                task.await.expect("server shutdown");
+                let pipe = listener
+                    .create(InstanceOrder::First)
+                    .expect("shutdown releases all instances");
+                drop(pipe);
+            });
+        });
+        let errors = std::fs::read_to_string(log.path()).expect("captured shutdown errors");
+        assert!(
+            errors.is_empty(),
+            "shutdown must stop slots without errors: {errors}"
+        );
+    }
 
     struct TestSlot {
         slot: Slot,
         _queries: crossbeam_channel::Receiver<crate::query::dispatch::QueryCommand>,
         _database: crate::query::dispatch::test_support::TestDatabase,
+        _status: StatusPublisher,
     }
     fn slot() -> TestSlot {
         let suffix = windows::core::GUID::new().expect("test pipe suffix");
@@ -584,7 +775,9 @@ mod tests {
                     hello: ConnectionTimeouts::default().hello,
                     close_flush: TEST_CLOSE_TIMEOUT,
                 },
+                life: watch::channel(ServerLife::Serving).1,
             },
+            _status: publisher,
         }
     }
     fn runtime() -> tokio::runtime::Runtime {
@@ -609,10 +802,44 @@ mod tests {
             drop(occupied.pop());
             tokio::time::sleep(SLOT_RETRY_MAX).await;
             let error = listener.create(InstanceOrder::Additional).expect_err("recovered slot occupies the freed capacity");
-            assert!(matches!(error, StartPipeServerError::Io { source } if source.is_win32(windows::Win32::Foundation::ERROR_PIPE_BUSY)));
+            assert!(matches!(error, CreatePipeInstanceError::Create { source } if source.is_win32(windows::Win32::Foundation::ERROR_PIPE_BUSY)));
             assert!(!task.is_finished());
             task.abort();
             assert!(task.await.expect_err("cancel test slot").is_cancelled());
+        });
+    }
+
+    #[test]
+    fn instance_creation_reports_create_named_pipe_and_win32_busy_code() {
+        runtime().block_on(async {
+            let fixture = slot();
+            let listener = &fixture.slot.listener;
+            let mut pipes = Vec::with_capacity(PIPE_INSTANCES);
+            pipes.push(
+                listener
+                    .create(InstanceOrder::First)
+                    .expect("first instance"),
+            );
+            for _ in 1..PIPE_INSTANCES {
+                pipes.push(
+                    listener
+                        .create(InstanceOrder::Additional)
+                        .expect("instance"),
+                );
+            }
+            let error = listener
+                .create(InstanceOrder::Additional)
+                .expect_err("all instances occupied");
+            let CreatePipeInstanceError::Create { source } = &error else {
+                panic!("expected CreateNamedPipeW failure: {error:?}");
+            };
+            assert!(source.is_win32(windows::Win32::Foundation::ERROR_PIPE_BUSY));
+            let report = Report::from_error(&error).to_string();
+            assert!(report.contains("CreateNamedPipeW"), "{report}");
+            assert!(
+                report.contains(&windows::Win32::Foundation::ERROR_PIPE_BUSY.0.to_string()),
+                "{report}"
+            );
         });
     }
 

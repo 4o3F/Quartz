@@ -226,7 +226,7 @@ impl OutboxHandle {
 
 pub(crate) struct OutboxTask {
     pub(crate) handle: OutboxHandle,
-    task: JoinHandle<io::Result<()>>,
+    task: Option<JoinHandle<io::Result<()>>>,
 }
 impl OutboxTask {
     pub(crate) fn spawn(write: impl AsyncWrite + Unpin + Send + 'static) -> Self {
@@ -248,19 +248,39 @@ impl OutboxTask {
             day_clocks: BTreeMap::new(),
         };
         let task = tokio::spawn(actor.run(write));
-        Self { handle, task }
+        Self {
+            handle,
+            task: Some(task),
+        }
     }
-    pub(crate) async fn finish(mut self) -> io::Result<()> {
+    pub(crate) async fn finish(&mut self) -> io::Result<()> {
         self.handle
             .enqueue(OutboxMessage::Finish)
             .map_err(io::Error::other)?;
-        (&mut self.task).await.map_err(io::Error::other)?
+        let result = self.task.as_mut().expect("outbox has not finished").await;
+        self.task.take();
+        result.map_err(io::Error::other)?
+    }
+    /// Waits for cancellation to release the transport before its slot is replaced.
+    pub(crate) async fn stop(&mut self) -> io::Result<()> {
+        self.handle.close();
+        if let Some(task) = self.task.take() {
+            task.abort();
+            match task.await {
+                Ok(result) => result?,
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => return Err(io::Error::other(error)),
+            }
+        }
+        Ok(())
     }
 }
 impl Drop for OutboxTask {
     fn drop(&mut self) {
         self.handle.close();
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
