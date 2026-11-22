@@ -53,6 +53,73 @@ pub(crate) enum ButtonContent {
     IconLabel(IconName, String),
 }
 
+#[derive(Debug)]
+struct ButtonParts {
+    icon: Option<IconName>,
+    label: Option<String>,
+}
+impl ButtonContent {
+    fn into_parts(self) -> ButtonParts {
+        match self {
+            Self::Label(label) => ButtonParts {
+                icon: None,
+                label: Some(label),
+            },
+            Self::Icon(icon) => ButtonParts {
+                icon: Some(icon),
+                label: None,
+            },
+            Self::IconLabel(icon, label) => ButtonParts {
+                icon: Some(icon),
+                label: Some(label),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ButtonStyle {
+    Standard,
+    Disabled,
+    Accent,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ButtonColors {
+    rest: Hsla,
+    hover: Hsla,
+    pressed: Hsla,
+    foreground: Hsla,
+    border: Hsla,
+}
+impl ButtonStyle {
+    fn colors(self, palette: &Palette) -> ButtonColors {
+        match self {
+            Self::Standard => ButtonColors {
+                rest: palette.fill_control,
+                hover: palette.fill_control_hover,
+                pressed: palette.fill_control_pressed,
+                foreground: palette.text_primary,
+                border: palette.stroke_control,
+            },
+            Self::Disabled => ButtonColors {
+                rest: palette.fill_control_disabled,
+                hover: palette.fill_control_disabled,
+                pressed: palette.fill_control_disabled,
+                foreground: palette.text_disabled,
+                border: palette.stroke_control,
+            },
+            Self::Accent => ButtonColors {
+                rest: palette.accent_fill,
+                hover: palette.accent_fill_hover,
+                pressed: palette.accent_fill,
+                foreground: palette.text_on_accent,
+                border: palette.accent_fill,
+            },
+        }
+    }
+}
+
 /// One choice of a segmented control.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Segment<V> {
@@ -334,7 +401,7 @@ impl<'a> Widgets<'a> {
         density: Density,
         content: ButtonContent,
     ) -> Stateful<Div> {
-        self.button_foreground(id, density, content, self.palette.text_primary)
+        self.styled_button(id, density, content, ButtonStyle::Standard)
     }
 
     pub(crate) fn disabled_button(
@@ -343,12 +410,7 @@ impl<'a> Widgets<'a> {
         density: Density,
         content: ButtonContent,
     ) -> Stateful<Div> {
-        let fill = self.palette.fill_control_disabled;
-        self.button_foreground(id, density, content, self.palette.text_disabled)
-            .bg(fill)
-            .cursor_default()
-            .hover(move |style| style.bg(fill))
-            .active(move |style| style.bg(fill))
+        self.styled_button(id, density, content, ButtonStyle::Disabled)
     }
 
     /// Accent actions use the matching icon and label foreground, including high contrast.
@@ -358,29 +420,19 @@ impl<'a> Widgets<'a> {
         density: Density,
         content: ButtonContent,
     ) -> Stateful<Div> {
-        let palette = self.palette;
-        self.button_foreground(id, density, content, palette.text_on_accent)
-            .bg(palette.accent_fill)
-            .border_color(palette.accent_fill)
-            .hover(move |style| style.bg(palette.accent_fill_hover))
-            .active(move |style| style.bg(palette.accent_fill))
+        self.styled_button(id, density, content, ButtonStyle::Accent)
     }
 
-    fn button_foreground(
+    fn styled_button(
         &self,
         id: impl Into<ElementId>,
         density: Density,
         content: ButtonContent,
-        foreground: Hsla,
+        appearance: ButtonStyle,
     ) -> Stateful<Div> {
-        let palette = self.palette;
+        let colors = appearance.colors(self.palette);
         let space = &self.metrics.space;
-        let (hover, pressed) = (palette.fill_control_hover, palette.fill_control_pressed);
-        let (icon, label) = match content {
-            ButtonContent::Label(label) => (None, Some(label)),
-            ButtonContent::Icon(icon) => (Some(icon), None),
-            ButtonContent::IconLabel(icon, label) => (Some(icon), Some(label)),
-        };
+        let parts = content.into_parts();
         div()
             .id(id)
             .flex()
@@ -389,24 +441,31 @@ impl<'a> Widgets<'a> {
             .justify_center()
             .gap(space.s)
             .min_h(self.metrics.density(density).control_height)
-            .px(if label.is_some() { space.m } else { space.s })
-            .bg(palette.fill_control)
-            .border_1()
-            .border_color(palette.stroke_control)
-            .rounded(self.metrics.radius.control)
-            .text_color(foreground)
-            .ramp(self, Ramp::Body)
-            .cursor_pointer()
-            .hover(move |style| style.bg(hover))
-            .active(move |style| style.bg(pressed))
-            .when_some(icon, |button, name| {
-                button.child(
-                    div()
-                        .flex_shrink_0()
-                        .child(self.icon(name, density, foreground)),
-                )
+            .px(if parts.label.is_some() {
+                space.m
+            } else {
+                space.s
             })
-            .map(|button| match label {
+            .bg(colors.rest)
+            .border_1()
+            .border_color(colors.border)
+            .rounded(self.metrics.radius.control)
+            .text_color(colors.foreground)
+            .ramp(self, Ramp::Body)
+            .map(|button| match appearance {
+                ButtonStyle::Disabled => button.cursor_default(),
+                ButtonStyle::Standard | ButtonStyle::Accent => button.cursor_pointer(),
+            })
+            .hover(move |style| style.bg(colors.hover))
+            .active(move |style| style.bg(colors.pressed))
+            .when_some(parts.icon, |button, name| {
+                button.child(div().flex_shrink_0().child(self.icon(
+                    name,
+                    density,
+                    colors.foreground,
+                )))
+            })
+            .map(|button| match parts.label {
                 Some(text) => button.min_w(px(0.)).child(
                     div()
                         .min_w(px(0.))
@@ -505,6 +564,93 @@ impl From<Glyph> for IconName {
             Glyph::Chat => IconName::MessageCircle,
             Glyph::Messenger => IconName::Send,
             Glyph::Terminal => IconName::SquareTerminal,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::runtime::ThemeBundle;
+
+    #[test]
+    fn every_button_constructor_builds_without_a_window() {
+        let theme = ThemeBundle::embedded().expect("embedded theme");
+        let tokens = theme.tokens();
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let ui = Widgets::new(&tokens, mode, TextScale::UNSCALED);
+            for density in [Density::Standard, Density::Compact] {
+                for content in [
+                    ButtonContent::Label("Button".into()),
+                    ButtonContent::Icon(IconName::Calendar),
+                    ButtonContent::IconLabel(IconName::Calendar, "Button".into()),
+                ] {
+                    drop(ui.button("standard", density, content.clone()));
+                    drop(ui.disabled_button("disabled", density, content.clone()));
+                    drop(ui.accent_button("accent", density, content));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn caption_and_segmented_controls_build_without_a_window() {
+        let theme = ThemeBundle::embedded().expect("embedded theme");
+        let tokens = theme.tokens();
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let ui = Widgets::new(&tokens, mode, TextScale::UNSCALED);
+            drop(ui.caption_control(IconName::WindowMinimize, WindowControlArea::Min));
+            drop(ui.caption_control(IconName::WindowMaximize, WindowControlArea::Max));
+            drop(ui.caption_control(IconName::WindowRestore, WindowControlArea::Max));
+            drop(ui.caption_control(IconName::WindowClose, WindowControlArea::Close));
+            for selected in [ThemeMode::Light, ThemeMode::Dark] {
+                drop(ui.segmented(
+                    "appearance",
+                    [
+                        Segment {
+                            id: "light",
+                            label: "Light".into(),
+                            value: ThemeMode::Light,
+                        },
+                        Segment {
+                            id: "dark",
+                            label: "Dark".into(),
+                            value: ThemeMode::Dark,
+                        },
+                    ],
+                    selected,
+                    |_| |_, _, _| {},
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn button_colors_preserve_standard_disabled_and_accent_states() {
+        let theme = ThemeBundle::embedded().expect("embedded theme");
+        let tokens = theme.tokens();
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let palette = tokens.palette(mode);
+            let standard = ButtonStyle::Standard.colors(palette);
+            assert_eq!(standard.rest, palette.fill_control);
+            assert_eq!(standard.hover, palette.fill_control_hover);
+            assert_eq!(standard.pressed, palette.fill_control_pressed);
+            assert_eq!(standard.foreground, palette.text_primary);
+            assert_eq!(standard.border, palette.stroke_control);
+
+            let disabled = ButtonStyle::Disabled.colors(palette);
+            for fill in [disabled.rest, disabled.hover, disabled.pressed] {
+                assert_eq!(fill, palette.fill_control_disabled);
+            }
+            assert_eq!(disabled.foreground, palette.text_disabled);
+            assert_eq!(disabled.border, palette.stroke_control);
+
+            let accent = ButtonStyle::Accent.colors(palette);
+            assert_eq!(accent.rest, palette.accent_fill);
+            assert_eq!(accent.hover, palette.accent_fill_hover);
+            assert_eq!(accent.pressed, palette.accent_fill);
+            assert_eq!(accent.foreground, palette.text_on_accent);
+            assert_eq!(accent.border, palette.accent_fill);
         }
     }
 }

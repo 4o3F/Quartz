@@ -14,7 +14,7 @@ use crate::{
 };
 use gpui_kit::{
     ClipboardItem, Context, Div, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window,
+    ParentElement as _, Render, Stateful, StatefulInteractiveElement as _, Styled as _, Window,
     assets::IconName,
     component::{
         ActiveTheme as _, Icon, Sizable as _, scroll::ScrollableElement as _, spinner::Spinner,
@@ -26,6 +26,12 @@ use gpui_kit::{
 enum ProgressSize {
     Inline,
     Standalone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionEmphasis {
+    Primary,
+    Secondary,
 }
 
 /// A running recovery action disables both recovery buttons until the result arrives.
@@ -46,6 +52,34 @@ pub(crate) struct FailureScreen {
 }
 impl EventEmitter<FailureAction> for FailureScreen {}
 impl FailureScreen {
+    fn action_button(
+        &self,
+        ui: &Widgets<'_>,
+        action: FailureAction,
+        emphasis: ActionEmphasis,
+    ) -> Stateful<Div> {
+        let label = action.label(self.formatter);
+        let content = if action == FailureAction::CopyDetails {
+            ButtonContent::IconLabel(IconName::Copy, label)
+        } else {
+            ButtonContent::Label(label)
+        };
+        let button =
+            if self.activity == RecoveryActivity::StartingCore && action != FailureAction::Exit {
+                ui.disabled_button(action.element_id(), Density::Standard, content)
+            } else {
+                match emphasis {
+                    ActionEmphasis::Primary => {
+                        ui.accent_button(action.element_id(), Density::Standard, content)
+                    }
+                    ActionEmphasis::Secondary => {
+                        ui.button(action.element_id(), Density::Standard, content)
+                    }
+                }
+            };
+        button.px(ui.metrics.space.l)
+    }
+
     pub(crate) fn new(
         failure: Option<Failure>,
         formatter: Formatter,
@@ -238,58 +272,40 @@ impl FailureScreen {
         for (index, &action) in presentation.actions.iter().enumerate() {
             let primary = index == 0;
             let busy = self.activity == RecoveryActivity::StartingCore;
-            let label = if busy && primary {
-                self.formatter.text(Msg::FailureStarting)
-            } else {
-                action.label(self.formatter)
-            };
-            let content = if action == FailureAction::CopyDetails {
-                ButtonContent::IconLabel(IconName::Copy, label)
-            } else {
-                ButtonContent::Label(label)
-            };
-            let color = if primary {
-                palette.text_on_accent
-            } else {
-                palette.text_primary
-            };
-            let mut button = if primary {
-                ui.accent_button(action.element_id(), Density::Standard, content)
-            } else {
-                ui.button(action.element_id(), Density::Standard, content)
+            if busy && primary && action != FailureAction::Exit {
+                let color = palette.text_on_accent;
+                // Keep the ring before the label by using a separate content row.
+                actions = actions.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(space.s)
+                        .px(space.l)
+                        .min_h(ui.metrics.density(Density::Standard).control_height)
+                        .rounded(ui.metrics.radius.control)
+                        .bg(if palette.contrast == ContrastMode::Standard {
+                            palette.accent_fill.opacity(geometry.busy_opacity)
+                        } else {
+                            palette.accent_fill
+                        })
+                        .text_color(color)
+                        .ramp(ui, Ramp::Body)
+                        .child(Self::ring(ui, ProgressSize::Inline, color))
+                        .child(self.formatter.text(Msg::FailureStarting)),
+                );
+                continue;
             }
-            .px(space.l);
-            if busy && action != FailureAction::Exit {
-                button = button.cursor_default();
+            let mut button = self.action_button(
+                ui,
+                action,
                 if primary {
-                    // Keep the ring before the label by using a separate content row.
-                    actions = actions.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap(space.s)
-                            .px(space.l)
-                            .min_h(ui.metrics.density(Density::Standard).control_height)
-                            .rounded(ui.metrics.radius.control)
-                            .bg(if palette.contrast == ContrastMode::Standard {
-                                palette.accent_fill.opacity(geometry.busy_opacity)
-                            } else {
-                                palette.accent_fill
-                            })
-                            .text_color(color)
-                            .ramp(ui, Ramp::Body)
-                            .child(Self::ring(ui, ProgressSize::Inline, color))
-                            .child(self.formatter.text(Msg::FailureStarting)),
-                    );
-                    continue;
-                }
-                button = button
-                    .bg(palette.fill_control_disabled)
-                    .text_color(palette.text_disabled)
-                    .hover(move |style| style.bg(palette.fill_control_disabled))
-                    .active(move |style| style.bg(palette.fill_control_disabled));
-            } else {
+                    ActionEmphasis::Primary
+                } else {
+                    ActionEmphasis::Secondary
+                },
+            );
+            if !busy || action == FailureAction::Exit {
                 button = button
                     .on_click(cx.listener(move |this, _, _, cx| this.emit_action(action, cx)));
             }
@@ -555,5 +571,40 @@ impl Render for FailureScreen {
             .p(ui.metrics.space.xxl)
             .child(content)
             .overflow_y_scrollbar()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::runtime::ThemeBundle;
+    use quartz_i18n::Language;
+
+    #[test]
+    fn failure_actions_build_in_idle_and_starting_states_without_a_window() {
+        let theme = ThemeBundle::embedded().expect("embedded theme");
+        let tokens = theme.tokens();
+        let mut screen =
+            FailureScreen::new(None, Formatter::new(Language::English), TextScale::UNSCALED);
+        for mode in [
+            gpui_kit::component::ThemeMode::Light,
+            gpui_kit::component::ThemeMode::Dark,
+        ] {
+            let ui = Widgets::new(&tokens, mode, TextScale::UNSCALED);
+            for activity in [RecoveryActivity::Idle, RecoveryActivity::StartingCore] {
+                screen.activity = activity;
+                for emphasis in [ActionEmphasis::Primary, ActionEmphasis::Secondary] {
+                    for action in [
+                        FailureAction::StartCore,
+                        FailureAction::RetryConnection,
+                        FailureAction::RetryStartCore,
+                        FailureAction::CopyDetails,
+                        FailureAction::Exit,
+                    ] {
+                        drop(screen.action_button(&ui, action, emphasis));
+                    }
+                }
+            }
+        }
     }
 }
