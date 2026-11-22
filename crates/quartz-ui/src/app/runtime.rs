@@ -41,7 +41,14 @@ pub enum LoadThemeError {
     visibility(pub(crate))
 )]
 pub struct GpuiError {
+    #[snafu(source(from(anyhow::Error, GpuiError::capture)))]
     source: anyhow::Error,
+}
+impl GpuiError {
+    fn capture(source: anyhow::Error) -> anyhow::Error {
+        // Window errors can contain COM error information; return owned diagnostics after GPUI exits.
+        anyhow::anyhow!("{source:#}")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,6 +203,39 @@ pub(crate) fn run_gpui<E: 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Debug, Snafu)]
+    #[snafu(display("native window failure"))]
+    struct OpenNativeWindowError {
+        drops: Arc<AtomicUsize>,
+    }
+    impl Drop for OpenNativeWindowError {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn returned_gpui_error_releases_native_source_before_application_teardown() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let source = anyhow::Error::new(OpenNativeWindowError {
+            drops: Arc::clone(&drops),
+        })
+        .context("creating GPUI window");
+        let result = Err::<(), _>(source).context(GpuiSnafu);
+        let error = result.expect_err("window error");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            format!("{:#}", error.source),
+            "creating GPUI window: native window failure"
+        );
+        drop(error);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn managed_lifecycle_disables_gpui_automatic_quit_on_last_window_close() {

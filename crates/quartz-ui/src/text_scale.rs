@@ -43,7 +43,10 @@ pub enum ReadTextScaleError {
     /// Windows did not provide `UISettings.TextScaleFactor`.
     #[cfg(windows)]
     #[snafu(display("could not read the Windows text size setting"))]
-    ReadSetting { source: windows::core::Error },
+    ReadSetting {
+        #[snafu(source(from(windows::core::Error, crate::CallWindowsError::from)))]
+        source: crate::CallWindowsError,
+    },
     /// Windows reported a factor outside the range of its own slider.
     #[snafu(display("the Windows text size setting is not a valid scale"))]
     InvalidSetting { source: ValidateTextScaleError },

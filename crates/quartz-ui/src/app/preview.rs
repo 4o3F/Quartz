@@ -307,7 +307,10 @@ pub enum PlaceWindowError {
     ForeignHandle,
     /// Win32 could not move the window.
     #[snafu(display("could not move the window off-screen"))]
-    MoveWindow { source: windows::core::Error },
+    MoveWindow {
+        #[snafu(source(from(windows::core::Error, crate::CallWindowsError::from)))]
+        source: crate::CallWindowsError,
+    },
 }
 
 /// Failures while running the preview window.

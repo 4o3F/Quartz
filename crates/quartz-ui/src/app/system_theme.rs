@@ -9,7 +9,7 @@ use super::{
     tokens::{AccentColors, Material, SystemColors, Tokens},
 };
 use gpui_kit::{
-    App, Global, Hsla, Rgba, Window, WindowBackgroundAppearance,
+    App, Global, Hsla, Rgba, Task, Window, WindowBackgroundAppearance,
     component::{Theme, ThemeMode},
 };
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
@@ -270,6 +270,8 @@ struct SettingsEvents {
     effects: Option<i64>,
     contrast: Option<i64>,
     energy: Option<i64>,
+    #[cfg(test)]
+    drop_probe: Option<tests::DropProbe>,
 }
 
 impl SettingsEvents {
@@ -364,6 +366,8 @@ impl Drop for SettingsEvents {
                 "EnergySaverStatusChanged",
             );
         }
+        #[cfg(test)]
+        drop(self.drop_probe.take());
     }
 }
 
@@ -383,7 +387,8 @@ pub(crate) struct SystemTheme {
     mapping: ComponentMapping,
     material: Material,
     support: BackdropSupport,
-    subscriptions: SettingsEvents,
+    subscriptions: Option<SettingsEvents>,
+    listener: Option<Task<()>>,
     #[cfg(feature = "preview")]
     preview_colors: SystemColors,
 }
@@ -412,18 +417,30 @@ impl SystemTheme {
             mapping: theme.mapping,
             material: Material::Solid,
             support,
-            subscriptions,
+            subscriptions: Some(subscriptions),
+            listener: None,
             #[cfg(feature = "preview")]
             preview_colors: PreviewTheme::load_colors(),
         });
+        cx.on_app_quit(|cx| {
+            cx.global_mut::<Self>().shutdown();
+            std::future::ready(())
+        })
+        .detach();
         Self::refresh(cx);
-        cx.spawn(async move |cx| {
+        let listener = cx.spawn(async move |cx| {
             loop {
                 events.next().await;
                 cx.update(Self::refresh);
             }
-        })
-        .detach();
+        });
+        cx.global_mut::<Self>().listener = Some(listener);
+    }
+    fn shutdown(&mut self) {
+        // GPUI drops its Windows platform (and uninitializes OLE) before app globals.
+        // Its quit observers run earlier, so revoke events and release WinRT objects here.
+        drop(self.listener.take());
+        drop(self.subscriptions.take());
     }
     pub(crate) fn tokens(cx: &App) -> Rc<Tokens> {
         Rc::clone(&cx.global::<Self>().tokens)
@@ -460,6 +477,9 @@ impl SystemTheme {
     }
     pub(crate) fn refresh(cx: &mut App) {
         let state = cx.global::<Self>();
+        let Some(subscriptions) = &state.subscriptions else {
+            return;
+        };
         let contrast = match state.contrast_colors(cx) {
             Ok(colors) => colors,
             Err(error) => {
@@ -469,7 +489,7 @@ impl SystemTheme {
         };
         let mut material = Material::Solid;
         let mut accent = None;
-        if let Some(ui) = &state.subscriptions.ui {
+        if let Some(ui) = &subscriptions.ui {
             match AccentColors::read(ui) {
                 Ok(colors) => accent = Some(colors),
                 Err(error) => {
@@ -656,10 +676,70 @@ impl PreviewDiagnostics {
 mod tests {
     use super::*;
     use std::{
+        cell::Cell,
         future::Future as _,
         sync::atomic::{AtomicUsize, Ordering},
         task::{Context, Wake},
     };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ApartmentState {
+        Initialized,
+        Uninitialized,
+    }
+
+    #[derive(Debug)]
+    pub(super) struct DropProbe {
+        apartment: Rc<Cell<ApartmentState>>,
+        drops: Rc<Cell<usize>>,
+    }
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            assert_eq!(self.apartment.get(), ApartmentState::Initialized);
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    #[test]
+    fn quit_releases_subscriptions_before_platform_teardown_and_global_drop() {
+        let apartment = Rc::new(Cell::new(ApartmentState::Initialized));
+        let drops = Rc::new(Cell::new(0));
+        let theme = ThemeBundle::embedded().expect("embedded typed theme");
+        let subscriptions = SettingsEvents {
+            ui: None,
+            accessibility: None,
+            colors: None,
+            effects: None,
+            contrast: None,
+            energy: None,
+            drop_probe: Some(DropProbe {
+                apartment: Rc::clone(&apartment),
+                drops: Rc::clone(&drops),
+            }),
+        };
+        let mut state = SystemTheme {
+            base: theme.tokens(),
+            tokens: theme.tokens(),
+            mapping: theme.mapping,
+            material: Material::Solid,
+            support: BackdropSupport::Supported,
+            subscriptions: Some(subscriptions),
+            listener: Some(Task::ready(())),
+            #[cfg(feature = "preview")]
+            preview_colors: PreviewTheme::load_colors(),
+        };
+
+        state.shutdown();
+        assert!(state.subscriptions.is_none());
+        assert!(state.listener.is_none());
+        assert_eq!(drops.get(), 1);
+
+        apartment.set(ApartmentState::Uninitialized);
+        state.shutdown();
+        drop(state);
+        assert_eq!(drops.get(), 1, "global drop must not release WinRT again");
+    }
+
     #[derive(Debug, Default)]
     struct WakeCounter(AtomicUsize);
     impl Wake for WakeCounter {

@@ -46,6 +46,11 @@ mod sample;
 mod text_scale;
 #[cfg(any(windows, test))]
 mod timeline_scale;
+#[cfg(windows)]
+mod windows_error;
+
+#[cfg(windows)]
+pub use windows_error::CallWindowsError;
 
 #[cfg(windows)]
 pub use app::{Appearance, GpuiError, LoadPaletteError, LoadThemeError};
