@@ -145,10 +145,11 @@ impl BuiltinCategory {
 }
 
 /// Tendency used to compute focus and distraction shares of active time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CategoryTendency {
     Focus,
+    #[default]
     Neutral,
     Distraction,
 }
@@ -166,9 +167,216 @@ pub struct Category {
     pub tendency: CategoryTendency,
 }
 
+/// Maximum user name length in Unicode scalar values (04 §6.3.5).
+pub const MAX_CATEGORY_NAME_SCALARS: usize = 256;
+
+/// Trimmed, nonblank user name; absence restores a builtin's localized default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CategoryName(String);
+impl CategoryName {
+    /// Returns the validated, trimmed name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl FromStr for CategoryName {
+    type Err = EditCategoryError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(EditCategoryError::BlankName);
+        }
+        if value.chars().count() > MAX_CATEGORY_NAME_SCALARS {
+            return Err(EditCategoryError::NameTooLong);
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+impl TryFrom<String> for CategoryName {
+    type Error = EditCategoryError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+impl From<CategoryName> for String {
+    fn from(value: CategoryName) -> Self {
+        value.0
+    }
+}
+
+/// A tendency outside the three supported values.
+#[derive(Debug, snafu::Snafu)]
+#[snafu(display("category tendency must be focus, neutral or distraction"))]
+pub struct ParseCategoryTendencyError;
+impl FromStr for CategoryTendency {
+    type Err = ParseCategoryTendencyError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "focus" => Ok(Self::Focus),
+            "neutral" => Ok(Self::Neutral),
+            "distraction" => Ok(Self::Distraction),
+            _ => Err(ParseCategoryTendencyError),
+        }
+    }
+}
+
+/// Whether list results include archived categories.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IncludeArchivedCategories {
+    #[default]
+    Exclude,
+    Include,
+}
+
+/// Persisted archive state, independent of the parent and children's states.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CategoryArchiveState {
+    #[default]
+    Active,
+    Archived,
+}
+
+/// Complete editable values; builtin identity and ordering have separate owners.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategoryValues {
+    pub parent_uuid: Option<CategoryUuid>,
+    pub name: Option<CategoryName>,
+    pub color: CategoryColor,
+    pub tendency: CategoryTendency,
+}
+impl CategoryValues {
+    /// Checks the name requirement after resolving the stored builtin identity.
+    ///
+    /// # Errors
+    /// Returns [`EditCategoryError::MissingName`] for unnamed user categories.
+    pub fn validate_for(&self, builtin: Option<BuiltinCategory>) -> Result<(), EditCategoryError> {
+        if builtin.is_none() && self.name.is_none() {
+            return Err(EditCategoryError::MissingName);
+        }
+        Ok(())
+    }
+}
+
+/// Create a user category, or return the original entity for an existing UUID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCategory {
+    pub uuid: CategoryUuid,
+    pub values: CategoryValues,
+}
+
+/// Replace all editable values of an existing category.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateCategory {
+    pub uuid: CategoryUuid,
+    pub values: CategoryValues,
+}
+
+/// Complete final sibling order, including archived children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReorderCategories {
+    pub parent_uuid: Option<CategoryUuid>,
+    pub uuids: Vec<CategoryUuid>,
+}
+
+/// Set one category's final archive state without cascading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveCategory {
+    pub uuid: CategoryUuid,
+    pub state: CategoryArchiveState,
+}
+
+/// Complete stored category metadata for editing and deterministic list traversal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategoryEntity {
+    pub id: CategoryId,
+    pub uuid: CategoryUuid,
+    pub builtin_key: Option<BuiltinCategory>,
+    pub values: CategoryValues,
+    pub sort_order: i64,
+    pub archive_state: CategoryArchiveState,
+}
+
+/// A rejected category edit; variants are independent of error message wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, snafu::Snafu)]
+#[snafu(module)]
+pub enum EditCategoryError {
+    #[snafu(display("category does not exist"))]
+    NotFound,
+    #[snafu(display("category name is blank"))]
+    BlankName,
+    #[snafu(display("category name exceeds 256 Unicode scalars"))]
+    NameTooLong,
+    #[snafu(display("user category requires a name"))]
+    MissingName,
+    #[snafu(display("category parent does not exist"))]
+    InvalidParent,
+    #[snafu(display("category hierarchy would contain a cycle"))]
+    Cycle,
+    #[snafu(display("client cannot create a builtin category identity"))]
+    BuiltinIdentityViolation,
+    #[snafu(display("reorder must contain every sibling exactly once"))]
+    ReorderSetMismatch,
+    #[snafu(display("category sibling order exceeds the supported range"))]
+    OrderOverflow,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_trim_and_count_unicode_scalars() {
+        let maximum = "🦀".repeat(MAX_CATEGORY_NAME_SCALARS);
+        let name: CategoryName = format!(" \t{maximum}\n").parse().expect("maximum name");
+        assert_eq!(name.as_str(), maximum);
+        for value in ["", " \t\n", "\u{2003}"] {
+            assert_eq!(
+                value.parse::<CategoryName>(),
+                Err(EditCategoryError::BlankName)
+            );
+        }
+        assert_eq!(
+            format!("{maximum}x").parse::<CategoryName>(),
+            Err(EditCategoryError::NameTooLong)
+        );
+        // Combining marks count separately from the preceding character.
+        assert!(
+            "a\u{301}"
+                .repeat(MAX_CATEGORY_NAME_SCALARS / 2)
+                .parse::<CategoryName>()
+                .is_ok()
+        );
+        assert_eq!(
+            "a\u{301}"
+                .repeat(MAX_CATEGORY_NAME_SCALARS)
+                .parse::<CategoryName>(),
+            Err(EditCategoryError::NameTooLong)
+        );
+        assert!(serde_json::from_value::<CategoryName>(serde_json::json!("  ")).is_err());
+        assert_eq!(serde_json::to_value(name).expect("name JSON"), maximum);
+    }
+
+    #[test]
+    fn tendencies_accept_only_the_three_exact_values_and_default_to_neutral() {
+        assert_eq!(CategoryTendency::default(), CategoryTendency::Neutral);
+        for value in ["focus", "neutral", "distraction"] {
+            let tendency: CategoryTendency = value.parse().expect("valid tendency");
+            assert_eq!(
+                serde_json::to_value(tendency).expect("tendency JSON"),
+                value
+            );
+            assert_eq!(
+                serde_json::from_value::<CategoryTendency>(serde_json::json!(value))
+                    .expect("tendency round trip"),
+                tendency
+            );
+        }
+        for value in ["", "Focus", "focus ", "other", "1"] {
+            assert!(value.parse::<CategoryTendency>().is_err());
+            assert!(serde_json::from_value::<CategoryTendency>(serde_json::json!(value)).is_err());
+        }
+    }
 
     #[test]
     fn colors_accept_only_canonical_palette_strings_and_round_trip_json() {
