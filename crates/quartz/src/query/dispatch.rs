@@ -66,6 +66,10 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
+            let response = database.port.call(QueryRequest::Annotations(quartz_protocol::QueryAnnotationsRequest {
+                start_utc_ms: start, end_utc_ms: start + 4000, cursor: None,
+            })).await.expect("annotation dispatcher response");
+            assert!(matches!(response, QueryResponse::Annotations(page) if page.entities.is_empty() && page.next_cursor.is_none()));
             let response = database.port.call(QueryRequest::Range(quartz_protocol::QueryRangeRequest {
                 start_date: crate::store::query::test_support::FIXTURE_DATE.parse().expect("date"), end_date: "2025-01-03".parse().expect("date"),
                 bucket: quartz_protocol::RangeBucket::Day, dimensions: vec![quartz_protocol::RangeDimension::Category], cursor: None,

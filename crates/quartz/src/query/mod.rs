@@ -1,5 +1,6 @@
 //! Snapshot query orchestration around pure slicing, aggregation, and paging.
 
+mod annotations;
 pub(crate) mod calendar;
 pub(crate) mod classification;
 mod day_walker;
@@ -126,6 +127,7 @@ impl RunQueryError {
 }
 #[derive(Debug, Clone)]
 pub(crate) enum QueryRequest {
+    Annotations(quartz_protocol::QueryAnnotationsRequest),
     Facts(QueryFactsRequest),
     Day(QueryDayRequest),
     Unclassified(quartz_protocol::QueryUnclassifiedRequest),
@@ -142,6 +144,9 @@ impl QueryRequest {
         body: serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
         match op {
+            quartz_protocol::Op::QueryAnnotations => {
+                serde_json::from_value(body).map(Self::Annotations)
+            }
             quartz_protocol::Op::QueryFacts => serde_json::from_value(body).map(Self::Facts),
             quartz_protocol::Op::QueryRange => serde_json::from_value(body).map(Self::Range),
             quartz_protocol::Op::QueryUnclassified => {
@@ -166,6 +171,7 @@ impl QueryRequest {
 
     fn parameters(&self) -> CursorQuery {
         match self {
+            Self::Annotations(request) => CursorQuery::from(request),
             Self::Facts(facts) => CursorQuery::from(facts),
             Self::Day(day) => CursorQuery::from(day),
             Self::Unclassified(request) => CursorQuery::from(request),
@@ -180,6 +186,7 @@ impl QueryRequest {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum QueryResponse {
+    Annotations(quartz_protocol::QueryAnnotationsResponse),
     Facts(QueryFactsResponse),
     Day(QueryDayResponse),
     Unclassified(quartz_protocol::QueryUnclassifiedResponse),
@@ -191,6 +198,7 @@ pub(crate) enum QueryResponse {
 }
 #[derive(Debug)]
 enum Stage {
+    Annotations(Box<annotations::AnnotationPage>),
     Facts(Vec<crate::store::facts::Fact>),
     Read(Pipeline),
     Sweep(Pipeline),
@@ -267,7 +275,9 @@ impl QueryJob {
                     }
                     _ => None,
                 },
-                stage: if matches!(request, QueryRequest::Facts(_)) {
+                stage: if let Some(page) = prepared.annotations {
+                    Stage::Annotations(Box::new(page))
+                } else if matches!(request, QueryRequest::Facts(_)) {
                     Stage::Facts(Vec::new())
                 } else {
                     Stage::Read(Pipeline::new(
@@ -292,7 +302,7 @@ impl QueryJob {
         snapshot.begin()?;
         let settings = snapshot.settings()?;
         let calendar = match request {
-            QueryRequest::Facts(_) => None,
+            QueryRequest::Facts(_) | QueryRequest::Annotations(_) => None,
             QueryRequest::Day(day) => Some(DayCalendar::in_zone(
                 day.local_date,
                 settings.day_start_offset,
@@ -389,6 +399,10 @@ impl QueryJob {
                     end: detail.end_utc_ms,
                 }
             }
+            QueryRequest::Annotations(request) => QueryRange {
+                start: request.start_utc_ms,
+                end: request.end_utc_ms,
+            },
             QueryRequest::Timeline(timeline) => QueryRange {
                 start: timeline.start_utc_ms,
                 end: timeline.end_utc_ms,
@@ -482,6 +496,7 @@ impl QueryJob {
         };
         let parameters = request.parameters();
         let cursor = match request {
+            QueryRequest::Annotations(request) => request.cursor.as_ref(),
             QueryRequest::Unclassified(request) => request.cursor.as_ref(),
             QueryRequest::Range(request) => request.cursor.as_ref(),
             QueryRequest::Facts(facts) => facts.cursor.as_ref(),
@@ -518,12 +533,25 @@ impl QueryJob {
             ))?;
             accumulator.start_page(response, budget, position, reference, reference_versions);
         }
-        let categories = snapshot.categories()?;
+        let annotations = match request {
+            QueryRequest::Annotations(_) => Some(annotations::AnnotationPage::new(
+                versions.clone(),
+                parameters.clone(),
+                position,
+            )?),
+            _ => None,
+        };
+        let categories = if annotations.is_some() {
+            Vec::new()
+        } else {
+            snapshot.categories()?
+        };
         let scan_range = match &mut day_walker {
             Some(calendar) => calendar.next_range().expect("validated nonempty dates"),
             None => range,
         };
         Ok(PreparedQuery {
+            annotations,
             scan_range,
             day_walker,
             range_accumulator,
@@ -548,6 +576,18 @@ impl QueryJob {
     ) -> Result<Option<QueryResponse>, RunQueryError> {
         let stage = std::mem::replace(&mut self.stage, Stage::Complete);
         match stage {
+            Stage::Annotations(mut page) => {
+                let response = timer.measure(QueryStage::Read, || {
+                    page.advance(&mut self.snapshot, self.range)
+                })?;
+                match response {
+                    Some(response) => Ok(Some(QueryResponse::Annotations(response))),
+                    None => {
+                        self.stage = Stage::Annotations(page);
+                        Ok(None)
+                    }
+                }
+            }
             Stage::Facts(mut facts) => {
                 match timer.measure(QueryStage::Read, || {
                     self.snapshot.read_fact_batch(self.range)
@@ -628,7 +668,9 @@ impl QueryJob {
                     QueryRequest::Unclassified(_) => Aggregation::Unclassified(
                         self.unclassified.take().expect("daily fold retained"),
                     ),
-                    QueryRequest::Facts(_) => unreachable!("raw facts bypass aggregation"),
+                    QueryRequest::Annotations(_) | QueryRequest::Facts(_) => {
+                        unreachable!("stored entities bypass aggregation")
+                    }
                     QueryRequest::Day(_) => Aggregation::Day(DayAccumulator::new(
                         self.calendar.take().expect("day calendar retained"),
                     )),
@@ -837,7 +879,10 @@ impl QueryJob {
                 });
             }
 
-            QueryResponse::Day(_) | QueryResponse::Unclassified(_) | QueryResponse::Range(_) => {}
+            QueryResponse::Annotations(_)
+            | QueryResponse::Day(_)
+            | QueryResponse::Unclassified(_)
+            | QueryResponse::Range(_) => {}
             QueryResponse::PendingAway(away) => {
                 let items = std::mem::take(&mut away.ranges);
                 let page = self.page_budget(away)?.page(items, self.position)?;
@@ -922,6 +967,7 @@ pub(crate) struct CompletedQuery {
 
 #[derive(Debug)]
 struct PreparedQuery {
+    annotations: Option<annotations::AnnotationPage>,
     scan_range: QueryRange,
     day_walker: Option<DayWalker>,
     range_accumulator: Option<RangeAccumulator>,

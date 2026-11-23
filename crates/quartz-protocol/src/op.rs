@@ -93,6 +93,9 @@ pub enum Op {
     /// The `query.unclassified` request.
     #[serde(rename = "query.unclassified")]
     QueryUnclassified,
+    /// The `query.annotations` request.
+    #[serde(rename = "query.annotations")]
+    QueryAnnotations,
     /// The `query.pending_away` request.
     #[serde(rename = "query.pending_away")]
     QueryPendingAway,
@@ -240,7 +243,8 @@ impl Op {
             | Self::QuerySegmentDetail
             | Self::QueryEntityDetail
             | Self::QueryUnclassified
-            | Self::QueryPendingAway => OpFamily::Query,
+            | Self::QueryPendingAway
+            | Self::QueryAnnotations => OpFamily::Query,
             Self::RuleSetsTree
             | Self::RuleSetsGet
             | Self::RuleSetsVersions

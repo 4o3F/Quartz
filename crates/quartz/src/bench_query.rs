@@ -409,7 +409,8 @@ impl<'path> BenchQuery<'path> {
         let mut workloads = Vec::new();
         for query in queries {
             let name = match &query {
-                QueryRequest::Range(_)
+                QueryRequest::Annotations(_)
+                | QueryRequest::Range(_)
                 | QueryRequest::Unclassified(_)
                 | QueryRequest::Facts(_)
                 | QueryRequest::SegmentDetail(_)

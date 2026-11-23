@@ -297,6 +297,9 @@ pub enum Capability {
     /// Grouped unclassified active work version 1.
     #[serde(rename = "query.unclassified.v1")]
     QueryUnclassifiedV1,
+    /// Saved annotation editing values and text continuations version 1.
+    #[serde(rename = "query.annotations.v1")]
+    QueryAnnotationsV1,
     /// A feature not understood by this client.
     #[serde(other, skip_serializing)]
     Unknown,

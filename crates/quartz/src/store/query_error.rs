@@ -16,6 +16,10 @@ pub(crate) enum ReadQueryError {
     InvalidFacts,
     #[snafu(display("invalid persisted category metadata"))]
     InvalidCategories,
+    #[snafu(display("invalid persisted annotation identity: {source}"))]
+    AnnotationIdentity {
+        source: quartz_protocol::ParseUuidError,
+    },
 }
 impl From<diesel::result::Error> for ReadQueryError {
     fn from(source: diesel::result::Error) -> Self {

@@ -59,6 +59,7 @@ requests! {
     UiHiddenRequest => UiHidden => AcceptedBody,
     Subscribe => Subscribe => SubscribeResponse,
     Unsubscribe => Unsubscribe => SubscribeResponse,
+    crate::QueryAnnotationsRequest => QueryAnnotations => crate::QueryAnnotationsResponse,
     QueryFactsRequest => QueryFacts => QueryFactsResponse,
     QueryDayRequest => QueryDay => QueryDayResponse,
     QueryRangeRequest => QueryRange => QueryRangeResponse,

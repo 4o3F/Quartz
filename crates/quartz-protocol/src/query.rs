@@ -87,6 +87,8 @@ impl QueryCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CursorQuery {
+    /// Saved annotation entities intersecting a bounded UTC range.
+    Annotations { start_utc_ms: i64, end_utc_ms: i64 },
     /// Category hierarchy with the archive filter bound to the continuation.
     Categories { include_archived: bool },
     /// A calendar date, from local midnight to the next local midnight.

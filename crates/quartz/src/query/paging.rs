@@ -6,6 +6,10 @@ use serde::Serialize;
 
 /// Reserve envelope fields and a continuation object inside the 200 KiB limit.
 const PAGE_ENVELOPE_BYTES: usize = 4096;
+/// JSON can encode one control byte as six bytes (`\u0000`).
+const MAX_JSON_BYTES_PER_TEXT_BYTE: usize = 6;
+/// Both editable text fields receive an independent allowance in each fragment.
+const ANNOTATION_TEXT_FIELDS: usize = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PagePosition {
@@ -44,6 +48,24 @@ pub(crate) struct PageBudget {
     remaining: usize,
 }
 impl PageBudget {
+    pub(super) fn fits(&self, item: &impl Serialize) -> Result<bool, RunQueryError> {
+        Ok(serde_json::to_vec(item)?.len() < self.remaining)
+    }
+    /// Reserves worst-case JSON escaping and metadata for both annotation text fields.
+    pub(super) fn annotation_chunk_bytes(
+        &self,
+        metadata: &impl Serialize,
+    ) -> Result<usize, RunQueryError> {
+        let bytes = self
+            .remaining
+            .checked_sub(serde_json::to_vec(metadata)?.len() + 1)
+            .ok_or(RunQueryError::PageTooLarge)?
+            / (ANNOTATION_TEXT_FIELDS * MAX_JSON_BYTES_PER_TEXT_BYTE);
+        if bytes < char::MAX.len_utf8() {
+            return Err(RunQueryError::PageTooLarge);
+        }
+        Ok(bytes)
+    }
     pub(crate) fn new(fixed: &impl Serialize) -> Result<Self, RunQueryError> {
         let fixed_bytes = serde_json::to_vec(fixed)?.len();
         Ok(Self {

@@ -73,9 +73,10 @@ pub use query::{
 };
 
 pub use annotations::{
-    Annotation, AnnotationCategory, AnnotationId, AnnotationKind, AnnotationValues,
-    AnnotationsCreateRequest, AnnotationsDeleteRequest, AnnotationsResponse,
-    AnnotationsUpdateRequest, CreateAnnotation, UpdateAnnotation,
+    Annotation, AnnotationCategory, AnnotationId, AnnotationKind, AnnotationText,
+    AnnotationTextChunk, AnnotationValues, AnnotationsCreateRequest, AnnotationsDeleteRequest,
+    AnnotationsResponse, AnnotationsUpdateRequest, CreateAnnotation, QueryAnnotationsRequest,
+    QueryAnnotationsResponse, SavedAnnotation, UpdateAnnotation,
 };
 
 pub use settings::{

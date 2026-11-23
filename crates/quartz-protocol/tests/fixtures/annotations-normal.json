@@ -1,0 +1,20 @@
+{
+  "entities": [
+    {
+      "uuid": "abcdef00-0000-4000-8000-000000000001",
+      "kind": "note",
+      "start_utc_ms": -1000,
+      "end_utc_ms": 2000,
+      "category": {
+        "kind": "uuid",
+        "uuid": "abcdef00-0000-4000-8000-000000000002"
+      },
+      "label": "",
+      "note": "第一部分🦀第二部分",
+      "created_utc_ms": 10,
+      "updated_utc_ms": 20
+    }
+  ],
+  "versions": "annotation-version",
+  "next_cursor": null
+}

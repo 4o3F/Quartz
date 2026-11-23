@@ -28,7 +28,9 @@ use std::{
 
 mod facts;
 mod input;
+mod saved_annotations;
 pub(crate) use input::{InputRow, QueryAnnotation};
+pub(crate) use saved_annotations::AnnotationScan;
 
 /// Bounds each SQLite fact scan before the database loop services pending writes.
 pub(crate) const READ_BATCH_ROWS: usize = 256;

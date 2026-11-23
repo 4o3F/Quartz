@@ -225,6 +225,7 @@ impl ConnectionSession {
                             quartz_protocol::Capability::QueryDocumentsV1,
                             quartz_protocol::Capability::QueryUnclassifiedV1,
                             quartz_protocol::Capability::QueryRangeV1,
+                            quartz_protocol::Capability::QueryAnnotationsV1,
                         ],
                     },
                 )
@@ -292,6 +293,7 @@ impl ConnectionSession {
                     Op::QueryFacts
                     | Op::QueryDay
                     | Op::QueryTimeline
+                    | Op::QueryAnnotations
                     | Op::QueryPendingAway
                     | Op::QuerySegmentDetail
                     | Op::QueryUnclassified
@@ -467,6 +469,38 @@ mod tests {
                 state: State::Ready(role),
                 allowed: AllowedRoles::Quartz,
             };
+            assert!(matches!(
+                session.receive(
+                    request(
+                        7,
+                        Op::QueryAnnotations,
+                        serde_json::json!({"start_utc_ms":0,"end_utc_ms":1000})
+                    ),
+                    &receiver.borrow().status
+                ),
+                Action::Query {
+                    request: crate::query::QueryRequest::Annotations(_),
+                    ..
+                }
+            ));
+            for body in [
+                serde_json::json!({"start_utc_ms":0,"end_utc_ms":1000,"label":"unexpected"}),
+                serde_json::json!({"start_utc_ms":0}),
+                serde_json::json!({"start_utc_ms":0,"end_utc_ms":1000,"cursor":"invalid"}),
+            ] {
+                assert_eq!(
+                    session
+                        .receive(
+                            request(7, Op::QueryAnnotations, body),
+                            &receiver.borrow().status
+                        )
+                        .reply()
+                        .outcome,
+                    ResponseOutcome::Err {
+                        error: ProtocolError::new(ErrorKind::BadRequest)
+                    }
+                );
+            }
             let range = session.receive(request(4, Op::QueryRange, serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-09","bucket":"week","dimensions":["category","app","document"]})), &receiver.borrow().status);
             assert!(matches!(
                 range,
@@ -564,6 +598,34 @@ mod tests {
         }
     }
     #[test]
+    fn cli_cannot_dispatch_annotation_writes() {
+        let publisher =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("annotations".into()));
+        let receiver = publisher.subscribe();
+        let mut session = ConnectionSession {
+            state: State::Ready(ReadyRole::Cli),
+            allowed: AllowedRoles::Quartz,
+        };
+        for op in [
+            Op::AnnotationsCreate,
+            Op::AnnotationsUpdate,
+            Op::AnnotationsDelete,
+        ] {
+            assert_eq!(
+                session
+                    .receive(
+                        request(1, op, serde_json::json!({})),
+                        &receiver.borrow().status
+                    )
+                    .reply()
+                    .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::Forbidden)
+                }
+            );
+        }
+    }
+    #[test]
     fn pure_session_requires_hello_and_authorizes_without_io() {
         let publisher =
             crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("session".into()));
@@ -599,6 +661,7 @@ mod tests {
                 quartz_protocol::Capability::QueryDocumentsV1,
                 quartz_protocol::Capability::QueryUnclassifiedV1,
                 quartz_protocol::Capability::QueryRangeV1,
+                quartz_protocol::Capability::QueryAnnotationsV1,
             ]
         );
         assert!(matches!(
