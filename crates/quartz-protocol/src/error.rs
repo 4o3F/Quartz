@@ -43,6 +43,8 @@ pub enum ErrorKind {
         /// Current version to read before resubmitting a change.
         current_version: RuleSetVersion,
     },
+    /// The selected set or historical revision does not exist.
+    RuleSetNotFound { key: String, version: Option<u32> },
     /// The host could not connect to the core.
     CoreOffline,
     /// The core could not complete the request because of an internal failure.
@@ -70,6 +72,7 @@ impl ErrorKind {
             Self::StaleCursor => "stale_cursor",
             Self::StaleDocumentRef => "stale_document_ref",
             Self::RuleSetStale { .. } => "rule_set_stale",
+            Self::RuleSetNotFound { .. } => "rule_set_not_found",
             Self::CoreOffline => "core_offline",
             Self::Internal => "internal",
             Self::Busy => "busy",

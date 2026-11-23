@@ -78,6 +78,8 @@ pub(crate) enum RunQueryError {
     },
     #[snafu(display("one query item exceeds the page size"))]
     PageTooLarge,
+    #[snafu(display("stored rule entry violates the read contract"))]
+    InvalidRuleEntry,
     #[snafu(display("could not read query snapshot: {source}"))]
     Read { source: ReadQueryError },
     #[snafu(display("could not interpret query calendar: {source}"))]

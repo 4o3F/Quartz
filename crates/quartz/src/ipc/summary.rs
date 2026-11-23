@@ -246,8 +246,9 @@ mod tests {
                 result = &mut compute => break result.expect("summary"),
                 _ = tokio::task::yield_now() => {
                     while let Ok(command) = channel.receiver.try_recv() {
-                        let response = fixture.run(command.request).map_err(|error| ProtocolError::new(error.kind()));
-                        command.reply.send(response).expect("query receiver");
+                        let crate::query::dispatch::QueryCommand::Query { request, reply } = command else { panic!("summary submits a fact query") };
+                        let response = fixture.run(request).map_err(|error| ProtocolError::new(error.kind()));
+                        reply.send(response).expect("query receiver");
                     }
                 }
             }
@@ -322,7 +323,9 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "main-side calls must not wait for the query or writer"
         );
-        assert!(!slow_query.reply.is_closed());
+        assert!(
+            matches!(slow_query, crate::query::dispatch::QueryCommand::Query { reply, .. } if !reply.is_closed())
+        );
         task.abort();
         assert!(
             task.await

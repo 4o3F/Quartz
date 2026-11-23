@@ -27,6 +27,8 @@ pub struct RuleSetVersion {
     pub parent_version: Option<u32>,
     /// Optional revision annotation.
     pub note: Option<String>,
+    /// UTC milliseconds assigned by the shell; absent while a decision awaits persistence.
+    pub created_utc_ms: Option<i64>,
 }
 impl RuleSetVersion {
     /// Hashes the canonical contents that a persistence adapter writes.

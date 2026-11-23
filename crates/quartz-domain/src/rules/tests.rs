@@ -1588,3 +1588,33 @@ when=[{{field='window.class',op='equals',value='Editor'}}]
         }
     }
 }
+
+#[test]
+fn encoded_entry_limit_rejects_large_combined_values_with_value_diagnostic() {
+    /// Individual values remain within 4096 UTF-16 units, but their JSON entry exceeds 128 KiB.
+    const CONDITION_COUNT: usize = 12;
+    const VALUE_UNITS: usize = 4096;
+    let condition = format!(
+        "{{field='app.exe_name',op='contains',value='{}'}}",
+        "字".repeat(VALUE_UNITS)
+    );
+    let conditions = vec![condition; CONDITION_COUNT].join(",");
+    let source = format!(
+        "format='quartz-rules/1'\n[set]\nkey='user.large'\nkind='privacy'\nname='Large'\n[[rule]]\nid='large'\nlabel='Large combined values'\npreset='title_hidden'\nwhen=[{conditions}]\n"
+    );
+    let error = RuleSet::parse(
+        "large.toml",
+        &source,
+        ParseContext {
+            origin: RuleOrigin::User,
+            references: &ReferenceCatalog::default(),
+        },
+    )
+    .expect_err("combined entry exceeds wire bound");
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == DiagnosticCode::Value)
+    );
+}

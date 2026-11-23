@@ -278,9 +278,38 @@ fn unknown_operation_preserves_connection_and_permission_errors_are_typed() {
     assert!(matches!(
         ui.request(Op::RuleSetsTree, &json!({})),
         Err(CallCoreError::Protocol {
+            kind: ErrorKind::BadRequest
+        })
+    ));
+    assert!(matches!(
+        ui.request(Op::RuleSetsEdit, &json!({})),
+        Err(CallCoreError::Protocol {
             kind: ErrorKind::NotImplemented
         })
     ));
+    for client in [&mut ui, &mut cli] {
+        let body = client
+            .request(Op::RuleSetsTree, &json!({"kind":"privacy"}))
+            .expect("rule tree over named pipe");
+        let tree: quartz_protocol::RuleSetsTreeResponse =
+            serde_json::from_value(body).expect("typed rule tree");
+        assert!(tree.nodes.iter().any(|node| node.key == "builtin.privacy"));
+        let body = client
+            .request(
+                Op::RuleSetsGet,
+                &json!({"key":"builtin.privacy","view":"effective"}),
+            )
+            .expect("effective contents over named pipe");
+        let contents: quartz_protocol::RuleSetsGetResponse =
+            serde_json::from_value(body).expect("typed contents");
+        assert!(!contents.entries.is_empty());
+        let body = client
+            .request(Op::RuleSetsVersions, &json!({"key":"builtin.privacy"}))
+            .expect("revisions over named pipe");
+        let revisions: quartz_protocol::RuleSetsVersionsResponse =
+            serde_json::from_value(body).expect("typed revisions");
+        assert_eq!(revisions.revisions[0].version, contents.version);
+    }
 }
 #[test]
 fn host_role_is_rejected_and_connection_closed() {

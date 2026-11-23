@@ -314,6 +314,23 @@ pub struct CommitOutcome {
     base_epoch: SnapshotEpoch,
 }
 
+impl CommitOutcome {
+    /// Records the shell-supplied transaction timestamp in newly committed revisions.
+    pub fn record_commit_time(&mut self, writes: &[RuleSetWrite], created_utc_ms: i64) {
+        for write in writes {
+            let update = write.update();
+            self.state
+                .sets
+                .get_mut(&update.key)
+                .expect("decision contains written set")
+                .versions
+                .get_mut(&update.revision.version)
+                .expect("decision contains written revision")
+                .created_utc_ms = Some(created_utc_ms);
+        }
+    }
+}
+
 /// A commit acknowledgement was stale or its snapshot could not be rebuilt.
 #[derive(Debug, Snafu)]
 #[snafu(module(commit_error))]
@@ -778,6 +795,7 @@ impl RegistryState {
                 content: set.content.clone(),
                 parent_version,
                 note: None,
+                created_utc_ms: None,
             },
             set,
             origin,
@@ -809,6 +827,7 @@ impl RegistryState {
             .ok_or(DecideRegistryCommandError::MissingRevision)?
             .clone();
         revision.version = version;
+        revision.created_utc_ms = None;
         revision.note = Some("rule-set state changed".into());
         let update = RuleSetUpdate {
             key: key.clone(),

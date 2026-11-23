@@ -158,6 +158,12 @@ impl Connection {
                         Err(error) => Action::error_response(Some(id), error),
                     })
                 }
+                Action::Rules { id, request } => {
+                    Some(match self.services.queries.read_rules(request).await {
+                        Ok(response) => Action::success_response(id, response),
+                        Err(error) => Action::error_response(Some(id), error),
+                    })
+                }
                 Action::Query { id, request } => {
                     Some(match self.services.queries.call(request).await {
                         Ok(response) => Action::success_response(id, response),
@@ -309,6 +315,45 @@ mod tests {
             );
         });
     }
+    #[tokio::test]
+    async fn ui_and_cli_rule_reads_round_trip_over_framed_transport() {
+        let database = TestDatabase::start();
+        let status =
+            StatusPublisher::new(quartz_protocol::InstanceId("rule-read-transport".into()));
+        for role in [
+            HelloRole::Cli,
+            HelloRole::Ui {
+                ui: quartz_protocol::UiHello {
+                    state: quartz_protocol::UiState::Visible,
+                },
+            },
+        ] {
+            let mut client = MemoryClient::connect(connection(&database, &status), role).await;
+            client
+                .request(
+                    2,
+                    quartz_protocol::Op::RuleSetsTree,
+                    serde_json::json!({"kind":"privacy"}),
+                )
+                .await;
+            client
+                .request(
+                    3,
+                    quartz_protocol::Op::RuleSetsGet,
+                    serde_json::json!({"key":"builtin.privacy","view":"effective"}),
+                )
+                .await;
+            client
+                .request(
+                    4,
+                    quartz_protocol::Op::RuleSetsVersions,
+                    serde_json::json!({"key":"builtin.privacy"}),
+                )
+                .await;
+            client.close().await;
+        }
+    }
+
     #[test]
     fn memory_transport_performs_hello_and_dispatches_query() {
         runtime().block_on(async {

@@ -178,6 +178,73 @@ pub struct Resolution {
     pub effective: EffectiveRules,
     /// All detected identity, ancestry, target, and conflict errors; empty for a valid tree.
     pub diagnostics: Vec<Diagnostic>,
+    /// All nodes in tree preorder, including effectively disabled subtrees.
+    pub nodes: Vec<ResolvedNode>,
+    /// Every authored entry in tree and file order.
+    pub entries: Vec<ResolvedEntry>,
+    /// Rejected directives, including both sides of a sibling conflict.
+    pub overlay_warnings: Vec<OverlayWarning>,
+}
+
+/// Participation of an authored entry after the shared resolver applies overlays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedEntryState {
+    Effective,
+    Disabled,
+    Overridden,
+    TargetMissing,
+}
+/// Source entry and its resolved provenance, retained for rule editors.
+#[derive(Debug, Clone)]
+pub struct ResolvedEntry {
+    /// Key of the authoring set.
+    pub key: String,
+    /// Entry identity in canonical contents.
+    pub position: EntryPosition,
+    /// Final state of this authored entry.
+    pub state: ResolvedEntryState,
+    /// Definition and replacement chain up to this entry.
+    pub provenance: Vec<RuleEntrySource>,
+    /// Position in the effective evaluation list, present for active rule contents.
+    pub effective_order: Option<usize>,
+}
+/// One definition, replacement, or disable author in an editor entry's chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuleEntrySource {
+    /// Authoring rule-set key.
+    pub key: String,
+    /// Authoring revision.
+    pub version: u32,
+    /// Original target's local rule identifier.
+    pub id: String,
+}
+impl RuleEntrySource {
+    fn from_installed(installed: &InstalledSet, id: &str) -> Self {
+        Self {
+            key: installed.set.header.key.clone(),
+            version: installed.version,
+            id: id.into(),
+        }
+    }
+}
+/// Tree traversal includes disabled descendants with their effective enablement.
+#[derive(Debug, Clone)]
+pub struct ResolvedNode {
+    /// Key of this tree node.
+    pub key: String,
+    /// Enablement after ancestors and compilation exclusions are applied.
+    pub enabled: Enablement,
+}
+/// Structured overlay rejection produced during target and conflict validation.
+#[derive(Debug, Clone)]
+pub struct OverlayWarning {
+    /// Set containing the rejected directive.
+    pub key: String,
+    /// Qualified target rule reference.
+    pub target: String,
+    /// Typed validation cause; Target or Conflict.
+    pub code: DiagnosticCode,
 }
 
 impl Resolution {
@@ -235,6 +302,7 @@ impl Resolution {
         }
         let mut modifications: BTreeMap<&str, Vec<Modification>> = BTreeMap::new();
         let mut bad_targets = BTreeSet::new();
+        let mut overlay_warnings = Vec::new();
         for (index, installed) in sets.iter().enumerate() {
             let targets = installed
                 .set
@@ -265,6 +333,11 @@ impl Resolution {
                     })
                 });
                 if !exists {
+                    overlay_warnings.push(OverlayWarning {
+                        key: installed.set.header.key.clone(),
+                        target: target.into(),
+                        code: DiagnosticCode::Target,
+                    });
                     diagnostics.push(installed.set.diagnostic(
                         DiagnosticCode::Target,
                         &path,
@@ -282,6 +355,13 @@ impl Resolution {
                 } in previous.iter()
                 {
                     if !ancestors[index].contains(other) && !ancestors[*other].contains(&index) {
+                        for set_index in [index, *other] {
+                            overlay_warnings.push(OverlayWarning {
+                                key: sets[set_index].set.header.key.clone(),
+                                target: target.into(),
+                                code: DiagnosticCode::Conflict,
+                            });
+                        }
                         diagnostics.push(installed.set.diagnostic(
                             DiagnosticCode::Conflict,
                             &path,
@@ -336,7 +416,7 @@ impl Resolution {
         );
         let mut rules: Vec<EffectiveRule> = Vec::new();
         let mut suppressed = Vec::new();
-        for (preorder, index) in traversal.into_iter().enumerate() {
+        for (preorder, index) in traversal.iter().copied().enumerate() {
             let installed = &sets[index];
             let set = &installed.set;
             for (file_order, rule) in set.content.rule.iter().enumerate() {
@@ -437,7 +517,136 @@ impl Resolution {
                 r.file_order,
             )
         });
+        let mut all_nodes: Vec<_> = (0..sets.len())
+            .filter(|&index| sets[index].set.header.kind == kind)
+            .collect();
+        all_nodes.sort_by_key(|&index| {
+            let mut path: Vec<_> = ancestors[index].iter().rev().copied().collect();
+            path.push(index);
+            path.into_iter()
+                .map(|i| (sets[i].sibling_order, sets[i].set.header.key.as_str()))
+                .collect::<Vec<_>>()
+        });
+        let mut nodes = Vec::new();
+        let mut entries = Vec::new();
+        for index in all_nodes {
+            let installed = &sets[index];
+            let key = &installed.set.header.key;
+            let enabled = traversal.contains(&index);
+            nodes.push(ResolvedNode {
+                key: key.clone(),
+                enabled: if enabled {
+                    Enablement::Enabled
+                } else {
+                    Enablement::Disabled
+                },
+            });
+            for (file_order, position) in installed.set.content.order.iter().copied().enumerate() {
+                let target = match position {
+                    EntryPosition::Rule(i) => format!("{key}/{}", installed.set.content.rule[i].id),
+                    EntryPosition::Override(i) => {
+                        installed.set.content.r#override[i].target.clone()
+                    }
+                    EntryPosition::Disable(i) => installed.set.content.disable[i].target.clone(),
+                };
+                let supplies = |rule: &EffectiveRule| {
+                    rule.full_id == target
+                        && rule.file_order == file_order
+                        && rule
+                            .provenance
+                            .overrides
+                            .last()
+                            .map_or(rule.provenance.defining_set.as_str(), |replacement| {
+                                replacement.set.as_str()
+                            })
+                            == key
+                };
+                let effective_order = rules.iter().position(supplies);
+                let removed = suppressed.iter().find(|old| supplies(&old.rule));
+                let missing = overlay_warnings.iter().any(|warning| {
+                    warning.key == *key
+                        && warning.target == target
+                        && warning.code == DiagnosticCode::Target
+                });
+                let state = if missing {
+                    ResolvedEntryState::TargetMissing
+                } else if !enabled {
+                    ResolvedEntryState::Disabled
+                } else if effective_order.is_some() {
+                    ResolvedEntryState::Effective
+                } else if removed
+                    .is_some_and(|old| matches!(old.reason, SuppressionReason::Overridden { .. }))
+                {
+                    ResolvedEntryState::Overridden
+                } else {
+                    ResolvedEntryState::Disabled
+                };
+                let source = effective_order
+                    .map(|i| &rules[i])
+                    .or_else(|| removed.map(|old| &old.rule));
+                let mut provenance = Vec::new();
+                if let Some(definition) = target.split_once('/') {
+                    let id = definition.1;
+                    if let Some(source) = source {
+                        provenance.push(RuleEntrySource {
+                            key: source.provenance.defining_set.clone(),
+                            version: source.provenance.defining_version,
+                            id: id.into(),
+                        });
+                        provenance.extend(source.provenance.overrides.iter().map(|replacement| {
+                            RuleEntrySource {
+                                key: replacement.set.to_string(),
+                                version: replacement.version.get(),
+                                id: id.into(),
+                            }
+                        }));
+                    } else {
+                        if let Some(definition_index) = by_key.get(definition.0) {
+                            provenance.push(RuleEntrySource::from_installed(
+                                &sets[*definition_index],
+                                id,
+                            ));
+                        }
+                        if !matches!(position, EntryPosition::Rule(_)) {
+                            for ancestor in ancestors[index].iter().rev() {
+                                let ancestor = &sets[*ancestor];
+                                if ancestor
+                                    .set
+                                    .content
+                                    .r#override
+                                    .iter()
+                                    .any(|entry| entry.target == target)
+                                {
+                                    provenance.push(RuleEntrySource::from_installed(ancestor, id));
+                                }
+                            }
+                            provenance.push(RuleEntrySource::from_installed(installed, id));
+                        }
+                    }
+                }
+                entries.push(ResolvedEntry {
+                    key: key.clone(),
+                    position,
+                    state,
+                    provenance,
+                    effective_order,
+                });
+            }
+        }
+        for entry in &entries {
+            let set = &sets[by_key[entry.key.as_str()]].set;
+            if entry.format_entry(&set.content).to_string().len() > super::MAX_ENTRY_BYTES {
+                diagnostics.push(set.diagnostic(
+                    DiagnosticCode::Value,
+                    "",
+                    "encoded rule entry exceeds 128 KiB",
+                ));
+            }
+        }
         Resolution {
+            nodes,
+            entries,
+            overlay_warnings,
             effective: EffectiveRules {
                 kind,
                 rules,

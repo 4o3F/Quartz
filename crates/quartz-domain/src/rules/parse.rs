@@ -383,6 +383,15 @@ impl RuleSet {
                 .map_or(0, |location| location.bytes.start)
         });
         content.order = order.into_iter().map(|(_, position)| position).collect();
+        for (index, position) in content.order.iter().enumerate() {
+            if content.entry_fields(*position).to_string().len() > super::MAX_ENTRY_BYTES {
+                check.error(
+                    DiagnosticCode::Value,
+                    &format!("entry[{index}]"),
+                    "encoded rule entry exceeds 128 KiB",
+                );
+            }
+        }
         let mut diagnostics = check.diagnostics.into_iter();
         if let Some(first) = diagnostics.next() {
             Err(ParseRuleSetError::new(first, diagnostics))

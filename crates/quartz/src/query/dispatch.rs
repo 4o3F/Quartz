@@ -8,9 +8,14 @@ use tokio::sync::oneshot;
 /// Limits queued queries independently of the capture write queue (01 §6).
 pub(crate) const QUERY_CHANNEL_CAPACITY: usize = 8;
 #[derive(Debug)]
-pub(crate) struct QueryCommand {
-    pub request: QueryRequest,
-    pub reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
+pub(crate) enum QueryCommand {
+    Query {
+        request: QueryRequest,
+        reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
+    },
+    RuleInputs {
+        reply: oneshot::Sender<Result<crate::rules::read::ReadInputs, ProtocolError>>,
+    },
 }
 #[derive(Debug, Clone)]
 pub(crate) struct QueryPort {
@@ -30,6 +35,28 @@ impl QueryChannel {
     }
 }
 impl QueryPort {
+    /// Captures registry and metadata inputs on the database actor, then projects off-thread.
+    pub(crate) async fn read_rules(
+        &self,
+        request: crate::rules::read::ReadRequest,
+    ) -> Result<crate::rules::read::ReadResponse, ProtocolError> {
+        let (reply, received) = oneshot::channel();
+        self.sender
+            .try_send(QueryCommand::RuleInputs { reply })
+            .map_err(|error| {
+                ProtocolError::new(match error {
+                    crossbeam_channel::TrySendError::Full(_) => ErrorKind::Busy,
+                    crossbeam_channel::TrySendError::Disconnected(_) => ErrorKind::Internal,
+                })
+            })?;
+        let inputs = received
+            .await
+            .map_err(|_| ProtocolError::new(ErrorKind::Internal))??;
+        tokio::task::spawn_blocking(move || request.execute(inputs))
+            .await
+            .map_err(|_| ProtocolError::new(ErrorKind::Internal))?
+    }
+
     pub(crate) async fn call(&self, request: QueryRequest) -> Result<QueryResponse, ProtocolError> {
         self.submit(request)?
             .await
@@ -41,7 +68,7 @@ impl QueryPort {
     ) -> Result<oneshot::Receiver<Result<QueryResponse, ProtocolError>>, ProtocolError> {
         let (reply, received) = oneshot::channel();
         self.sender
-            .try_send(QueryCommand { request, reply })
+            .try_send(QueryCommand::Query { request, reply })
             .map_err(|error| {
                 ProtocolError::new(match error {
                     crossbeam_channel::TrySendError::Full(_) => ErrorKind::Busy,

@@ -32,7 +32,7 @@ impl TestDatabase {
         let crate::query::versions::VersionChannel {
             mut publisher,
             port: versions,
-        } = VersionPublisher::open(&mut fixture.store, snapshots).expect("versions");
+        } = VersionPublisher::open(&mut fixture.store, snapshots.clone()).expect("versions");
         let (writes, receive) = bounded(QUERY_CHANNEL_CAPACITY);
         let thread = std::thread::spawn(move || {
             loop {
@@ -47,7 +47,8 @@ impl TestDatabase {
                     },
                     recv(publisher.requests) -> request => match request { Ok(request) => publisher.receive(request), Err(_) => return },
                     recv(channel.receiver) -> query => match query {
-                        Ok(query) => { let result = fixture.run(query.request).map_err(|error| ProtocolError::new(error.kind())); let _ = query.reply.send(result); }
+                        Ok(QueryCommand::Query {request, reply}) => { let result = fixture.run(request).map_err(|error| ProtocolError::new(error.kind())); let _ = reply.send(result); }
+                        Ok(QueryCommand::RuleInputs {reply}) => { let result = fixture.store.rule_read_metadata().map(|metadata_version| crate::rules::read::ReadInputs {snapshot: snapshots.load(), metadata_version}).map_err(|_| ProtocolError::new(ErrorKind::Internal)); let _ = reply.send(result); }
                         Err(_) => return,
                     }
                 }
@@ -84,7 +85,7 @@ impl QueryChannel {
             let (reply, _) = oneshot::channel();
             self.port
                 .sender
-                .try_send(QueryCommand {
+                .try_send(QueryCommand::Query {
                     request: request.clone(),
                     reply,
                 })

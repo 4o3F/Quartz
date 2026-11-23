@@ -44,6 +44,8 @@ pub struct RuleSnapshot {
     hashes: SnapshotHashes,
     warnings: Vec<RuleWarning>,
     upstream_changes: Vec<UpstreamChange>,
+    state: RegistryState,
+    resolutions: Vec<Resolution>,
 }
 impl RuleSnapshot {
     /// Returns the publication sequence within this registry process.
@@ -74,6 +76,17 @@ impl RuleSnapshot {
     /// Borrows derived alerts for the snapshot or command result.
     pub fn upstream_changes(&self) -> &[UpstreamChange] {
         &self.upstream_changes
+    }
+
+    /// Borrows the exact registry history published with these compiled rules.
+    pub fn state(&self) -> &RegistryState {
+        &self.state
+    }
+    /// Borrows shared resolver output for one supported rule family.
+    pub fn resolution(&self, kind: RuleKind) -> Option<&Resolution> {
+        self.resolutions
+            .iter()
+            .find(|resolution| resolution.effective.kind == kind)
     }
 
     pub(super) fn build(
@@ -110,6 +123,7 @@ impl RuleSnapshot {
             }
         }
         let mut families = Vec::new();
+        let mut resolutions = Vec::new();
         for kind in [
             RuleKind::Privacy,
             RuleKind::Classification,
@@ -131,13 +145,20 @@ impl RuleSnapshot {
                     diagnostics: blocking,
                 });
             }
-            warnings.extend(resolution.diagnostics.into_iter().map(RuleWarning::Tree));
+            warnings.extend(
+                resolution
+                    .diagnostics
+                    .iter()
+                    .cloned()
+                    .map(RuleWarning::Tree),
+            );
             let hash = resolution.effective.version_hash.clone();
             let compiled = resolution
                 .effective
                 .compile()
                 .context(snapshot_error::EffectiveSnafu)?;
             families.push((compiled, hash));
+            resolutions.push(resolution);
         }
         let (extraction, extraction_hash) = families.pop().expect("three rule families");
         let (classification, classification_hash) =
@@ -145,6 +166,8 @@ impl RuleSnapshot {
         let (privacy, privacy_hash) = families.pop().expect("privacy family remains");
         Ok(Self {
             epoch,
+            state: installed.clone(),
+            resolutions,
             privacy,
             classification,
             extraction,

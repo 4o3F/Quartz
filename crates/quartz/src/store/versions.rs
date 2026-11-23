@@ -248,6 +248,15 @@ impl From<super::settings::AccessSettingError> for BumpVersionError {
     }
 }
 
+impl Store {
+    /// Reads the single metadata counter without scanning fact-day inputs.
+    pub(crate) fn rule_read_metadata(
+        &mut self,
+    ) -> Result<i64, super::settings::AccessSettingError> {
+        Settings::new(&mut self.writer).metadata_version()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

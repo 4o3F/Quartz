@@ -21,23 +21,31 @@ impl QueryRunner {
         command: QueryCommand,
         rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
     ) {
-        if command.reply.is_closed() {
+        let QueryCommand::Query { request, reply } = command else {
+            if let QueryCommand::RuleInputs { reply } = command {
+                let result = store
+                    .rule_read_metadata()
+                    .map(|metadata_version| crate::rules::read::ReadInputs {
+                        snapshot: rules,
+                        metadata_version,
+                    })
+                    .map_err(|_| ProtocolError::new(ErrorKind::Internal));
+                let _ = reply.send(result);
+            }
+            return;
+        };
+        if reply.is_closed() {
             return;
         }
         let mut reader = store.take_query_reader();
-        match QueryJob::start(&mut reader, command.request, rules) {
-            Ok(job) => {
-                self.running = Some(RunningQuery {
-                    job,
-                    reply: command.reply,
-                })
-            }
+        match QueryJob::start(&mut reader, request, rules) {
+            Ok(job) => self.running = Some(RunningQuery { job, reply }),
             Err(error) => {
                 if let Some(reader) = reader {
                     store.return_query_reader(reader);
                 }
                 tracing::warn!(%error, "could not start query");
-                let _ = command.reply.send(Err(ProtocolError::new(error.kind())));
+                let _ = reply.send(Err(ProtocolError::new(error.kind())));
             }
         }
     }

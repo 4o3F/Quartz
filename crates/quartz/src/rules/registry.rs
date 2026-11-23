@@ -154,11 +154,12 @@ impl RegistryShell {
             outcome,
         } = decision.into_parts();
         let reply = reply.context(run_error::DecideSnafu)?;
-        let event = if let Some(outcome) = outcome {
+        let event = if let Some(mut outcome) = outcome {
             let now = now.get().as_millisecond();
             store
                 .rule_transaction(|transaction| transaction.execute(&writes, now))
                 .context(run_error::PersistSnafu)?;
+            outcome.record_commit_time(&writes, now);
             Some(
                 self.registry
                     .committed(outcome)

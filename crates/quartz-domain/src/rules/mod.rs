@@ -3,6 +3,7 @@
 mod content_hash;
 mod diagnostic;
 mod evaluate;
+mod format;
 mod identity;
 mod model;
 mod parse;
@@ -17,19 +18,21 @@ pub use evaluate::{
     ParseExplanationIdError, PreparedClassifier, PreparedExtractor, PrivacyLabelSnapshot,
     PrivacySources, RuleObserver, RuleOutcome, RuleStage, RuleStatus, ShadowReason,
 };
+pub use format::MAX_ENTRY_BYTES;
 pub use identity::{
     ParseRuleIdError, ParseRuleSetKeyError, ParseRuleTargetError, RuleId, RuleSetKey, RuleTarget,
     RuleVersion, RuleWriteCode,
 };
 pub use model::{
     Action, BuiltinMetadata, CaseSensitivity, CategoryReference, Condition, Content, Disable,
-    EntryPosition, Field, MatchMode, Operator, Override, PrivacyAction, Rule, RuleBody, RuleKind,
-    RuleOrigin, RuleSet, SetHeader, WebAction,
+    EntryPosition, Field, MatchMode, Operator, Override, PrivacyAction, Rule, RuleBody,
+    RuleEntryKind, RuleKind, RuleOrigin, RuleSet, SetHeader, WebAction,
 };
 pub use parse::{ParseContext, ParseRuleSetError, ReferenceCatalog};
 pub use resolve::{
-    EffectiveRule, EffectiveRules, Enablement, InstalledSet, OverrideRef, Resolution,
-    RuleProvenance, SuppressedRule, SuppressionReason,
+    EffectiveRule, EffectiveRules, Enablement, InstalledSet, OverlayWarning, OverrideRef,
+    Resolution, ResolvedEntry, ResolvedEntryState, ResolvedNode, RuleEntrySource, RuleProvenance,
+    SuppressedRule, SuppressionReason,
 };
 
 /// Embedded privacy rules; all language variants are evaluated together.

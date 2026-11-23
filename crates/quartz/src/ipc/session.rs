@@ -116,6 +116,10 @@ pub(crate) enum Action {
         id: RequestId,
         request: crate::persistence::dispatch::WriteRequest,
     },
+    Rules {
+        id: RequestId,
+        request: crate::rules::read::ReadRequest,
+    },
     Query {
         id: RequestId,
         request: crate::query::QueryRequest,
@@ -290,6 +294,12 @@ impl ConnectionSession {
                         };
                         Action::Unsubscribe { id, subscription }
                     }
+                    Op::RuleSetsTree | Op::RuleSetsGet | Op::RuleSetsVersions => {
+                        match crate::rules::read::ReadRequest::decode(request.op, request.body) {
+                            Ok(request) => Action::Rules { id, request },
+                            Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
+                        }
+                    }
                     Op::QueryFacts
                     | Op::QueryDay
                     | Op::QueryTimeline
@@ -321,9 +331,6 @@ impl ConnectionSession {
                         }
                     }
                     Op::Hello
-                    | Op::RuleSetsTree
-                    | Op::RuleSetsGet
-                    | Op::RuleSetsVersions
                     | Op::RuleSetsSetEnabled
                     | Op::RuleSetsReorder
                     | Op::RuleSetsDelete
@@ -375,6 +382,51 @@ mod tests {
             body,
         })
     }
+    #[test]
+    fn rule_reads_allow_ui_and_cli_and_reject_invalid_bodies_before_admission() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("rule-reads".into()));
+        for role in [
+            ReadyRole::Ui {
+                state: UiState::Visible,
+            },
+            ReadyRole::Cli,
+        ] {
+            let mut session = ConnectionSession {
+                state: State::Ready(role),
+                allowed: AllowedRoles::Quartz,
+            };
+            for op in [Op::RuleSetsTree, Op::RuleSetsGet, Op::RuleSetsVersions] {
+                let body = match op {
+                    Op::RuleSetsTree => serde_json::json!({"kind":"privacy"}),
+                    Op::RuleSetsGet => {
+                        serde_json::json!({"key":"builtin.privacy","view":"effective"})
+                    }
+                    Op::RuleSetsVersions => serde_json::json!({"key":"builtin.privacy"}),
+                    _ => unreachable!("three read operations"),
+                };
+                assert!(matches!(
+                    session.receive(
+                        request(7, op, body.clone()),
+                        &status.subscribe().borrow().status
+                    ),
+                    Action::Rules { .. }
+                ));
+                let mut invalid = body;
+                invalid["unexpected"] = serde_json::json!(true);
+                assert_eq!(
+                    session
+                        .receive(request(8, op, invalid), &status.subscribe().borrow().status)
+                        .reply()
+                        .outcome,
+                    ResponseOutcome::Err {
+                        error: ProtocolError::new(ErrorKind::BadRequest)
+                    }
+                );
+            }
+        }
+    }
+
     #[test]
     fn category_operations_are_ui_only_and_reject_unknown_fields() {
         let status =

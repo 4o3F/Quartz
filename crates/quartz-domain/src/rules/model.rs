@@ -325,6 +325,24 @@ pub enum EntryPosition {
         usize,
     ),
 }
+/// Source table section of a canonical entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleEntryKind {
+    Rule,
+    Override,
+    Disable,
+}
+impl EntryPosition {
+    /// Returns the rule-format section for this source entry.
+    pub fn kind(self) -> RuleEntryKind {
+        match self {
+            Self::Rule(_) => RuleEntryKind::Rule,
+            Self::Override(_) => RuleEntryKind::Override,
+            Self::Disable(_) => RuleEntryKind::Disable,
+        }
+    }
+}
 impl Content {
     /// Returns compact deterministic JSON with category UUID references.
     pub fn canonical_json(&self) -> String {

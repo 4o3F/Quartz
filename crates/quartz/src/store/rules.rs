@@ -155,6 +155,7 @@ impl<'connection> RuleSets<'connection> {
                         .transpose()
                         .context(InvalidVersionSnafu)?,
                     note: row.note,
+                    created_utc_ms: Some(row.created_utc_ms),
                 },
             );
         }
