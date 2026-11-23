@@ -32,8 +32,8 @@ use quartz_protocol::{
 use serde::Serialize;
 use timing::{QueryStage, QueryTimer, QueryTimings};
 
-/// Increment whenever slicing, duration, aggregation, or projection semantics change.
-pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 3;
+/// Increment whenever matching, slicing, duration, aggregation, or projection semantics change.
+pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 4;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
 const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
 

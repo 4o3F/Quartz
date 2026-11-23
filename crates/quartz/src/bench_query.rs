@@ -294,6 +294,7 @@ impl<'path> BenchQuery<'path> {
             }),
         ];
         snafu::ensure!(self.runs > 0, RunsSnafu);
+        let mut workloads = Vec::new();
         for query in queries {
             let name = match &query {
                 QueryRequest::Facts(_)
@@ -310,30 +311,59 @@ impl<'path> BenchQuery<'path> {
                 }
                 QueryRequest::Timeline(_) => "pipeline.timeline.week",
             };
+            workloads.push(PipelineWorkload {
+                name,
+                requests: vec![query],
+            });
+        }
+        let mut days = Vec::new();
+        let mut date = local_date;
+        for _ in 0..WEEK_DAYS {
+            days.push(QueryRequest::Day(QueryDayRequest {
+                local_date: date,
+                cursor: None,
+            }));
+            date = date
+                .tomorrow()
+                .map_err(crate::query::RunQueryError::from)
+                .context(QuerySnafu)?;
+        }
+        workloads.push(PipelineWorkload {
+            name: "pipeline.week.fold",
+            requests: days,
+        });
+        for workload in workloads {
+            let name = workload.name;
             let mut samples = Vec::new();
             let mut encoded_bytes = 0;
             let mut stages = StageSamples::default();
             let mut memory = memory::MemoryPeaks::new(idle);
             for _ in 0..self.runs {
-                let mut snapshot_reader = Some(reader);
                 memory.observe(memory::PrivateBytes::sample()?);
                 let started = Instant::now();
-                let job = QueryJob::start(&mut snapshot_reader, query.clone(), rules.clone())
-                    .context(QuerySnafu)?;
-                let prepare = started.elapsed();
-                let mut completed = job.run_measured().context(QuerySnafu)?;
-                completed.timings.read += prepare;
-                let encode = Instant::now();
-                encoded_bytes = serde_json::to_vec(&completed.response)
-                    .map_err(crate::query::RunQueryError::from)
-                    .context(QuerySnafu)?
-                    .len();
-                completed.timings.page_encode += encode.elapsed();
-                hint::black_box(&completed.response);
+                let mut combined = crate::query::timing::QueryTimings::default();
+                encoded_bytes = 0;
+                for query in &workload.requests {
+                    let mut snapshot_reader = Some(reader);
+                    let prepare_started = Instant::now();
+                    let job = QueryJob::start(&mut snapshot_reader, query.clone(), rules.clone())
+                        .context(QuerySnafu)?;
+                    let prepare = prepare_started.elapsed();
+                    let mut completed = job.run_measured().context(QuerySnafu)?;
+                    completed.timings.read += prepare;
+                    let encode = Instant::now();
+                    encoded_bytes += serde_json::to_vec(&completed.response)
+                        .map_err(crate::query::RunQueryError::from)
+                        .context(QuerySnafu)?
+                        .len();
+                    completed.timings.page_encode += encode.elapsed();
+                    hint::black_box(&completed.response);
+                    combined.accumulate(completed.timings);
+                    reader = completed.reader;
+                }
                 samples.push(started.elapsed());
-                stages.push(completed.timings);
+                stages.push(combined);
                 memory.observe(memory::PrivateBytes::sample()?);
-                reader = completed.reader;
             }
             samples.sort_unstable();
             let percentile = |percent: usize| {
@@ -353,6 +383,12 @@ impl<'path> BenchQuery<'path> {
         }
         Ok(reader)
     }
+}
+/// The weekly fold uses seven day queries until query.range is supplied by M4-B6.
+#[derive(Debug)]
+struct PipelineWorkload {
+    name: &'static str,
+    requests: Vec<crate::query::QueryRequest>,
 }
 #[derive(Debug, Default)]
 struct StageSamples {

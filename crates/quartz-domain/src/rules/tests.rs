@@ -171,6 +171,9 @@ fn builtin_extraction_matches_multilingual_fixtures_and_rejects_lookalikes() {
             value => panic!("invalid fixture status {value}"),
         };
         let result = compiled.evaluate(&snapshot);
+        let direct = compiled.extract(&snapshot);
+        assert_eq!(Some(&direct.fields), result.extraction.as_ref());
+        assert_eq!(direct.extractor_rule, result.selected);
         assert_eq!(
             result.selected, fixture.extractor_rule,
             "provenance for {:?}: {:?}",
@@ -1179,7 +1182,7 @@ fn builtin_classification_validates_and_matches_only_current_fields_and_known_ca
         },
     )
     .expect("valid embedded classification");
-    assert_eq!(set.content.rule.len(), 50);
+    assert_eq!(set.content.rule.len(), 52);
     for rule in &set.content.rule {
         let RuleBody::Classification { category, when, .. } = &rule.body else {
             panic!("classification body");
@@ -1192,7 +1195,11 @@ fn builtin_classification_validates_and_matches_only_current_fields_and_known_ca
         );
         assert!(when.iter().all(|condition| matches!(
             condition.field,
-            Field::IdentityKey | Field::ExeName | Field::DisplayName | Field::RawTitle
+            Field::IdentityKey
+                | Field::ExeName
+                | Field::DisplayName
+                | Field::RawTitle
+                | Field::Document
         )));
     }
     let effective = Resolution::resolve(&[installed(set)], RuleKind::Classification)
@@ -1225,9 +1232,7 @@ fn builtin_classification_validates_and_matches_only_current_fields_and_known_ca
     }
     for field in [
         "app.name",
-        "window.class",
-        "title.normalized",
-        "doc.document",
+        "web.tab_title",
         "web.domain",
         "browser.profile_label",
     ] {
@@ -1328,4 +1333,258 @@ fn matching_bounds_normalized_text_at_utf16_character_boundaries() {
     }
     let result = evaluate_condition("title.raw", "contains", "secret", "", &snapshot);
     assert_eq!(result.privacy.window_title, Action::Keep);
+}
+
+#[test]
+fn m4_classification_fields_preserve_missing_and_empty_negation_semantics() {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Negation {
+        Normal,
+        Negated,
+    }
+    for field in [
+        Field::WindowClass,
+        Field::NormalizedTitle,
+        Field::Document,
+        Field::Project,
+        Field::Profile,
+    ] {
+        for negation in [Negation::Normal, Negation::Negated] {
+            let source = format!(
+                "format='quartz-rules/1'\n[set]\nkey='user.fields'\nkind='classification'\nname='Fields'\n[[rule]]\nid='field'\nlabel='Available field'\ncategory='builtin:learning'\nwhen=[{{field='{}',op='regex',value='^$',negate={}}}]",
+                field.as_str(),
+                negation == Negation::Negated
+            );
+            let compiled =
+                Resolution::resolve(&[installed(user(&source))], RuleKind::Classification)
+                    .effective
+                    .compile()
+                    .expect("M4 field is accepted");
+            let mut fields = FieldSnapshot::default();
+            assert_eq!(
+                compiled.classify(&fields).is_some(),
+                negation == Negation::Negated
+            );
+            fields.text.insert(field, NfcText::new(""));
+            assert_eq!(
+                compiled.classify(&fields).is_some(),
+                negation == Negation::Normal
+            );
+            assert_eq!(
+                compiled.classify(&fields).is_some(),
+                compiled.evaluate(&fields).selected.is_some()
+            );
+        }
+    }
+}
+
+#[test]
+fn prepared_extraction_preserves_naive_results_over_fixtures_and_randomized_titles() {
+    let builtin = RuleSet::parse(
+        "builtin.toml",
+        BUILTIN_EXTRACTION,
+        ParseContext {
+            origin: RuleOrigin::Builtin,
+            references: &catalog(),
+        },
+    )
+    .expect("builtin extraction");
+    let overlay = user(
+        r"format='quartz-rules/1'
+[set]
+key='user.prepared'
+kind='extraction'
+name='Mixed app selectors'
+parent='builtin.extraction'
+[[rule]]
+id='display'
+label='Display name and negation'
+priority=60
+app=[{field='app.display_name',op='contains',value='Editor'},{field='app.exe_name',op='equals',value='blocked.exe',negate=true}]
+pattern='\A(?P<document>.+) : (?P<project>.*)\z'
+[[rule]]
+id='missing'
+label='Absent executable'
+app=[{field='app.exe_name',op='contains',value='.exe',negate=true}]
+pattern='\A(?P<profile>.*)\z'
+[[override]]
+target='builtin.extraction/vscode-project'
+label='Override with a regex app predicate'
+app=[{field='app.exe_name',op='regex',value='(?i)\Acode\.exe\z'}]
+pattern='\A(?P<dirty>● )?(?P<document>.+) : (?P<project>.*)\z'
+[[disable]]
+target='builtin.extraction/office-word'
+",
+    );
+    let fixtures: Vec<ExtractionFixture> = serde_json::from_str(include_str!(
+        "../../tests/fixtures/rules/builtin-extraction.json"
+    ))
+    .expect("fixtures");
+    for sets in [
+        vec![installed(builtin.clone())],
+        vec![installed(builtin), installed(overlay)],
+    ] {
+        let compiled = Resolution::resolve(&sets, RuleKind::Extraction)
+            .effective
+            .compile()
+            .expect("compiled extraction");
+        for fixture in &fixtures {
+            let mut fields = FieldSnapshot::default();
+            for field in [Field::ExeName, Field::DisplayName, Field::RawTitle] {
+                let value = match field {
+                    Field::ExeName => fixture.exe.as_deref(),
+                    Field::DisplayName => fixture.display_name.as_deref(),
+                    _ => fixture.title.as_deref(),
+                };
+                if let Some(value) = value {
+                    fields.text.insert(field, NfcText::new(value));
+                }
+            }
+            let expected = compiled.extract(&fields);
+            let prepared = compiled
+                .prepare_extractor(&fields)
+                .extract(fixture.title.as_deref());
+            assert_eq!(prepared, expected, "fixture extraction differs");
+        }
+        // A deterministic generator makes corpus failures reproducible without an extra crate.
+        const TITLE_COUNT: usize = 2_048;
+        const SEED: u64 = 0x51c0_6a27_013f_8d92;
+        const MULTIPLIER: u64 = 6_364_136_223_846_793_005;
+        const INCREMENT: u64 = 1_442_695_040_888_963_407;
+        let fragments = [
+            "",
+            " : ",
+            " - ",
+            "● ",
+            "é",
+            "e\u{301}",
+            "报告",
+            "\r\n",
+            "😀",
+            "Visual Studio Code",
+            " - Windows Terminal",
+            " - Google Chrome - Work",
+        ];
+        let mut state = SEED;
+        for index in 0..TITLE_COUNT {
+            let mut title = String::new();
+            for _ in 0..fragments.len() {
+                state = state.wrapping_mul(MULTIPLIER).wrapping_add(INCREMENT);
+                let position = usize::try_from(
+                    state % u64::try_from(fragments.len()).expect("fragment count"),
+                )
+                .expect("fragment index");
+                title.push_str(fragments[position]);
+            }
+            if index == 0 {
+                title = "e\u{301}😀".repeat(super::model::MAX_TEXT_UTF16);
+            }
+            for exe in [
+                None,
+                Some("code.exe"),
+                Some("ＣＯＤＥ.exe"),
+                Some("idea64.exe"),
+                Some("windowsterminal.exe"),
+                Some("chrome.exe"),
+                Some("blocked.exe"),
+            ] {
+                let mut fields = FieldSnapshot::default();
+                if let Some(exe) = exe {
+                    fields.text.insert(Field::ExeName, NfcText::new(exe));
+                }
+                fields
+                    .text
+                    .insert(Field::DisplayName, NfcText::new("Editor"));
+                if index != 1 {
+                    fields.text.insert(Field::RawTitle, NfcText::new(&title));
+                }
+                let prepared = compiled
+                    .prepare_extractor(&fields)
+                    .extract((index != 1).then_some(title.as_str()));
+                assert_eq!(
+                    prepared,
+                    compiled.extract(&fields),
+                    "random corpus index {index}, executable {exe:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn prepared_classification_preserves_all_any_order_negation_and_missing_fields() {
+    for mode in ["all", "any"] {
+        let source = format!(
+            r"format='quartz-rules/1'
+[set]
+key='user.partial'
+kind='classification'
+name='Application specialization'
+[[rule]]
+id='early'
+label='Mixed application and document conditions'
+category='builtin:learning'
+priority=60
+match='{mode}'
+when=[{{field='doc.document',op='equals',value='hit'}},{{field='app.exe_name',op='equals',value='code.exe'}}]
+[[rule]]
+id='title'
+label='Missing titles and application exclusions'
+category='builtin:communication'
+when=[{{field='app.exe_name',op='equals',value='blocked.exe',negate=true}},{{field='title.raw',op='equals',value='hit',negate=true}}]
+[[rule]]
+id='application'
+label='Application result before later title rules'
+category='builtin:development'
+when=[{{field='app.display_name',op='contains',value='Editor'}}]
+[[rule]]
+id='late'
+label='Window class'
+category='builtin:system'
+when=[{{field='window.class',op='equals',value='Editor'}}]
+"
+        );
+        let compiled = Resolution::resolve(&[installed(user(&source))], RuleKind::Classification)
+            .effective
+            .compile()
+            .expect("compiled classification");
+        for exe in [
+            None,
+            Some("code.exe"),
+            Some("blocked.exe"),
+            Some("other.exe"),
+        ] {
+            for title in [None, Some(""), Some("hit"), Some("miss")] {
+                for document in [None, Some(""), Some("hit"), Some("miss")] {
+                    for display in [None, Some("Editor"), Some("Viewer")] {
+                        let mut fields = FieldSnapshot::default();
+                        for field in [
+                            Field::ExeName,
+                            Field::RawTitle,
+                            Field::Document,
+                            Field::DisplayName,
+                            Field::WindowClass,
+                        ] {
+                            let value = match field {
+                                Field::ExeName => exe,
+                                Field::RawTitle => title,
+                                Field::Document => document,
+                                Field::DisplayName => display,
+                                _ => display,
+                            };
+                            if let Some(value) = value {
+                                fields.text.insert(field, NfcText::new(value));
+                            }
+                        }
+                        let prepared = compiled.prepare_classifier(&fields);
+                        assert_eq!(
+                            prepared.classify(&fields),
+                            compiled.classify(&fields),
+                            "mode={mode}, executable={exe:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

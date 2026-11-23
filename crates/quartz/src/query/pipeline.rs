@@ -2,7 +2,7 @@
 
 use super::{
     calendar::DayCalendar,
-    classification::{ClassificationId, Classifier, QueryCategoryRef},
+    classification::{ClassificationId, Classifier, ExtractedTitle, QueryCategoryRef},
     input::{
         Availability, CaptureLevel, ClockSegment, FactId, ForegroundKind, InputRow,
         QueryAnnotation, QueryRange,
@@ -152,6 +152,7 @@ pub(crate) struct DerivedSegments {
 #[cfg_attr(test, derive(Clone))]
 pub(super) struct ClassifiedInput {
     input: InputRow,
+    extraction: Option<std::sync::Arc<ExtractedTitle>>,
     classification: ClassificationId,
     source: CategorySource,
 }
@@ -218,20 +219,25 @@ impl Pipeline {
             .collect()
     }
     fn classified(&mut self, input: InputRow) -> ClassifiedInput {
-        let classification = self.classify_row(&input);
-        let source = self.classifier.result(classification).source.clone();
-        ClassifiedInput {
+        let extraction = match &input {
+            InputRow::Foreground(row) => self.classifier.extract(row),
+            _ => None,
+        };
+        let mut staged = ClassifiedInput {
             input,
-            classification,
-            source,
-        }
-    }
-    fn classify_row(&mut self, row: &InputRow) -> ClassificationId {
-        match row {
-            InputRow::Foreground(row) => self.classifier.classify(row),
+            extraction,
+            classification: ClassificationId::UNCLASSIFIED,
+            source: CategorySource::Unclassified,
+        };
+        staged.classification = match &staged.input {
+            InputRow::Foreground(row) => {
+                self.classifier.classify(row, staged.extraction.as_deref())
+            }
             InputRow::Annotation(annotation) => self.classifier.annotation(annotation),
             _ => ClassificationId::UNCLASSIFIED,
-        }
+        };
+        staged.source = self.classifier.result(staged.classification).source.clone();
+        staged
     }
     #[cfg(test)]
     pub(crate) fn ingest(&mut self, input: InputRow) -> Result<(), DeriveSegmentsError> {

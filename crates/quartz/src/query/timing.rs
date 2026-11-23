@@ -18,6 +18,15 @@ pub(crate) struct QueryTimings {
     pub aggregate: Duration,
     pub page_encode: Duration,
 }
+impl QueryTimings {
+    pub(crate) fn accumulate(&mut self, other: Self) {
+        self.read += other.read;
+        self.slice += other.slice;
+        self.classify += other.classify;
+        self.aggregate += other.aggregate;
+        self.page_encode += other.page_encode;
+    }
+}
 #[derive(Debug)]
 pub(super) struct QueryTimer<'timings> {
     timings: Option<&'timings mut QueryTimings>,

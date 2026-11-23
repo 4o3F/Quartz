@@ -36,6 +36,7 @@ fn window(id: i64, start: i64, end: i64) -> InputRow {
         CaptureLevel::Full,
         quartz_domain::facts::ForegroundContent {
             window_instance: Some(quartz_domain::facts::WindowInstanceId(id)),
+            window_class: None,
             app: Some(
                 ApplicationRef {
                     id: ApplicationId(id),
@@ -51,13 +52,14 @@ fn window(id: i64, start: i64, end: i64) -> InputRow {
         },
     ))
 }
-fn edit_foreground(
+pub(super) fn edit_foreground(
     row: &mut Foreground,
     level: CaptureLevel,
     edit: impl FnOnce(&mut quartz_domain::facts::ForegroundContent),
 ) {
     let mut content = quartz_domain::facts::ForegroundContent {
         window_instance: row.visible_window_instance(),
+        window_class: row.visible_window_class().map(str::to_owned),
         app: row.visible_app().cloned(),
         title: row.visible_title().map(str::to_owned),
         title_id: row.visible_title_id(),
@@ -515,7 +517,7 @@ fn newly_opened_zero_length_clock_and_foreground_do_not_fail_the_query() {
     assert_eq!(segments.display(0).duration_ms, 20);
 }
 
-fn categories() -> Vec<quartz_domain::categories::Category> {
+pub(super) fn categories() -> Vec<quartz_domain::categories::Category> {
     use quartz_domain::categories::{BuiltinCategory, Category, CategoryId};
     BuiltinCategory::ALL
         .into_iter()
@@ -530,7 +532,7 @@ fn categories() -> Vec<quartz_domain::categories::Category> {
         })
         .collect()
 }
-fn classifier(overlays: &[&str]) -> classification::Classifier {
+pub(super) fn classifier(overlays: &[&str]) -> classification::Classifier {
     use quartz_domain::rules::{
         self, ParseContext, ReferenceCatalog, RuleOrigin, RuleSet,
         registry::{RegistryCommand, RegistryState, RuleRegistry},
@@ -546,25 +548,40 @@ fn classifier(overlays: &[&str]) -> classification::Classifier {
         ..Default::default()
     })
     .expect("registry");
-    let set = RuleSet::parse(
-        "builtin.toml",
-        rules::BUILTIN_CLASSIFICATION,
-        ParseContext {
-            origin: RuleOrigin::Builtin,
-            references: &registry.state().references,
-        },
-    )
-    .expect("builtin");
-    let decision = registry
-        .decide(RegistryCommand::InstallBuiltin {
-            set,
+    struct BuiltinSet {
+        source: &'static str,
+        revision: u32,
+    }
+    for builtin in [
+        BuiltinSet {
+            source: rules::BUILTIN_CLASSIFICATION,
             revision: rules::BUILTIN_CLASSIFICATION_REVISION,
-        })
-        .into_parts();
-    decision.reply.expect("install decision");
-    registry
-        .committed(decision.outcome.expect("install write"))
-        .expect("commit builtin");
+        },
+        BuiltinSet {
+            source: rules::BUILTIN_EXTRACTION,
+            revision: rules::BUILTIN_EXTRACTION_REVISION,
+        },
+    ] {
+        let set = RuleSet::parse(
+            "builtin.toml",
+            builtin.source,
+            ParseContext {
+                origin: RuleOrigin::Builtin,
+                references: &registry.state().references,
+            },
+        )
+        .expect("builtin");
+        let decision = registry
+            .decide(RegistryCommand::InstallBuiltin {
+                set,
+                revision: builtin.revision,
+            })
+            .into_parts();
+        decision.reply.expect("install decision");
+        registry
+            .committed(decision.outcome.expect("install write"))
+            .expect("commit builtin");
+    }
     for text in overlays {
         let set = RuleSet::parse(
             "overlay.toml",
@@ -590,7 +607,7 @@ fn classifier(overlays: &[&str]) -> classification::Classifier {
     }
     classification::Classifier::new(registry.snapshots().load(), categories())
 }
-fn classified_window(id: i64, start: i64, end: i64, exe: &str) -> InputRow {
+pub(super) fn classified_window(id: i64, start: i64, end: i64, exe: &str) -> InputRow {
     let mut input = window(id, start, end);
     if let InputRow::Foreground(row) = &mut input {
         edit_foreground(row, CaptureLevel::Full, |content| {
@@ -657,7 +674,7 @@ when=[{field='title.raw',op='equals',value='document'}]
         matches!(&segments.display(0).category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Development))
     );
     assert!(
-        matches!(&segments.display(0).category_source, CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@1")
+        matches!(&segments.display(0).category_source, CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@2")
     );
     assert_eq!(segments.display(1).category, CategoryRef::Unclassified);
     assert_eq!(segments.display(2).category, CategoryRef::Unclassified);
@@ -768,7 +785,7 @@ when=[{field='title.raw',op='equals',value='document'}]
     assert!(
         matches!(
             &segments.display(3).category_source,
-            CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@1"
+            CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@2"
         ),
         "a new title for the same application must be evaluated against the overlay"
     );
@@ -1425,4 +1442,174 @@ fn entity_daily_duration_matches_day_queries_at_integer_clipping_boundaries() {
     }
     assert_eq!(daily[0].active_ms, 1);
     assert_eq!(daily[1].active_ms, 2);
+}
+
+#[test]
+fn extraction_fields_classify_before_slicing_and_respect_missing_titles() {
+    const EXTRACT: &str = "format='quartz-rules/1'\n[set]\nkey='user.extract'\nkind='extraction'\nname='Extract'\nparent='builtin.extraction'\n[[rule]]\nid='document'\nlabel='Named fields'\napp=[{field='app.exe_name',op='equals',value='unknown.exe'}]\npattern='^(?P<document>document) - (?P<project>Quartz) - (?P<profile>Work)$'";
+    struct FieldCase {
+        field: &'static str,
+        value: &'static str,
+    }
+    for case in [
+        FieldCase {
+            field: "title.normalized",
+            value: "document - Quartz - Work",
+        },
+        FieldCase {
+            field: "doc.document",
+            value: "document",
+        },
+        FieldCase {
+            field: "doc.project",
+            value: "Quartz",
+        },
+        FieldCase {
+            field: "doc.profile",
+            value: "Work",
+        },
+    ] {
+        let rule = format!(
+            "format='quartz-rules/1'\n[set]\nkey='user.extracted'\nkind='classification'\nname='Extracted fields'\nparent='builtin.classification'\n[[rule]]\nid='read'\nlabel='Read extracted field'\ncategory='builtin:learning'\nwhen=[{{field='{}',op='equals',value='{}'}}]",
+            case.field, case.value
+        );
+        let mut rows = vec![clock(1, 0, 0, 40)];
+        for id in 1..=4 {
+            let mut input = classified_window(id, (id - 1) * 10, id * 10, "unknown.exe");
+            if let InputRow::Foreground(row) = &mut input {
+                let level = match id {
+                    2 => CaptureLevel::TitleHidden,
+                    3 => CaptureLevel::Excluded,
+                    _ => CaptureLevel::Full,
+                };
+                edit_foreground(row, level, |content| {
+                    content.title = (id != 4).then(|| "document - Quartz - Work".into());
+                    content.title_id = (id != 4).then_some(quartz_domain::facts::TitleId(1));
+                });
+            }
+            rows.push(input);
+        }
+        let segments = derive_classified(
+            rows.clone(),
+            QueryRange { start: 0, end: 40 },
+            classifier(&[EXTRACT, &rule]),
+        );
+        assert!(
+            matches!(
+                segments.display(0).category,
+                quartz_protocol::CategoryRef::Classified { .. }
+            ),
+            "{}",
+            case.field
+        );
+        for index in 1..4 {
+            assert_eq!(
+                segments.display(index).category,
+                quartz_protocol::CategoryRef::Unclassified,
+                "{}",
+                case.field
+            );
+        }
+        let negated = rule.replace("op='equals'", "negate=true,op='equals'");
+        let segments = derive_classified(
+            rows,
+            QueryRange { start: 0, end: 40 },
+            classifier(&[EXTRACT, &negated]),
+        );
+        assert_eq!(
+            segments.display(0).category,
+            quartz_protocol::CategoryRef::Unclassified
+        );
+        for index in [1, 3] {
+            assert!(
+                matches!(
+                    segments.display(index).category,
+                    quartz_protocol::CategoryRef::Classified { .. }
+                ),
+                "{}",
+                case.field
+            );
+        }
+        assert_eq!(
+            segments.display(2).category,
+            quartz_protocol::CategoryRef::Unclassified
+        );
+        assert_eq!(
+            segments
+                .segments
+                .iter()
+                .map(|segment| segments.project(segment).duration_ms)
+                .sum::<i64>(),
+            40
+        );
+    }
+}
+
+#[test]
+fn builtin_manifest_rules_are_narrow_and_user_overrides_win() {
+    const OVERRIDE: &str = "format='quartz-rules/1'\n[set]\nkey='user.manifest'\nkind='classification'\nname='Manifest override'\nparent='builtin.classification'\n[[override]]\ntarget='builtin.classification/notepad-cargo-manifest'\nlabel='Read Rust manifests'\ncategory='builtin:learning'\nwhen=[{field='app.exe_name',op='equals',value='notepad.exe'},{field='doc.document',op='equals',value='Cargo.toml'}]";
+    struct ManifestCase {
+        title: &'static str,
+        exe: &'static str,
+        expected: Option<quartz_protocol::BuiltinCategory>,
+    }
+    for case in [
+        ManifestCase {
+            title: "Cargo.toml - Notepad",
+            exe: "notepad.exe",
+            expected: Some(quartz_protocol::BuiltinCategory::Development),
+        },
+        ManifestCase {
+            title: "pyproject.toml - Notepad",
+            exe: "notepad.exe",
+            expected: Some(quartz_protocol::BuiltinCategory::Development),
+        },
+        ManifestCase {
+            title: "notes.txt - Notepad",
+            exe: "notepad.exe",
+            expected: None,
+        },
+        ManifestCase {
+            title: "My Cargo.toml notes - Notepad",
+            exe: "notepad.exe",
+            expected: None,
+        },
+        ManifestCase {
+            title: "Cargo.toml - Notepad",
+            exe: "unknown.exe",
+            expected: None,
+        },
+    ] {
+        let mut input = classified_window(1, 0, 10, case.exe);
+        if let InputRow::Foreground(row) = &mut input {
+            edit_foreground(row, CaptureLevel::Full, |content| {
+                std::sync::Arc::make_mut(content.app.as_mut().expect("app")).display_name =
+                    "Notepad".into();
+                content.title = Some(case.title.into());
+            });
+        }
+        let result = derive_classified(
+            vec![clock(1, 0, 0, 10), input.clone()],
+            QueryRange { start: 0, end: 10 },
+            classifier(&[]),
+        );
+        let category = match result.display(0).category {
+            quartz_protocol::CategoryRef::Unclassified => None,
+            quartz_protocol::CategoryRef::Classified { category } => category.builtin_key,
+        };
+        assert_eq!(category, case.expected);
+        if case.exe == "notepad.exe" && case.title.starts_with("Cargo.toml") {
+            let result = derive_classified(
+                vec![clock(1, 0, 0, 10), input],
+                QueryRange { start: 0, end: 10 },
+                classifier(&[OVERRIDE]),
+            );
+            assert!(
+                matches!(&result.display(0).category_source, quartz_protocol::CategorySource::Rule {rule} if rule.as_str() == "user.manifest/notepad-cargo-manifest@1")
+            );
+            assert!(
+                matches!(&result.display(0).category, quartz_protocol::CategoryRef::Classified {category} if category.builtin_key == Some(quartz_protocol::BuiltinCategory::Learning))
+            );
+        }
+    }
 }

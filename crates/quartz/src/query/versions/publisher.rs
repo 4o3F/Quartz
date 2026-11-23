@@ -355,7 +355,12 @@ mod tests {
             .run(
                 &mut fixture.store,
                 now,
-                RegistryCommand::InstallBuiltin { set, revision: 2 },
+                RegistryCommand::InstallBuiltin {
+                    set,
+                    revision: rules::BUILTIN_CLASSIFICATION_REVISION
+                        .checked_add(1)
+                        .expect("next revision"),
+                },
             )
             .expect("builtin upgrade");
         publisher

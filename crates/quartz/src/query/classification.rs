@@ -4,14 +4,22 @@ use super::pipeline::CategorySource;
 use quartz_domain::{
     categories::{Category, CategoryUuid},
     facts::{ApplicationId, CaptureLevel, Foreground, ForegroundKind, TitleId},
-    rules::{Field, FieldSnapshot, registry::RuleSnapshot},
-    text::NfcText,
+    rules::{Field, FieldSnapshot, PreparedClassifier, PreparedExtractor, registry::RuleSnapshot},
 };
 use quartz_protocol::CategoryRef;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
+
+pub(super) use quartz_domain::rules::ExtractedTitle;
+#[derive(Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(test, derive(Clone))]
+struct ExtractionKey {
+    app: ApplicationId,
+    title: Option<TitleId>,
+    level: CaptureLevel,
+}
 
 struct QueryCategory {
     uuid: CategoryUuid,
@@ -72,6 +80,7 @@ impl QueryCategoryRef for CategoryRef {
 struct MatchKey {
     app: Option<ApplicationId>,
     title: Option<TitleId>,
+    window_class: Option<String>,
     level: CaptureLevel,
 }
 /// Index into the immutable results retained by one query's classifier.
@@ -100,13 +109,22 @@ pub(crate) struct Classifier {
     rules: Arc<RuleSnapshot>,
     categories: BTreeMap<CategoryUuid, Arc<quartz_protocol::Category>>,
     required_fields: BTreeSet<Field>,
-    // The retained snapshot fixes the rule hash for every entry in this cache.
+    extraction_fields: BTreeSet<Field>,
+    extractions: HashMap<ExtractionKey, Arc<ExtractedTitle>>,
+    extractors: HashMap<ApplicationId, PreparedExtractor>,
+    classifiers: HashMap<Option<ApplicationId>, PreparedClassifier>,
+    // The retained rule and database snapshots fix rule hashes and metadata for both caches.
     cache: HashMap<MatchKey, ClassificationId>,
     results: Vec<Classification>,
 }
 impl Classifier {
     pub(crate) fn new(rules: Arc<RuleSnapshot>, categories: Vec<Category>) -> Self {
         let required_fields = rules.classification().fields().collect();
+        let extraction_fields = rules
+            .extraction()
+            .fields()
+            .chain([Field::DisplayName])
+            .collect();
         Self {
             rules,
             categories: categories
@@ -115,6 +133,10 @@ impl Classifier {
                 .map(|category| (category.uuid, category.wire))
                 .collect(),
             required_fields,
+            extraction_fields,
+            extractions: HashMap::new(),
+            extractors: HashMap::new(),
+            classifiers: HashMap::new(),
             cache: HashMap::new(),
             results: vec![Classification::unclassified()],
         }
@@ -175,16 +197,88 @@ impl Classifier {
             category,
         }
     }
-    pub(super) fn classify(&mut self, row: &Foreground) -> ClassificationId {
+    pub(super) fn extract(&mut self, row: &Foreground) -> Option<Arc<ExtractedTitle>> {
+        if row.capture_level() != CaptureLevel::Full || !matches!(row.kind, ForegroundKind::Window)
+        {
+            return None;
+        }
+        let app = row.visible_app()?.id;
+        let key = ExtractionKey {
+            app,
+            title: row.visible_title_id(),
+            level: row.capture_level(),
+        };
+        Some(
+            self.extractions
+                .entry(key)
+                .or_insert_with(|| {
+                    let extractor = self.extractors.entry(app).or_insert_with(|| {
+                        let fields = FieldSnapshot::from_foreground(
+                            row,
+                            self.extraction_fields.iter().copied(),
+                            None,
+                        );
+                        self.rules.extraction().prepare_extractor(&fields)
+                    });
+                    Arc::new(extractor.extract(row.visible_title()))
+                })
+                .clone(),
+        )
+    }
+    pub(super) fn classify(
+        &mut self,
+        row: &Foreground,
+        extraction: Option<&ExtractedTitle>,
+    ) -> ClassificationId {
         if row.capture_level() == CaptureLevel::Excluded
             || !matches!(row.kind, ForegroundKind::Window)
         {
             return ClassificationId::UNCLASSIFIED;
         }
+        let app = row.visible_app().map(|app| app.id);
+        let plan = self.classifiers.entry(app).or_insert_with(|| {
+            let app_fields = self.required_fields.iter().copied().filter(|field| {
+                matches!(
+                    field,
+                    Field::IdentityKey | Field::ExeName | Field::DisplayName
+                )
+            });
+            let fields = FieldSnapshot::from_foreground(row, app_fields, None);
+            self.rules.classification().prepare_classifier(&fields)
+        });
         let key = MatchKey {
-            app: row.visible_app().map(|app| app.id),
-            title: if self.required_fields.contains(&Field::RawTitle) {
+            app: if self.required_fields.iter().any(|field| {
+                matches!(
+                    field,
+                    Field::IdentityKey
+                        | Field::ExeName
+                        | Field::DisplayName
+                        | Field::NormalizedTitle
+                        | Field::Document
+                        | Field::Project
+                        | Field::Profile
+                )
+            }) {
+                row.visible_app().map(|app| app.id)
+            } else {
+                None
+            },
+            title: if plan.fields().any(|field| {
+                matches!(
+                    field,
+                    Field::RawTitle
+                        | Field::NormalizedTitle
+                        | Field::Document
+                        | Field::Project
+                        | Field::Profile
+                )
+            }) {
                 row.visible_title_id()
+            } else {
+                None
+            },
+            window_class: if plan.fields().any(|field| field == Field::WindowClass) {
+                row.visible_window_class().map(str::to_owned)
             } else {
                 None
             },
@@ -193,7 +287,7 @@ impl Classifier {
         if let Some(result) = self.cache.get(&key) {
             return *result;
         }
-        let result = self.evaluate(row);
+        let result = self.evaluate(row, extraction);
         let id = if matches!(&result.category, CategoryRef::Unclassified) {
             ClassificationId::UNCLASSIFIED
         } else {
@@ -204,31 +298,14 @@ impl Classifier {
         self.cache.insert(key, id);
         id
     }
-    fn evaluate(&self, row: &Foreground) -> Classification {
-        let mut fields = FieldSnapshot::default();
-        if let Some(app) = row.visible_app() {
-            if self.required_fields.contains(&Field::IdentityKey) {
-                fields
-                    .text
-                    .insert(Field::IdentityKey, NfcText::new(&app.identity_key));
-            }
-            if self.required_fields.contains(&Field::DisplayName) {
-                fields
-                    .text
-                    .insert(Field::DisplayName, NfcText::new(&app.display_name));
-            }
-            if self.required_fields.contains(&Field::ExeName)
-                && let Some(exe) = &app.exe_name
-            {
-                fields.text.insert(Field::ExeName, NfcText::new(exe));
-            }
-        }
-        if self.required_fields.contains(&Field::RawTitle)
-            && let Some(title) = row.visible_title()
+    fn evaluate(&self, row: &Foreground, extraction: Option<&ExtractedTitle>) -> Classification {
+        let app = row.visible_app().map(|app| app.id);
+        match self
+            .classifiers
+            .get(&app)
+            .expect("application classification is prepared before evaluation")
+            .classify_foreground(row, extraction.map(|value| &value.fields))
         {
-            fields.text.insert(Field::RawTitle, NfcText::new(title));
-        }
-        match self.rules.classification().classify(&fields) {
             None => Classification::unclassified(),
             Some(matched) => match self.categories.get(&matched.category) {
                 Some(category) => Classification {
@@ -245,3 +322,6 @@ impl Classifier {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

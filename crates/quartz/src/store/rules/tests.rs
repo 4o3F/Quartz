@@ -83,6 +83,7 @@ fn batch_failure_rolls_back_all_writes_and_never_acknowledges_the_core() {
     fixture.apply("user.b", "B", 0).expect("B");
     let before = fixture.shell.snapshots().load();
     let count = fixture.version_count();
+    let saved = fixture.persisted();
     fixture.connection().batch_execute("CREATE TRIGGER fail_second_revision BEFORE INSERT ON rule_set_versions WHEN NEW.set_id=(SELECT id FROM rule_sets WHERE key='user.b') BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END;").expect("failure injection");
     let siblings = ["builtin.privacy", "user.a", "user.b"]
         .into_iter()
@@ -101,22 +102,16 @@ fn batch_failure_rolls_back_all_writes_and_never_acknowledges_the_core() {
         .expect_err("last write fails");
     assert!(matches!(error, RunRegistryCommandError::Persist { .. }));
     assert_eq!(fixture.version_count(), count);
-    assert!(
-        fixture
-            .persisted()
-            .sets
-            .values()
-            .all(|entry| entry.current.version == 1)
-    );
-    assert!(
-        fixture
-            .shell
-            .core()
-            .state()
-            .sets
-            .values()
-            .all(|entry| entry.current.version == 1)
-    );
+    let persisted = fixture.persisted();
+    for key in saved.sets.keys() {
+        let entry = &saved.sets[key];
+        assert_eq!(persisted.sets[key].current.version, entry.current.version);
+        assert_eq!(persisted.sets[key].versions, entry.versions);
+        assert_eq!(
+            fixture.shell.core().state().sets[key].current.version,
+            entry.current.version
+        );
+    }
     assert!(Arc::ptr_eq(&before, &fixture.shell.snapshots().load()));
     assert_eq!(fixture.shell.snapshots().load().epoch().get(), 2);
 }

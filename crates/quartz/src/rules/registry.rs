@@ -183,6 +183,90 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn classification_revision_two_upgrades_revision_one_and_preserves_overlay() {
+        let directory = tempfile::tempdir().expect("isolated classification database");
+        let data = DataDirectory::new(directory.path());
+        let mut store = Store::open(&data).expect("store");
+        store.seed_categories().expect("categories");
+        let now = quartz_domain::capture::UtcInstant::try_from(0).expect("UTC");
+        let old_source = rules::BUILTIN_CLASSIFICATION
+            .split("# Exact project manifest names")
+            .next()
+            .expect("revision one rules");
+        let mut old_builtins = BUILTIN_RULE_SETS.to_vec();
+        let classification = old_builtins
+            .iter_mut()
+            .find(|builtin| builtin.file == "builtin-classification.toml")
+            .expect("classification builtin");
+        classification.source = old_source;
+        classification.revision = 1;
+        let mut shell = RegistryShell::open_with_builtins(&mut store, now, &old_builtins)
+            .expect("revision one");
+        let overlay_key = "user.classification".parse().expect("key");
+        shell.run(&mut store, now, RegistryCommand::Apply {
+            key: overlay_key,
+            file: "overlay.toml".into(),
+            text: "format='quartz-rules/1'\n[set]\nkey='user.classification'\nkind='classification'\nname='My classification'\nparent='builtin.classification'\n[[override]]\ntarget='builtin.classification/vscode'\nlabel='Read code'\ncategory='builtin:learning'\nwhen=[{field='app.exe_name',op='equals',value='code.exe'}]\n[[disable]]\ntarget='builtin.classification/notepad-plus-plus'".into(),
+            base_version: 0,
+        }).expect("overlay");
+        let before = store.rule_sets().load().expect("old state");
+        let overlay_key = "user.classification".parse().expect("key");
+        let old_hash = shell.snapshots().load().hashes().classification.clone();
+        drop(shell);
+        let shell = RegistryShell::open(&mut store, now).expect("upgrade");
+        let snapshot = shell.snapshots().load();
+        assert_ne!(snapshot.hashes().classification, old_hash);
+        let after = store.rule_sets().load().expect("new state");
+        assert_eq!(
+            after.sets[&overlay_key].versions,
+            before.sets[&overlay_key].versions
+        );
+        let key = "builtin.classification".parse().expect("builtin key");
+        assert_eq!(
+            after.sets[&key].builtin_revision,
+            Some(rules::BUILTIN_CLASSIFICATION_REVISION)
+        );
+        assert_eq!(after.sets[&key].current.version, 2);
+        assert_eq!(after.sets[&key].versions.len(), 2);
+        let mut fields = FieldSnapshot::default();
+        fields.text.insert(Field::ExeName, NfcText::new("code.exe"));
+        assert_eq!(
+            snapshot
+                .classification()
+                .classify(&fields)
+                .expect("user override")
+                .rule
+                .as_str(),
+            "user.classification/vscode@1"
+        );
+        fields
+            .text
+            .insert(Field::ExeName, NfcText::new("notepad++.exe"));
+        assert!(snapshot.classification().classify(&fields).is_none());
+        fields
+            .text
+            .insert(Field::ExeName, NfcText::new("notepad.exe"));
+        fields
+            .text
+            .insert(Field::Document, NfcText::new("Cargo.toml"));
+        assert_eq!(
+            snapshot
+                .classification()
+                .classify(&fields)
+                .expect("new manifest rule")
+                .rule
+                .as_str(),
+            "builtin.classification/notepad-cargo-manifest@2"
+        );
+        let reopened = RegistryShell::open(&mut store, now).expect("idempotent upgrade");
+        assert_eq!(reopened.snapshots().load().hashes(), snapshot.hashes());
+        assert_eq!(
+            store.rule_sets().load().expect("stable state").sets[&key].versions,
+            after.sets[&key].versions
+        );
+    }
+
+    #[test]
     fn startup_installs_only_the_supplied_builtin_table() {
         let directory = tempfile::tempdir().expect("isolated rule database");
         let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
@@ -247,7 +331,10 @@ mod tests {
         let stored = store.rule_sets().load().expect("persisted builtin table");
         assert_eq!(stored.sets.len(), 3);
         for builtin in stored.sets.values() {
-            assert_eq!(builtin.current.version, 1);
+            assert_eq!(
+                builtin.current.version,
+                builtin.builtin_revision.expect("builtin revision")
+            );
             assert_eq!(builtin.versions.len(), 1);
         }
     }

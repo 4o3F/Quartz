@@ -13,8 +13,9 @@ pub use content_hash::{ContentHash, ParseContentHashError};
 pub use diagnostic::{Diagnostic, DiagnosticCode, SourceLocation};
 pub use evaluate::{
     ClassificationMatch, CompileRulesError, CompiledRules, ConditionOutcome, Evaluation,
-    ExplanationId, Extraction, ExtractionStatus, FieldSnapshot, ParseExplanationIdError,
-    PrivacyLabelSnapshot, PrivacySources, RuleOutcome, RuleStatus, ShadowReason,
+    ExplanationId, ExtractedTitle, Extraction, ExtractionStatus, FieldSnapshot,
+    ParseExplanationIdError, PreparedClassifier, PreparedExtractor, PrivacyLabelSnapshot,
+    PrivacySources, RuleObserver, RuleOutcome, RuleStage, RuleStatus, ShadowReason,
 };
 pub use identity::{
     ParseRuleIdError, ParseRuleSetKeyError, ParseRuleTargetError, RuleId, RuleSetKey, RuleTarget,
@@ -38,8 +39,8 @@ pub const BUILTIN_PRIVACY_REVISION: u32 = 1;
 
 /// Embedded application classification rules, using currently captured fields.
 pub const BUILTIN_CLASSIFICATION: &str = include_str!("builtin-classification.toml");
-/// Initial published classification revision.
-pub const BUILTIN_CLASSIFICATION_REVISION: u32 = 1;
+/// Published classification revision installed through the builtin upgrade path.
+pub const BUILTIN_CLASSIFICATION_REVISION: u32 = 2;
 
 /// Embedded document, project, and browser-profile title extractors.
 pub const BUILTIN_EXTRACTION: &str = include_str!("builtin-extraction.toml");

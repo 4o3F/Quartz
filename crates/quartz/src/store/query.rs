@@ -10,7 +10,7 @@ use super::{
     },
     schema::{
         annotations, applications, availability_intervals, capture_gaps, capture_runs,
-        clock_segments, intervals, titles,
+        clock_segments, intervals, titles, window_instances,
     },
     versions::QuerySettings,
 };
@@ -156,6 +156,7 @@ struct ClockDetails {
 struct ForegroundDetails {
     fact: IntervalsRow,
     title: Option<String>,
+    window_class: Option<String>,
 }
 
 impl ReadSnapshot {
@@ -378,6 +379,7 @@ impl ReadSnapshot {
                     window_instance: row
                         .window_instance_id
                         .map(quartz_domain::facts::WindowInstanceId),
+                    window_class: details.window_class,
                     app,
                     title: details.title,
                     title_id: row.title_id.map(quartz_domain::facts::TitleId),
@@ -518,6 +520,9 @@ impl ScanCursor {
 
         let mut query = intervals::table
             .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
+            .left_join(
+                window_instances::table.on(intervals::window_instance_id.eq(window_instances::id)),
+            )
             .into_boxed();
         query = query
             .filter(
@@ -535,7 +540,11 @@ impl ScanCursor {
         let rows = query
             .filter(intervals::start_utc_ms.lt(range.end))
             .limit(limit)
-            .select((IntervalsRow::as_select(), titles::text.nullable()))
+            .select((
+                IntervalsRow::as_select(),
+                titles::text.nullable(),
+                window_instances::window_class.nullable(),
+            ))
             .load::<ForegroundDetails>(connection)?;
         if let Some(row) = rows.last() {
             *self = ScanCursor::ForegroundClosed(StartCursor {
@@ -558,6 +567,9 @@ impl ScanCursor {
 
         let mut query = intervals::table
             .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
+            .left_join(
+                window_instances::table.on(intervals::window_instance_id.eq(window_instances::id)),
+            )
             .into_boxed();
         query = query
             .filter(intervals::end_utc_ms.is_null())
@@ -567,7 +579,11 @@ impl ScanCursor {
         let rows = query
             .filter(intervals::start_utc_ms.lt(range.end))
             .limit(limit)
-            .select((IntervalsRow::as_select(), titles::text.nullable()))
+            .select((
+                IntervalsRow::as_select(),
+                titles::text.nullable(),
+                window_instances::window_class.nullable(),
+            ))
             .load::<ForegroundDetails>(connection)?;
         if let Some(row) = rows.last() {
             *self = ScanCursor::ForegroundOpen(StoredRunId(row.fact.run_id));

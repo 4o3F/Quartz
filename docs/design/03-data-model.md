@@ -581,7 +581,7 @@ struct DerivedSegment {
 | `entertainment` | `distraction` | `cat.13` | 3 |
 | `system` | `neutral` | `cat.10` | 4 |
 
-`builtin.classification` 包含 50 条规则：开发 17 条、学习 10 条、沟通 10 条、娱乐 8 条、系统与工具 5 条。规则以可执行文件名精确匹配，覆盖编辑器、开发环境、终端、Office、阅读与学习工具、聊天、邮件、会议、游戏及启动器、播放器和系统工具；浏览器按应用保持未分类。M4 分类导入接受 `app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`；窗口类名取自已存储窗口实例，提取先于分类。网页字段在 M5 接入；未知或尚未提供的字段返回 `E-RULE-FIELD`。
+`builtin.classification` 包含 52 条规则：开发 19 条、学习 10 条、沟通 10 条、娱乐 8 条、系统与工具 5 条。规则以可执行文件名精确匹配，覆盖编辑器、开发环境、终端、Office、阅读与学习工具、聊天、邮件、会议、游戏及启动器、播放器和系统工具；另以提取文档名精确匹配记事本中的 `Cargo.toml` 和 `pyproject.toml`，将这两类项目配置归为开发；其他记事本文档和浏览器按应用保持未分类。M4 分类导入接受 `app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`；窗口类名取自已存储窗口实例，提取先于分类。网页字段在 M5 接入；未知或尚未提供的字段返回 `E-RULE-FIELD`。
 
 分类规则只读取采集级别允许保留的字段：`TitleHidden` 提供应用与已保留的窗口类名，标题及提取字段缺失；`Excluded` 不参与分类。普通条件对缺失字段不成立，取反条件的行为遵循规则格式第 2 节。导入时把内置键、分类名或 UUID 解析为分类 UUID；查询中第一条匹配规则引用的分类已归档或不存在时，结果为未分类，并记录包含规则 ID 和分类 UUID 的诊断。
 
@@ -589,11 +589,11 @@ struct DerivedSegment {
 
 ### 5.4 缓存
 
-分类按前台事实计算一次，切片通过查询内的结果索引读取分类。单次查询内使用 `HashMap`，键包含实际读取的应用、窗口类名、标题与采集等级，规则哈希由持有缓存的规则快照固定；读取 `title.raw`、`title.normalized` 或 `doc.*` 时包含标题 ID，读取 `window.class` 时包含其值，纯应用规则可以跨标题复用结果。只为规则实际读取的字段构造规范化文本。应用元数据按批次收集尚未读取的应用 ID，在同一数据库快照内读取一次并通过共享引用供事实使用；分类元数据和规则标识也共享存储，切片与聚合克隆引用。查询结束即释放这些缓存和结果表。`TitleHidden` 的标题键为空，`Excluded` 不进入缓存。分类与日结果的跨查询 LRU 只在 `bench-query` 实测的日、周查询 P95 未达到 08 第 1.4 节目标时启用；M4 必须交付跨查询提取缓存，并测量完整管线；分类与日结果缓存继续按此条件启用（已有测量见[测量记录](../measurements.md)）。
+分类按前台事实计算一次，切片通过查询内的结果索引读取分类。单次查询内使用 `HashMap`，键包含实际读取的应用、窗口类名、标题与采集等级，规则哈希由持有缓存的规则快照固定；读取 `title.raw`、`title.normalized` 或 `doc.*` 时包含标题 ID，读取 `window.class` 时包含其值，纯应用规则可以跨标题复用结果。应用条件在每次查询内按应用元数据求值一次，按原顺序保留尚需读取标题或窗口字段的分类条件；其余结果可跨该应用的不同标题复用。缓存键中的标题和窗口类名仅由这些剩余条件决定。只为规则实际读取的字段构造规范化文本。应用元数据按批次收集尚未读取的应用 ID，在同一数据库快照内读取一次并通过共享引用供事实使用；分类元数据和规则标识也共享存储，切片与聚合克隆引用。查询结束即释放这些缓存和结果表。`TitleHidden` 的标题键为空，`Excluded` 不进入缓存。分类与日结果的跨查询 LRU 只在 `bench-query` 实测的日、周查询 P95 未达到 08 第 1.4 节目标时启用；M4 必须交付跨查询提取缓存，并测量完整管线；分类与日结果缓存继续按此条件启用（已有测量见[测量记录](../measurements.md)）。
 
 | 层 | 键 | 值 | 失效 |
 |---|---|---|---|
-| 提取缓存 | `(app_id, title_id, extractor_version, metadata_version)` | 提取结果 | 提取规则或元数据版本变化 |
+| 提取缓存 | `(app_id, title_id, capture_level, extractor_version, metadata_version)` | 提取结果 | 提取规则或元数据版本变化 |
 | 分类匹配缓存 | `(classification_version, extractor_version, metadata_version, app_id, title_id, capture_level, window_class, domain_id, tab_title_id, stream_id)` | `(category_id, rule_id)` | 任一输入版本变化 |
 | 日结果缓存 | `(逻辑日期, 时区, 日起点偏移, 查询语义版本, metadata_version, 各规则版本, 覆盖的 UTC 日期的 data_day_versions 摘要)` | 该日完整的派生片段和各维度完整聚合 | 任一依赖版本变化 |
 

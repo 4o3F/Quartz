@@ -92,10 +92,11 @@ pub enum ForegroundKind {
     Window,
     NoForeground,
 }
-/// Application and title values supplied by the persistence reader.
+/// Window, application, and title values supplied by the persistence reader.
 #[derive(Debug, Clone, Default)]
 pub struct ForegroundContent {
     pub window_instance: Option<WindowInstanceId>,
+    pub window_class: Option<String>,
     pub app: Option<std::sync::Arc<ApplicationRef>>,
     pub title: Option<String>,
     pub title_id: Option<TitleId>,
@@ -121,6 +122,7 @@ impl Foreground {
         }
         if level == CaptureLevel::Excluded || matches!(kind, ForegroundKind::NoForeground) {
             content.window_instance = None;
+            content.window_class = None;
         }
         if level != CaptureLevel::Full {
             content.title = None;
@@ -145,11 +147,15 @@ impl Foreground {
     pub fn visible_window_instance(&self) -> Option<WindowInstanceId> {
         self.content.window_instance
     }
+    /// Returns the stored window class after the read-time privacy projection.
+    pub fn visible_window_class(&self) -> Option<&str> {
+        self.content.window_class.as_deref()
+    }
     /// Returns title text after the read-time privacy projection.
     pub fn visible_title(&self) -> Option<&str> {
         self.content.title.as_deref()
     }
-    /// Returns the title identity used by the classification cache.
+    /// Returns the title identity used by the per-query extraction and classification caches.
     pub fn visible_title_id(&self) -> Option<TitleId> {
         self.content.title_id
     }

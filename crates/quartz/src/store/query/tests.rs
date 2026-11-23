@@ -398,6 +398,9 @@ fn builtin_classification_upgrade_preserves_user_sets_invalidates_cursor_and_ret
     };
     continuation.cursor = Some(first.next_cursor.expect("continuation"));
     let mut inflight = fixture.start(request);
+    let next_revision = rules::BUILTIN_CLASSIFICATION_REVISION
+        .checked_add(1)
+        .expect("next revision");
     let changed =
         rules::BUILTIN_CLASSIFICATION.replace("builtin:development", "builtin:communication");
     let set = RuleSet::parse(
@@ -415,7 +418,7 @@ fn builtin_classification_upgrade_preserves_user_sets_invalidates_cursor_and_ret
             now,
             RegistryCommand::InstallBuiltin {
                 set: set.clone(),
-                revision: 2,
+                revision: next_revision,
             },
         )
         .expect("upgrade");
@@ -430,7 +433,10 @@ fn builtin_classification_upgrade_preserves_user_sets_invalidates_cursor_and_ret
         .run(
             &mut fixture.store,
             now,
-            RegistryCommand::InstallBuiltin { set, revision: 2 },
+            RegistryCommand::InstallBuiltin {
+                set,
+                revision: next_revision,
+            },
         )
         .expect("idempotent upgrade");
     assert_eq!(&hash, &shell.snapshots().load().hashes().classification);
@@ -449,7 +455,7 @@ fn builtin_classification_upgrade_preserves_user_sets_invalidates_cursor_and_ret
         panic!("timeline");
     };
     assert!(
-        matches!(&old.segments[0].category_source, CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@1")
+        matches!(&old.segments[0].category_source, CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@2")
     );
     fixture
         .store
@@ -466,7 +472,7 @@ fn builtin_classification_upgrade_preserves_user_sets_invalidates_cursor_and_ret
         matches!(&new.segments[0].category, CategoryRef::Classified { category } if category.builtin_key == Some(BuiltinCategory::Communication))
     );
     assert!(
-        matches!(&new.segments[0].category_source, CategorySource::Rule { rule } if rule.as_str() == "builtin.classification/vscode@2")
+        matches!(&new.segments[0].category_source, CategorySource::Rule { rule } if rule.as_str() == format!("builtin.classification/vscode@{next_revision}"))
     );
 }
 #[test]
@@ -579,7 +585,7 @@ fn store_read_projects_private_fields_before_returning_foreground_facts() {
                 hwnd: id,
                 generation: 1,
                 retired_utc_ms: None,
-                window_class: None,
+                window_class: Some("StoredClass".into()),
                 first_seen_utc_ms: fixture.start,
                 last_seen_utc_ms: fixture.start,
             })
@@ -619,6 +625,10 @@ fn store_read_projects_private_fields_before_returning_foreground_facts() {
                         row.visible_window_instance(),
                         (level != enums::CaptureLevel::Excluded)
                             .then_some(quartz_domain::facts::WindowInstanceId(row.span.id.0))
+                    );
+                    assert_eq!(
+                        row.visible_window_class(),
+                        (level != enums::CaptureLevel::Excluded).then_some("StoredClass")
                     );
                     assert_eq!(
                         row.visible_title().is_some(),
@@ -1294,7 +1304,7 @@ fn entity_detail_aggregates_app_activity_rules_titles_and_unknown_apps() {
     assert_eq!(page.rules.len(), 1);
     assert_eq!(
         page.rules[0].rule.as_str(),
-        "builtin.classification/vscode@1"
+        "builtin.classification/vscode@2"
     );
     assert!(page.rules[0].label.is_some() || page.rules[0].label_key.is_some());
     let unknown = entity_page(&mut fixture, entity_request(i64::MAX));
@@ -1448,4 +1458,76 @@ fn entity_detail_pages_rule_metadata_and_invalidates_versions() {
             .kind(),
         ErrorKind::StaleCursor
     );
+}
+
+#[test]
+fn stored_window_class_classifies_closed_and_open_facts_with_hidden_titles() {
+    let mut fixture = QueryFixture::new(2);
+    diesel::update(intervals::table)
+        .set(intervals::app_id.eq(Some(1_i64)))
+        .execute(&mut fixture.store.writer)
+        .expect("same application");
+    for id in 1..=2_i64 {
+        diesel::insert_into(crate::store::schema::window_instances::table)
+            .values(crate::store::rows::WindowInstancesRow {
+                id: Some(id),
+                run_id: 1,
+                app_id: 1,
+                pid: 1,
+                process_created_utc_ms: None,
+                hwnd: id,
+                generation: 1,
+                retired_utc_ms: None,
+                window_class: Some(if id == 1 { "Editor" } else { "Viewer" }.into()),
+                first_seen_utc_ms: fixture.start,
+                last_seen_utc_ms: fixture.start,
+            })
+            .execute(&mut fixture.store.writer)
+            .expect("window class");
+        diesel::update(intervals::table.filter(intervals::id.eq(Some(id))))
+            .set(intervals::window_instance_id.eq(Some(id)))
+            .execute(&mut fixture.store.writer)
+            .expect("window identity");
+    }
+    diesel::update(intervals::table.filter(intervals::id.eq(Some(2_i64))))
+        .set((
+            intervals::end_utc_ms.eq(None::<i64>),
+            intervals::end_mono_ms.eq(None::<i64>),
+            intervals::confirmed_utc_ms.eq(Some(fixture.start + 2000)),
+            intervals::confirmed_mono_ms.eq(Some(2000_i64)),
+        ))
+        .execute(&mut fixture.store.writer)
+        .expect("open foreground");
+    let now = quartz_domain::capture::UtcInstant::try_from(0).expect("UTC");
+    let mut shell =
+        crate::rules::registry::RegistryShell::open(&mut fixture.store, now).expect("rules");
+    shell.run(&mut fixture.store, now, quartz_domain::rules::registry::RegistryCommand::Apply {
+        key: "user.windows".parse().expect("key"), file: "windows.toml".into(), base_version: 0,
+        text: "format='quartz-rules/1'\n[set]\nkey='user.windows'\nkind='classification'\nname='Window class'\n[[rule]]\nid='editor'\nlabel='Editor windows'\ncategory='builtin:learning'\nwhen=[{field='window.class',op='equals',value='Editor'}]".into(),
+    }).expect("class rule");
+    for level in [enums::CaptureLevel::Full, enums::CaptureLevel::TitleHidden] {
+        fixture.redact_titles(level);
+        let request = fixture.request_timeline();
+        let segments = collect_timeline(&mut fixture, request);
+        let foreground: Vec<_> = segments
+            .iter()
+            .filter(|segment| segment.app.is_some())
+            .collect();
+        assert_eq!(foreground.len(), 2);
+        assert!(matches!(
+            foreground[0].category,
+            quartz_protocol::CategoryRef::Classified { .. }
+        ));
+        assert_eq!(
+            foreground[1].category,
+            quartz_protocol::CategoryRef::Unclassified
+        );
+        assert_eq!(
+            foreground
+                .iter()
+                .map(|segment| segment.duration_ms)
+                .sum::<i64>(),
+            2000
+        );
+    }
 }

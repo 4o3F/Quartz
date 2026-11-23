@@ -19,6 +19,12 @@ impl NfcText {
         Self(ComposingNormalizer::new_nfc().normalize(text).into_owned())
     }
 
+    /// Transfers normalized text without allocating another string.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
     /// Borrows the NFC text, including for a regex engine's own case handling.
     #[must_use]
     pub fn as_str(&self) -> &str {

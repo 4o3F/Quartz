@@ -74,7 +74,18 @@ impl Field {
     pub(super) const fn allows(self, kind: RuleKind) -> bool {
         match kind {
             RuleKind::Extraction => self.is_app(),
-            RuleKind::Classification => self.is_app() || matches!(self, Self::RawTitle),
+            RuleKind::Classification => {
+                self.is_app()
+                    || matches!(
+                        self,
+                        Self::WindowClass
+                            | Self::RawTitle
+                            | Self::NormalizedTitle
+                            | Self::Document
+                            | Self::Project
+                            | Self::Profile
+                    )
+            }
             RuleKind::Privacy => {
                 self.is_app()
                     || matches!(

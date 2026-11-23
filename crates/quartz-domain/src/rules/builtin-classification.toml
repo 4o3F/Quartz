@@ -522,3 +522,22 @@ when = [
   { field = "app.exe_name", op = "equals", value = "resmon.exe" },
   { field = "app.exe_name", op = "equals", value = "msinfo32.exe" },
 ]
+
+# Exact project manifest names refine otherwise unclassified Notepad windows.
+[[rule]]
+id = "notepad-cargo-manifest"
+label = "Notepad: Rust project manifest"
+category = "builtin:development"
+when = [
+  { field = "app.exe_name", op = "equals", value = "notepad.exe" },
+  { field = "doc.document", op = "equals", value = "Cargo.toml" },
+]
+
+[[rule]]
+id = "notepad-python-manifest"
+label = "Notepad: Python project manifest"
+category = "builtin:development"
+when = [
+  { field = "app.exe_name", op = "equals", value = "notepad.exe" },
+  { field = "doc.document", op = "equals", value = "pyproject.toml" },
+]
