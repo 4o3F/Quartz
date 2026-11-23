@@ -1,0 +1,1809 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Quartz — Categories &amp; unclassified queue (M4 V2)</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mockup.css">
+<!--
+  Categories editor, unclassified queue, and classification scope chooser mockup for Quartz (M4 V2: H2 / H11).
+  Query parameters:
+    ?state=categories | category-edit | category-archived |
+           categories-loading | categories-error | category-saving |
+           queue | queue-documents | queue-day | queue-scope |
+           queue-empty | queue-search-empty | queue-loading | queue-error
+    &theme=light | dark
+    &lang=zh-CN | en | en-XA
+    &size=min          (optional: 640x480 minimum window per 07 §2.3; default 1280x800)
+    &group=app | document  (optional override for queue states; queue/queue-day default app, queue-documents/queue-scope default document)
+-->
+<style>
+/* Minimum window 640x480 (Compact breakpoint per 07 §2.1 & §2.3) */
+html[data-size="min"],
+html[data-size="min"] body,
+html[data-size="min"] .window{width:640px;height:480px}
+
+.wrap{position:relative;overflow:hidden}
+.main-wrap{position:relative;flex:1;min-width:0;display:flex}
+.main{position:relative;padding:var(--space-xxl) var(--space-xxl) var(--space-l);gap:var(--space-s);overflow-y:auto;overflow-x:hidden}
+html[data-has-panel="true"] .main{padding:var(--space-xl) var(--space-l) var(--space-l)}
+html[data-size="min"] .main{padding:var(--space-l) var(--space-l) var(--space-l)}
+
+/* Fluent 2 overlay scrollbar indicator (11 §9.2) */
+.scroll-track{
+  display:none;
+  position:absolute;top:var(--space-xs);right:var(--space-xs);bottom:var(--space-xs);
+  width:6px;pointer-events:none;z-index:8;
+}
+.scrollable > .scroll-track{display:block}
+.scroll-thumb{
+  position:absolute;left:1px;right:1px;top:0;
+  border-radius:var(--radius-control);
+  background:var(--text-tertiary);
+}
+
+/* Nav text stays single-line with ellipsis in en-XA */
+.nav-item span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Page header & pivot — content-driven wrapping for en-XA and 640x480 */
+.page-head{
+  flex:none;
+  display:flex;align-items:center;flex-wrap:wrap;
+  gap:var(--space-s);
+  min-height:40px;
+}
+.page-head .h-title{flex:1;min-width:140px}
+.page-head-acts{display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap}
+
+.pivot{
+  height:auto;min-height:32px;
+  gap:var(--space-l);row-gap:var(--space-xs);
+  flex-wrap:wrap;
+}
+.pivot div{height:32px;white-space:nowrap}
+html[data-size="min"] .pivot{gap:var(--space-m);row-gap:0}
+
+/* Flexible buttons & badges safe for en-XA */
+.badge{max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center}
+.badge .btxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn{min-height:var(--h-control-standard);height:auto;padding:4px 12px}
+.btn.compact{min-height:var(--h-control-compact);height:auto;padding:2px 10px}
+.btn.icon{width:var(--h-control-standard);height:var(--h-control-standard);padding:0}
+.btn.compact.icon{width:var(--h-control-compact);height:var(--h-control-compact);padding:0}
+
+/* Main workspace card */
+.work-card{
+  flex:none;
+  padding:var(--space-m) var(--space-m) var(--space-s);
+  display:flex;flex-direction:column;gap:var(--space-xs);
+  margin-top:var(--space-xs);
+}
+.toolbar{
+  display:flex;align-items:center;flex-wrap:wrap;
+  gap:var(--space-s);
+  padding:0 var(--space-xs) var(--space-xs);
+}
+.toolbar-right{margin-left:auto;display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap}
+.meta-bar{
+  display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-s);
+  padding:0 var(--space-xs) var(--space-xs);
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.meta-bar .meta-hint{margin-left:auto;color:var(--text-tertiary)}
+html[data-size="min"] .meta-bar .meta-hint{margin-left:0}
+
+/* Inline banners (InfoBars, reused from V1) */
+.infobar{
+  flex:none;
+  padding:6px var(--space-m);
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;word-break:break-word;
+}
+.infobar .ib-ic{flex:none;margin-top:1px;color:var(--text-secondary)}
+.infobar .ib-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow-wrap:anywhere}
+.infobar .ib-title{font:var(--type-body-strong);color:var(--text-primary);font-size:13px;line-height:18px;overflow-wrap:anywhere}
+.infobar.caution{
+  background:var(--status-caution-bg);
+  border-color:color-mix(in srgb,var(--status-caution) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.caution .ib-ic{color:var(--status-caution)}
+
+/* Lightweight inline load error card (shared pattern with V1 & Today) */
+.load-err-card{
+  flex:none;margin-top:var(--space-xs);
+  padding:var(--space-l) var(--space-xl);
+  display:flex;align-items:flex-start;gap:var(--space-m);
+}
+.load-err-ic{color:var(--status-caution);margin-top:1px;flex:none}
+.load-err-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:var(--space-xs);overflow-wrap:anywhere}
+.load-err-title{font:var(--type-body-strong);color:var(--text-primary);overflow-wrap:anywhere}
+.load-err-msg{font:var(--type-body);color:var(--text-secondary);overflow-wrap:anywhere}
+.load-err-code{font:var(--type-caption);font-family:var(--font-mono);color:var(--text-tertiary);margin-top:2px;overflow-wrap:anywhere}
+.load-err-act{flex:none;align-self:center;margin-left:var(--space-m)}
+html[data-size="min"] .load-err-card{flex-wrap:wrap;padding:var(--space-l)}
+html[data-size="min"] .load-err-act{margin-left:calc(20px + var(--space-m));margin-top:var(--space-xs);align-self:flex-start}
+
+/* Static skeleton primitives (zero looping animation per 07 §9 & 11 §1) */
+.skel{
+  display:inline-block;border-radius:var(--radius-control);
+  background:color-mix(in srgb,var(--text-tertiary) 18%,transparent);
+}
+.skel.soft{background:var(--fill-subtle-hover)}
+.seg.dim{opacity:.55}
+
+/* Drag-reorder insertion bar (reused from V1) */
+.drop-line{
+  position:relative;height:2px;margin:2px 8px;
+  background:var(--accent-fill);border-radius:1px;
+}
+.drop-line::before,.drop-line::after{
+  content:"";position:absolute;top:-3px;width:8px;height:8px;border-radius:50%;
+  background:var(--accent-fill);
+}
+.drop-line::before{left:-4px}
+.drop-line::after{right:-4px}
+.drop-line.ind1{margin-left:34px}
+
+/* ===========================
+   Categories list
+   =========================== */
+.cat-h,.cat-r{
+  display:flex;align-items:center;gap:var(--space-s);
+  min-height:var(--h-row-standard);
+  padding:4px var(--space-s);
+  border-radius:var(--radius-control);
+}
+.cat-h{
+  min-height:var(--h-row-compact);
+  font:var(--type-caption);color:var(--text-secondary);
+  border-bottom:1px solid var(--stroke-divider);
+  border-radius:0;
+}
+.cat-r{position:relative}
+.cat-r.sel{background:var(--fill-subtle-hover)}
+.cat-r.sel::before{
+  content:"";position:absolute;left:0;top:11px;width:3px;height:18px;
+  border-radius:2px;background:var(--accent-fill);
+}
+.cat-r.dragging{
+  background:var(--bg-flyout);
+  border:1px solid var(--accent-fill);
+  box-shadow:var(--shadow-8);
+}
+.cat-r.disabled-ui{opacity:.6}
+.cat-r.arch-r{
+  min-height:auto;
+  padding:8px var(--space-s);
+  align-items:flex-start;
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  margin-top:4px;
+}
+.cat-grip{
+  width:16px;flex:none;
+  display:flex;align-items:center;justify-content:center;
+  color:var(--text-tertiary);
+}
+.cat-indent{
+  width:24px;flex:none;
+  display:flex;align-items:center;justify-content:flex-end;
+  padding-right:4px;
+  color:var(--stroke-control-strong);
+}
+.cat-branch{
+  width:10px;height:12px;
+  border-left:1.5px solid var(--stroke-control-strong);
+  border-bottom:1.5px solid var(--stroke-control-strong);
+  border-bottom-left-radius:3px;
+  margin-bottom:4px;
+}
+.cat-sw{
+  width:14px;height:14px;border-radius:3px;flex:none;
+  background:var(--c);
+  box-shadow:inset 0 0 0 1px var(--stroke-control);
+}
+.cat-r.arch-r .cat-sw{opacity:.65;margin-top:3px}
+.cat-name-col{
+  flex:1;min-width:110px;
+  display:flex;align-items:center;gap:6px;
+  overflow:hidden;
+}
+.cat-name-stack{
+  flex:1;min-width:0;
+  display:flex;flex-direction:column;gap:2px;
+}
+.cat-name-line{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}
+.cat-name-txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cat-tend-col{
+  flex:0 0 112px;
+  display:flex;align-items:center;justify-content:flex-start;
+}
+.tend-pill{
+  display:inline-flex;align-items:center;
+  height:20px;padding:0 8px;max-width:100%;
+  border-radius:var(--radius-control);
+  background:var(--fill-subtle-hover);
+  font:var(--type-caption);color:var(--text-secondary);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.cat-rules-col{
+  flex:0 0 88px;
+  text-align:right;
+  font:var(--type-caption);color:var(--text-secondary);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.cat-act-col{
+  flex:0 0 28px;
+  display:flex;justify-content:flex-end;align-items:center;
+}
+html[data-lang="en-XA"] .cat-tend-col{flex:0 0 144px}
+html[data-lang="en-XA"] .cat-rules-col{flex:0 0 108px}
+html[data-size="min"] .cat-rules-col{display:none}
+html[data-size="min"] .cat-tend-col{flex:0 0 76px}
+html[data-size="min"][data-lang="en-XA"] .cat-tend-col{flex:0 0 104px}
+html[data-size="min"] .cat-indent{width:16px}
+
+/* Collapsed / expanded archived footer inside Categories card */
+.arch-sect{
+  margin-top:var(--space-s);
+  padding-top:var(--space-s);
+  border-top:1px solid var(--stroke-divider);
+  display:flex;flex-direction:column;gap:6px;
+}
+.arch-toggle{
+  display:flex;align-items:center;flex-wrap:wrap;gap:6px;
+  padding:4px var(--space-s);
+  border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);
+  min-height:var(--h-row-compact);
+}
+.arch-toggle .arch-hint{margin-left:auto;font:var(--type-caption);color:var(--text-tertiary)}
+html[data-size="min"] .arch-toggle .arch-hint{margin-left:0}
+.arch-ref-hint{
+  margin-top:4px;
+  padding:5px 8px;
+  border-radius:var(--radius-control);
+  background:var(--status-caution-bg);
+  border:1px solid color-mix(in srgb,var(--status-caution) 26%,transparent);
+  display:flex;align-items:center;flex-wrap:wrap;gap:6px;
+  font:var(--type-caption);color:var(--text-primary);
+  overflow-wrap:anywhere;
+}
+.arch-ref-hint svg{flex:none;color:var(--status-caution)}
+.arch-ref-link{
+  margin-left:auto;
+  display:inline-flex;align-items:center;gap:2px;
+  font:var(--type-caption);font-weight:600;color:var(--accent-text);
+  white-space:nowrap;
+}
+.arch-ref-link svg{color:var(--accent-text)}
+
+/* Range filter chip & reset link (queue-day) */
+.range-chip{
+  display:inline-flex;align-items:center;gap:5px;
+  height:var(--h-control-compact);padding:0 8px;
+  border-radius:var(--radius-control);
+  background:var(--fill-subtle-hover);
+  font:var(--type-caption);color:var(--text-secondary);
+  white-space:nowrap;
+}
+.range-chip.active-day{
+  background:color-mix(in srgb,var(--accent-fill) 14%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent-fill) 36%,transparent);
+  color:var(--accent-text);
+  font-weight:600;
+}
+.range-reset-link{
+  font:var(--type-caption);color:var(--accent-text);
+  white-space:nowrap;
+}
+
+/* ===========================
+   Unclassified queue list
+   =========================== */
+.q-h,.q-r{
+  display:flex;align-items:center;gap:var(--space-s);
+  min-height:44px;
+  padding:6px var(--space-s);
+  border-radius:var(--radius-control);
+}
+.q-h{
+  min-height:var(--h-row-compact);
+  padding:4px var(--space-s);
+  font:var(--type-caption);color:var(--text-secondary);
+  border-bottom:1px solid var(--stroke-divider);
+  border-radius:0;
+}
+.q-r.sel{
+  background:var(--fill-subtle-hover);
+  position:relative;
+}
+.q-r.sel::before{
+  content:"";position:absolute;left:0;top:10px;bottom:10px;width:3px;
+  border-radius:2px;background:var(--accent-fill);
+}
+.q-r.expanded{
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  border-bottom:none;
+  border-bottom-left-radius:0;
+  border-bottom-right-radius:0;
+}
+.q-chev{
+  width:18px;flex:none;
+  display:flex;align-items:center;justify-content:center;
+  color:var(--text-secondary);
+}
+.q-ic{
+  width:24px;height:24px;border-radius:var(--radius-control);flex:none;
+  background:var(--fill-subtle-hover);
+  color:var(--text-secondary);
+  display:grid;place-items:center;
+}
+.q-entity{
+  flex:1;min-width:110px;
+  display:flex;flex-direction:column;gap:1px;
+  overflow:hidden;
+}
+.q-entity-title{display:flex;align-items:center;gap:6px;min-width:0}
+.q-entity-sub{font:var(--type-caption);color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.q-bar-col{
+  width:96px;flex:none;
+  display:flex;align-items:center;
+}
+.q-bar{
+  width:100%;height:6px;border-radius:3px;
+  background:var(--fill-subtle-hover);
+  overflow:hidden;
+}
+.q-bar i{
+  display:block;height:100%;border-radius:3px;
+  background:var(--cat-neutral);
+}
+.q-dur-col{
+  flex:0 0 82px;
+  text-align:right;
+  font:var(--type-caption);color:var(--text-secondary);
+  white-space:nowrap;
+}
+.q-act-col{
+  flex:0 0 92px;
+  display:flex;justify-content:flex-end;
+}
+html[data-lang="en-XA"] .q-dur-col{flex:0 0 96px}
+html[data-lang="en-XA"] .q-act-col{flex:0 0 148px}
+html[data-has-panel="true"] .q-bar-col{width:64px}
+html[data-size="min"] .q-bar-col{width:52px}
+html[data-size="min"] .q-dur-col{flex:0 0 68px}
+html[data-size="min"] .q-act-col{flex:0 0 78px}
+html[data-size="min"][data-lang="en-XA"] .q-dur-col{flex:0 0 82px}
+html[data-size="min"][data-lang="en-XA"] .q-act-col{flex:0 0 140px}
+
+/* Expandable sample ranges drawer under a queue row (up to 5 ranges per 04 §6.2.1) */
+.q-samples{
+  padding:6px var(--space-m) 8px 46px;
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  border-top:1px solid var(--stroke-divider);
+  border-bottom-left-radius:var(--radius-control);
+  border-bottom-right-radius:var(--radius-control);
+  margin-bottom:4px;
+  display:flex;flex-direction:column;gap:3px;
+}
+html[data-size="min"] .q-samples{padding-left:var(--space-m)}
+.q-samples-hdr{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--space-s);flex-wrap:wrap;
+  padding-bottom:3px;
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.q-sample-row{
+  display:flex;align-items:center;gap:var(--space-s);
+  min-height:28px;padding:2px 6px;
+  border-radius:var(--radius-control);
+  font:var(--type-caption);
+}
+.q-sample-row.sel{background:var(--fill-subtle-hover)}
+.q-sample-range{flex:1;min-width:0;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.q-sample-dur{flex:none;color:var(--text-secondary);white-space:nowrap}
+
+/* Calm empty states (matching today-states.html) */
+.empty-card{
+  flex:1;min-height:280px;
+  margin-top:var(--space-xs);
+  display:flex;align-items:center;justify-content:center;
+}
+.empty-inner{
+  max-width:440px;
+  display:flex;flex-direction:column;align-items:center;
+  text-align:center;gap:var(--space-m);
+  padding:var(--space-xxl) var(--space-l);
+}
+.empty-tile{
+  width:48px;height:48px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-subtle-hover);
+  border:1px solid var(--stroke-card);
+  color:var(--text-secondary);
+  display:grid;place-items:center;
+}
+.empty-tile.ok{
+  background:var(--status-success-bg);
+  border-color:color-mix(in srgb,var(--status-success) 24%,transparent);
+  color:var(--status-success);
+}
+.empty-tile svg{width:24px;height:24px;stroke-width:1.5}
+.empty-title{font:var(--type-subtitle);color:var(--text-primary)}
+.empty-desc{font:var(--type-body);color:var(--text-secondary);overflow-wrap:anywhere}
+.status-pill{
+  display:inline-flex;align-items:center;gap:8px;
+  height:24px;padding:0 var(--space-m);
+  border-radius:var(--radius-control);
+  background:var(--fill-subtle-hover);
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.status-pill i{width:6px;height:6px;border-radius:50%;background:var(--status-success);flex:none}
+
+.search-empty-box{
+  padding:var(--space-xxxl) var(--space-l);
+  display:flex;flex-direction:column;align-items:center;
+  text-align:center;gap:var(--space-s);
+}
+
+/* ===========================
+   Right-hand panel (360px, reused from V1)
+   =========================== */
+.panel-scrim{
+  display:none;
+  position:absolute;inset:0;
+  background:color-mix(in srgb,var(--fill-smoke) 42%,transparent);
+  z-index:15;
+}
+.details{
+  width:var(--w-details);flex:none;
+  border-left:1px solid var(--stroke-divider);
+  padding:0;gap:0;
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  background:transparent;
+}
+html[data-size="min"][data-panel-open="true"] .panel-scrim{display:block}
+html[data-size="min"] .details{
+  position:absolute;top:0;right:0;bottom:0;
+  width:360px;max-width:calc(100% - 16px);
+  background:linear-gradient(var(--fill-layer),var(--fill-layer)),var(--bg-base);
+  border-left:1px solid var(--stroke-divider);
+  box-shadow:var(--shadow-28);
+  z-index:20;
+}
+
+.ed-head{
+  flex:none;
+  padding:10px var(--space-l);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+}
+.ed-head-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.ed-head-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+
+.ed-body-wrap{position:relative;flex:1;min-height:0;display:flex}
+.ed-body{
+  flex:1;min-height:0;
+  overflow-y:auto;overflow-x:hidden;
+  padding:10px var(--space-l);
+  display:flex;flex-direction:column;gap:8px;
+}
+
+.ed-foot{
+  flex:none;
+  padding:8px var(--space-l);
+  border-top:1px solid var(--stroke-divider);
+  display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+}
+.ed-foot-main{
+  flex:1;min-width:0;
+  display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+}
+.ed-foot-main .btn{
+  padding:4px 10px;
+  min-width:0;max-width:100%;
+  overflow:hidden;
+}
+.ed-foot-main .btn.accent{flex:0 1 auto}
+.ed-foot-main .btn:not(.accent){flex:0 0 auto}
+.ed-foot-main .btn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-foot-copy{flex:0 0 auto;margin-left:auto}
+.ed-foot-more{flex:0 0 auto;margin-left:auto}
+.tend-seg{width:100%;display:flex;height:auto;min-height:var(--h-control-compact)}
+.tend-seg div{flex:1 1 0;min-width:0;padding:2px 6px;justify-content:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Form controls inside panel */
+.field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.field>label{
+  font:var(--type-caption);color:var(--text-secondary);
+  display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;
+}
+.label-act{color:var(--accent-text);font:var(--type-caption);white-space:nowrap}
+.label-act.disabled{color:var(--text-disabled)}
+.input{min-width:0}
+.input.focused{
+  border-color:var(--stroke-control);
+  border-bottom:2px solid var(--accent-fill);
+}
+.input.disabled{
+  background:var(--fill-control-disabled);
+  border-color:var(--stroke-control);
+  color:var(--text-disabled);
+}
+.caret{
+  display:inline-block;width:1.5px;height:14px;
+  background:var(--accent-fill);vertical-align:middle;margin-left:1px;flex:none;
+}
+.field-hint{font:var(--type-caption);color:var(--text-tertiary);overflow-wrap:anywhere}
+
+/* Semantic 15-swatch category palette tray (sits on bg.base for >=3:1 dark contrast per 11 §3.3) */
+.palette-tray{
+  padding:8px;
+  border-radius:var(--radius-control);
+  background:var(--bg-base);
+  border:1px solid var(--stroke-card);
+  display:grid;
+  grid-template-columns:repeat(5,minmax(0,1fr));
+  gap:8px;
+}
+.swatch-btn{
+  height:28px;
+  border-radius:var(--radius-control);
+  background:var(--c);
+  color:var(--c-on);
+  box-shadow:inset 0 0 0 1px var(--stroke-control);
+  display:grid;place-items:center;
+  position:relative;
+}
+.swatch-btn.sel{
+  box-shadow:0 0 0 2px var(--bg-base),0 0 0 4px var(--stroke-focus-outer);
+}
+.swatch-btn.disabled{opacity:.55}
+.palette-meta{
+  display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;
+  font:var(--type-caption);color:var(--text-tertiary);
+}
+
+/* Archive action box inside Category edit panel (calm, non-destructive) */
+.archive-box{
+  margin-top:2px;
+  padding:10px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:6px;
+}
+
+/* Radio scope cards inside queue-scope (reused from V1 modal radio cards) */
+.radio-stack{display:flex;flex-direction:column;gap:6px}
+.radio-card{
+  padding:7px 9px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-control);
+  background:var(--fill-control);
+  display:flex;flex-direction:column;gap:6px;
+}
+.radio-card.sel{
+  border-color:var(--accent-fill);
+  background:var(--fill-card);
+}
+.radio-hdr{display:flex;align-items:flex-start;gap:8px}
+.radio-dot{
+  width:16px;height:16px;border-radius:50%;flex:none;margin-top:2px;
+  border:1.5px solid var(--text-secondary);
+  display:grid;place-items:center;
+}
+.radio-card.sel .radio-dot{
+  border-color:var(--accent-fill);
+  background:var(--accent-fill);
+}
+.radio-card.sel .radio-dot::after{
+  content:"";width:7px;height:7px;border-radius:50%;
+  background:var(--text-on-accent);
+}
+.radio-title-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.radio-fields{
+  padding-left:24px;
+  display:flex;flex-direction:column;gap:4px;
+}
+.sample-select-pill{
+  margin-top:3px;
+  display:inline-flex;align-items:center;gap:6px;
+  padding:2px 8px;
+  min-height:24px;max-width:100%;
+  border-radius:var(--radius-control);
+  background:var(--fill-subtle-hover);
+  border:1px solid var(--stroke-control);
+  font:var(--type-caption);color:var(--text-primary);
+}
+
+/* Compact V1 dual-duration preview card inside queue-scope */
+.prev-card{
+  padding:8px 10px;
+  border-radius:var(--radius-overlay);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:6px;
+}
+.prev-head{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}
+.prev-head .prev-dest{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.prev-metrics{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:6px;
+}
+.prev-metric{
+  padding:5px 7px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:1px;
+  min-width:0;
+}
+.prev-metric .pm-lbl{
+  display:flex;align-items:center;gap:5px;
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.prev-metric .pm-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--status-neutral)}
+.prev-metric.eff .pm-dot{background:var(--status-success)}
+.prev-metric .pm-val{font:var(--type-body-strong);color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prev-metric .pm-sub{font:var(--type-caption);color:var(--text-tertiary);overflow-wrap:anywhere}
+
+/* Spinner & busy accent button (reused from V1) */
+.ring-xs{width:14px;height:14px;display:block;flex:none}
+.ring-sm{width:16px;height:16px;display:block;flex:none}
+.btn.accent.busy{
+  background:color-mix(in srgb,var(--accent-fill) 86%,transparent);
+  border-color:color-mix(in srgb,var(--accent-fill) 86%,transparent);
+}
+
+/* Search input width */
+.q-search{width:184px}
+html[data-has-panel="true"] .q-search{width:152px}
+html[data-size="min"] .q-search{width:148px}
+</style>
+<script>
+const __p = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = __p.get('theme') || 'light';
+if (__p.get('size') === 'min') document.documentElement.dataset.size = 'min';
+</script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.4" fill="currentColor"/></symbol>
+  <symbol id="week" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3M8 13h8M8 16.5h5"/></symbol>
+  <symbol id="tag" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z"/><circle cx="8.3" cy="8.3" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="tag-f" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z" fill="currentColor"/><circle cx="8.3" cy="8.3" r="1.3" fill="var(--cut)" stroke="none"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><path d="M10.29 4.59L10.47 2.32L13.53 2.32L13.71 4.59L16.03 5.55L17.76 4.07L19.93 6.24L18.45 7.97L19.41 10.29L21.68 10.47L21.68 13.53L19.41 13.71L18.45 16.03L19.93 17.76L17.76 19.93L16.03 18.45L13.71 19.41L13.53 21.68L10.47 21.68L10.29 19.41L7.97 18.45L6.24 19.93L4.07 17.76L5.55 16.03L4.59 13.71L2.32 13.53L2.32 10.47L4.59 10.29L5.55 7.97L4.07 6.24L6.24 4.07L7.97 5.55Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="chev-r" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+  <symbol id="chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
+  <symbol id="chev-u" viewBox="0 0 24 24"><path d="M5 15l7-7 7 7"/></symbol>
+  <symbol id="menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5"/><path d="M15 15l5 5"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.3" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><circle cx="12" cy="8" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="drag" viewBox="0 0 24 24"><g fill="currentColor" stroke="none"><circle cx="9" cy="6" r="1.2"/><circle cx="15" cy="6" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="9" cy="18" r="1.2"/><circle cx="15" cy="18" r="1.2"/></g></symbol>
+  <symbol id="more" viewBox="0 0 24 24"><g fill="currentColor" stroke="none"><circle cx="5.5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18.5" cy="12" r="1.5"/></g></symbol>
+  <symbol id="copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.2h-4.2"/></symbol>
+  <symbol id="archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4" rx="1"/><path d="M5 8.5v9.5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5M9.5 13h5"/></symbol>
+  <symbol id="restore" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4.5v4.2h4.2"/></symbol>
+  <symbol id="edit" viewBox="0 0 24 24"><path d="M15.5 5.5l3 3L8.5 18.5l-4 1 1-4z"/></symbol>
+  <symbol id="doc" viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9.5 12h5M9.5 15.5h5"/></symbol>
+  <symbol id="pen" viewBox="0 0 24 24"><path d="M12 19l7-7-3-3-7 7-1 4zM14.5 6.5l3 3"/><path d="M4 20h16"/></symbol>
+  <symbol id="code" viewBox="0 0 24 24"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></symbol>
+  <symbol id="cube" viewBox="0 0 24 24"><path d="M12 3.5l7.5 4.2v8.6L12 20.5l-7.5-4.2V7.7z"/><path d="M12 12v8.5M12 12l7.5-4.3M12 12L4.5 7.7"/></symbol>
+  <symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="logo" viewBox="0 0 24 24"><path d="M12 2.5l8 4.5v10l-8 4.5-8-4.5V7z" fill="var(--accent-fill)" stroke="none"/><path d="M12 2.5v19M4 7l16 10M20 7L4 17" stroke="var(--text-on-accent)" stroke-width="1" opacity=".7"/></symbol>
+</defs></svg>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="app"><svg class="ic s16"><use href="#logo"/></svg><span>Quartz</span></div>
+    <div class="btns">
+      <div><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></div>
+    </div>
+  </div>
+  <div class="body">
+    <nav class="nav" id="nav"></nav>
+    <div class="wrap" id="wrap">
+      <div class="main-wrap" id="main-wrap">
+        <main class="main" id="main"></main>
+        <div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="main-thumb"></div></div>
+      </div>
+      <div class="panel-scrim" id="panel-scrim"></div>
+      <aside class="details" id="details" style="display:none"></aside>
+    </div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const rawLang = params.get('lang') || 'zh-CN';
+const lang = (rawLang === 'en' || rawLang === 'en-XA') ? rawLang : 'zh-CN';
+const stateKey = params.get('state') || 'categories';
+const isMin = params.get('size') === 'min';
+const rawGroup = params.get('group');
+const queueGroup = rawGroup === 'document'
+  ? 'document'
+  : (rawGroup === 'app' ? 'app' : ((stateKey === 'queue-documents' || stateKey === 'queue-scope') ? 'document' : 'app'));
+document.documentElement.lang = lang === 'en-XA' ? 'en' : lang;
+document.documentElement.dataset.lang = lang;
+
+const PANEL_STATES = new Set(['category-edit', 'category-saving', 'queue-scope']);
+const QUEUE_STATES = new Set(['queue', 'queue-documents', 'queue-day', 'queue-scope', 'queue-empty', 'queue-search-empty', 'queue-loading', 'queue-error']);
+const hasPanel = PANEL_STATES.has(stateKey);
+const isQueueTab = QUEUE_STATES.has(stateKey);
+if (hasPanel) document.documentElement.dataset.panelOpen = 'true';
+if (hasPanel && !isMin) document.documentElement.dataset.hasPanel = 'true';
+
+/* Pseudo-locale generator matching rules-states.html (~40% tilde padding + brackets) */
+const ACCENT_MAP = {
+  A:'À',B:'Ɓ',C:'Ç',D:'Ď',E:'É',F:'Ƒ',G:'Ĝ',H:'Ĥ',I:'Î',J:'Ĵ',K:'Ķ',L:'Ļ',M:'Ḿ',
+  N:'Ñ',O:'Ö',P:'Ƥ',Q:'Ǫ',R:'Ŕ',S:'Š',T:'Ţ',U:'Û',V:'Ṽ',W:'Ŵ',X:'Ẋ',Y:'Ý',Z:'Ž',
+  a:'à',b:'ƀ',c:'ç',d:'đ',e:'é',f:'ƒ',g:'ĝ',h:'ĥ',i:'î',j:'ĵ',k:'ķ',l:'ļ',m:'ɱ',
+  n:'ñ',o:'ö',p:'ƥ',q:'ǫ',r:'ŕ',s:'š',t:'ţ',u:'û',v:'ṽ',w:'ŵ',x:'ẋ',y:'ý',z:'ž',
+};
+function pseudoStr(s) {
+  if (!s || typeof s !== 'string') return s;
+  const accented = [...s].map(ch => ACCENT_MAP[ch] || ch).join('');
+  const pad = Math.ceil((s.length * 2) / 5);
+  return '[' + accented + '~'.repeat(pad) + ']';
+}
+function pseudoObj(val, skipKeys = new Set(['c', 'on', 'key', 'id', 'ic', 'w', 'code', 'exe', 'doc', 'project', 'query', 'kw'])) {
+  if (typeof val === 'string') return pseudoStr(val);
+  if (Array.isArray(val)) return val.map(v => pseudoObj(v, skipKeys));
+  if (val && typeof val === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      out[k] = skipKeys.has(k) ? v : pseudoObj(v, skipKeys);
+    }
+    return out;
+  }
+  return val;
+}
+
+const PALETTE = [
+  { key: 'cat.1', c: '--cat-1', on: '--cat-1-on' },
+  { key: 'cat.2', c: '--cat-2', on: '--cat-2-on' },
+  { key: 'cat.3', c: '--cat-3', on: '--cat-3-on' },
+  { key: 'cat.4', c: '--cat-4', on: '--cat-4-on' },
+  { key: 'cat.5', c: '--cat-5', on: '--cat-5-on' },
+  { key: 'cat.6', c: '--cat-6', on: '--cat-6-on' },
+  { key: 'cat.7', c: '--cat-7', on: '--cat-7-on' },
+  { key: 'cat.8', c: '--cat-8', on: '--cat-8-on' },
+  { key: 'cat.9', c: '--cat-9', on: '--cat-9-on' },
+  { key: 'cat.10', c: '--cat-10', on: '--cat-10-on' },
+  { key: 'cat.11', c: '--cat-11', on: '--cat-11-on' },
+  { key: 'cat.12', c: '--cat-12', on: '--cat-12-on' },
+  { key: 'cat.13', c: '--cat-13', on: '--cat-13-on' },
+  { key: 'cat.14', c: '--cat-14', on: '--cat-14-on' },
+  { key: 'neutral', c: '--cat-neutral', on: '--bg-base' },
+];
+
+const COPY = {
+  'zh-CN': {
+    nav: { today: '今天', week: '本周', rules: '分类与规则', settings: '设置' },
+    page: {
+      title: '分类与规则',
+      newCategory: '新建分类',
+      copySituation: '复制情况说明',
+      tabs: {
+        categories: '分类',
+        rules: '规则',
+        queue: '未分类队列',
+        extraction: '文档提取规则',
+        privacy: '隐私规则',
+      },
+    },
+    tend: {
+      focus: '专注',
+      neutral: '中性',
+      distraction: '分心',
+    },
+    cats: {
+      heading: '分类层级',
+      summary: '9 个启用分类 · 5 个内置 · 4 个自定义',
+      reorderHint: '拖动同级分类调整顺序；调整父级请在编辑面板设置',
+      colName: '分类',
+      colTend: '倾向',
+      colRules: '关联规则',
+      builtinBadge: '内置',
+      renamedBadge: '已改名',
+      siblingDragBadge: '同级排序',
+      rulesCount: (n) => `${n} 条规则`,
+      archivedCollapsed: '已归档分类（2）',
+      archivedCollapsedHint: '保留历史统计与规则引用，新选择器不显示',
+      archivedExpandedInfo: '已归档分类不会删除历史记录，既有规则与手动标注引用会保留；恢复后可再次用于新规则。',
+      archivedBadge: '已归档',
+      restoreBtn: '恢复',
+      archRefBadge: '被 2 条规则引用',
+      archRefHint: 'user.project-docs/client-a 等 2 条规则仍指向已归档分类“外包项目 A”。',
+      archRefLink: '在规则页筛选查看',
+      archNoRef: '无规则引用 · 历史时长已保留',
+      items: {
+        dev: '开发',
+        backend: '后端开发',
+        docs: '文档编写',
+        learnRenamed: '深度研习',
+        learnDefault: '学习',
+        reading: '阅读与笔记',
+        comm: '沟通',
+        ent: '娱乐',
+        sys: '系统与工具',
+        browse: '浏览',
+        archClient: '外包项目 A',
+        archResearch: '临时调研',
+      },
+      errTitle: '暂时无法加载分类列表',
+      errMsg: '核心暂时繁忙，未能返回分类元数据。你仍可切换其他标签页或导航到今天页。',
+      codeLabel: '错误代码',
+      retry: '重试',
+    },
+    catEd: {
+      title: '编辑分类',
+      subtitleBuiltin: '内置分类 · learning',
+      nameLabel: '名称',
+      resetDefault: '恢复默认名称（学习）',
+      nameHint: '当前已自定义名称；恢复默认后将随界面语言显示“学习”。',
+      colorLabel: '颜色（语义色板）',
+      colorMeta: '已选：紫色（cat.1）· 明暗与高对比度自动适配',
+      tendLabel: '统计倾向',
+      tendHint: '用于计算今天页的专注与分心占比；新建分类默认为中性。',
+      parentLabel: '父分类',
+      parentNone: '无（顶层分类）',
+      parentHint: '为避免循环已排除自身与下级子分类；已归档分类（2）不提供选择。',
+      archiveTitle: '归档分类',
+      archiveDesc: '归档不删除数据，历史时长、已有规则与手动标注引用均保留；仅从新规则与标注选择器中隐藏，可随时恢复。',
+      archiveBtn: '归档此分类',
+      saveBtn: '保存',
+      savingBtn: '正在保存…',
+      savingNote: '正在保存分类变更并刷新规则目录与今天页…',
+      cancelBtn: '取消',
+    },
+    queue: {
+      segApp: '应用',
+      segDoc: '文档',
+      rangePill: '过去 7 天',
+      dayRangePill: '11月22日',
+      backTo7Days: '回到过去 7 天',
+      searchPh: '搜索应用、文档或项目',
+      summaryDoc: '过去 7 天 · 已提取文档的未分类活跃时长 3 小时 19 分 · 5 项',
+      summaryApp: '过去 7 天 · 7 个未分类应用 · 活跃时长 3 小时 48 分',
+      summaryDay: '11月22日（来自今天页）· 3 个未分类应用 · 活跃时长 59 分',
+      docGroupNote: '缺少文档身份的活动不在此列出；页签计数始终统计未分类应用数',
+      dayGroupNote: '当前仅显示 11月22日；点击上方“回到过去 7 天”查看完整队列',
+      colItem: '未分类项',
+      colShare: '占比',
+      colDur: '活跃时长',
+      classifyBtn: '归类为…',
+      samplesHdr: '时间段样本（显示 5 / 5，按时间顺序）',
+      samplesDayHdr: '时间段样本（显示 2 / 2，按时间顺序）',
+      samplesNote: '用于“仅这一段”快速标注',
+      classifySegBtn: '仅归类此段',
+      noProject: '未提取项目',
+      docItems: [
+        {
+          ic: 'doc', doc: 'Quartz-M4-Spec.pdf', app: 'SumatraPDF', exe: 'SumatraPDF.exe',
+          project: '项目：Quartz', dur: '1 小时 18 分', pct: '100%',
+          samples: [
+            { range: '今天 16:10 – 16:38', dur: '28 分' },
+            { range: '今天 13:45 – 14:07', dur: '22 分' },
+            { range: '昨天 19:20 – 19:34', dur: '14 分' },
+            { range: '昨天 15:02 – 15:11', dur: '9 分' },
+            { range: '11月17日 11:30 – 11:35', dur: '5 分' },
+          ],
+        },
+        { ic: 'doc', doc: 'architecture-notes.md', app: 'Typora', exe: 'Typora.exe', project: '项目：Quartz', dur: '53 分', pct: '68%' },
+        { ic: 'pen', doc: 'm4-wireframes.fig', app: 'Figma', exe: 'Figma.exe', project: '项目：Design System', dur: '42 分', pct: '54%' },
+        { ic: 'code', doc: 'api-collection.json', app: 'Postman', exe: 'Postman.exe', project: '项目：Local Core', dur: '27 分', pct: '35%' },
+        { ic: 'cube', doc: 'shader-test.blend', app: 'Blender', exe: 'blender.exe', project: '未提取项目', dur: '19 分', pct: '24%' },
+      ],
+      appItems: [
+        {
+          ic: 'doc', doc: 'SumatraPDF', app: 'SumatraPDF.exe', exe: 'SumatraPDF.exe',
+          project: '3 个文档样本', dur: '1 小时 29 分', pct: '100%',
+          samples: [
+            { range: '今天 16:10 – 16:38', dur: '28 分' },
+            { range: '今天 13:45 – 14:07', dur: '22 分' },
+            { range: '昨天 19:20 – 19:34', dur: '14 分' },
+            { range: '昨天 15:02 – 15:11', dur: '9 分' },
+            { range: '11月17日 11:30 – 11:35', dur: '5 分' },
+          ],
+        },
+        { ic: 'doc', doc: 'Typora', app: 'Typora.exe', exe: 'Typora.exe', project: '2 个文档样本', dur: '58 分', pct: '65%' },
+        { ic: 'pen', doc: 'Figma', app: 'Figma.exe', exe: 'Figma.exe', project: '1 个文档样本', dur: '42 分', pct: '47%' },
+        { ic: 'code', doc: 'Postman', app: 'Postman.exe', exe: 'Postman.exe', project: '1 个文档样本', dur: '27 分', pct: '30%' },
+        { ic: 'cube', doc: 'Blender', app: 'blender.exe', exe: 'blender.exe', project: '1 个文档样本', dur: '19 分', pct: '21%' },
+        { ic: 'search', doc: 'Everything', app: 'Everything.exe', exe: 'Everything.exe', project: '无文档样本', dur: '9 分', pct: '10%' },
+        { ic: 'archive', doc: '7-Zip File Manager', app: '7zFM.exe', exe: '7zFM.exe', project: '无文档样本', dur: '4 分', pct: '5%' },
+      ],
+      dayItems: [
+        {
+          ic: 'doc', doc: 'SumatraPDF', app: 'SumatraPDF.exe', exe: 'SumatraPDF.exe',
+          project: 'Quartz-M4-Spec.pdf', dur: '34 分', pct: '100%',
+          samples: [
+            { range: '11月22日 16:10 – 16:32', dur: '22 分' },
+            { range: '11月22日 13:45 – 13:57', dur: '12 分' },
+          ],
+        },
+        { ic: 'doc', doc: 'Typora', app: 'Typora.exe', exe: 'Typora.exe', project: 'architecture-notes.md', dur: '16 分', pct: '47%' },
+        { ic: 'pen', doc: 'Figma', app: 'Figma.exe', exe: 'Figma.exe', project: 'm4-wireframes.fig', dur: '9 分', pct: '26%' },
+      ],
+      emptyTitle: '所有活动均已分类',
+      emptyDesc: '过去 7 天没有待处理的未分类活跃时间。当出现新的未匹配应用或文档时，会自动出现在这里。',
+      emptyPill: '未分类时长 0 分',
+      searchQuery: 'kicad',
+      searchEmptyTitle: '没有匹配的未分类项',
+      searchEmptyDesc: '在“应用”分组中未找到包含“kicad”的条目。可清除搜索词，或切换到“文档”分组查看。',
+      clearSearch: '清除搜索',
+      errTitle: '暂时无法加载未分类队列',
+      errMsg: '核心暂时繁忙，未能返回未分类统计与时间段样本。你仍可切换其他标签页或导航到今天页。',
+      codeLabel: '错误代码',
+      retry: '重试',
+    },
+    scope: {
+      title: '归类为…',
+      catLabel: '目标分类',
+      catSelected: '开发',
+      catArchivedNote: '已归档分类（2）不提供选择',
+      scopeLabel: '选择归类范围',
+      badgeRule: '新建规则',
+      badgeAnno: '仅标注 · 不建规则',
+      optAppTitle: '整个应用',
+      optAppDesc: 'SumatraPDF.exe 的全部活动',
+      optDocTitle: '这个文档',
+      optDocDesc: 'Quartz-M4-Spec.pdf · 项目 Quartz',
+      optKwTitle: '标题包含关键词',
+      optKwDesc: '已从窗口标题预填，可按需修改关键词',
+      kwVal: 'Quartz-M4-Spec',
+      kwHint: 'title.normalized contains "Quartz-M4-Spec"',
+      optSegTitle: '仅这一段',
+      optSegDesc: '创建单次分类标注（category_override），不新建规则',
+      segSample: '样本：今天 16:10 – 16:38 · 28 分',
+      prevDest: '写入 user.local.classification',
+      prevRange: '过去 7 天预览',
+      condMatchLabel: '条件命中',
+      condMatchVal: '1 小时 42 分',
+      condMatchSub: '8 段 · 含已分类/空闲',
+      effLabel: '有效贡献',
+      effVal: '1 小时 18 分',
+      effSub: '5 段 · 与排行口径一致',
+      prevNote: '保存后将追加规则至本地分类集；选“仅这一段”则只写标注。',
+      submitRule: '创建规则并归类',
+      cancelBtn: '取消',
+      copyBtn: '复制情况说明',
+      moreBtnTitle: '更多操作（复制情况说明）',
+    },
+  },
+  en: {
+    nav: { today: 'Today', week: 'This week', rules: 'Categories & rules', settings: 'Settings' },
+    page: {
+      title: 'Categories & rules',
+      newCategory: 'New category',
+      copySituation: 'Copy situation',
+      tabs: {
+        categories: 'Categories',
+        rules: 'Rules',
+        queue: 'Unclassified queue',
+        extraction: 'Extraction rules',
+        privacy: 'Privacy rules',
+      },
+    },
+    tend: {
+      focus: 'Focus',
+      neutral: 'Neutral',
+      distraction: 'Distraction',
+    },
+    cats: {
+      heading: 'Category hierarchy',
+      summary: '9 active categories · 5 builtin · 4 custom',
+      reorderHint: 'Drag siblings to reorder; change parent in the editor panel',
+      colName: 'Category',
+      colTend: 'Tendency',
+      colRules: 'Rules',
+      builtinBadge: 'Builtin',
+      renamedBadge: 'Renamed',
+      siblingDragBadge: 'Sibling order',
+      rulesCount: (n) => `${n} rules`,
+      archivedCollapsed: 'Archived categories (2)',
+      archivedCollapsedHint: 'History and rule references stay intact; hidden from new pickers',
+      archivedExpandedInfo: 'Archived categories keep historical durations and existing rule/annotation references. Restore a category to use it in new rules.',
+      archivedBadge: 'Archived',
+      restoreBtn: 'Restore',
+      archRefBadge: 'Referenced by 2 rules',
+      archRefHint: '2 rules (incl. user.project-docs/client-a) still target archived “Client Project A”.',
+      archRefLink: 'Filter in Rules',
+      archNoRef: 'No rule references · history retained',
+      items: {
+        dev: 'Development',
+        backend: 'Backend dev',
+        docs: 'Technical docs',
+        learnRenamed: 'Deep study',
+        learnDefault: 'Learning',
+        reading: 'Reading & notes',
+        comm: 'Communication',
+        ent: 'Entertainment',
+        sys: 'System & tools',
+        browse: 'Browsing',
+        archClient: 'Client Project A',
+        archResearch: 'Temp research',
+      },
+      errTitle: 'Couldn’t load categories',
+      errMsg: 'The core is temporarily busy and couldn’t return category metadata. You can still switch tabs or open Today.',
+      codeLabel: 'Error code',
+      retry: 'Retry',
+    },
+    catEd: {
+      title: 'Edit category',
+      subtitleBuiltin: 'Builtin category · learning',
+      nameLabel: 'Name',
+      resetDefault: 'Reset to default (Learning)',
+      nameHint: 'Custom name overrides the builtin translation; resetting restores “Learning” per UI language.',
+      colorLabel: 'Color (semantic palette)',
+      colorMeta: 'Selected: Purple (cat.1) · contrast-safe across themes',
+      tendLabel: 'Tendency',
+      tendHint: 'Used for focus and distraction shares on Today; new categories default to Neutral.',
+      parentLabel: 'Parent category',
+      parentNone: 'None (top-level)',
+      parentHint: 'Self and descendants are excluded to prevent cycles; archived categories (2) are not offered.',
+      archiveTitle: 'Archive category',
+      archiveDesc: 'Archiving never deletes history. Existing rule and annotation references stay intact; hidden from new pickers and restorable anytime.',
+      archiveBtn: 'Archive category',
+      saveBtn: 'Save',
+      savingBtn: 'Saving…',
+      savingNote: 'Saving category changes and refreshing rules & Today…',
+      cancelBtn: 'Cancel',
+    },
+    queue: {
+      segApp: 'Apps',
+      segDoc: 'Documents',
+      rangePill: 'Past 7 days',
+      dayRangePill: 'Nov 22',
+      backTo7Days: 'Back to past 7 days',
+      searchPh: 'Search apps, docs, or projects',
+      summaryDoc: 'Past 7 days · 3h 19m unclassified in extracted documents · 5 items',
+      summaryApp: 'Past 7 days · 7 unclassified apps · 3h 48m active',
+      summaryDay: 'Nov 22 (from Today) · 3 unclassified apps · 59m active',
+      docGroupNote: 'Activity without document identity is omitted; tab badge always counts unclassified apps',
+      dayGroupNote: 'Showing Nov 22 only; use “Back to past 7 days” above for the full queue',
+      colItem: 'Unclassified item',
+      colShare: 'Share',
+      colDur: 'Active time',
+      classifyBtn: 'Classify as…',
+      samplesHdr: 'Sample ranges (showing 5 of 5, chronological)',
+      samplesDayHdr: 'Sample ranges (showing 2 of 2, chronological)',
+      samplesNote: 'Used by “Only this segment”',
+      classifySegBtn: 'Label segment',
+      noProject: 'No project',
+      docItems: [
+        {
+          ic: 'doc', doc: 'Quartz-M4-Spec.pdf', app: 'SumatraPDF', exe: 'SumatraPDF.exe',
+          project: 'Project: Quartz', dur: '1h 18m', pct: '100%',
+          samples: [
+            { range: 'Today 16:10 – 16:38', dur: '28m' },
+            { range: 'Today 13:45 – 14:07', dur: '22m' },
+            { range: 'Yest 19:20 – 19:34', dur: '14m' },
+            { range: 'Yest 15:02 – 15:11', dur: '9m' },
+            { range: 'Nov 17 11:30 – 11:35', dur: '5m' },
+          ],
+        },
+        { ic: 'doc', doc: 'architecture-notes.md', app: 'Typora', exe: 'Typora.exe', project: 'Project: Quartz', dur: '53m', pct: '68%' },
+        { ic: 'pen', doc: 'm4-wireframes.fig', app: 'Figma', exe: 'Figma.exe', project: 'Project: Design System', dur: '42m', pct: '54%' },
+        { ic: 'code', doc: 'api-collection.json', app: 'Postman', exe: 'Postman.exe', project: 'Project: Local Core', dur: '27m', pct: '35%' },
+        { ic: 'cube', doc: 'shader-test.blend', app: 'Blender', exe: 'blender.exe', project: 'No project', dur: '19m', pct: '24%' },
+      ],
+      appItems: [
+        {
+          ic: 'doc', doc: 'SumatraPDF', app: 'SumatraPDF.exe', exe: 'SumatraPDF.exe',
+          project: '3 document samples', dur: '1h 29m', pct: '100%',
+          samples: [
+            { range: 'Today 16:10 – 16:38', dur: '28m' },
+            { range: 'Today 13:45 – 14:07', dur: '22m' },
+            { range: 'Yest 19:20 – 19:34', dur: '14m' },
+            { range: 'Yest 15:02 – 15:11', dur: '9m' },
+            { range: 'Nov 17 11:30 – 11:35', dur: '5m' },
+          ],
+        },
+        { ic: 'doc', doc: 'Typora', app: 'Typora.exe', exe: 'Typora.exe', project: '2 document samples', dur: '58m', pct: '65%' },
+        { ic: 'pen', doc: 'Figma', app: 'Figma.exe', exe: 'Figma.exe', project: '1 document sample', dur: '42m', pct: '47%' },
+        { ic: 'code', doc: 'Postman', app: 'Postman.exe', exe: 'Postman.exe', project: '1 document sample', dur: '27m', pct: '30%' },
+        { ic: 'cube', doc: 'Blender', app: 'blender.exe', exe: 'blender.exe', project: '1 document sample', dur: '19m', pct: '21%' },
+        { ic: 'search', doc: 'Everything', app: 'Everything.exe', exe: 'Everything.exe', project: 'No document samples', dur: '9m', pct: '10%' },
+        { ic: 'archive', doc: '7-Zip File Manager', app: '7zFM.exe', exe: '7zFM.exe', project: 'No document samples', dur: '4m', pct: '5%' },
+      ],
+      dayItems: [
+        {
+          ic: 'doc', doc: 'SumatraPDF', app: 'SumatraPDF.exe', exe: 'SumatraPDF.exe',
+          project: 'Quartz-M4-Spec.pdf', dur: '34m', pct: '100%',
+          samples: [
+            { range: 'Nov 22 16:10 – 16:32', dur: '22m' },
+            { range: 'Nov 22 13:45 – 13:57', dur: '12m' },
+          ],
+        },
+        { ic: 'doc', doc: 'Typora', app: 'Typora.exe', exe: 'Typora.exe', project: 'architecture-notes.md', dur: '16m', pct: '47%' },
+        { ic: 'pen', doc: 'Figma', app: 'Figma.exe', exe: 'Figma.exe', project: 'm4-wireframes.fig', dur: '9m', pct: '26%' },
+      ],
+      emptyTitle: 'Everything is classified',
+      emptyDesc: 'No unclassified active time in the past 7 days. New unmatched apps or documents will appear here automatically.',
+      emptyPill: '0m unclassified',
+      searchQuery: 'kicad',
+      searchEmptyTitle: 'No matching unclassified items',
+      searchEmptyDesc: 'No items in Apps match “kicad”. Clear the search or switch to Documents to check document titles.',
+      clearSearch: 'Clear search',
+      errTitle: 'Couldn’t load unclassified queue',
+      errMsg: 'The core is temporarily busy and couldn’t return unclassified items. You can still switch tabs or open Today.',
+      codeLabel: 'Error code',
+      retry: 'Retry',
+    },
+    scope: {
+      title: 'Classify as…',
+      catLabel: 'Target category',
+      catSelected: 'Development',
+      catArchivedNote: 'Archived categories (2) are not offered',
+      scopeLabel: 'Classification scope',
+      badgeRule: 'Creates rule',
+      badgeAnno: 'Annotation · no rule',
+      optAppTitle: 'Entire app',
+      optAppDesc: 'All activity in SumatraPDF.exe',
+      optDocTitle: 'This document',
+      optDocDesc: 'Quartz-M4-Spec.pdf · Project Quartz',
+      optKwTitle: 'Title contains keyword',
+      optKwDesc: 'Prefilled from window title; edit as needed',
+      kwVal: 'Quartz-M4-Spec',
+      kwHint: 'title.normalized contains "Quartz-M4-Spec"',
+      optSegTitle: 'Only this segment',
+      optSegDesc: 'Creates a one-off category annotation; no rule added',
+      segSample: 'Sample: Today 16:10 – 16:38 · 28m',
+      prevDest: 'Writes to user.local.classification',
+      prevRange: 'Past 7 days preview',
+      condMatchLabel: 'Condition match',
+      condMatchVal: '1h 42m',
+      condMatchSub: '8 segs · incl. idle/other',
+      effLabel: 'Effective contribution',
+      effVal: '1h 18m',
+      effSub: '5 segs · matches ranking',
+      prevNote: 'Appends a rule to your local set; “Only this segment” writes an annotation instead.',
+      submitRule: 'Create rule & classify',
+      cancelBtn: 'Cancel',
+      copyBtn: 'Copy situation',
+      moreBtnTitle: 'More actions (Copy situation)',
+    },
+  },
+};
+
+/* Build en-XA pseudo-locale preserving technical keys, filenames, and user-entered text per 10 §3 */
+COPY['en-XA'] = pseudoObj(COPY.en, new Set(['c', 'on', 'key', 'id', 'ic', 'pct', 'code', 'exe', 'doc', 'app', 'kwVal', 'kwHint', 'searchQuery', 'rulesCount']));
+COPY['en-XA'].cats.rulesCount = (n) => pseudoStr(`${n} rules`);
+COPY['en-XA'].cats.items = {
+  ...COPY.en.cats.items,
+  dev: pseudoStr(COPY.en.cats.items.dev),
+  learnDefault: pseudoStr(COPY.en.cats.items.learnDefault),
+  comm: pseudoStr(COPY.en.cats.items.comm),
+  ent: pseudoStr(COPY.en.cats.items.ent),
+  sys: pseudoStr(COPY.en.cats.items.sys),
+};
+COPY['en-XA'].scope.prevDest = pseudoStr('Writes to') + ' user.local.classification';
+COPY['en-XA'].catEd.subtitleBuiltin = pseudoStr('Builtin category') + ' · learning';
+
+const T = COPY[lang];
+
+function ringSvg(cls, trackVar = 'var(--stroke-control-strong)', arcVar = 'var(--accent-fill)') {
+  return `<svg class="${cls}" viewBox="0 0 28 28" aria-hidden="true">` +
+    `<circle cx="14" cy="14" r="10.5" fill="none" stroke="${trackVar}" stroke-width="3"/>` +
+    `<path d="M14 3.5 A10.5 10.5 0 0 1 24.5 14" fill="none" stroke="${arcVar}" stroke-width="3" stroke-linecap="round"/>` +
+    `</svg>`;
+}
+
+function catChip(colorVar, label) {
+  return `<span class="chip" style="--c:var(${colorVar})"><i></i><span>${label}</span></span>`;
+}
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  const isRail = isMin || hasPanel;
+  if (isRail) nav.classList.add('rail');
+  const menuRow = isMin
+    ? `<div style="height:4px;flex:none"></div>`
+    : `<div class="nav-item" style="margin-top:4px"><svg class="ic"><use href="#menu"/></svg></div>`;
+  nav.innerHTML =
+    menuRow +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#today"/></svg><span>${T.nav.today}</span></div>` +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#week"/></svg><span>${T.nav.week}</span></div>` +
+    `<div class="nav-item selected"><i class="ind"></i><svg class="ic"><use href="#tag-f"/></svg><span>${T.nav.rules}</span></div>` +
+    `<div class="spacer"></div>` +
+    `<div class="bottom"><div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#gear"/></svg><span>${T.nav.settings}</span></div></div>`;
+}
+
+function renderHeaderAndPivot({ disabled = false, loadingBadge = false, hideQueueBadge = false } = {}) {
+  const dis = disabled ? ' disabled' : '';
+  let qBadge = `<span class="badge">7</span>`;
+  if (loadingBadge) qBadge = `<span class="skel soft" style="width:18px;height:16px"></span>`;
+  else if (hideQueueBadge) qBadge = '';
+
+  const headerAct = isQueueTab
+    ? `<button class="btn${dis}"><svg class="ic s16"><use href="#copy"/></svg><span>${T.page.copySituation}</span></button>`
+    : `<button class="btn accent${dis}"><svg class="ic s16"><use href="#add"/></svg><span>${T.page.newCategory}</span></button>`;
+
+  return `<div class="page-head">` +
+    `<span class="h-title ell">${T.page.title}</span>` +
+    `<div class="page-head-acts">${headerAct}</div>` +
+  `</div>` +
+  `<div class="pivot">` +
+    `<div class="${!isQueueTab ? 'on' : ''}">${T.page.tabs.categories}</div>` +
+    `<div>${T.page.tabs.rules}</div>` +
+    `<div class="${isQueueTab ? 'on' : ''}">${T.page.tabs.queue}${qBadge}</div>` +
+    `<div>${T.page.tabs.extraction}</div>` +
+    `<div>${T.page.tabs.privacy}</div>` +
+  `</div>`;
+}
+
+function renderErrorCard(title, msg, codeLabel, retryLabel) {
+  return `<div class="card load-err-card" role="alert">` +
+    `<svg class="ic load-err-ic"><use href="#warn"/></svg>` +
+    `<div class="load-err-body">` +
+      `<div class="load-err-title">${title}</div>` +
+      `<div class="load-err-msg">${msg}</div>` +
+      `<div class="load-err-code">${codeLabel}: busy</div>` +
+    `</div>` +
+    `<div class="load-err-act"><button class="btn"><svg class="ic s16"><use href="#refresh"/></svg><span>${retryLabel}</span></button></div>` +
+  `</div>`;
+}
+
+/* ===========================
+   Categories Tab Views
+   =========================== */
+function getCategoryRows() {
+  const it = T.cats.items;
+  return [
+    { id: 'dev', name: it.dev, c: '--cat-8', tend: T.tend.focus, builtin: true, rules: 18, depth: 0 },
+    { id: 'backend', name: it.backend, c: '--cat-2', tend: T.tend.focus, builtin: false, rules: 4, depth: 1 },
+    { id: 'docs', name: it.docs, c: '--cat-11', tend: T.tend.focus, builtin: false, rules: 2, depth: 1 },
+    { id: 'learn', name: it.learnRenamed, defaultName: it.learnDefault, c: '--cat-1', tend: T.tend.focus, builtin: true, renamed: true, rules: 9, depth: 0 },
+    { id: 'reading', name: it.reading, c: '--cat-14', tend: T.tend.focus, builtin: false, rules: 3, depth: 1 },
+    { id: 'comm', name: it.comm, c: '--cat-3', tend: T.tend.neutral, builtin: true, rules: 6, depth: 0 },
+    { id: 'ent', name: it.ent, c: '--cat-13', tend: T.tend.distraction, builtin: true, rules: 8, depth: 0 },
+    { id: 'sys', name: it.sys, c: '--cat-10', tend: T.tend.neutral, builtin: true, rules: 5, depth: 0 },
+    { id: 'browse', name: it.browse, c: '--cat-7', tend: T.tend.neutral, builtin: false, rules: 2, depth: 0 },
+  ];
+}
+
+function renderCategoriesList({ mode = 'normal', selectedId = null, disabled = false } = {}) {
+  const c = T.cats;
+  const rows = getCategoryRows();
+  const showDragDemo = mode === 'normal';
+  const showArchivedExpanded = mode === 'archived';
+  const visibleRows = showArchivedExpanded ? rows.slice(0, 6) : rows;
+  const disCls = disabled ? ' disabled-ui' : '';
+  const btnDis = disabled ? ' disabled' : '';
+
+  const rowsHtml = visibleRows.map((r) => {
+    const isSel = selectedId === r.id;
+    const isDragging = showDragDemo && r.id === 'docs';
+    const dropBefore = showDragDemo && r.id === 'backend' ? `<div class="drop-line ind1"></div>` : '';
+    const indentHtml = r.depth > 0 ? `<span class="cat-indent"><i class="cat-branch"></i></span>` : '';
+    const badges =
+      (r.builtin ? `<span class="badge"><span class="btxt">${c.builtinBadge}</span></span>` : '') +
+      (r.renamed ? `<span class="badge ovr"><span class="btxt">${c.renamedBadge}</span></span>` : '') +
+      (isDragging ? `<span class="badge ovr"><span class="btxt">${c.siblingDragBadge}</span></span>` : '');
+    return dropBefore +
+      `<div class="cat-r${isSel ? ' sel' : ''}${isDragging ? ' dragging' : ''}${disCls}">` +
+        `<span class="cat-grip" style="${isDragging ? 'color:var(--accent-text)' : ''}"><svg class="ic s16"><use href="#drag"/></svg></span>` +
+        indentHtml +
+        `<span class="cat-sw" style="--c:var(${r.c})"></span>` +
+        `<div class="cat-name-col">` +
+          `<span class="cat-name-txt${r.depth === 0 || isDragging ? ' strong' : ''}">${r.name}</span>` +
+          badges +
+        `</div>` +
+        `<div class="cat-tend-col"><span class="tend-pill">${r.tend}</span></div>` +
+        `<div class="cat-rules-col">${c.rulesCount(r.rules)}</div>` +
+        `<div class="cat-act-col"><button class="btn compact icon subtle${btnDis}"><svg class="ic s16"><use href="#edit"/></svg></button></div>` +
+      `</div>`;
+  }).join('');
+
+  let archHtml = '';
+  if (!showArchivedExpanded) {
+    archHtml = `<div class="arch-sect">` +
+      `<div class="arch-toggle">` +
+        `<svg class="ic s16" style="color:var(--text-secondary)"><use href="#chev-r"/></svg>` +
+        `<span class="strong">${c.archivedCollapsed}</span>` +
+        `<span class="arch-hint">${c.archivedCollapsedHint}</span>` +
+      `</div>` +
+    `</div>`;
+  } else {
+    archHtml = `<div class="arch-sect">` +
+      `<div class="arch-toggle">` +
+        `<svg class="ic s16" style="color:var(--text-secondary)"><use href="#chev-d"/></svg>` +
+        `<span class="strong">${c.archivedCollapsed}</span>` +
+      `</div>` +
+      `<div class="infobar">` +
+        `<svg class="ic s16 ib-ic"><use href="#info"/></svg>` +
+        `<div class="ib-body"><span>${c.archivedExpandedInfo}</span></div>` +
+      `</div>` +
+      `<div class="cat-r arch-r">` +
+        `<span class="cat-sw" style="--c:var(--cat-9)"></span>` +
+        `<div class="cat-name-stack">` +
+          `<div class="cat-name-line">` +
+            `<span class="strong sec">${c.items.archClient}</span>` +
+            `<span class="badge dis"><span class="btxt">${c.archivedBadge}</span></span>` +
+            `<span class="badge warn"><span class="btxt">${c.archRefBadge}</span></span>` +
+            `<span class="tend-pill">${T.tend.focus}</span>` +
+          `</div>` +
+          `<div class="arch-ref-hint">` +
+            `<svg class="ic s16" style="width:14px;height:14px"><use href="#warn"/></svg>` +
+            `<span style="flex:1;min-width:140px">${c.archRefHint}</span>` +
+            `<span class="arch-ref-link">${c.archRefLink}<svg class="ic s16" style="width:12px;height:12px"><use href="#chev-r"/></svg></span>` +
+          `</div>` +
+        `</div>` +
+        `<button class="btn compact" style="flex:none"><svg class="ic s16"><use href="#restore"/></svg><span>${c.restoreBtn}</span></button>` +
+      `</div>` +
+      `<div class="cat-r arch-r">` +
+        `<span class="cat-sw" style="--c:var(--cat-12)"></span>` +
+        `<div class="cat-name-stack">` +
+          `<div class="cat-name-line">` +
+            `<span class="strong sec">${c.items.archResearch}</span>` +
+            `<span class="badge dis"><span class="btxt">${c.archivedBadge}</span></span>` +
+            `<span class="tend-pill">${T.tend.neutral}</span>` +
+          `</div>` +
+          `<div class="cap ter">${c.archNoRef}</div>` +
+        `</div>` +
+        `<button class="btn compact" style="flex:none"><svg class="ic s16"><use href="#restore"/></svg><span>${c.restoreBtn}</span></button>` +
+      `</div>` +
+    `</div>`;
+  }
+
+  return `<div class="card work-card">` +
+    `<div class="meta-bar">` +
+      `<span class="strong" style="color:var(--text-primary)">${c.heading}</span>` +
+      `<span>${c.summary}</span>` +
+      `<span class="meta-hint">${c.reorderHint}</span>` +
+    `</div>` +
+    `<div class="cat-h">` +
+      `<span class="cat-grip"></span>` +
+      `<span style="width:14px;flex:none"></span>` +
+      `<span class="cat-name-col">${c.colName}</span>` +
+      `<span class="cat-tend-col">${c.colTend}</span>` +
+      `<span class="cat-rules-col">${c.colRules}</span>` +
+      `<span class="cat-act-col"></span>` +
+    `</div>` +
+    rowsHtml +
+    archHtml +
+  `</div>`;
+}
+
+function renderCategoriesLoading() {
+  const c = T.cats;
+  const skelRows = [
+    { d: 0, w: 72 }, { d: 1, w: 92 }, { d: 1, w: 84 },
+    { d: 0, w: 86 }, { d: 1, w: 96 }, { d: 0, w: 68 },
+    { d: 0, w: 64 }, { d: 0, w: 102 },
+  ];
+  return `<div class="card work-card">` +
+    `<div class="meta-bar"><span class="strong" style="color:var(--text-primary)">${c.heading}</span><span class="skel soft" style="width:180px;height:12px"></span></div>` +
+    `<div class="cat-h">` +
+      `<span class="cat-grip"></span><span style="width:14px;flex:none"></span>` +
+      `<span class="cat-name-col">${c.colName}</span>` +
+      `<span class="cat-tend-col">${c.colTend}</span>` +
+      `<span class="cat-rules-col">${c.colRules}</span>` +
+      `<span class="cat-act-col"></span>` +
+    `</div>` +
+    skelRows.map(r =>
+      `<div class="cat-r">` +
+        `<span class="cat-grip"><span class="skel soft" style="width:10px;height:14px"></span></span>` +
+        (r.d ? `<span class="cat-indent"><i class="cat-branch"></i></span>` : '') +
+        `<span class="skel" style="width:14px;height:14px;border-radius:3px;flex:none"></span>` +
+        `<div class="cat-name-col"><span class="skel" style="width:${r.w}px;height:14px"></span></div>` +
+        `<div class="cat-tend-col"><span class="skel soft" style="width:44px;height:18px"></span></div>` +
+        `<div class="cat-rules-col"><span class="skel soft" style="width:46px;height:12px"></span></div>` +
+        `<div class="cat-act-col"></div>` +
+      `</div>`
+    ).join('') +
+    `<div class="arch-sect"><div class="arch-toggle"><span class="skel soft" style="width:140px;height:14px"></span></div></div>` +
+  `</div>`;
+}
+
+function renderCategoryEditPanel({ saving = false } = {}) {
+  const ed = T.catEd;
+  const disInp = saving ? ' disabled' : '';
+  const disBtn = saving ? ' disabled' : '';
+  const selectedKey = 'cat.1';
+
+  const swatchesHtml = PALETTE.map(sw => {
+    const isSel = sw.key === selectedKey;
+    return `<div class="swatch-btn${isSel ? ' sel' : ''}${saving ? ' disabled' : ''}" style="--c:var(${sw.c});--c-on:var(${sw.on})" title="${sw.key}">` +
+      (isSel ? `<svg class="ic s16"><use href="#check"/></svg>` : '') +
+    `</div>`;
+  }).join('');
+
+  const primaryBtn = saving
+    ? `<button class="btn accent busy">${ringSvg('ring-sm', 'color-mix(in srgb,var(--text-on-accent) 32%,transparent)', 'var(--text-on-accent)')}<span>${ed.savingBtn}</span></button>`
+    : `<button class="btn accent"><span>${ed.saveBtn}</span></button>`;
+
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${ed.title}</span><span class="badge"><span class="btxt">${T.cats.builtinBadge}</span></span></div>` +
+        `<div class="cap sec ell">${ed.subtitleBuiltin}</div>` +
+      `</div>` +
+      `<button class="btn subtle icon compact${disBtn}"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        (saving ? `<div class="infobar"><span style="flex:none">${ringSvg('ring-xs')}</span><div class="ib-body"><span>${ed.savingNote}</span></div></div>` : '') +
+        `<div class="field">` +
+          `<label><span>${ed.nameLabel}</span><span class="label-act${saving ? ' disabled' : ''}">${ed.resetDefault}</span></label>` +
+          `<div class="input std${disInp}${!saving ? ' focused' : ''}"><span class="ell">${T.cats.items.learnRenamed}</span>${!saving ? '<span class="caret"></span>' : ''}</div>` +
+          `<div class="field-hint">${ed.nameHint}</div>` +
+        `</div>` +
+        `<div class="field">` +
+          `<label><span>${ed.colorLabel}</span></label>` +
+          `<div class="palette-tray">${swatchesHtml}</div>` +
+          `<div class="palette-meta"><span>${ed.colorMeta}</span></div>` +
+        `</div>` +
+        `<div class="field">` +
+          `<label><span>${ed.tendLabel}</span></label>` +
+          `<div class="seg tend-seg${saving ? ' dim' : ''}">` +
+            `<div class="on">${T.tend.focus}</div>` +
+            `<div>${T.tend.neutral}</div>` +
+            `<div>${T.tend.distraction}</div>` +
+          `</div>` +
+          `<div class="field-hint">${ed.tendHint}</div>` +
+        `</div>` +
+        `<div class="field">` +
+          `<label><span>${ed.parentLabel}</span></label>` +
+          `<div class="input std${disInp}"><span class="grow ell">${ed.parentNone}</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+          `<div class="field-hint">${ed.parentHint}</div>` +
+        `</div>` +
+        `<div class="archive-box">` +
+          `<div class="row gap8"><svg class="ic s16" style="color:var(--text-secondary)"><use href="#archive"/></svg><span class="strong">${ed.archiveTitle}</span></div>` +
+          `<div class="cap sec" style="overflow-wrap:anywhere">${ed.archiveDesc}</div>` +
+          `<button class="btn compact${disBtn}" style="align-self:flex-start"><svg class="ic s16"><use href="#archive"/></svg><span>${ed.archiveBtn}</span></button>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    `<div class="ed-foot">` +
+      `<div class="ed-foot-main">${primaryBtn}<button class="btn${disBtn}"><span>${ed.cancelBtn}</span></button></div>` +
+    `</div>`;
+}
+
+/* ===========================
+   Unclassified Queue Tab Views
+   =========================== */
+function renderQueueToolbar({ disabled = false, searchVal = '', singleDay = false } = {}) {
+  const q = T.queue;
+  const isDoc = queueGroup === 'document';
+  const disInp = disabled ? ' disabled' : '';
+  const searchInner = searchVal
+    ? `<svg class="ic s16"><use href="#search"/></svg><span class="grow ell">${searchVal}</span><svg class="ic s16" style="color:var(--text-tertiary)"><use href="#close"/></svg>`
+    : `<svg class="ic s16"><use href="#search"/></svg><span class="ph grow ell">${q.searchPh}</span>`;
+
+  const rangeHtml = singleDay
+    ? `<span class="range-chip active-day"><svg class="ic s16" style="width:13px;height:13px"><use href="#today"/></svg><span>${q.dayRangePill}</span></span>` +
+      `<span class="range-reset-link">${q.backTo7Days}</span>`
+    : `<span class="range-chip"><svg class="ic s16" style="width:13px;height:13px"><use href="#clock"/></svg><span>${q.rangePill}</span></span>`;
+
+  return `<div class="toolbar">` +
+    `<div class="seg${disabled ? ' dim' : ''}">` +
+      `<div class="${!isDoc ? 'on' : ''}">${q.segApp}</div>` +
+      `<div class="${isDoc ? 'on' : ''}">${q.segDoc}</div>` +
+    `</div>` +
+    rangeHtml +
+    `<div class="toolbar-right">` +
+      `<div class="input q-search${disInp}${searchVal ? ' focused' : ''}">${searchInner}</div>` +
+    `</div>` +
+  `</div>`;
+}
+
+function renderQueueList({ selectedIdx = -1, expandFirst = true, singleDay = false } = {}) {
+  const q = T.queue;
+  const isDoc = !singleDay && queueGroup === 'document';
+  const items = singleDay ? q.dayItems : (isDoc ? q.docItems : q.appItems);
+  const samplesTitle = singleDay ? q.samplesDayHdr : q.samplesHdr;
+  const summaryTxt = singleDay ? q.summaryDay : (isDoc ? q.summaryDoc : q.summaryApp);
+  const noteTxt = singleDay ? q.dayGroupNote : (isDoc ? q.docGroupNote : '');
+
+  const rowsHtml = items.map((item, idx) => {
+    const isExp = expandFirst && idx === 0 && item.samples;
+    const isSel = selectedIdx === idx;
+    const subLine = isDoc ? `${item.app} · ${item.project}` : `${item.exe} · ${item.project}`;
+    const samplesHtml = isExp
+      ? `<div class="q-samples">` +
+          `<div class="q-samples-hdr"><span>${samplesTitle}</span><span class="ter">${q.samplesNote}</span></div>` +
+          item.samples.map((s, sIdx) =>
+            `<div class="q-sample-row${isSel && sIdx === 0 ? ' sel' : ''}">` +
+              `<svg class="ic s16" style="width:13px;height:13px;color:var(--text-tertiary);flex:none"><use href="#clock"/></svg>` +
+              `<span class="q-sample-range">${s.range}</span>` +
+              `<span class="q-sample-dur">${s.dur}</span>` +
+              `<button class="btn compact subtle" style="color:var(--accent-text)">${q.classifySegBtn}</button>` +
+            `</div>`
+          ).join('') +
+        `</div>`
+      : '';
+
+    return `<div class="q-r${isExp ? ' expanded' : ''}${isSel ? ' sel' : ''}">` +
+      `<span class="q-chev"><svg class="ic s16"><use href="#${isExp ? 'chev-d' : 'chev-r'}"/></svg></span>` +
+      `<span class="q-ic"><svg class="ic s16"><use href="#${item.ic}"/></svg></span>` +
+      `<div class="q-entity">` +
+        `<div class="q-entity-title"><span class="strong ell">${item.doc}</span></div>` +
+        `<div class="q-entity-sub">${subLine}</div>` +
+      `</div>` +
+      `<div class="q-bar-col"><div class="q-bar"><i style="width:${item.pct}"></i></div></div>` +
+      `<div class="q-dur-col">${item.dur}</div>` +
+      `<div class="q-act-col"><button class="btn compact${isSel ? ' accent' : ''}">${q.classifyBtn}</button></div>` +
+    `</div>` +
+    samplesHtml;
+  }).join('');
+
+  return `<div class="card work-card">` +
+    renderQueueToolbar({ singleDay }) +
+    `<div class="meta-bar">` +
+      `<span>${summaryTxt}</span>` +
+      (noteTxt ? `<span class="meta-hint">${noteTxt}</span>` : '') +
+    `</div>` +
+    `<div class="q-h">` +
+      `<span class="q-chev"></span>` +
+      `<span style="width:24px;flex:none"></span>` +
+      `<span class="q-entity">${q.colItem}</span>` +
+      `<span class="q-bar-col">${q.colShare}</span>` +
+      `<span class="q-dur-col">${q.colDur}</span>` +
+      `<span class="q-act-col"></span>` +
+    `</div>` +
+    rowsHtml +
+  `</div>`;
+}
+
+function renderQueueScopePanel() {
+  const sc = T.scope;
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${sc.title}</span></div>` +
+        `<div class="cap sec ell">SumatraPDF · Quartz-M4-Spec.pdf</div>` +
+      `</div>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        `<div class="field">` +
+          `<label><span>${sc.catLabel}</span></label>` +
+          `<div class="input std">${catChip('--cat-8', sc.catSelected)}<span class="grow"></span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+          `<div class="field-hint">${sc.catArchivedNote}</div>` +
+        `</div>` +
+        `<div class="field">` +
+          `<label><span>${sc.scopeLabel}</span></label>` +
+          `<div class="radio-stack">` +
+            `<div class="radio-card">` +
+              `<div class="radio-hdr">` +
+                `<span class="radio-dot"></span>` +
+                `<div class="grow" style="min-width:0">` +
+                  `<div class="radio-title-row"><span class="strong">${sc.optAppTitle}</span><span class="badge"><span class="btxt">${sc.badgeRule}</span></span></div>` +
+                  `<div class="cap sec" style="overflow-wrap:anywhere">${sc.optAppDesc}</div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="radio-card">` +
+              `<div class="radio-hdr">` +
+                `<span class="radio-dot"></span>` +
+                `<div class="grow" style="min-width:0">` +
+                  `<div class="radio-title-row"><span class="strong">${sc.optDocTitle}</span><span class="badge"><span class="btxt">${sc.badgeRule}</span></span></div>` +
+                  `<div class="cap sec" style="overflow-wrap:anywhere">${sc.optDocDesc}</div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="radio-card sel">` +
+              `<div class="radio-hdr">` +
+                `<span class="radio-dot"></span>` +
+                `<div class="grow" style="min-width:0">` +
+                  `<div class="radio-title-row"><span class="strong">${sc.optKwTitle}</span><span class="badge add"><span class="btxt">${sc.badgeRule}</span></span></div>` +
+                  `<div class="cap sec" style="overflow-wrap:anywhere">${sc.optKwDesc}</div>` +
+                `</div>` +
+              `</div>` +
+              `<div class="radio-fields">` +
+                `<div class="input std focused"><span class="ell">${sc.kwVal}</span><span class="caret"></span></div>` +
+                `<div class="mono ter" style="overflow-wrap:anywhere">${sc.kwHint}</div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="radio-card">` +
+              `<div class="radio-hdr">` +
+                `<span class="radio-dot"></span>` +
+                `<div class="grow" style="min-width:0">` +
+                  `<div class="radio-title-row"><span class="strong">${sc.optSegTitle}</span><span class="badge ovr"><span class="btxt">${sc.badgeAnno}</span></span></div>` +
+                  `<div class="cap sec" style="overflow-wrap:anywhere">${sc.optSegDesc}</div>` +
+                  `<div class="sample-select-pill"><svg class="ic s16" style="width:13px;height:13px;color:var(--text-secondary);flex:none"><use href="#clock"/></svg><span class="ell">${sc.segSample}</span><svg class="ic s16" style="width:13px;height:13px;flex:none"><use href="#chev-d"/></svg></div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="prev-card">` +
+          `<div class="prev-head">` +
+            `<span class="cap strong prev-dest" title="${sc.prevDest}">${sc.prevDest}</span>` +
+            `<span class="badge"><span class="btxt">${sc.prevRange}</span></span>` +
+          `</div>` +
+          `<div class="prev-metrics">` +
+            `<div class="prev-metric">` +
+              `<div class="pm-lbl"><i class="pm-dot"></i><span class="ell">${sc.condMatchLabel}</span></div>` +
+              `<div class="pm-val">${sc.condMatchVal}</div>` +
+              `<div class="pm-sub">${sc.condMatchSub}</div>` +
+            `</div>` +
+            `<div class="prev-metric eff">` +
+              `<div class="pm-lbl"><i class="pm-dot"></i><span class="ell">${sc.effLabel}</span></div>` +
+              `<div class="pm-val">${sc.effVal}</div>` +
+              `<div class="pm-sub">${sc.effSub}</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="cap ter" style="overflow-wrap:anywhere">${sc.prevNote}</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    `<div class="ed-foot">` +
+      `<div class="ed-foot-main"><button class="btn accent"><span>${sc.submitRule}</span></button><button class="btn"><span>${sc.cancelBtn}</span></button></div>` +
+      ((isMin || lang !== 'zh-CN')
+        ? `<button class="btn icon ed-foot-more" title="${sc.moreBtnTitle}" aria-label="${sc.moreBtnTitle}"><svg class="ic s16"><use href="#more"/></svg></button>`
+        : `<button class="btn compact ed-foot-copy"><svg class="ic s16"><use href="#copy"/></svg><span>${sc.copyBtn}</span></button>`) +
+    `</div>`;
+}
+
+function renderQueueEmpty() {
+  const q = T.queue;
+  return `<div class="card empty-card">` +
+    `<div class="empty-inner">` +
+      `<div class="empty-tile ok"><svg class="ic"><use href="#check"/></svg></div>` +
+      `<div class="empty-title">${q.emptyTitle}</div>` +
+      `<div class="empty-desc">${q.emptyDesc}</div>` +
+      `<div class="status-pill"><i></i><span>${q.emptyPill}</span></div>` +
+    `</div>` +
+  `</div>`;
+}
+
+function renderQueueSearchEmpty() {
+  const q = T.queue;
+  return `<div class="card work-card">` +
+    renderQueueToolbar({ searchVal: q.searchQuery }) +
+    `<div class="search-empty-box">` +
+      `<div class="empty-tile"><svg class="ic"><use href="#search"/></svg></div>` +
+      `<div class="strong">${q.searchEmptyTitle}</div>` +
+      `<div class="cap sec" style="max-width:380px;overflow-wrap:anywhere">${q.searchEmptyDesc}</div>` +
+      `<button class="btn compact" style="margin-top:4px">${q.clearSearch}</button>` +
+    `</div>` +
+  `</div>`;
+}
+
+function renderQueueLoading() {
+  const q = T.queue;
+  const rows = [
+    { w1: 146, w2: 112, bar: 92 },
+    { w1: 128, w2: 96, bar: 66 },
+    { w1: 138, w2: 124, bar: 52 },
+    { w1: 118, w2: 104, bar: 36 },
+    { w1: 132, w2: 88, bar: 24 },
+  ];
+  return `<div class="card work-card">` +
+    renderQueueToolbar({ disabled: true }) +
+    `<div class="meta-bar"><span class="skel soft" style="width:220px;height:12px"></span></div>` +
+    `<div class="q-h">` +
+      `<span class="q-chev"></span><span style="width:24px;flex:none"></span>` +
+      `<span class="q-entity">${q.colItem}</span>` +
+      `<span class="q-bar-col">${q.colShare}</span>` +
+      `<span class="q-dur-col">${q.colDur}</span>` +
+      `<span class="q-act-col"></span>` +
+    `</div>` +
+    rows.map(r =>
+      `<div class="q-r">` +
+        `<span class="q-chev"><span class="skel soft" style="width:12px;height:12px"></span></span>` +
+        `<span class="skel soft" style="width:24px;height:24px;flex:none"></span>` +
+        `<div class="q-entity" style="gap:4px"><span class="skel" style="width:${r.w1}px;height:13px"></span><span class="skel soft" style="width:${r.w2}px;height:10px"></span></div>` +
+        `<div class="q-bar-col"><span class="skel soft" style="width:${r.bar}%;height:6px;border-radius:3px"></span></div>` +
+        `<div class="q-dur-col"><span class="skel soft" style="width:48px;height:12px"></span></div>` +
+        `<div class="q-act-col"><span class="skel soft" style="width:68px;height:24px"></span></div>` +
+      `</div>`
+    ).join('') +
+  `</div>`;
+}
+
+function renderMain() {
+  const main = document.getElementById('main');
+
+  switch (stateKey) {
+    case 'categories':
+      main.innerHTML = renderHeaderAndPivot() + renderCategoriesList({ mode: 'normal' });
+      break;
+    case 'category-edit':
+      main.innerHTML = renderHeaderAndPivot() + renderCategoriesList({ mode: 'edit', selectedId: 'learn' });
+      renderCategoryEditPanel({ saving: false });
+      break;
+    case 'category-archived':
+      main.innerHTML = renderHeaderAndPivot() + renderCategoriesList({ mode: 'archived' });
+      break;
+    case 'categories-loading':
+      main.innerHTML = renderHeaderAndPivot({ disabled: true, loadingBadge: true }) + renderCategoriesLoading();
+      break;
+    case 'categories-error':
+      main.innerHTML = renderHeaderAndPivot({ disabled: true }) + renderErrorCard(T.cats.errTitle, T.cats.errMsg, T.cats.codeLabel, T.cats.retry);
+      break;
+    case 'category-saving':
+      main.innerHTML = renderHeaderAndPivot({ disabled: true }) + renderCategoriesList({ mode: 'edit', selectedId: 'learn', disabled: true });
+      renderCategoryEditPanel({ saving: true });
+      break;
+    case 'queue':
+      main.innerHTML = renderHeaderAndPivot() + renderQueueList({ selectedIdx: -1, expandFirst: true });
+      break;
+    case 'queue-documents':
+      main.innerHTML = renderHeaderAndPivot() + renderQueueList({ selectedIdx: -1, expandFirst: true });
+      break;
+    case 'queue-day':
+      main.innerHTML = renderHeaderAndPivot() + renderQueueList({ selectedIdx: -1, expandFirst: true, singleDay: true });
+      break;
+    case 'queue-scope':
+      main.innerHTML = renderHeaderAndPivot() + renderQueueList({ selectedIdx: 0, expandFirst: true });
+      renderQueueScopePanel();
+      break;
+    case 'queue-empty':
+      main.innerHTML = renderHeaderAndPivot({ disabled: true, hideQueueBadge: true }) + renderQueueEmpty();
+      break;
+    case 'queue-search-empty':
+      main.innerHTML = renderHeaderAndPivot() + renderQueueSearchEmpty();
+      break;
+    case 'queue-loading':
+      main.innerHTML = renderHeaderAndPivot({ disabled: true, loadingBadge: true }) + renderQueueLoading();
+      break;
+    case 'queue-error':
+      main.innerHTML = renderHeaderAndPivot({ disabled: true }) + renderErrorCard(T.queue.errTitle, T.queue.errMsg, T.queue.codeLabel, T.queue.retry);
+      break;
+    default:
+      main.innerHTML = renderHeaderAndPivot() + renderCategoriesList({ mode: 'normal' });
+  }
+}
+
+function syncScroll(scrollEl, wrapEl, thumbEl) {
+  if (!scrollEl || !wrapEl || !thumbEl) return;
+  const overflow = scrollEl.scrollHeight > scrollEl.clientHeight + 1;
+  wrapEl.classList.toggle('scrollable', overflow);
+  if (!overflow) return;
+  const trackH = wrapEl.clientHeight - 8;
+  const ratio = scrollEl.clientHeight / scrollEl.scrollHeight;
+  const thumbH = Math.max(28, Math.round(trackH * ratio));
+  const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+  const top = maxScroll > 0 ? Math.round((scrollEl.scrollTop / maxScroll) * (trackH - thumbH)) : 0;
+  thumbEl.style.height = thumbH + 'px';
+  thumbEl.style.top = top + 'px';
+}
+
+renderNav();
+renderMain();
+
+const mainEl = document.getElementById('main');
+const mainWrapEl = document.getElementById('main-wrap');
+const mainThumbEl = document.getElementById('main-thumb');
+syncScroll(mainEl, mainWrapEl, mainThumbEl);
+mainEl.addEventListener('scroll', () => syncScroll(mainEl, mainWrapEl, mainThumbEl));
+
+const edBody = document.getElementById('ed-body');
+const edBodyWrap = document.getElementById('ed-body-wrap');
+const edThumb = document.getElementById('ed-thumb');
+if (edBody) {
+  syncScroll(edBody, edBodyWrap, edThumb);
+  edBody.addEventListener('scroll', () => syncScroll(edBody, edBodyWrap, edThumb));
+}
+</script>
+</body>
+</html>
