@@ -1,0 +1,71 @@
+{
+  "create": {
+    "entity": {
+      "uuid": "00000000-0000-4000-8000-000000000123",
+      "parent_uuid": null,
+      "name": "研究",
+      "color": "cat.8",
+      "tendency": "focus"
+    }
+  },
+  "update": {
+    "entity": {
+      "uuid": "00000000-0000-4000-8000-000000000123",
+      "parent_uuid": null,
+      "name": "研究",
+      "color": "cat.8",
+      "tendency": "focus"
+    }
+  },
+  "reorder": {
+    "parent_uuid": null,
+    "uuids": [
+      "00000000-0000-4000-8000-000000000123"
+    ]
+  },
+  "archive": {
+    "uuid": "00000000-0000-4000-8000-000000000123",
+    "archived": true
+  },
+  "list": {
+    "include_archived": true
+  },
+  "entity_response": {
+    "entity": {
+      "uuid": "00000000-0000-4000-8000-000000000123",
+      "parent_uuid": null,
+      "name": "研究",
+      "color": "cat.8",
+      "tendency": "focus",
+      "builtin_key": null,
+      "sort_order": 5,
+      "archived": false
+    }
+  },
+  "list_response": {
+    "entities": [
+      {
+        "uuid": "00000000-0000-4000-8000-000000000123",
+        "parent_uuid": null,
+        "name": "研究",
+        "color": "cat.8",
+        "tendency": "focus",
+        "builtin_key": null,
+        "sort_order": 5,
+        "archived": false
+      }
+    ],
+    "versions": "categories.v1:2",
+    "next_cursor": {
+      "versions": "categories.v1:2",
+      "query": {
+        "kind": "categories",
+        "include_archived": true
+      },
+      "position": 1
+    }
+  },
+  "accepted": {
+    "accepted": true
+  }
+}

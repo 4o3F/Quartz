@@ -1,5 +1,6 @@
 //! Bounded I/O and main-thread admission to the database writer.
 
+use super::categories::CategoryRequest;
 use crate::store::{Store, annotations::ExecuteAnnotationWritesError};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use quartz_domain::capture::UtcInstant;
@@ -11,6 +12,8 @@ use tokio::sync::oneshot;
 #[serde(untagged)]
 pub(crate) enum WriteResponse {
     Annotations(quartz_protocol::AnnotationsResponse),
+    Category(quartz_protocol::CategoryResponse),
+    Categories(quartz_protocol::CategoriesListResponse),
     Settings(quartz_protocol::SettingsResponse),
     Accepted(quartz_protocol::AcceptedBody),
 }
@@ -20,6 +23,21 @@ impl WriteRequest {
         body: serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
         match op {
+            quartz_protocol::Op::CategoriesList => serde_json::from_value(body)
+                .map(CategoryRequest::List)
+                .map(Self::Categories),
+            quartz_protocol::Op::CategoriesCreate => serde_json::from_value(body)
+                .map(CategoryRequest::Create)
+                .map(Self::Categories),
+            quartz_protocol::Op::CategoriesUpdate => serde_json::from_value(body)
+                .map(CategoryRequest::Update)
+                .map(Self::Categories),
+            quartz_protocol::Op::CategoriesReorder => serde_json::from_value(body)
+                .map(CategoryRequest::Reorder)
+                .map(Self::Categories),
+            quartz_protocol::Op::CategoriesArchive => serde_json::from_value(body)
+                .map(CategoryRequest::Archive)
+                .map(Self::Categories),
             quartz_protocol::Op::AnnotationsCreate => serde_json::from_value(body)
                 .map(AnnotationWrite::Create)
                 .map(Self::Annotations),
@@ -44,6 +62,7 @@ impl WriteRequest {
         system: Option<quartz_protocol::EffectiveUiSettings>,
     ) -> Result<WriteResponse, ProtocolError> {
         let result = match self {
+            Self::Categories(request) => return request.execute(store),
             Self::SettingsGet | Self::SettingsSet(_) => {
                 let system = system.ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?;
                 let result = match self {
@@ -106,6 +125,7 @@ pub(crate) enum WriteRequest {
     SettingsGet,
     SettingsSet(quartz_protocol::SettingsSetRequest),
     Annotations(AnnotationWrite),
+    Categories(CategoryRequest),
     #[cfg(test)]
     BumpMetadata {
         outcome: TestCommit,

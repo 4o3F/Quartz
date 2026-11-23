@@ -8,7 +8,7 @@ mod details;
 pub(crate) mod dispatch;
 pub(crate) mod documents;
 pub(crate) mod input;
-mod paging;
+pub(crate) mod paging;
 mod pending_away;
 pub(crate) mod pipeline;
 mod range;

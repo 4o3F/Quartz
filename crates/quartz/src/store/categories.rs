@@ -85,13 +85,34 @@ impl From<EditCategoryError> for ExecuteCategoryCommandError {
     }
 }
 
+/// One database snapshot of the hierarchy and its metadata input.
+#[derive(Debug)]
+pub(crate) struct CategoryListing {
+    pub entities: Vec<CategoryEntity>,
+    pub metadata_version: i64,
+}
+
 impl Store {
+    pub(crate) fn category_listing(
+        &mut self,
+        archived: IncludeArchivedCategories,
+    ) -> Result<CategoryListing, ExecuteCategoryCommandError> {
+        self.writer.transaction(|connection| {
+            let entities = CategoryTree::load(connection)?.list(archived)?;
+            let metadata_version = super::settings::Settings::new(connection)
+                .metadata_version()
+                .map_err(|source| ExecuteCategoryCommandError::Version {
+                    source: BumpVersionError::Setting { source },
+                })?;
+            Ok(CategoryListing {
+                entities,
+                metadata_version,
+            })
+        })
+    }
+
     /// Returns hierarchy preorder with siblings ordered by sort_order, then UUID.
     /// Filtering archives preserves active descendants of archived parents.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "category IPC is added in M4-C2")
-    )]
     pub(crate) fn list_categories(
         &mut self,
         archived: IncludeArchivedCategories,
@@ -100,10 +121,6 @@ impl Store {
             .transaction(|connection| CategoryTree::load(connection)?.list(archived))
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "category IPC is added in M4-C2")
-    )]
     pub(crate) fn create_category(
         &mut self,
         command: CreateCategory,
@@ -145,10 +162,6 @@ impl Store {
 
     /// Moving a category appends it after all children of the new parent, including archives.
     /// Archived parents are permitted; identity and archive state remain unchanged.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "category IPC is added in M4-C2")
-    )]
     pub(crate) fn update_category(
         &mut self,
         command: UpdateCategory,
@@ -186,10 +199,6 @@ impl Store {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "category IPC is added in M4-C2")
-    )]
     pub(crate) fn reorder_categories(
         &mut self,
         command: ReorderCategories,
@@ -231,10 +240,6 @@ impl Store {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "category IPC is added in M4-C2")
-    )]
     pub(crate) fn archive_category(
         &mut self,
         command: ArchiveCategory,

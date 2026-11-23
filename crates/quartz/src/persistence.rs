@@ -1,6 +1,8 @@
 //! Database-thread persistence shell; all core feedback is returned as values.
 
 #[cfg(any(windows, test))]
+mod categories;
+#[cfg(any(windows, test))]
 pub(crate) mod dispatch;
 mod queue;
 use queue::TransactionPlan;

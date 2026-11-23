@@ -282,6 +282,9 @@ pub enum Capability {
     /// Browser activity reporting version 1.
     #[serde(rename = "browser.v1")]
     BrowserV1,
+    /// Category editing and hierarchy listing version 1.
+    #[serde(rename = "categories.v1")]
+    CategoriesV1,
     /// Annotation operations version 1.
     #[serde(rename = "annotations.v1")]
     AnnotationsV1,

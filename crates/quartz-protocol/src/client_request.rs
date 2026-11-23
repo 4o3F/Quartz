@@ -47,6 +47,11 @@ macro_rules! requests {
     )*};
 }
 requests! {
+    crate::CategoriesListRequest => CategoriesList => crate::CategoriesListResponse,
+    crate::CategoriesCreateRequest => CategoriesCreate => crate::CategoryResponse,
+    crate::CategoriesUpdateRequest => CategoriesUpdate => crate::CategoryResponse,
+    crate::CategoriesReorderRequest => CategoriesReorder => AcceptedBody,
+    crate::CategoriesArchiveRequest => CategoriesArchive => crate::CategoryResponse,
     Hello => Hello => HelloResponse,
     CoreStatusRequest => CoreStatus => CoreStatusResponse,
     UiOpenRequest => UiOpen => AcceptedBody,

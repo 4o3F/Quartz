@@ -26,6 +26,10 @@ use std::{
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module)]
 pub(crate) enum RunDatabaseLoopError {
+    #[snafu(display("could not refresh committed category references"))]
+    RefreshReferences {
+        source: crate::store::rules::LoadRulesError,
+    },
     #[snafu(display("could not read database worker clock"))]
     Clock { source: ReadClockError },
     #[snafu(display("database command channel disconnected"))]
@@ -104,6 +108,11 @@ enum DrainProgress {
 }
 impl DatabaseLoop {
     fn publish_versions(&mut self) -> Result<(), RunDatabaseLoopError> {
+        if self.store.has_committed_metadata() {
+            self.registry
+                .refresh_category_references(&mut self.store)
+                .map_err(|source| RunDatabaseLoopError::RefreshReferences { source })?;
+        }
         if let Some(offset) = self
             .versions
             .publish(&mut self.store)
@@ -490,6 +499,584 @@ mod tests {
         _commands: Receiver<MainCommand>,
         _feedback: Receiver<Feedback>,
     }
+    const CATEGORY_UUID: &str = "00000000-0000-4000-8000-000000000123";
+    const MISSING_CATEGORY_UUID: &str = "00000000-0000-4000-8000-000000000124";
+
+    impl Fixture {
+        fn category_body(&self) -> serde_json::Value {
+            serde_json::json!({"entity":{"uuid":CATEGORY_UUID,"parent_uuid":null,"name":"研究","color":"cat.8","tendency":"focus"}})
+        }
+        fn ipc(
+            &mut self,
+            op: quartz_protocol::Op,
+            body: serde_json::Value,
+        ) -> Result<serde_json::Value, quartz_protocol::ProtocolError> {
+            use crate::ipc::{Action, AllowedRoles, ConnectionSession, StatusPublisher};
+            use quartz_protocol::{Envelope, Request, RequestId, ResponseOutcome};
+            let status = StatusPublisher::new(quartz_protocol::InstanceId("category-test".into()));
+            let status = status.subscribe();
+            let mut session = ConnectionSession::new(AllowedRoles::Quartz);
+            let hello = quartz_protocol::Hello {
+                proto: quartz_protocol::ProtoRange::new(
+                    quartz_protocol::PROTOCOL_VERSION,
+                    quartz_protocol::PROTOCOL_VERSION,
+                )
+                .expect("protocol"),
+                client_version: quartz_protocol::ClientVersion("test".into()),
+                role: quartz_protocol::HelloRole::Ui {
+                    ui: quartz_protocol::UiHello {
+                        state: quartz_protocol::UiState::Visible,
+                    },
+                },
+            };
+            assert!(matches!(
+                session.receive(
+                    Envelope::Request(Request {
+                        id: RequestId(1),
+                        op: quartz_protocol::Op::Hello,
+                        body: serde_json::to_value(hello).expect("hello")
+                    }),
+                    &status.borrow().status
+                ),
+                Action::Reply(quartz_protocol::Response {
+                    outcome: ResponseOutcome::Ok { .. },
+                    ..
+                })
+            ));
+            let envelope = Envelope::Request(Request {
+                id: RequestId(2),
+                op,
+                body,
+            });
+            let bytes = quartz_protocol::encode_json(&envelope).expect("encode request");
+            let request = quartz_protocol::decode_json(&bytes).expect("decode request");
+            let action = session.receive(request, &status.borrow().status);
+            let result = match action {
+                Action::Write { id, request } => {
+                    assert_eq!(id, RequestId(2));
+                    let channel = crate::persistence::dispatch::WriteChannel::new();
+                    let mut reply = channel
+                        .port
+                        .submit(request)
+                        .expect("admit category request");
+                    self.database
+                        .write_command(channel.receiver.try_recv().expect("database request"))
+                        .expect("database loop");
+                    reply
+                        .try_recv()
+                        .expect("database reply")
+                        .map(|response| serde_json::to_value(response).expect("wire response"))
+                }
+                Action::Reply(response) => match response.outcome {
+                    ResponseOutcome::Err { error } => Err(error),
+                    ResponseOutcome::Ok { body } => Ok(body),
+                },
+                _ => panic!("expected category or annotation dispatch"),
+            };
+            let response = quartz_protocol::Response {
+                id: Some(RequestId(2)),
+                outcome: match result {
+                    Ok(body) => ResponseOutcome::Ok { body },
+                    Err(error) => ResponseOutcome::Err { error },
+                },
+            };
+            let bytes = quartz_protocol::encode_json(&response).expect("encode response");
+            let response: quartz_protocol::Response =
+                quartz_protocol::decode_json(&bytes).expect("decode response");
+            match response.outcome {
+                ResponseOutcome::Ok { body } => Ok(body),
+                ResponseOutcome::Err { error } => Err(error),
+            }
+        }
+        fn import_category(
+            &mut self,
+            key: &str,
+            reference: &str,
+        ) -> Result<RegistryResult, RunRegistryCommandError> {
+            let text = format!(
+                "format='quartz-rules/1'\n[set]\nkey='{key}'\nkind='classification'\nname='Test rules'\nparent='builtin.classification'\n[[rule]]\nid='test'\nlabel='Test rule'\ncategory='{reference}'\nwhen=[{{field='app.exe_name',op='equals',value='test.exe'}}]\n"
+            );
+            let (reply, received) = bounded(1);
+            self.database
+                .registry_command(
+                    RegistryCommand::Import {
+                        key: key.parse().expect("key"),
+                        file: "test.toml".into(),
+                        text,
+                        base_version: 0,
+                        preview_hash: None,
+                    },
+                    reply,
+                )
+                .expect("registry dispatch");
+            let result = received.recv().expect("registry response");
+            if result.as_ref().is_ok_and(|result| result.event.is_some()) {
+                assert!(matches!(
+                    self._feedback.try_recv(),
+                    Ok(Feedback::RulesChanged)
+                ));
+            }
+            result
+        }
+        fn subscribe_category_day(&mut self) {
+            use std::future::Future;
+            let port = self._versions.clone();
+            let date = "1970-01-01".parse().expect("date");
+            {
+                let subscription = port.set_days(std::collections::BTreeSet::from([date]));
+                let mut subscription = std::pin::pin!(subscription);
+                let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+                assert!(subscription.as_mut().poll(&mut context).is_pending());
+                self.database.versions.receive(
+                    self.database
+                        .versions
+                        .requests
+                        .try_recv()
+                        .expect("subscription request"),
+                );
+                assert!(matches!(
+                    subscription.poll(&mut context),
+                    std::task::Poll::Ready(Ok(_))
+                ));
+            }
+            let mut subscription = std::pin::pin!(port.set_summary_day(date));
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(subscription.as_mut().poll(&mut context).is_pending());
+            self.database.versions.receive(
+                self.database
+                    .versions
+                    .requests
+                    .try_recv()
+                    .expect("tray subscription request"),
+            );
+            assert!(matches!(
+                subscription.poll(&mut context),
+                std::task::Poll::Ready(Ok(_))
+            ));
+            self._versions.updates.borrow_and_update();
+        }
+        fn assert_category_publication(&mut self) {
+            assert!(
+                self._versions
+                    .updates
+                    .has_changed()
+                    .expect("publisher open"),
+                "committed change reaches day and tray input"
+            );
+            self._versions.updates.borrow_and_update();
+            self.database
+                .publish_versions()
+                .expect("repeat publication");
+            assert!(
+                !self
+                    ._versions
+                    .updates
+                    .has_changed()
+                    .expect("publisher open"),
+                "committed change is consumed once"
+            );
+        }
+    }
+
+    #[test]
+    fn category_ipc_retries_and_each_real_edit_publish_once() {
+        use quartz_protocol::Op;
+        let mut fixture = Fixture::new();
+        fixture
+            .database
+            .publish_versions()
+            .expect("startup publication");
+        fixture.subscribe_category_day();
+        let first = fixture
+            .ipc(Op::CategoriesCreate, fixture.category_body())
+            .expect("create over IPC");
+        fixture.assert_category_publication();
+        let references = &fixture
+            .database
+            .registry
+            .core()
+            .state()
+            .references
+            .categories;
+        assert_eq!(
+            references.get("研究").map(String::as_str),
+            Some(CATEGORY_UUID)
+        );
+        let mut retry = fixture.category_body();
+        retry["entity"]["name"] = serde_json::json!(" ");
+        retry["entity"]["color"] = serde_json::json!("invalid");
+        retry["entity"]["parent_uuid"] = serde_json::json!(MISSING_CATEGORY_UUID);
+        assert_eq!(
+            fixture
+                .ipc(Op::CategoriesCreate, retry)
+                .expect("UUID retry returns stored entity"),
+            first
+        );
+        assert!(!fixture._versions.updates.has_changed().expect("publisher"));
+        assert_eq!(
+            fixture
+                .ipc(Op::CategoriesUpdate, fixture.category_body())
+                .expect("same final values"),
+            first
+        );
+        assert!(!fixture._versions.updates.has_changed().expect("publisher"));
+        let mut rename = fixture.category_body();
+        rename["entity"]["name"] = serde_json::json!("阅读");
+        fixture
+            .ipc(Op::CategoriesUpdate, rename.clone())
+            .expect("rename");
+        fixture.assert_category_publication();
+        let references = &fixture
+            .database
+            .registry
+            .core()
+            .state()
+            .references
+            .categories;
+        assert!(!references.contains_key("研究"));
+        assert_eq!(
+            references.get("阅读").map(String::as_str),
+            Some(CATEGORY_UUID)
+        );
+        let listing = fixture
+            .ipc(
+                Op::CategoriesList,
+                serde_json::json!({"include_archived":true}),
+            )
+            .expect("siblings");
+        let mut uuids: Vec<_> = listing["entities"]
+            .as_array()
+            .expect("entities")
+            .iter()
+            .map(|entity| entity["uuid"].clone())
+            .collect();
+        uuids.reverse();
+        let reorder = serde_json::json!({"parent_uuid":null,"uuids":uuids});
+        assert_eq!(
+            fixture
+                .ipc(Op::CategoriesReorder, reorder.clone())
+                .expect("reorder"),
+            serde_json::json!({"accepted":true})
+        );
+        fixture.assert_category_publication();
+        fixture
+            .ipc(Op::CategoriesReorder, reorder)
+            .expect("same order");
+        assert!(!fixture._versions.updates.has_changed().expect("publisher"));
+        for archived in [true, false] {
+            let body = serde_json::json!({"uuid":CATEGORY_UUID,"archived":archived});
+            fixture
+                .ipc(Op::CategoriesArchive, body.clone())
+                .expect("archive final state");
+            fixture.assert_category_publication();
+            fixture
+                .ipc(Op::CategoriesArchive, body)
+                .expect("same archive state");
+            assert!(!fixture._versions.updates.has_changed().expect("publisher"));
+        }
+        fixture
+            .ipc(Op::CategoriesUpdate, rename)
+            .expect("same renamed values");
+        assert!(!fixture._versions.updates.has_changed().expect("publisher"));
+    }
+
+    #[test]
+    fn category_ipc_validation_keeps_rows_versions_and_references_unchanged() {
+        use quartz_protocol::{ErrorKind, Op};
+        let mut fixture = Fixture::new();
+        fixture
+            .ipc(Op::CategoriesCreate, fixture.category_body())
+            .expect("create");
+        fixture.subscribe_category_day();
+        let before = fixture
+            .ipc(
+                Op::CategoriesList,
+                serde_json::json!({"include_archived":true}),
+            )
+            .expect("before");
+        struct Case {
+            op: Op,
+            body: serde_json::Value,
+        }
+        let mut cases = vec![
+            Case {
+                op: Op::CategoriesArchive,
+                body: serde_json::json!({"uuid":MISSING_CATEGORY_UUID,"archived":true}),
+            },
+            Case {
+                op: Op::CategoriesReorder,
+                body: serde_json::json!({"parent_uuid":null,"uuids":[CATEGORY_UUID]}),
+            },
+        ];
+        for name in [
+            serde_json::json!(" "),
+            serde_json::json!(
+                "🦀".repeat(quartz_domain::categories::MAX_CATEGORY_NAME_SCALARS + 1)
+            ),
+            serde_json::Value::Null,
+        ] {
+            let mut body = fixture.category_body();
+            body["entity"]["name"] = name;
+            cases.push(Case {
+                op: Op::CategoriesUpdate,
+                body,
+            });
+        }
+        for field in ["color", "tendency", "parent_uuid", "uuid", "builtin_key"] {
+            let mut body = fixture.category_body();
+            body["entity"][field] = serde_json::json!(if matches!(field, "uuid" | "parent_uuid") {
+                MISSING_CATEGORY_UUID
+            } else {
+                "invalid"
+            });
+            cases.push(Case {
+                op: Op::CategoriesUpdate,
+                body,
+            });
+        }
+        let mut cycle = fixture.category_body();
+        cycle["entity"]["parent_uuid"] = serde_json::json!(CATEGORY_UUID);
+        cases.push(Case {
+            op: Op::CategoriesUpdate,
+            body: cycle,
+        });
+        for case in cases {
+            assert_eq!(
+                fixture
+                    .ipc(case.op, case.body)
+                    .expect_err("invalid category request")
+                    .kind,
+                ErrorKind::BadRequest
+            );
+            assert_eq!(
+                fixture
+                    .ipc(
+                        Op::CategoriesList,
+                        serde_json::json!({"include_archived":true})
+                    )
+                    .expect("unchanged list"),
+                before
+            );
+            assert!(!fixture._versions.updates.has_changed().expect("publisher"));
+            assert_eq!(
+                fixture
+                    .database
+                    .registry
+                    .core()
+                    .state()
+                    .references
+                    .categories
+                    .get("研究")
+                    .map(String::as_str),
+                Some(CATEGORY_UUID)
+            );
+        }
+    }
+
+    #[test]
+    fn committed_category_is_immediately_usable_and_archive_retains_existing_references() {
+        use quartz_protocol::{ErrorKind, Op};
+        let mut fixture = Fixture::new();
+        fixture
+            .ipc(Op::CategoriesCreate, fixture.category_body())
+            .expect("create");
+        fixture
+            .import_category("user.by-name", "研究")
+            .expect("import new name immediately");
+        fixture
+            .import_category("user.by-uuid", CATEGORY_UUID)
+            .expect("import new UUID immediately");
+        let annotation = serde_json::json!({"entities":[{"uuid":"00000000-0000-4000-8000-000000000200","kind":"offline_activity","start_utc_ms":0,"end_utc_ms":1000,"category":{"kind":"uuid","uuid":CATEGORY_UUID}}]});
+        let saved = fixture
+            .ipc(Op::AnnotationsCreate, annotation.clone())
+            .expect("annotate new category immediately");
+        let rule_hashes = fixture
+            .database
+            .registry
+            .snapshots()
+            .load()
+            .hashes()
+            .clone();
+        fixture
+            .ipc(
+                Op::CategoriesArchive,
+                serde_json::json!({"uuid":CATEGORY_UUID,"archived":true}),
+            )
+            .expect("archive");
+        assert_eq!(
+            fixture.database.registry.snapshots().load().hashes(),
+            &rule_hashes
+        );
+        fixture
+            .import_category("user.archived-name", "研究")
+            .expect_err("new rule rejects archived name");
+        fixture
+            .import_category("user.archived-uuid", CATEGORY_UUID)
+            .expect_err("new rule rejects archived UUID");
+        let mut rejected = annotation.clone();
+        rejected["entities"][0]["uuid"] = serde_json::json!("00000000-0000-4000-8000-000000000201");
+        assert_eq!(
+            fixture
+                .ipc(Op::AnnotationsCreate, rejected)
+                .expect_err("new annotation rejects archive")
+                .kind,
+            ErrorKind::BadRequest
+        );
+        assert_eq!(
+            fixture
+                .ipc(Op::AnnotationsCreate, annotation)
+                .expect("load original annotation by retry"),
+            saved
+        );
+        let stored = fixture
+            .database
+            .store
+            .rule_sets()
+            .load()
+            .expect("retained rule history");
+        assert!(
+            stored
+                .sets
+                .contains_key(&"user.by-name".parse().expect("key"))
+        );
+        assert!(
+            stored
+                .sets
+                .contains_key(&"user.by-uuid".parse().expect("key"))
+        );
+        let builtin = quartz_domain::categories::BuiltinCategory::Development.uuid();
+        fixture
+            .ipc(
+                Op::CategoriesArchive,
+                serde_json::json!({"uuid":builtin.0,"archived":true}),
+            )
+            .expect("archive builtin");
+        let reopened = RegistryShell::open(
+            &mut fixture.database.store,
+            UtcInstant::try_from(0).expect("UTC"),
+        )
+        .expect("restart retains rules including archived builtin references");
+        assert_eq!(reopened.snapshots().load().hashes(), &rule_hashes);
+        assert!(
+            !reopened
+                .core()
+                .state()
+                .references
+                .categories
+                .contains_key("builtin:development")
+        );
+        assert!(
+            !reopened
+                .core()
+                .state()
+                .references
+                .categories
+                .contains_key(CATEGORY_UUID)
+        );
+        fixture
+            .ipc(
+                Op::CategoriesArchive,
+                serde_json::json!({"uuid":CATEGORY_UUID,"archived":false}),
+            )
+            .expect("restore");
+        fixture
+            .import_category("user.restored", "研究")
+            .expect("restored name immediately available");
+    }
+
+    #[test]
+    fn category_ipc_pages_are_bounded_and_metadata_changes_stale_the_cursor() {
+        use quartz_domain::categories::{CategoryValues, CreateCategory};
+        use quartz_protocol::{CategoriesListResponse, ErrorKind, Op};
+        // Maximum-length four-byte names force multiple pages with a small hierarchy.
+        const CATEGORY_COUNT: usize = 220;
+        let mut fixture = Fixture::new();
+        for index in 0..CATEGORY_COUNT {
+            fixture
+                .database
+                .store
+                .create_category(CreateCategory {
+                    uuid: quartz_domain::categories::CategoryUuid(format!(
+                        "00000000-0000-4000-8000-{index:012}"
+                    )),
+                    values: CategoryValues {
+                        parent_uuid: None,
+                        name: Some(
+                            "🦀"
+                                .repeat(quartz_domain::categories::MAX_CATEGORY_NAME_SCALARS)
+                                .parse()
+                                .expect("maximum name"),
+                        ),
+                        color: quartz_domain::categories::CategoryColor::Neutral,
+                        tendency: quartz_domain::categories::CategoryTendency::Neutral,
+                    },
+                })
+                .expect("create paging fixture");
+        }
+        let first_wire = fixture
+            .ipc(Op::CategoriesList, serde_json::json!({}))
+            .expect("first page");
+        assert!(
+            serde_json::to_vec(&first_wire).expect("page bytes").len()
+                <= quartz_protocol::QUERY_PAGE_BYTES
+        );
+        let first: CategoriesListResponse =
+            serde_json::from_value(first_wire).expect("typed first page");
+        let cursor = first.next_cursor.clone().expect("continuation");
+        let mut entities = first.entities;
+        let mut next = Some(cursor.clone());
+        while let Some(cursor) = next {
+            let wire = fixture
+                .ipc(Op::CategoriesList, serde_json::json!({"cursor":cursor}))
+                .expect("next page");
+            assert!(
+                serde_json::to_vec(&wire).expect("page bytes").len()
+                    <= quartz_protocol::QUERY_PAGE_BYTES
+            );
+            let page: CategoriesListResponse = serde_json::from_value(wire).expect("typed page");
+            assert_eq!(page.versions, first.versions);
+            entities.extend(page.entities);
+            next = page.next_cursor;
+        }
+        assert_eq!(
+            entities.len(),
+            CATEGORY_COUNT + quartz_domain::categories::BuiltinCategory::ALL.len()
+        );
+        let expected = fixture
+            .database
+            .store
+            .list_categories(quartz_domain::categories::IncludeArchivedCategories::Exclude)
+            .expect("hierarchy");
+        assert!(
+            entities
+                .iter()
+                .map(|entity| entity.uuid.to_string())
+                .eq(expected.into_iter().map(|entity| entity.uuid.0))
+        );
+        assert_eq!(
+            fixture
+                .ipc(
+                    Op::CategoriesList,
+                    serde_json::json!({"include_archived":true,"cursor":cursor})
+                )
+                .expect_err("filter differs")
+                .kind,
+            ErrorKind::BadRequest
+        );
+        let mut update = fixture.category_body();
+        update["entity"]["name"] = serde_json::json!("Changed");
+        fixture
+            .ipc(Op::CategoriesUpdate, update)
+            .expect("metadata change");
+        assert_eq!(
+            fixture
+                .ipc(Op::CategoriesList, serde_json::json!({"cursor":cursor}))
+                .expect_err("stale cursor")
+                .kind,
+            ErrorKind::StaleCursor
+        );
+    }
+
     #[test]
     fn committed_day_offset_wakes_main_once_and_updates_query_versions() {
         let mut fixture = Fixture::new();

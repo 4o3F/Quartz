@@ -6,6 +6,8 @@ mod logical_day;
 pub(crate) mod outbox;
 pub(crate) mod registry;
 mod session;
+#[cfg(test)]
+pub(crate) use session::Action;
 mod status;
 pub(crate) use logical_day::{LogicalDay, RefreshLogicalDay};
 pub(crate) mod summary;

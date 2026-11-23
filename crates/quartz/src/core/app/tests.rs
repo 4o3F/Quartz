@@ -1011,6 +1011,75 @@ impl AnnotationClient {
 }
 
 #[test]
+fn categories_ipc_retries_and_day_subscription_emit_only_real_changes() {
+    use futures_util::StreamExt;
+    use quartz_protocol::{Envelope, ErrorKind, Op, ProtocolError, ResponseOutcome, Role};
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(
+        "category-integration".into(),
+    ));
+    let services = crate::ipc::Services {
+        summary: None,
+        timed: crate::ipc::TimedPolicyPort::unavailable(),
+        queries: runtime.workers.queries.clone(),
+        writes: runtime.workers.writes.clone(),
+        versions: runtime.workers.versions.clone(),
+        status: status.subscribe(),
+        ui: Arc::new(|_| Ok(())),
+    };
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("I/O runtime");
+    io.block_on(async {
+        let registry = services.start_registry();
+        let mut cli = AnnotationClient::connect(services.clone(), registry.clone(), Role::Cli).await;
+        for op in [Op::CategoriesList, Op::CategoriesCreate, Op::CategoriesUpdate, Op::CategoriesReorder, Op::CategoriesArchive] {
+            cli.send(2, op, serde_json::json!({})).await;
+            assert_eq!(cli.response(2).await, ResponseOutcome::Err { error: ProtocolError::new(ErrorKind::Forbidden) });
+        }
+        cli.close().await;
+        let mut subscriber = AnnotationClient::connect(services.clone(), registry.clone(), Role::Ui).await;
+        let date: quartz_protocol::LocalDate = "2025-01-02".parse().expect("date");
+        subscriber.send(2, Op::Subscribe, serde_json::json!({"topics":[format!("day:{date}")]})).await;
+        subscriber.success(2).await;
+        let Envelope::Event(initial) = subscriber.receive().await else { panic!("initial day event") };
+        let mut ui = AnnotationClient::connect(services, registry, Role::Ui).await;
+        let body = serde_json::json!({"entity":{"uuid":"00000000-0000-4000-8000-000000000123","name":"研究","parent_uuid":null,"color":"cat.8","tendency":"focus"}});
+        ui.send(2, Op::CategoriesCreate, body.clone()).await;
+        let created = ui.success(2).await;
+        let Envelope::Event(changed) = subscriber.receive().await else { panic!("changed day event") };
+        assert_eq!(changed.topic, quartz_protocol::Topic::Day(date));
+        assert_ne!(changed.body, initial.body);
+        assert!(changed.seq > initial.seq);
+        ui.send(3, Op::CategoriesCreate, body.clone()).await;
+        assert_eq!(ui.success(3).await, created);
+        ui.send(4, Op::CategoriesUpdate, body.clone()).await;
+        assert_eq!(ui.success(4).await, created);
+        let mut invalid = body.clone();
+        invalid["entity"]["color"] = serde_json::json!("invalid");
+        ui.send(5, Op::CategoriesUpdate, invalid).await;
+        assert_eq!(ui.response(5).await, ResponseOutcome::Err { error: ProtocolError::new(ErrorKind::BadRequest) });
+        // Observe beyond the existing per-day throttle to detect delayed duplicate events.
+        let quiet = crate::ipc::outbox::DAY_PUSH_INTERVAL + crate::ipc::outbox::STATE_PUSH_INTERVAL;
+        assert!(tokio::time::timeout(quiet, subscriber.frames.next()).await.is_err());
+        let mut renamed = body;
+        renamed["entity"]["name"] = serde_json::json!("阅读");
+        ui.send(6, Op::CategoriesUpdate, renamed).await;
+        assert_eq!(ui.success(6).await["entity"]["name"], "阅读");
+        let Envelope::Event(renamed) = subscriber.receive().await else { panic!("renamed day event") };
+        assert_eq!(renamed.topic, quartz_protocol::Topic::Day(date));
+        assert_ne!(renamed.body, changed.body);
+        assert!(renamed.seq > changed.seq);
+        assert!(tokio::time::timeout(quiet, subscriber.frames.next()).await.is_err());
+        ui.close().await;
+        subscriber.close().await;
+    });
+    runtime.shutdown();
+}
+
+#[test]
 fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
     use quartz_protocol::{ErrorKind, Op, ProtocolError, ResponseOutcome};
     let runtime = RuntimeFixture::recovered();

@@ -221,6 +221,7 @@ impl ConnectionSession {
                         instance_id: status.instance_id.clone(),
                         core_version: status.core_version.clone(),
                         capabilities: vec![
+                            quartz_protocol::Capability::CategoriesV1,
                             quartz_protocol::Capability::QueryDocumentsV1,
                             quartz_protocol::Capability::QueryUnclassifiedV1,
                             quartz_protocol::Capability::QueryRangeV1,
@@ -303,7 +304,12 @@ impl ConnectionSession {
                     | Op::SettingsSet
                     | Op::AnnotationsCreate
                     | Op::AnnotationsUpdate
-                    | Op::AnnotationsDelete => {
+                    | Op::AnnotationsDelete
+                    | Op::CategoriesList
+                    | Op::CategoriesCreate
+                    | Op::CategoriesUpdate
+                    | Op::CategoriesArchive
+                    | Op::CategoriesReorder => {
                         match crate::persistence::dispatch::WriteRequest::decode(
                             request.op,
                             request.body,
@@ -328,11 +334,6 @@ impl ConnectionSession {
                     | Op::RulesTextDiff
                     | Op::RulesTextImport
                     | Op::RulesTextExport
-                    | Op::CategoriesList
-                    | Op::CategoriesCreate
-                    | Op::CategoriesUpdate
-                    | Op::CategoriesDelete
-                    | Op::CategoriesReorder
                     | Op::DataDelete
                     | Op::BrowserHello
                     | Op::BrowserState
@@ -371,6 +372,85 @@ mod tests {
             op,
             body,
         })
+    }
+    #[test]
+    fn category_operations_are_ui_only_and_reject_unknown_fields() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("categories".into()));
+        let status = status.subscribe();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../quartz-protocol/tests/fixtures/categories.json"
+        ))
+        .expect("category fixture");
+        struct Case {
+            op: Op,
+            body: serde_json::Value,
+        }
+        let cases = [
+            Case {
+                op: Op::CategoriesList,
+                body: fixture["list"].clone(),
+            },
+            Case {
+                op: Op::CategoriesCreate,
+                body: fixture["create"].clone(),
+            },
+            Case {
+                op: Op::CategoriesUpdate,
+                body: fixture["update"].clone(),
+            },
+            Case {
+                op: Op::CategoriesReorder,
+                body: fixture["reorder"].clone(),
+            },
+            Case {
+                op: Op::CategoriesArchive,
+                body: fixture["archive"].clone(),
+            },
+        ];
+        for case in cases {
+            let mut ui = ConnectionSession {
+                state: State::Ready(ReadyRole::Ui {
+                    state: UiState::Visible,
+                }),
+                allowed: AllowedRoles::Quartz,
+            };
+            assert!(matches!(
+                ui.receive(
+                    request(2, case.op, case.body.clone()),
+                    &status.borrow().status
+                ),
+                Action::Write { .. }
+            ));
+            for role in [ReadyRole::Cli, ReadyRole::Host] {
+                let mut session = ConnectionSession {
+                    state: State::Ready(role),
+                    allowed: AllowedRoles::Quartz,
+                };
+                assert_eq!(
+                    session
+                        .receive(
+                            request(2, case.op, case.body.clone()),
+                            &status.borrow().status
+                        )
+                        .reply()
+                        .outcome,
+                    ResponseOutcome::Err {
+                        error: ProtocolError::new(ErrorKind::Forbidden)
+                    }
+                );
+            }
+            let mut invalid = case.body;
+            invalid["extra"] = serde_json::json!(true);
+            assert_eq!(
+                ui.receive(request(2, case.op, invalid), &status.borrow().status)
+                    .reply()
+                    .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::BadRequest)
+                }
+            );
+        }
     }
     #[test]
     fn detail_queries_reach_dispatch_for_ui_and_cli() {
@@ -515,6 +595,7 @@ mod tests {
         assert_eq!(
             hello.capabilities,
             vec![
+                quartz_protocol::Capability::CategoriesV1,
                 quartz_protocol::Capability::QueryDocumentsV1,
                 quartz_protocol::Capability::QueryUnclassifiedV1,
                 quartz_protocol::Capability::QueryRangeV1,

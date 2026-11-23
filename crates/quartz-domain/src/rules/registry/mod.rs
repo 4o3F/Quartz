@@ -390,6 +390,11 @@ impl RuleRegistry {
     pub fn state(&self) -> &RegistryState {
         &self.state
     }
+    /// Replaces lookup aliases for future commands after category metadata commits.
+    /// Existing rule contents and snapshots retain their resolved category UUIDs.
+    pub fn update_references(&mut self, references: rules::ReferenceCatalog) {
+        self.state.references = references;
+    }
     /// Clones a read handle whose loads retain one immutable snapshot per work unit.
     pub fn snapshots(&self) -> SnapshotCell {
         self.snapshots.clone()

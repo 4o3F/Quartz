@@ -90,13 +90,18 @@ impl RegistryShell {
         let state = store.rule_sets().load().context(open_error::LoadSnafu)?;
         let registry = RuleRegistry::from_state(state).context(open_error::CreateSnafu)?;
         let mut shell = Self { registry };
+        // Embedded revisions retain references to archived builtin categories.
+        let builtin_references = store
+            .rule_sets()
+            .category_references(quartz_domain::categories::IncludeArchivedCategories::Include)
+            .context(open_error::LoadSnafu)?;
         for builtin in builtins {
             let set = RuleSet::parse(
                 builtin.file,
                 builtin.source,
                 ParseContext {
                     origin: RuleOrigin::Builtin,
-                    references: &shell.registry.state().references,
+                    references: &builtin_references,
                 },
             )
             .context(open_error::ParseSnafu)?;
@@ -117,6 +122,16 @@ impl RegistryShell {
             .context(open_error::FinishStartupSnafu)?;
         shell.log_warnings();
         Ok(shell)
+    }
+    pub(crate) fn refresh_category_references(
+        &mut self,
+        store: &mut Store,
+    ) -> Result<(), LoadRulesError> {
+        let references = store
+            .rule_sets()
+            .category_references(quartz_domain::categories::IncludeArchivedCategories::Exclude)?;
+        self.registry.update_references(references);
+        Ok(())
     }
     pub(crate) fn snapshots(&self) -> SnapshotCell {
         self.registry.snapshots()

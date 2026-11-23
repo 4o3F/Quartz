@@ -150,9 +150,9 @@ pub enum Op {
     /// The `categories.update` request.
     #[serde(rename = "categories.update")]
     CategoriesUpdate,
-    /// The `categories.delete` request.
-    #[serde(rename = "categories.delete")]
-    CategoriesDelete,
+    /// The `categories.archive` request.
+    #[serde(rename = "categories.archive")]
+    CategoriesArchive,
     /// The `categories.reorder` request.
     #[serde(rename = "categories.reorder")]
     CategoriesReorder,
@@ -258,7 +258,7 @@ impl Op {
             Self::CategoriesList
             | Self::CategoriesCreate
             | Self::CategoriesUpdate
-            | Self::CategoriesDelete
+            | Self::CategoriesArchive
             | Self::CategoriesReorder => OpFamily::Categories,
             Self::AnnotationsCreate | Self::AnnotationsUpdate | Self::AnnotationsDelete => {
                 OpFamily::Annotations

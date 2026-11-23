@@ -387,7 +387,7 @@ UUID 去重先于回执校验：已存在且确认内容相同则返回原 job�
 
 ### 6.3.5 分类操作
 
-分类操作仅允许 UI；读取 `categories.list {include_archived?,cursor?}`（include_archived 默认 false）返回 `{entities,versions,next_cursor}`，按层级前序、sort_order、UUID 排序并完整分页。实体为 `{uuid,builtin_key,parent_uuid,name,color,tendency,sort_order,archived}`，内置 name 可为 null，按 builtin_key 本地化。
+分类操作仅允许 UI；读取 `categories.list {include_archived?,cursor?}`（include_archived 默认 false）返回 `{entities,versions,next_cursor}`，按层级前序、sort_order、UUID 排序并完整分页。每页沿用 200 KiB 上限；`versions` 为 `categories.v1:<metadata_version>`，游标绑定该版本及 `include_archived`，元数据版本变化返回 `stale_cursor`，参数或位置无效返回 `bad_request`。实体为 `{uuid,builtin_key,parent_uuid,name,color,tendency,sort_order,archived}`，内置 name 可为 null，按 builtin_key 本地化。
 
 - `categories.create {entity}`：客户端提供 uuid、parent_uuid、name、color、tendency；tendency 缺省 neutral，追加到同级末尾，返回 `{entity}`。UUID 已存在先返回已有实体。
 - `categories.update {entity}`：uuid、parent_uuid、name、color、tendency 为完整最终值；返回 `{entity}`。内置分类 name=null 恢复默认名称；builtin_key 固定，不允许客户端创建内置身份。

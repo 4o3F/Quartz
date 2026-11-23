@@ -1,6 +1,12 @@
 //! Shared IPC data types, framing, permissions, and startup failures.
 
 mod annotations;
+mod categories;
+pub use categories::{
+    CategoriesArchiveRequest, CategoriesCreateRequest, CategoriesListRequest,
+    CategoriesListResponse, CategoriesReorderRequest, CategoriesUpdateRequest, CategoryEdit,
+    CategoryResponse, EditableCategory, NewCategory,
+};
 mod client_request;
 pub use client_request::CoreRequest;
 /// Raw JSON at the protocol envelope boundary.

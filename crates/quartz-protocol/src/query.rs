@@ -55,6 +55,7 @@ pub struct TitleExtraction {
 }
 /// Opaque continuation value; clients preserve and return its JSON object unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryCursor {
     versions: QueryVersions,
     query: CursorQuery,
@@ -84,8 +85,10 @@ impl QueryCursor {
 }
 /// Query parameters retained in a continuation, without recursive cursor fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CursorQuery {
+    /// Category hierarchy with the archive filter bound to the continuation.
+    Categories { include_archived: bool },
     /// A calendar date, from local midnight to the next local midnight.
     Facts { local_date: LocalDate },
     /// A logical date in the core's current system time zone.

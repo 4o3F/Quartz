@@ -77,6 +77,14 @@ impl std::fmt::Debug for RuleSets<'_> {
         f.debug_struct("RuleSets").finish_non_exhaustive()
     }
 }
+#[derive(diesel::Queryable, diesel::Selectable)]
+#[diesel(table_name = categories)]
+struct CategoryReferenceRow {
+    uuid: String,
+    name: Option<String>,
+    builtin_key: Option<String>,
+}
+
 impl<'connection> RuleSets<'connection> {
     pub(super) fn new(connection: &'connection mut SqliteConnection) -> Self {
         Self { connection }
@@ -84,6 +92,34 @@ impl<'connection> RuleSets<'connection> {
     pub(crate) fn load(&mut self) -> Result<RegistryState, LoadRulesError> {
         self.connection
             .transaction(|connection| RuleSets::new(connection).load_rows())
+    }
+    pub(crate) fn category_references(
+        &mut self,
+        archived: quartz_domain::categories::IncludeArchivedCategories,
+    ) -> Result<ReferenceCatalog, LoadRulesError> {
+        let mut query = categories::table.into_boxed();
+        if archived == quartz_domain::categories::IncludeArchivedCategories::Exclude {
+            query = query.filter(categories::archived.eq(0));
+        }
+        let rows = query
+            .order(categories::uuid)
+            .select(CategoryReferenceRow::as_select())
+            .load::<CategoryReferenceRow>(self.connection)?;
+        let mut references = ReferenceCatalog::default();
+        for row in rows {
+            references
+                .categories
+                .insert(row.uuid.clone(), row.uuid.clone());
+            if let Some(name) = row.name {
+                references.categories.insert(name, row.uuid.clone());
+            }
+            if let Some(key) = row.builtin_key {
+                references
+                    .categories
+                    .insert(format!("builtin:{key}"), row.uuid);
+            }
+        }
+        Ok(references)
     }
     fn load_rows(&mut self) -> Result<RegistryState, LoadRulesError> {
         let rows = rule_sets::table
@@ -122,20 +158,8 @@ impl<'connection> RuleSets<'connection> {
                 },
             );
         }
-        let mut references = ReferenceCatalog::default();
-        for (uuid, name, builtin) in categories::table
-            .select((categories::uuid, categories::name, categories::builtin_key))
-            .load::<(String, Option<String>, Option<String>)>(self.connection)
-            .context(QuerySnafu)?
-        {
-            references.categories.insert(uuid.clone(), uuid.clone());
-            if let Some(name) = name {
-                references.categories.insert(name, uuid.clone());
-            }
-            if let Some(key) = builtin {
-                references.categories.insert(format!("builtin:{key}"), uuid);
-            }
-        }
+        let references = self
+            .category_references(quartz_domain::categories::IncludeArchivedCategories::Exclude)?;
         let mut sets = BTreeMap::new();
         for row in rows {
             let id = row.id.ok_or(LoadRulesError::MissingId)?;

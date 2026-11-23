@@ -225,6 +225,10 @@ impl Store {
         })
     }
     #[cfg(any(windows, test))]
+    pub(crate) fn has_committed_metadata(&self) -> bool {
+        self.pending_effects.metadata.is_some()
+    }
+    #[cfg(any(windows, test))]
     pub(crate) fn take_committed_versions(&mut self) -> CommittedVersions {
         let effects = std::mem::take(&mut self.pending_effects);
         CommittedVersions {
