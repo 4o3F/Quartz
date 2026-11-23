@@ -313,16 +313,12 @@ impl CaptureLoop {
         mut observation: ObservedEvent,
         settlement: Settlement,
     ) -> Result<(), RunCaptureLoopError> {
-        // Other producers and database feedback can advance capture after admission.
-        // Apply retained controls at the current boundary while preserving their UTC deadline.
-        if matches!(
-            observation.event,
-            CaptureEvent::SetTimedState(_) | CaptureEvent::CancelTimedPolicy(_)
-        ) && observation.at.mono < self.at.mono
-        {
+        // Preserve dequeue order across producers. Late work takes effect at the last
+        // accepted clock pair; payload deadlines and input evidence remain unchanged.
+        // Shutdown uses this same admission after draining queued observations.
+        if observation.at.mono < self.at.mono {
             observation.at = self.at;
         }
-        self.at = observation.at;
         let calendar_change = match observation.event {
             CaptureEvent::ClockChanged(_) => Some(MainCommand::ClockChanged),
             _ => None,
@@ -333,7 +329,7 @@ impl CaptureLoop {
                 | CaptureEvent::SetTimedState(_)
                 | CaptureEvent::CancelTimedPolicy(_)
         );
-        let followup = self.followup(&observation.event);
+        let followup = self.followup(&observation.event, observation.at);
         let event = self.normalize(observation.event);
         let step = self
             .core
@@ -343,6 +339,7 @@ impl CaptureLoop {
                 rules: self.snapshots.load(),
             })
             .map_err(|source| RunCaptureLoopError::Step { source })?;
+        self.at = observation.at;
         self.publish(step, observation.at, settlement)?;
         if let Some(command) = calendar_change {
             self.main.send(command)?;
@@ -361,12 +358,12 @@ impl CaptureLoop {
         }
         Ok(())
     }
-    fn followup(&self, event: &CaptureEvent) -> Option<CaptureEvent> {
+    fn followup(&self, event: &CaptureEvent, at: Timestamp) -> Option<CaptureEvent> {
         match event {
             CaptureEvent::Session(SessionStatus::Ready(_)) => {
                 Some(CaptureEvent::RegisterDeadline {
                     owner: SchedulerKind::Idle,
-                    deadline: Deadline::Mono(self.at.mono),
+                    deadline: Deadline::Mono(at.mono),
                 })
             }
             _ => None,
@@ -919,5 +916,99 @@ mod tests {
                 .any(|snapshot| snapshot.pause_until_utc_ms == Some(100))
         );
         assert_eq!(snapshots.last(), Some(&policies));
+    }
+    #[test]
+    fn cross_producer_observations_and_shutdown_use_the_accepted_boundary() {
+        let run = RunId::new(1);
+        let started = CaptureCore::start(run, at(0)).expect("core");
+        let rules = RuleRegistry::from_state(RegistryState::default())
+            .expect("rules")
+            .snapshots();
+        let (sender, observed) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let (feedback, replies) = bounded(CONTROL_CAPACITY);
+        let (_shutdown, stop) = bounded(CONTROL_CAPACITY);
+        let (database, _writes) = bounded(CONTROL_CAPACITY);
+        let (main, _commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let mut capture = CaptureLoop {
+            core: started.core,
+            run,
+            at: at(0),
+            snapshots: rules,
+            observed,
+            pending_control: None,
+            discard_remaining: 0,
+            replies,
+            stop,
+            database,
+            writer: WriteQueue::new(),
+            main: MainPort {
+                sender: main,
+                wake: Arc::new(|| {}),
+            },
+            overloaded: Arc::new(AtomicBool::new(false)),
+            clock: Arc::new(TestClock(at(30))),
+        };
+        let mut resolver = super::super::tests::FakeResolver;
+        capture
+            .step(
+                ObservedEvent {
+                    at: at(20),
+                    event: CaptureEvent::Wake,
+                },
+                Settlement::Deferred,
+            )
+            .expect("newer producer");
+        capture
+            .feedback(Feedback::RulesChanged)
+            .expect("database feedback");
+        capture
+            .observe(
+                Observation::Event(ObservedEvent {
+                    at: at(10),
+                    event: CaptureEvent::Session(SessionStatus::Ready(Default::default())),
+                }),
+                &mut resolver,
+            )
+            .expect("late session producer");
+        capture
+            .observe(
+                Observation::Foreground(crate::core::foreground::Snapshot {
+                    at: at(15),
+                    read_at: at(15),
+                    event_time_ms: None,
+                    source: ObservationSource::Review,
+                    kind: EventKind::Foreground,
+                    window: WindowHandle::new(0),
+                    title: Title::readable(""),
+                    desktop: crate::core::foreground::Desktop::Observable,
+                }),
+                &mut resolver,
+            )
+            .expect("late foreground producer");
+        assert_eq!(capture.at, at(20));
+        sender
+            .send(Observation::Event(ObservedEvent {
+                at: at(30),
+                event: CaptureEvent::Wake,
+            }))
+            .expect("queued observation newer than shutdown");
+        sender
+            .send(Observation::Event(ObservedEvent {
+                at: at(25),
+                event: CaptureEvent::Wake,
+            }))
+            .expect("queued late observation");
+        feedback
+            .send(Feedback::Ended)
+            .expect("scripted database completion");
+        capture
+            .shutdown(Shutdown::new(at(22), RunEndReason::Shutdown), &mut resolver)
+            .expect("drain observations and clamp sampled shutdown");
+        assert_eq!(capture.at, at(30));
+        assert_eq!(capture.core.state(), CaptureState::Ended);
+        assert_eq!(
+            capture.writer.shutdown().expect("final settlement").at,
+            at(30)
+        );
     }
 }

@@ -3,6 +3,12 @@ use crate::rules::registry::{DecisionParts, RegistryCommand, RegistryState, Rule
 use std::time::Duration;
 use std::{collections::BTreeSet, sync::Arc};
 
+impl Timestamp {
+    fn advance(self, duration: Duration) -> Self {
+        self.checked_advance(duration).expect("test timestamp")
+    }
+}
+
 fn utc(ms: i64) -> UtcInstant {
     UtcInstant::try_from(ms).expect("test UTC")
 }
@@ -836,14 +842,27 @@ fn idle_threshold_wrap_errors_exceptions_and_separate_mask() {
         policy,
         exceptions: vec![],
     };
-    assert_eq!(sample.decide(at(179_999)).next_check_mono, mono(180_000));
-    assert!(sample.decide(at(179_999)).idle().is_none());
+    assert_eq!(
+        sample
+            .decide(at(179_999))
+            .expect("valid idle sample")
+            .next_check_mono,
+        mono(180_000)
+    );
+    assert!(
+        sample
+            .decide(at(179_999))
+            .expect("valid idle sample")
+            .idle()
+            .is_none()
+    );
     let sample = IdleSample {
         tick: Duration::from_millis(180_000),
         ..sample
     };
     let record = sample
         .decide(at(180_000))
+        .expect("valid idle sample")
         .idle()
         .expect("exact boundary idle");
     assert_eq!(record.start, at(180_000));
@@ -856,14 +875,19 @@ fn idle_threshold_wrap_errors_exceptions_and_separate_mask() {
         },
         exceptions: vec![],
     };
-    assert!(wrap.decide(at(1_000)).idle().is_some());
+    assert!(
+        wrap.decide(at(1_000))
+            .expect("valid idle sample")
+            .idle()
+            .is_some()
+    );
     let future = IdleSample {
         tick: Duration::from_millis(1_000),
         last_input: LastInput::Tick(1_001),
         ..sample.clone()
     };
     assert_eq!(
-        future.decide(at(1_000)).error(),
+        future.decide(at(1_000)).expect("valid idle sample").error(),
         Some(ReadLastInputError::FutureLastInput)
     );
     let failed = IdleSample {
@@ -871,7 +895,10 @@ fn idle_threshold_wrap_errors_exceptions_and_separate_mask() {
         ..sample.clone()
     };
     assert_eq!(
-        failed.decide(at(180_000)).error(),
+        failed
+            .decide(at(180_000))
+            .expect("valid idle sample")
+            .error(),
         Some(ReadLastInputError::ApiFailed)
     );
     let mut fixture = Fixture::active();
@@ -880,7 +907,9 @@ fn idle_threshold_wrap_errors_exceptions_and_separate_mask() {
     let grant = ExceptionGrant {
         kind: IdleException::AppExempt,
         started_utc: utc(180_100),
-        until_utc: UtcInstant::new(jiff::Timestamp::MAX),
+        until_utc: utc(180_100)
+            .checked_add(limits::EXCEPTION_CAP * 2)
+            .expect("long grant"),
     };
     assert_eq!(grant.expires_at(), utc(7_380_100));
     let excepted = IdleSample {
@@ -2054,4 +2083,876 @@ fn offline_web_privacy_drops_titles_immediately_without_changing_non_browser_cap
         Some("allowed offline title")
     );
     fixture.finish(at(20));
+}
+
+#[test]
+fn tolerated_drift_midnight_boundaries_stay_inside_the_row() {
+    for start in [
+        at(1_000),
+        Timestamp {
+            utc: utc(-2_000),
+            mono: mono(0),
+        },
+    ] {
+        let mut fixture = Fixture::new(start);
+        let _ = fixture.send(
+            start,
+            CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+        );
+        let _ = fixture.review(start, window(1, "initial"));
+        let sample = if start.utc == utc(1_000) {
+            Timestamp {
+                utc: utc(-500),
+                mono: mono(1_100),
+            }
+        } else {
+            Timestamp {
+                utc: utc(-100),
+                mono: mono(2_500),
+            }
+        };
+        let _ = fixture.hook(sample, window(1, "midnight drift"));
+        fixture.finish(Timestamp {
+            utc: start
+                .utc
+                .checked_add(Duration::from_millis(3_000))
+                .expect("UTC"),
+            mono: start.mono.advance(Duration::from_millis(3_000)),
+        });
+    }
+}
+
+#[test]
+fn policy_changes_close_the_old_segment_before_reevaluation() {
+    for offset in [-5_000, 5_000] {
+        enum PolicyTrigger {
+            Explicit,
+            RuleEpoch,
+        }
+        for trigger in [PolicyTrigger::Explicit, PolicyTrigger::RuleEpoch] {
+            let mut fixture = Fixture::active();
+            if matches!(trigger, PolicyTrigger::RuleEpoch) {
+                fixture.policy(
+                    &rule(
+                        "title_hidden",
+                        "{field='app.exe_name',op='equals',value='app.exe'}",
+                    ),
+                    0,
+                );
+            }
+            let changed = Timestamp {
+                utc: utc(offset),
+                mono: mono(200),
+            };
+            let event = if matches!(trigger, PolicyTrigger::RuleEpoch) {
+                reading(ObservationSource::Review, window(1, "new rules"))
+            } else {
+                CaptureEvent::PolicyChanged(PolicyObservation::Refresh)
+            };
+            let step = fixture.send(changed, event);
+            assert!(step.writes.iter().any(|write| matches!(write, CaptureWrite::CloseInterval { at: end, reason: IntervalEndReason::ClockJump, .. } if *end == at(200))), "old interval must close through its segment: {step:?}");
+            fixture.finish(changed.advance(Duration::from_millis(10)));
+        }
+    }
+}
+
+#[test]
+fn tolerated_backward_utc_orders_waiting_gaps_coverage_and_policy_closes() {
+    let mut fixture = Fixture::active();
+    let _ = fixture.send(
+        at(10),
+        CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
+    );
+    let ahead = Timestamp {
+        utc: utc(1_100),
+        mono: mono(100),
+    };
+    let _ = fixture.send(
+        ahead,
+        CaptureEvent::Stop(StopChange::End(StopReason::Locked)),
+    );
+    let reviewed = fixture.review(at(200), window(2, "review"));
+    assert!(
+        reviewed
+            .coverage
+            .iter()
+            .all(|span| span.range.end.utc >= span.range.start.utc)
+    );
+    let _ = fixture.send(
+        Timestamp {
+            utc: utc(60_000),
+            mono: mono(58_000),
+        },
+        CaptureEvent::EventOverload,
+    );
+    let checkpoint = fixture.send(at(59_000), CaptureEvent::Wake);
+    assert!(
+        checkpoint
+            .coverage
+            .iter()
+            .all(|span| span.range.end.utc >= span.range.start.utc)
+    );
+    let _ = fixture.review(at(59_010), window(1, "recovered"));
+    let _ = fixture.send(
+        Timestamp {
+            utc: utc(60_020),
+            mono: mono(59_020),
+        },
+        CaptureEvent::PolicyChanged(PolicyObservation::Refresh),
+    );
+    let _ = fixture.send(
+        at(59_030),
+        CaptureEvent::PolicyChanged(PolicyObservation::Refresh),
+    );
+    fixture.finish(at(59_040));
+}
+
+#[test]
+fn admission_rejects_submillisecond_timestamps_and_exception_deadlines() {
+    let fractional = UtcInstant::new(jiff::Timestamp::from_nanosecond(1).expect("fractional UTC"));
+    assert!(
+        CaptureCore::start(
+            RunId::new(1),
+            Timestamp {
+                utc: fractional,
+                mono: mono(0)
+            }
+        )
+        .is_err()
+    );
+    let mut fixture = Fixture::active();
+    let sample = IdleSample {
+        tick: Duration::ZERO,
+        last_input: LastInput::Tick(0),
+        policy: IdlePolicy::default(),
+        exceptions: vec![ExceptionGrant {
+            kind: IdleException::KeepTiming,
+            started_utc: utc(0),
+            until_utc: fractional,
+        }],
+    };
+    assert!(matches!(
+        sample.decide(at(0)),
+        Err(AdvanceTimeError::Submillisecond)
+    ));
+    for input in [
+        CaptureInput {
+            at: Timestamp {
+                utc: fractional,
+                mono: mono(1),
+            },
+            event: CaptureEvent::Wake,
+            rules: fixture.rules.snapshots().load(),
+        },
+        CaptureInput {
+            at: at(0),
+            event: CaptureEvent::Idle(sample),
+            rules: fixture.rules.snapshots().load(),
+        },
+    ] {
+        let before = format!("{:?}", fixture.core);
+        assert!(matches!(
+            fixture.core.step(input),
+            Err(StepCaptureError::Time {
+                source: AdvanceTimeError::Submillisecond
+            })
+        ));
+        assert_eq!(format!("{:?}", fixture.core), before);
+    }
+}
+
+#[test]
+fn startup_readiness_uses_the_active_segment_after_clock_reopens() {
+    enum StartupEvidence {
+        Unavailable,
+        LockAndUnlock,
+    }
+    for change in [ClockChange::Resume, ClockChange::TimeChange] {
+        for evidence in [StartupEvidence::Unavailable, StartupEvidence::LockAndUnlock] {
+            for reason in [None, Some(StopReason::Locked)] {
+                let mut fixture = Fixture::new(at(0));
+                let _ = fixture.send(at(10), CaptureEvent::Session(SessionStatus::Unavailable));
+                if matches!(evidence, StartupEvidence::LockAndUnlock) {
+                    let _ = fixture.send(
+                        at(20),
+                        CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
+                    );
+                    let _ = fixture.send(
+                        at(30),
+                        CaptureEvent::Stop(StopChange::End(StopReason::Locked)),
+                    );
+                }
+                let changed = Timestamp {
+                    utc: utc(-5_000),
+                    mono: mono(100),
+                };
+                let _ = fixture.send(changed, CaptureEvent::ClockChanged(change));
+                let ready = changed.advance(Duration::from_millis(10));
+                let step = fixture.send(
+                    ready,
+                    CaptureEvent::Session(SessionStatus::Ready(reason.into_iter().collect())),
+                );
+                assert!(step.writes.iter().all(|write| match write {
+                    CaptureWrite::OpenAvailability(row) => row.start.mono >= changed.mono,
+                    _ => true,
+                }));
+                let _ =
+                    fixture.review(ready.advance(Duration::from_millis(10)), window(1, "ready"));
+                fixture.finish(ready.advance(Duration::from_millis(20)));
+            }
+        }
+    }
+}
+
+struct DriftSequence {
+    seed: u64,
+}
+impl DriftSequence {
+    // Fixed LCG parameters keep every failing sequence reproducible.
+    const MULTIPLIER: u64 = 6_364_136_223_846_793_005;
+    const INCREMENT: u64 = 1;
+    fn next(&mut self) -> u64 {
+        self.seed = self
+            .seed
+            .wrapping_mul(Self::MULTIPLIER)
+            .wrapping_add(Self::INCREMENT);
+        self.seed
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DriftStream {
+    Foreground,
+    Availability(AvailabilityReason),
+    Gap,
+}
+struct DriftRow {
+    segment: SegmentId,
+    start: Timestamp,
+    stream: DriftStream,
+}
+#[derive(Default)]
+struct DriftAudit {
+    rows: std::collections::BTreeMap<RowId, DriftRow>,
+    segments: std::collections::BTreeMap<SegmentId, TimeRange>,
+    streams:
+        std::collections::BTreeMap<SegmentId, std::collections::BTreeMap<DriftStream, Timestamp>>,
+}
+impl DriftAudit {
+    fn check_range(&mut self, segment: SegmentId, stream: DriftStream, range: TimeRange) {
+        let bounds = self.segments.get(&segment).expect("known segment");
+        assert!(
+            range.start.mono >= bounds.start.mono && range.end.mono <= bounds.end.mono,
+            "monotonic bounds: {range:?} in {bounds:?}"
+        );
+        assert!(
+            range.start.utc >= bounds.start.utc && range.end.utc <= bounds.end.utc,
+            "UTC bounds: {range:?} in {bounds:?}"
+        );
+        assert!(
+            range.end.mono >= range.start.mono && range.end.utc >= range.start.utc,
+            "ordered range: {range:?}"
+        );
+        if let Some(previous) = self
+            .streams
+            .entry(segment)
+            .or_default()
+            .insert(stream, range.end)
+        {
+            assert!(
+                previous.mono <= range.start.mono && previous.utc <= range.start.utc,
+                "overlap in {stream:?}: {previous:?}, {range:?}"
+            );
+        }
+    }
+    fn check(mut self, writes: &[CaptureWrite]) {
+        for write in writes {
+            match write {
+                CaptureWrite::OpenClockSegment { segment, at } => {
+                    self.segments.insert(
+                        *segment,
+                        TimeRange {
+                            start: *at,
+                            end: *at,
+                        },
+                    );
+                }
+                CaptureWrite::CloseClockSegment { segment, at, .. } => {
+                    self.segments.get_mut(segment).expect("opened segment").end = *at;
+                }
+                _ => {}
+            }
+        }
+        for write in writes {
+            match write {
+                CaptureWrite::OpenInterval(row) => {
+                    self.rows.insert(
+                        row.id,
+                        DriftRow {
+                            segment: row.segment,
+                            start: row.start,
+                            stream: DriftStream::Foreground,
+                        },
+                    );
+                }
+                CaptureWrite::OpenAvailability(row) => {
+                    self.rows.insert(
+                        row.id,
+                        DriftRow {
+                            segment: row.segment,
+                            start: row.start,
+                            stream: DriftStream::Availability(row.reason),
+                        },
+                    );
+                }
+                CaptureWrite::CloseInterval { id, at, .. }
+                | CaptureWrite::CloseAvailability { id, at, .. } => {
+                    let row = self.rows.remove(id).expect("opened row");
+                    self.check_range(
+                        row.segment,
+                        row.stream,
+                        TimeRange {
+                            start: row.start,
+                            end: *at,
+                        },
+                    );
+                }
+                CaptureWrite::RecordGap(gap) => {
+                    self.check_range(gap.segment, DriftStream::Gap, gap.range)
+                }
+                _ => {}
+            }
+        }
+        assert!(self.rows.is_empty());
+    }
+}
+
+#[test]
+fn seeded_small_drift_sequences_preserve_segment_bounds_order_and_duration() {
+    const CASES: u64 = 24;
+    const EVENTS: u64 = 400;
+    const MAX_STEP_MS: u64 = 400;
+    const SEED: u64 = 0x52ed_bac4;
+    let tolerance = i64::try_from(limits::CLOCK_DRIFT.as_millis()).expect("tolerance");
+    let offset_count = u64::try_from(tolerance * 2 + 1).expect("offset range");
+    for case in 0..CASES {
+        let mut sequence = DriftSequence { seed: SEED + case };
+        let origin = Timestamp {
+            utc: utc(-1_500),
+            mono: mono(0),
+        };
+        let mut fixture = Fixture::new(origin);
+        let _ = fixture.send(
+            origin,
+            CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+        );
+        let _ = fixture.review(origin, window(1, "initial"));
+        let mut now = origin;
+        let mut anchor = origin;
+        let mut last_input = 0;
+        for _ in 0..EVENTS {
+            now.mono = now
+                .mono
+                .advance(Duration::from_millis(sequence.next() % MAX_STEP_MS + 1));
+            let projected = anchor.project(now.mono);
+            let offset = i64::try_from(sequence.next() % offset_count).expect("offset") - tolerance;
+            now.utc = utc(i64::try_from(projected.utc).expect("UTC millis") + offset);
+            if sequence.next().is_multiple_of(8) {
+                last_input = u32::try_from(now.mono.get()).expect("small input tick");
+            }
+            let event = match sequence.next() % 10 {
+                0 => CaptureEvent::PolicyChanged(PolicyObservation::Refresh),
+                1 => CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
+                2 => CaptureEvent::Stop(StopChange::End(StopReason::Locked)),
+                3 => CaptureEvent::EventOverload,
+                4 => CaptureEvent::Wake,
+                5 => {
+                    if sequence.next().is_multiple_of(7) {
+                        now.utc = projected
+                            .utc
+                            .checked_sub(limits::CLOCK_DRIFT + Duration::from_millis(1))
+                            .expect("small rollback");
+                    }
+                    CaptureEvent::ClockChanged(ClockChange::TimeChange)
+                }
+                6 => CaptureEvent::Idle(IdleSample {
+                    tick: Duration::from_millis(now.mono.get()),
+                    last_input: LastInput::Tick(last_input),
+                    policy: IdlePolicy {
+                        threshold: Duration::from_millis(500),
+                        version: 1,
+                    },
+                    exceptions: Vec::new(),
+                }),
+                _ => reading(
+                    ObservationSource::Review,
+                    window(sequence.next() % 3 + 1, "drift"),
+                ),
+            };
+            let step = fixture.send(now, event);
+            for write in &step.writes {
+                if let CaptureWrite::OpenClockSegment { at, .. } = write {
+                    anchor = *at;
+                }
+            }
+            assert!(
+                step.coverage
+                    .iter()
+                    .all(|span| span.range.start.utc <= span.range.end.utc
+                        && span.range.start.mono <= span.range.end.mono),
+                "case {case}: {step:?}"
+            );
+        }
+        let writes = fixture.finish(anchor.project(now.mono.advance(Duration::from_millis(1))));
+        DriftAudit::default().check(&writes);
+    }
+}
+
+#[test]
+fn tolerated_drift_uses_sampled_utc_for_policies_and_projected_midnight_for_facts() {
+    let origin = Timestamp {
+        utc: utc(-1_000),
+        mono: mono(0),
+    };
+    let mut fixture = Fixture::new(origin);
+    let _ = fixture.send(
+        origin,
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    let _ = fixture.review(origin, window(1, "initial"));
+    let _ = fixture.send(
+        origin,
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::KeepTiming,
+            started: origin.utc,
+            until: utc(500),
+        }),
+    );
+    let ahead = Timestamp {
+        utc: utc(600),
+        mono: mono(100),
+    };
+    let step = fixture.send(ahead, CaptureEvent::Wake);
+    assert!(step.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::ClearTimedPolicy(TimedPolicyKind::KeepTiming)
+    )));
+    assert!(
+        step.effects
+            .contains(&CaptureEffect::ScheduleTimer(Timer::Arm(mono(1_000)))),
+        "midnight must follow the segment's mapping: {step:?}"
+    );
+    fixture.finish(origin.project(mono(1_100)));
+}
+
+#[test]
+fn clock_jump_splits_the_old_row_before_closing_its_segment() {
+    let mut fixture = Fixture::active();
+    let elapsed = limits::UTC_DAY + Duration::from_secs(1);
+    let now = at(0).advance(elapsed);
+    let changed = Timestamp {
+        utc: now.utc.checked_add(Duration::from_secs(3)).expect("jump"),
+        ..now
+    };
+    let step = fixture.send(
+        changed,
+        CaptureEvent::PolicyChanged(PolicyObservation::Refresh),
+    );
+    assert!(step.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::CloseInterval {
+            reason: IntervalEndReason::MidnightSplit,
+            ..
+        }
+    )));
+    fixture.finish(changed.advance(Duration::from_millis(1)));
+}
+
+#[test]
+fn overloaded_clock_samples_keep_the_gap_from_the_last_trusted_observation() {
+    let mut fixture = Fixture::active();
+    let changed = Timestamp {
+        utc: utc(-5_000),
+        mono: mono(100),
+    };
+    let _ = fixture.send(changed, CaptureEvent::EventOverload);
+    let _ = fixture.review(
+        changed.advance(Duration::from_millis(10)),
+        window(1, "recovered"),
+    );
+    let writes = fixture.finish(changed.advance(Duration::from_millis(20)));
+    let gap_duration: Duration = writes
+        .iter()
+        .filter_map(|write| match write {
+            CaptureWrite::RecordGap(gap) => Some(
+                gap.range
+                    .end
+                    .mono
+                    .duration_since(gap.range.start.mono)
+                    .expect("ordered gap"),
+            ),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(gap_duration, Duration::from_millis(110));
+}
+
+impl Fixture {
+    fn utc_ceiling() -> UtcInstant {
+        const NANOS_PER_MILLISECOND: i128 = 1_000_000;
+        let limit = UtcInstant::new(jiff::Timestamp::MAX);
+        let fraction = limit
+            .get()
+            .as_nanosecond()
+            .rem_euclid(NANOS_PER_MILLISECOND);
+        limit
+            .checked_sub(Duration::from_nanos(
+                u64::try_from(fraction).expect("fraction"),
+            ))
+            .expect("whole millisecond ceiling")
+    }
+    fn reject_time(&mut self, now: Timestamp, event: CaptureEvent) {
+        let before = format!("{:?}", self.core);
+        let result = self.core.step(CaptureInput {
+            at: now,
+            event,
+            rules: self.rules.snapshots().load(),
+        });
+        assert!(
+            matches!(result, Err(StepCaptureError::Time { .. })),
+            "expected typed rejection: {result:?}"
+        );
+        assert_eq!(
+            format!("{:?}", self.core),
+            before,
+            "time rejection changed capture state"
+        );
+    }
+}
+
+#[test]
+fn suppression_near_utc_limit_uses_only_monotonic_deadlines() {
+    enum GrantSource {
+        Sample,
+        Policy,
+    }
+    for source in [GrantSource::Sample, GrantSource::Policy] {
+        let mut fixture = Fixture::active();
+        let until = Fixture::utc_ceiling();
+        let mut exceptions = Vec::new();
+        match source {
+            GrantSource::Sample => exceptions.push(ExceptionGrant {
+                kind: IdleException::KeepTiming,
+                started_utc: utc(0),
+                until_utc: until,
+            }),
+            GrantSource::Policy => {
+                let _ = fixture.send(
+                    at(0),
+                    CaptureEvent::SetTimedState(TimedState {
+                        policy: TimedPolicy::KeepTiming,
+                        started: utc(0),
+                        until,
+                    }),
+                );
+            }
+        }
+        let observed = Timestamp {
+            utc: utc(500),
+            mono: mono(1_000),
+        };
+        let sample = IdleSample {
+            tick: Duration::from_millis(1_000),
+            last_input: LastInput::Tick(1_000),
+            policy: IdlePolicy::default(),
+            exceptions,
+        };
+        let step = fixture.send(observed, CaptureEvent::Idle(sample));
+        assert!(step.writes.iter().all(|write| !matches!(write, CaptureWrite::OpenAvailability(row) if row.reason == AvailabilityReason::Idle)));
+        fixture.finish(at(1_500));
+    }
+}
+
+#[test]
+fn persistence_gap_projection_overflow_is_rejected_without_mutation() {
+    let mut fixture = Fixture::active();
+    fixture.reject_time(
+        at(10),
+        CaptureEvent::PersistenceGap {
+            reason: GapReason::DatabaseError,
+            lost_through: Timestamp {
+                utc: utc(0),
+                mono: mono(u64::MAX / 2),
+            },
+        },
+    );
+    fixture.finish(at(20));
+}
+
+#[test]
+fn old_segment_calendar_limit_is_rejected_without_mutation() {
+    let ceiling = Fixture::utc_ceiling();
+    let elapsed = limits::UTC_DAY * 3;
+    let anchor = Timestamp {
+        utc: ceiling.checked_sub(elapsed).expect("anchor"),
+        mono: mono(0),
+    };
+    for reason in [None, Some(StopReason::Locked)] {
+        let mut fixture = Fixture::new(anchor);
+        let _ = fixture.send(
+            anchor,
+            CaptureEvent::Session(SessionStatus::Ready(reason.into_iter().collect())),
+        );
+        if reason.is_none() {
+            let _ = fixture.review(anchor, window(1, "near limit"));
+        }
+        fixture.reject_time(
+            Timestamp {
+                utc: anchor.utc,
+                mono: anchor.mono.advance(elapsed),
+            },
+            CaptureEvent::ClockChanged(ClockChange::TimeChange),
+        );
+    }
+}
+
+#[test]
+fn keep_timing_near_utc_limit_does_not_require_a_two_hour_cap() {
+    let until = Fixture::utc_ceiling();
+    let now = Timestamp {
+        utc: until.checked_sub(Duration::from_secs(30)).expect("now"),
+        mono: mono(0),
+    };
+    let sample = IdleSample {
+        tick: Duration::ZERO,
+        last_input: LastInput::Tick(0),
+        policy: IdlePolicy::default(),
+        exceptions: vec![ExceptionGrant {
+            kind: IdleException::KeepTiming,
+            started_utc: until
+                .checked_sub(Duration::from_secs(60))
+                .expect("grant start"),
+            until_utc: until,
+        }],
+    };
+    let decision = sample.decide(now).expect("representable keep-timing grant");
+    assert_eq!(
+        decision.status,
+        IdleStatus::Suppressed(IdleException::KeepTiming)
+    );
+    assert_eq!(decision.next_check_mono, mono(30_000));
+}
+
+#[test]
+fn drifted_shutdown_closes_the_active_segment_without_reopening_or_review() {
+    for offset in [-5_000, 5_000] {
+        for stop in [None, Some(StopReason::Locked)] {
+            let mut fixture = Fixture::active();
+            if let Some(reason) = stop {
+                let _ = fixture.send(at(10), CaptureEvent::Stop(StopChange::Begin(reason)));
+            }
+            let step = fixture.send(
+                Timestamp {
+                    utc: utc(offset),
+                    mono: mono(200),
+                },
+                CaptureEvent::Shutdown,
+            );
+            assert!(
+                !step
+                    .writes
+                    .iter()
+                    .any(|write| matches!(write, CaptureWrite::OpenClockSegment { .. })),
+                "shutdown reopened a segment: {step:?}"
+            );
+            assert!(!step.effects.contains(&CaptureEffect::ReviewForeground));
+            assert!(step.writes.iter().any(|write| matches!(write, CaptureWrite::CloseClockSegment { at: end, reason: ClockEndReason::RunEnd, .. } if *end == at(200))));
+            assert!(step.writes.iter().any(|write| match write {
+                CaptureWrite::CloseInterval {
+                    reason: IntervalEndReason::Shutdown,
+                    ..
+                } => stop.is_none(),
+                CaptureWrite::CloseAvailability {
+                    reason: AvailabilityEndReason::Shutdown,
+                    ..
+                } => stop.is_some(),
+                _ => false,
+            }));
+            assert_conservation(&fixture.writes);
+        }
+    }
+}
+
+#[test]
+fn idle_evidence_uses_the_segment_mapping_under_negative_drift() {
+    let mut fixture = Fixture::active();
+    let elapsed = limits::IDLE_THRESHOLD;
+    let projected = at(0).advance(elapsed);
+    let observed = Timestamp {
+        utc: projected
+            .utc
+            .checked_sub(Duration::from_millis(1_500))
+            .expect("drift"),
+        ..projected
+    };
+    let sample = IdleSample {
+        tick: elapsed,
+        last_input: LastInput::Tick(0),
+        policy: IdlePolicy::default(),
+        exceptions: Vec::new(),
+    };
+    let step = fixture.send(observed, CaptureEvent::Idle(sample));
+    let record = step
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            CaptureWrite::OpenAvailability(row) if row.reason == AvailabilityReason::Idle => {
+                row.idle
+            }
+            _ => None,
+        })
+        .expect("idle evidence");
+    assert_eq!(record.detected, projected);
+    assert_eq!(record.last_input, at(0));
+    assert_eq!(
+        record
+            .start
+            .utc
+            .duration_since(record.last_input.utc)
+            .expect("ordered evidence"),
+        record.policy.threshold
+    );
+    fixture.finish(projected.advance(Duration::from_millis(1)));
+}
+
+#[test]
+fn remaining_submillisecond_inputs_are_rejected_without_mutation() {
+    let fractional = UtcInstant::new(jiff::Timestamp::from_nanosecond(1).expect("fraction"));
+    let idle = IdleSample {
+        tick: Duration::ZERO,
+        last_input: LastInput::Tick(0),
+        policy: IdlePolicy::default(),
+        exceptions: Vec::new(),
+    };
+    for event in [
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::KeepTiming,
+            started: fractional,
+            until: utc(10),
+        }),
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::KeepTiming,
+            started: utc(0),
+            until: fractional,
+        }),
+        CaptureEvent::RegisterDeadline {
+            owner: SchedulerKind::Idle,
+            deadline: Deadline::Utc(fractional),
+        },
+        CaptureEvent::PersistenceGap {
+            reason: GapReason::DatabaseError,
+            lost_through: Timestamp {
+                utc: fractional,
+                mono: mono(0),
+            },
+        },
+        CaptureEvent::Idle(IdleSample {
+            tick: Duration::from_nanos(1),
+            ..idle.clone()
+        }),
+        CaptureEvent::Idle(IdleSample {
+            policy: IdlePolicy {
+                threshold: Duration::from_nanos(1),
+                ..IdlePolicy::default()
+            },
+            ..idle
+        }),
+    ] {
+        let mut fixture = Fixture::active();
+        fixture.reject_time(at(0), event);
+    }
+}
+
+#[test]
+fn future_keep_timing_near_limit_is_inactive_before_capture_admission_rejects_it() {
+    let mut fixture = Fixture::active();
+    let until = Fixture::utc_ceiling();
+    let started = until
+        .checked_sub(Duration::from_secs(60))
+        .expect("future start");
+    let _ = fixture.send(
+        at(0),
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::KeepTiming,
+            started,
+            until,
+        }),
+    );
+    let sample = IdleSample {
+        tick: Duration::from_millis(1_000),
+        last_input: LastInput::Tick(1_000),
+        policy: IdlePolicy {
+            threshold: Duration::ZERO,
+            ..IdlePolicy::default()
+        },
+        exceptions: Vec::new(),
+    };
+    let step = fixture.send(at(1_000), CaptureEvent::Idle(sample.clone()));
+    assert!(step.writes.iter().any(|write| matches!(write, CaptureWrite::OpenAvailability(row) if row.reason == AvailabilityReason::Idle)), "future policy must not suppress idle");
+    fixture.reject_time(
+        Timestamp {
+            utc: started,
+            mono: mono(2_000),
+        },
+        CaptureEvent::Idle(sample),
+    );
+    fixture.finish(at(3_000));
+}
+
+#[test]
+fn empty_startup_readiness_after_unlock_has_no_write_batch() {
+    let mut fixture = Fixture::new(at(0));
+    let _ = fixture.send(
+        at(10),
+        CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
+    );
+    let _ = fixture.send(
+        at(20),
+        CaptureEvent::Stop(StopChange::End(StopReason::Locked)),
+    );
+    let ready = fixture.send(
+        at(30),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    assert!(ready.writes.is_empty());
+    assert!(ready.batch.is_none());
+    let _ = fixture.review(at(40), window(1, "ready"));
+    fixture.finish(at(50));
+}
+
+#[test]
+fn shutdown_ignores_a_new_rule_epoch_when_settling_the_active_rows() {
+    let mut fixture = Fixture::active();
+    fixture.policy(
+        &rule(
+            "title_hidden",
+            "{field='app.exe_name',op='equals',value='app.exe'}",
+        ),
+        0,
+    );
+    let step = fixture.send(
+        Timestamp {
+            utc: utc(-5_000),
+            mono: mono(200),
+        },
+        CaptureEvent::Shutdown,
+    );
+    assert!(!step.effects.contains(&CaptureEffect::ReviewForeground));
+    assert!(
+        step.writes
+            .iter()
+            .all(|write| !matches!(write, CaptureWrite::OpenInterval(_)))
+    );
+    assert!(step.writes.iter().any(|write| matches!(write, CaptureWrite::CloseInterval { at: end, reason: IntervalEndReason::Shutdown, .. } if *end == at(200))));
+    assert_conservation(&fixture.writes);
 }

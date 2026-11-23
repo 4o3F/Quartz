@@ -262,7 +262,10 @@ mod tests {
             last_input: LastInput::Tick(u32::MAX - 10),
         }
         .idle();
-        assert_eq!(idle.decide(at).status, IdleStatus::Active);
+        assert_eq!(
+            idle.decide(at).expect("valid idle sample").status,
+            IdleStatus::Active
+        );
         assert!(
             InputSample {
                 tick_ms: 0,
@@ -270,6 +273,7 @@ mod tests {
             }
             .idle()
             .decide(at)
+            .expect("valid idle sample")
             .error()
             .is_some()
         );

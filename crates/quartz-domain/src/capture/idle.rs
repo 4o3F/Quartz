@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use super::{MonoInstant, Timestamp, UtcInstant, limits};
+use super::{AdvanceTimeError, MonoInstant, Timestamp, UtcInstant, limits};
 
 /// Why an idle interval ended early.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,21 +148,63 @@ impl IdleDecision {
 }
 impl IdleSample {
     /// Interprets wrapping input ticks and schedules the next threshold or recovery check.
-    pub fn decide(&self, now: Timestamp) -> IdleDecision {
+    /// # Errors
+    /// Rejects submillisecond inputs and time arithmetic outside the supported range.
+    pub fn decide(&self, now: Timestamp) -> Result<IdleDecision, AdvanceTimeError> {
+        self.decide_at(now, now)
+    }
+    /// Evaluates UTC exceptions on the sample and constructs evidence on the segment mapping.
+    pub(super) fn decide_at(
+        &self,
+        observed: Timestamp,
+        boundary: Timestamp,
+    ) -> Result<IdleDecision, AdvanceTimeError> {
+        self.validate(observed)?;
+        i64::try_from(boundary.utc)?;
+        boundary
+            .utc
+            .checked_sub(Duration::from_millis(u64::from(u32::MAX)))?;
+        Ok(self.decide_validated(observed, boundary))
+    }
+    pub(super) fn validate(&self, now: Timestamp) -> Result<(), AdvanceTimeError> {
+        i64::try_from(now.utc)?;
+        now.utc
+            .checked_sub(Duration::from_millis(u64::from(u32::MAX)))?;
+        MonoInstant::from_millis(0).checked_add(self.tick)?;
+        now.mono.checked_add(self.policy.threshold)?;
+        now.mono.checked_add(limits::IDLE_POLL)?;
+        for grant in &self.exceptions {
+            i64::try_from(grant.started_utc)?;
+            i64::try_from(grant.until_utc)?;
+            if matches!(
+                grant.kind,
+                IdleException::AppExempt | IdleException::Audible
+            ) {
+                grant.started_utc.checked_add(limits::EXCEPTION_CAP)?;
+            }
+            super::Deadline::Utc(grant.until_utc).mono_at(now)?;
+        }
+        Ok(())
+    }
+    fn decide_validated(&self, observed: Timestamp, boundary: Timestamp) -> IdleDecision {
         let age = match self.input_age() {
             Ok(age) => age,
-            Err(error) => return self.retry(now, IdleStatus::Failed(error)),
+            Err(error) => return self.retry(boundary, IdleStatus::Failed(error)),
         };
-        if let Some(grant) = self.exceptions.iter().find(|grant| grant.active_at(now)) {
-            return self.suppressed(now, grant.kind);
+        if let Some(grant) = self
+            .exceptions
+            .iter()
+            .find(|grant| grant.active_at(observed))
+        {
+            return self.suppressed(observed, grant.kind);
         }
         if age < self.policy.threshold {
             return IdleDecision {
                 status: IdleStatus::Active,
-                next_check_mono: now.mono.advance(self.policy.threshold - age),
+                next_check_mono: boundary.mono.advance(self.policy.threshold - age),
             };
         }
-        self.retry(now, IdleStatus::Idle(self.record(now, age)))
+        self.retry(boundary, IdleStatus::Idle(self.record(boundary, age)))
     }
     fn input_age(&self) -> Result<Duration, ReadLastInputError> {
         let tick = match self.last_input {

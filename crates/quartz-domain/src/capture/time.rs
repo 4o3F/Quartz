@@ -164,6 +164,18 @@ pub struct Timestamp {
     pub mono: MonoInstant,
 }
 impl Timestamp {
+    /// Reserves room for midnight splitting, input history, and monotonic deadlines.
+    pub(super) fn validate_capture(self) -> Result<(), AdvanceTimeError> {
+        i64::try_from(self.utc)?;
+        self.utc.checked_add(limits::CAPTURE_UTC_HEADROOM)?;
+        self.utc
+            .checked_sub(Duration::from_millis(u64::from(u32::MAX)))?;
+        let utc_range =
+            Duration::try_from(jiff::Timestamp::MAX.duration_since(jiff::Timestamp::MIN))
+                .map_err(|_| AdvanceTimeError::Monotonic)?;
+        self.mono.checked_add_rounded_up(utc_range)?;
+        Ok(())
+    }
     /// Projects a monotonic reading through this clock-segment anchor.
     /// # Errors
     /// Returns an error for backwards monotonic time or UTC overflow.
@@ -196,10 +208,6 @@ impl Timestamp {
         self.checked_project(mono)
             .expect("clock projection was validated before the transition")
     }
-    pub(super) fn advance(self, duration: Duration) -> Self {
-        self.checked_advance(duration)
-            .expect("capture arithmetic was validated before the transition")
-    }
 }
 
 /// Half-open range belonging to one clock segment.
@@ -211,27 +219,43 @@ pub struct TimeRange {
     pub end: Timestamp,
 }
 impl TimeRange {
+    /// Projects a UTC cut onto this row, clamping it to the row's elapsed range.
+    /// A zero UTC span selects the row start.
+    /// # Errors
+    /// Returns an error for reversed endpoints or arithmetic outside the supported range.
+    pub fn boundary_at(self, utc: UtcInstant) -> Result<Timestamp, AdvanceTimeError> {
+        let wall = self.end.utc.duration_since(self.start.utc)?;
+        let elapsed = self.end.mono.duration_since(self.start.mono)?;
+        let utc = utc.clamp(self.start.utc, self.end.utc);
+        if wall.is_zero() {
+            return Ok(self.start);
+        }
+        let offset = utc.duration_since(self.start.utc)?;
+        let millis = elapsed
+            .as_millis()
+            .checked_mul(offset.as_nanos())
+            .ok_or(AdvanceTimeError::Monotonic)?
+            / wall.as_nanos();
+        let delta = u64::try_from(millis).map_err(|_| AdvanceTimeError::Monotonic)?;
+        Ok(Timestamp {
+            utc,
+            mono: self
+                .start
+                .mono
+                .checked_add(Duration::from_millis(delta))?
+                .clamp(self.start.mono, self.end.mono),
+        })
+    }
     /// Splits at UTC civil midnights, preserving suspended ranges with equal monotonic readings.
     /// # Errors
     /// Returns an error for reversed endpoints or arithmetic outside the supported range.
     pub fn split_midnights(self) -> Result<Vec<Self>, AdvanceTimeError> {
-        let wall = self.end.utc.duration_since(self.start.utc)?;
-        let elapsed = self.end.mono.duration_since(self.start.mono)?;
+        self.end.utc.duration_since(self.start.utc)?;
+        self.end.mono.duration_since(self.start.mono)?;
         let mut pieces = Vec::new();
         let mut start = self.start;
         while start.next_midnight()? < self.end.utc {
-            let utc = start.next_midnight()?;
-            let offset = utc.duration_since(self.start.utc)?;
-            let millis = elapsed
-                .as_millis()
-                .checked_mul(offset.as_nanos())
-                .ok_or(AdvanceTimeError::Monotonic)?
-                / wall.as_nanos();
-            let delta = u64::try_from(millis).map_err(|_| AdvanceTimeError::Monotonic)?;
-            let end = Timestamp {
-                utc,
-                mono: self.start.mono.checked_add(Duration::from_millis(delta))?,
-            };
+            let end = self.boundary_at(start.next_midnight()?)?;
             pieces.push(Self { start, end });
             start = end;
         }

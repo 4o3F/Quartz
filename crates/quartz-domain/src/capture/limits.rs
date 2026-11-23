@@ -32,3 +32,7 @@ pub const WRITE_QUEUE_CAPACITY: usize = 4_096;
 pub const UTC_DAY: Duration = Duration::from_millis(UTC_DAY_MS.unsigned_abs());
 /// Millisecond representation of the UTC fact-splitting limit.
 pub const UTC_DAY_MS: i64 = 86_400_000;
+
+/// Two UTC days reserved for capture boundaries and their next midnights.
+pub(super) const CAPTURE_UTC_HEADROOM: Duration =
+    Duration::from_millis(UTC_DAY_MS.unsigned_abs() * 2);

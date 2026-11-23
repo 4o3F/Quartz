@@ -1810,3 +1810,92 @@ fn startup_warns_and_ignores_removed_browser_context_deadline_without_decoding_i
     assert!(logged.contains(SettingKey::RemovedPrivacyContextDeadline.as_str()));
     assert!(!logged.contains("obsolete, not a timestamp"));
 }
+
+#[test]
+fn uninitialized_startup_discard_repairs_only_the_uncommitted_range() {
+    enum LostBoundary {
+        Unlock,
+        Ready,
+    }
+    for boundary in [LostBoundary::Unlock, LostBoundary::Ready] {
+        let mut fixture = Fixture::new(at(0));
+        fixture.persist(
+            at(10),
+            CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
+        );
+        let lost_at;
+        let settled_at;
+        let mut parts = match boundary {
+            LostBoundary::Unlock => {
+                lost_at = at(20);
+                settled_at = at(10);
+                fixture.step(
+                    lost_at,
+                    CaptureEvent::Stop(StopChange::End(StopReason::Locked)),
+                )
+            }
+            LostBoundary::Ready => {
+                fixture.persist(
+                    at(20),
+                    CaptureEvent::Stop(StopChange::End(StopReason::Locked)),
+                );
+                lost_at = at(30);
+                settled_at = at(20);
+                fixture.step(
+                    lost_at,
+                    CaptureEvent::Session(SessionStatus::Ready(BTreeSet::from([
+                        StopReason::Locked,
+                    ]))),
+                )
+            }
+        };
+        // Exceed the command budget while retaining the real batch coverage.
+        parts.batch.as_mut().expect("batch").writes.resize(
+            limits::WRITE_QUEUE_CAPACITY + 1,
+            CaptureWrite::ClearDeadline {
+                owner: SchedulerKind::Idle,
+            },
+        );
+        let accepted = fixture.shell.accept(parts, lost_at);
+        assert!(
+            accepted
+                .feedback
+                .iter()
+                .any(|event| matches!(event, CaptureEvent::BatchDiscarded(_)))
+        );
+        let repaired = fixture
+            .shell
+            .flush(&mut fixture.store, lost_at, CheckpointCollection::Skip);
+        assert!(
+            repaired.failure().is_none(),
+            "startup repair failed: {:?}",
+            repaired.failure()
+        );
+        let gaps = capture_gaps::table
+            .order(capture_gaps::id)
+            .select(CaptureGapsRow::as_select())
+            .load::<CaptureGapsRow>(&mut fixture.store.writer)
+            .expect("gaps");
+        assert_eq!(gaps.len(), 2);
+        assert_eq!(gaps[0].start_mono_ms, 0);
+        assert_eq!(gaps[0].end_mono_ms, 10);
+        assert_eq!(
+            gaps[1].start_mono_ms,
+            i64::try_from(settled_at.mono).expect("settled boundary")
+        );
+        assert_eq!(
+            gaps[1].end_mono_ms,
+            i64::try_from(lost_at.mono).expect("lost boundary")
+        );
+        let rows = availability_intervals::table
+            .select(AvailabilityIntervalsRow::as_select())
+            .load::<AvailabilityIntervalsRow>(&mut fixture.store.writer)
+            .expect("availability");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].start_mono_ms, 10);
+        assert_eq!(
+            rows[0].end_mono_ms,
+            Some(i64::try_from(settled_at.mono).expect("settled boundary"))
+        );
+    }
+}

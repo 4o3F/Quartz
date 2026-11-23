@@ -44,6 +44,9 @@ pub enum Deadline {
 impl Deadline {
     /// Resolves an absolute deadline to a monotonic timer target, clamping expired work to now.
     pub fn mono_at(self, now: Timestamp) -> Result<MonoInstant, AdvanceTimeError> {
+        if let Self::Utc(at) = self {
+            i64::try_from(at)?;
+        }
         match self {
             Self::Mono(at) => Ok(at.max(now.mono)),
             Self::Utc(at) if at <= now.utc => Ok(now.mono),

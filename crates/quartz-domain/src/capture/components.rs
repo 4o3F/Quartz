@@ -10,8 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug)]
 pub(super) struct ClockSegment {
     pub run: RunId,
-    pub started: Timestamp,
+    /// Last accepted fact boundary in the segment mapping.
     pub last_at: Timestamp,
+    /// Raw reading used to evaluate UTC policy deadlines.
+    pub observed: Timestamp,
+    /// Startup boundary following any previously recorded stop notifications.
+    pub startup_boundary: Timestamp,
     pub anchor: Timestamp,
     pub segment: SegmentId,
     pub maintenance_deadline: MonoInstant,
@@ -20,16 +24,25 @@ impl ClockSegment {
     pub(super) fn new(run: RunId, at: Timestamp, ids: &mut IdAllocator) -> Self {
         Self {
             run,
-            started: at,
             last_at: at,
+            observed: at,
+            startup_boundary: at,
             anchor: at,
             segment: ids.segment(),
             maintenance_deadline: at.mono.advance(super::limits::CHECKPOINT_PERIOD),
         }
     }
+    /// Uses one UTC mapping for all fact boundaries within the active segment.
+    pub(super) fn ordered_boundary(
+        &self,
+        at: Timestamp,
+    ) -> Result<Timestamp, super::AdvanceTimeError> {
+        self.anchor.checked_project(at.mono)
+    }
     pub(super) fn reopen(&mut self, at: Timestamp, ids: &mut IdAllocator) {
         self.segment = ids.segment();
         self.anchor = at;
+        self.startup_boundary = at;
     }
 }
 #[derive(Debug)]
@@ -82,7 +95,9 @@ impl AvailabilitySet {
     pub(super) fn new(at: Timestamp) -> Self {
         Self {
             rows: BTreeMap::new(),
-            idle: IdleSuppression::Eligible { not_before: at },
+            idle: IdleSuppression::Eligible {
+                not_before: at.mono,
+            },
         }
     }
     pub(super) fn open_ids(&self) -> Vec<RowId> {
@@ -100,38 +115,29 @@ impl AvailabilitySet {
     pub(super) fn apply_idle(
         &mut self,
         decision: IdleDecision,
-        at: Timestamp,
-        anchor: Timestamp,
+        at: MonoInstant,
+        anchor: MonoInstant,
     ) -> AvailabilityAction {
         if let IdleStatus::Failed(error) = decision.status {
             return AvailabilityAction::Preserve(error);
         }
         if let IdleStatus::Suppressed(exception) = decision.status {
             self.idle = IdleSuppression::Suppressed {
-                until: at.advance(
-                    decision
-                        .next_check_mono
-                        .duration_since(at.mono)
-                        .expect("idle deadline follows its sample"),
-                ),
+                until: decision.next_check_mono,
             };
             return AvailabilityAction::Close(AvailabilityEndReason::Exception(exception));
         }
         if let IdleSuppression::Suppressed { until } = self.idle {
             self.idle = IdleSuppression::Eligible {
-                not_before: if until.mono <= at.mono { until } else { at },
+                not_before: until.min(at),
             };
         }
         match decision.status {
             IdleStatus::Idle(mut record) => {
-                if let IdleSuppression::Eligible { not_before } = self.idle
-                    && record.start.mono < not_before.mono
-                {
-                    record.start = not_before;
+                if let IdleSuppression::Eligible { not_before } = self.idle {
+                    record.start.mono = record.start.mono.max(not_before);
                 }
-                if record.start.mono < anchor.mono || record.start.utc < anchor.utc {
-                    record.start = anchor;
-                }
+                record.start.mono = record.start.mono.max(anchor);
                 AvailabilityAction::Open(record)
             }
             IdleStatus::Active => AvailabilityAction::Close(AvailabilityEndReason::Resumed),
@@ -216,7 +222,7 @@ impl AvailabilitySet {
         end_reason: AvailabilityEndReason,
         ids: &mut IdAllocator,
         step: &mut CaptureStep,
-    ) {
+    ) -> Result<(), super::AdvanceTimeError> {
         if let Some(mut row) = self.rows.remove(&reason) {
             let end = Timestamp {
                 utc: at.utc.max(row.start.utc),
@@ -226,8 +232,7 @@ impl AvailabilitySet {
                 start: row.start,
                 end,
             }
-            .split_midnights()
-            .expect("ordered segment endpoints");
+            .split_midnights()?;
             for (index, piece) in pieces.iter().enumerate() {
                 if index > 0 {
                     row.id = ids.row();
@@ -246,6 +251,7 @@ impl AvailabilitySet {
                 });
             }
         }
+        Ok(())
     }
     pub(super) fn close_all(
         &mut self,
@@ -253,17 +259,18 @@ impl AvailabilitySet {
         reason: AvailabilityEndReason,
         ids: &mut IdAllocator,
         step: &mut CaptureStep,
-    ) {
+    ) -> Result<(), super::AdvanceTimeError> {
         let reasons: Vec<_> = self.rows.keys().copied().collect();
         for availability in reasons {
-            self.close(availability, at, reason, ids, step);
+            self.close(availability, at, reason, ids, step)?;
         }
+        Ok(())
     }
 }
 #[derive(Debug, Clone, Copy)]
 enum IdleSuppression {
-    Eligible { not_before: Timestamp },
-    Suppressed { until: Timestamp },
+    Eligible { not_before: MonoInstant },
+    Suppressed { until: MonoInstant },
 }
 #[derive(Debug)]
 pub(super) enum AvailabilityAction {
