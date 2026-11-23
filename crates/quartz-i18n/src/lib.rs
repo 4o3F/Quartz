@@ -217,6 +217,21 @@ mod tests {
     }
 
     #[test]
+    fn builtin_extraction_labels_resolve_in_both_catalogs() {
+        let source = include_str!("../../quartz-domain/src/rules/builtin-extraction.toml");
+        for line in source.lines() {
+            let Some(key) = line.strip_prefix("label_key = \"") else {
+                continue;
+            };
+            let key = MessageKey::new(key.strip_suffix('"').expect("quoted label key"));
+            for language in [Language::English, Language::SimplifiedChinese] {
+                assert!(language.has_message(key), "{language}: {key}");
+                assert!(!language.translate(key).is_empty(), "{language}: {key}");
+            }
+        }
+    }
+
+    #[test]
     fn every_locale_has_every_key_and_matching_placeholders() {
         let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
         // Read the backend directly so fallback cannot hide missing keys.

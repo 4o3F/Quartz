@@ -231,6 +231,18 @@ privacy.label.credential_ui:
   en: "Credentials"
 privacy.label.password_manager:
   en: "Password manager"
+extraction.label.vscode:
+  en: "VS Code document and project"
+extraction.label.jetbrains:
+  en: "JetBrains document and project"
+extraction.label.office:
+  en: "Office document"
+extraction.label.browser_profile:
+  en: "Browser title and profile"
+extraction.label.terminal_document:
+  en: "Terminal editor document"
+extraction.label.terminal_tab:
+  en: "Terminal tab title"
 tray.pause:
   en: "Pause"
 tray.keep_timing:

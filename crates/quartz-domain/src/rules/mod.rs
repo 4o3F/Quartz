@@ -41,5 +41,10 @@ pub const BUILTIN_CLASSIFICATION: &str = include_str!("builtin-classification.to
 /// Initial published classification revision.
 pub const BUILTIN_CLASSIFICATION_REVISION: u32 = 1;
 
+/// Embedded document, project, and browser-profile title extractors.
+pub const BUILTIN_EXTRACTION: &str = include_str!("builtin-extraction.toml");
+/// Initial published extraction revision.
+pub const BUILTIN_EXTRACTION_REVISION: u32 = 1;
+
 #[cfg(test)]
 mod tests;

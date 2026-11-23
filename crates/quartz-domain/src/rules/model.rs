@@ -219,7 +219,7 @@ pub struct BuiltinMetadata {
     pub languages: Vec<String>,
     /// Whether samples have verified this entry; absent when verification metadata was omitted.
     pub verified: Option<bool>,
-    /// Translation key for the builtin privacy label, replacing a user-provided label.
+    /// Translation key for the builtin rule label, replacing a user-provided label.
     pub label_key: Option<String>,
 }
 /// Family-specific rule data; unsupported families cannot enter an effective list.

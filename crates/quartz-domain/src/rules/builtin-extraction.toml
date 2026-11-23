@@ -1,0 +1,212 @@
+format = "quartz-rules/1"
+
+[set]
+key = "builtin.extraction"
+kind = "extraction"
+name = "Builtin document extraction"
+
+# Synthetic zh-CN/en fixtures cover these formats; live application verification is pending.
+# All patterns use absolute anchors and the parser's existing bounded regex compiler.
+[[rule]]
+id = "vscode-project"
+label_key = "extraction.label.vscode"
+detector = "builtin.vscode_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'code.exe' }]
+pattern = '\A(?P<dirty>● )?(?P<document>[^\r\n]+?) - (?P<project>[^\r\n]+?)(?: \((?:Workspace|工作区)\))?(?: \[(?:WSL|SSH|Remote|Dev Container): [^\]\r\n]+\])? - Visual Studio Code(?: \[(?:WSL|SSH|Remote|Dev Container): [^\]\r\n]+\])?(?: - (?:WSL|SSH|Remote): [^\r\n]+)?\z'
+
+# A workspace title without an active editor supplies only a project.
+[[rule]]
+id = "vscode-workspace"
+label_key = "extraction.label.vscode"
+detector = "builtin.vscode_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'code.exe' }]
+pattern = '\A(?P<project>[^\r\n]+?) \((?:Workspace|工作区)\)(?: \[(?:WSL|SSH|Remote|Dev Container): [^\]\r\n]+\])? - Visual Studio Code(?: \[(?:WSL|SSH|Remote|Dev Container): [^\]\r\n]+\])?(?: - (?:WSL|SSH|Remote): [^\r\n]+)?\z'
+
+[[rule]]
+id = "vscode-document"
+label_key = "extraction.label.vscode"
+detector = "builtin.vscode_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'code.exe' }]
+pattern = '\A(?P<dirty>● )?(?P<document>[^\r\n]+?)(?: \[(?:WSL|SSH|Remote|Dev Container): [^\]\r\n]+\])? - Visual Studio Code(?: \[(?:WSL|SSH|Remote|Dev Container): [^\]\r\n]+\])?(?: - (?:WSL|SSH|Remote): [^\r\n]+)?\z'
+
+[[rule]]
+id = "jetbrains-idea"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Aidea(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] IntelliJ IDEA)?\z'
+
+[[rule]]
+id = "jetbrains-pycharm"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Apycharm(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] PyCharm)?\z'
+
+[[rule]]
+id = "jetbrains-webstorm"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Awebstorm(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] WebStorm)?\z'
+
+[[rule]]
+id = "jetbrains-rider"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Arider(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] Rider)?\z'
+
+[[rule]]
+id = "jetbrains-clion"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Aclion(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] CLion)?\z'
+
+[[rule]]
+id = "jetbrains-rustrover"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Arustrover(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] RustRover)?\z'
+
+[[rule]]
+id = "jetbrains-goland"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Agoland(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] GoLand)?\z'
+
+[[rule]]
+id = "jetbrains-phpstorm"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Aphpstorm(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] PhpStorm)?\z'
+
+[[rule]]
+id = "jetbrains-rubymine"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Arubymine(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] RubyMine)?\z'
+
+[[rule]]
+id = "jetbrains-datagrip"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Adatagrip(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] DataGrip)?\z'
+
+[[rule]]
+id = "jetbrains-android-studio"
+label_key = "extraction.label.jetbrains"
+detector = "builtin.jetbrains_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "regex", value = '(?i)\Astudio(?:64)?\.exe\z' }]
+pattern = '\A(?P<project>[^\r\n–—]+?) [–—-] (?P<document>[^\r\n–—]+?)(?: [–—-] Android Studio)?\z'
+
+# Only recognized trailing mode annotations are removed; other brackets remain part of the name.
+[[rule]]
+id = "office-word"
+label_key = "extraction.label.office"
+detector = "builtin.office_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'winword.exe' }]
+pattern = '\A(?P<document>[^\r\n]+?)(?: \[(?:Compatibility Mode|Read-Only|Read Only|兼容模式|只读)\]| \((?:Compatibility Mode|Read-Only|Read Only|兼容模式|只读)\)| （(?:兼容模式|只读)）){0,3} - (?:Microsoft )?Word\z'
+
+[[rule]]
+id = "office-excel"
+label_key = "extraction.label.office"
+detector = "builtin.office_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'excel.exe' }]
+pattern = '\A(?P<document>[^\r\n]+?)(?: \[(?:Compatibility Mode|Read-Only|Read Only|兼容模式|只读)\]| \((?:Compatibility Mode|Read-Only|Read Only|兼容模式|只读)\)| （(?:兼容模式|只读)）){0,3} - (?:Microsoft )?Excel\z'
+
+[[rule]]
+id = "office-powerpoint"
+label_key = "extraction.label.office"
+detector = "builtin.office_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'powerpnt.exe' }]
+pattern = '\A(?P<document>[^\r\n]+?)(?: \[(?:Compatibility Mode|Read-Only|Read Only|兼容模式|只读)\]| \((?:Compatibility Mode|Read-Only|Read Only|兼容模式|只读)\)| （(?:兼容模式|只读)）){0,3} - (?:Microsoft )?PowerPoint\z'
+
+# Require the browser brand before the final profile suffix; page-title separators alone are ambiguous.
+[[rule]]
+id = "browser-chrome-profile"
+label_key = "extraction.label.browser_profile"
+detector = "builtin.browser_profile_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'chrome.exe' }]
+pattern = '\A(?P<document>[^\r\n]+) - Google Chrome - (?P<profile>\S(?:[^\r\n]*\S)?)\z'
+
+[[rule]]
+id = "browser-edge-profile"
+label_key = "extraction.label.browser_profile"
+detector = "builtin.browser_profile_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'msedge.exe' }]
+pattern = '\A(?P<document>[^\r\n]+) - Microsoft Edge - (?P<profile>\S(?:[^\r\n]*\S)?)\z'
+
+[[rule]]
+id = "browser-firefox-profile"
+label_key = "extraction.label.browser_profile"
+detector = "builtin.browser_profile_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'firefox.exe' }]
+pattern = '\A(?P<document>[^\r\n]+) [-–—] (?:Mozilla )?Firefox - (?P<profile>\S(?:[^\r\n]*\S)?)\z'
+
+# An editor command naming a file supplies a document; shell and task labels do not.
+[[rule]]
+id = "windows-terminal-document"
+label_key = "extraction.label.terminal_document"
+detector = "builtin.terminal_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'windowsterminal.exe' }]
+pattern = '\A(?:n?vim|nano|emacs) (?P<document>[^\r\n]+\.[A-Za-z0-9]{1,16})(?: - Windows Terminal)?\z'
+
+# A match without named captures keeps the tab title and prevents generic fallback from inventing a document.
+[[rule]]
+id = "windows-terminal-tab"
+label_key = "extraction.label.terminal_tab"
+detector = "builtin.terminal_title"
+languages = ["zh-CN", "en"]
+verified = false
+app = [{ field = "app.exe_name", op = "equals", value = 'windowsterminal.exe' }]
+pattern = '\A(?s:.*)\z'
+

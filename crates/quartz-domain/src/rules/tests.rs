@@ -98,6 +98,100 @@ fn builtin_privacy_is_valid_and_all_language_variants_are_present() {
         );
     }
 }
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtractionFixture {
+    exe: Option<String>,
+    title: Option<String>,
+    language: String,
+    display_name: Option<String>,
+    document: Option<String>,
+    project: Option<String>,
+    profile: Option<String>,
+    dirty: bool,
+    normalized_title: Option<String>,
+    status: String,
+    extractor_rule: Option<String>,
+}
+
+#[test]
+fn builtin_extraction_matches_multilingual_fixtures_and_rejects_lookalikes() {
+    let set = RuleSet::parse(
+        "builtin-extraction.toml",
+        BUILTIN_EXTRACTION,
+        ParseContext {
+            origin: RuleOrigin::Builtin,
+            references: &catalog(),
+        },
+    )
+    .expect("valid embedded extraction rules");
+    set.validate_compilation().expect("bounded builtin regexes");
+    let fixtures: Vec<ExtractionFixture> = serde_json::from_str(include_str!(
+        "../../tests/fixtures/rules/builtin-extraction.json"
+    ))
+    .expect("extraction fixtures");
+    for rule in &set.content.rule {
+        let metadata = rule.builtin.as_ref().expect("builtin metadata");
+        assert_eq!(metadata.verified, Some(false), "no live app verification");
+        assert!(metadata.detector.is_some(), "detector for {}", rule.id);
+        assert!(metadata.label_key.is_some(), "label for {}", rule.id);
+        for language in ["zh-CN", "en"] {
+            assert!(metadata.languages.iter().any(|value| value == language));
+            let explanation = format!("builtin.extraction/{}@1", rule.id);
+            assert!(
+                fixtures.iter().any(|fixture| fixture.language == language
+                    && fixture.extractor_rule.as_deref() == Some(&explanation)),
+                "{} needs a {language} fixture",
+                rule.id
+            );
+        }
+    }
+    let compiled = Resolution::resolve(&[installed(set)], RuleKind::Extraction)
+        .effective
+        .compile()
+        .expect("compile builtin extraction");
+    assert!(compiled.fields().all(Field::is_app));
+    for fixture in fixtures {
+        let mut snapshot = FieldSnapshot::default();
+        for (field, value) in [
+            (Field::ExeName, &fixture.exe),
+            (Field::RawTitle, &fixture.title),
+            (Field::DisplayName, &fixture.display_name),
+        ] {
+            if let Some(value) = value {
+                snapshot.text.insert(field, NfcText::new(value));
+            }
+        }
+        let expected_status = match fixture.status.as_str() {
+            "extracted" => ExtractionStatus::Extracted,
+            "fallback" => ExtractionStatus::Fallback,
+            "empty" => ExtractionStatus::Empty,
+            "unknown" => ExtractionStatus::Unknown,
+            value => panic!("invalid fixture status {value}"),
+        };
+        let result = compiled.evaluate(&snapshot);
+        assert_eq!(
+            result.selected, fixture.extractor_rule,
+            "provenance for {:?}: {:?}",
+            fixture.exe, fixture.title
+        );
+        assert_eq!(
+            result.extraction,
+            Some(Extraction {
+                document: fixture.document,
+                project: fixture.project,
+                profile: fixture.profile,
+                dirty: fixture.dirty,
+                normalized_title: fixture.normalized_title,
+                status: expected_status,
+            }),
+            "outputs for {:?}: {:?}",
+            fixture.exe,
+            fixture.title
+        );
+    }
+}
 #[test]
 fn user_files_reject_every_builtin_only_key() {
     for key in [

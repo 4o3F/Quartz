@@ -231,6 +231,18 @@ privacy.label.credential_ui:
   zh-CN: "凭据界面"
 privacy.label.password_manager:
   zh-CN: "密码管理器"
+extraction.label.vscode:
+  zh-CN: "VS Code 文档与项目"
+extraction.label.jetbrains:
+  zh-CN: "JetBrains 文档与项目"
+extraction.label.office:
+  zh-CN: "Office 文档"
+extraction.label.browser_profile:
+  zh-CN: "浏览器标题与配置文件"
+extraction.label.terminal_document:
+  zh-CN: "终端编辑器文档"
+extraction.label.terminal_tab:
+  zh-CN: "终端标签页标题"
 tray.pause:
   zh-CN: "暂停"
 tray.keep_timing:
