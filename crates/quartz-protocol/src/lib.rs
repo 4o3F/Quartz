@@ -59,8 +59,10 @@ pub use query::{
     QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse, QueryGapReason,
     QueryPendingAwayRequest, QueryPendingAwayResponse, QuerySegmentDetailRequest,
     QuerySegmentDetailResponse, QueryStopReason, QueryTimelineRequest, QueryTimelineResponse,
-    QueryVersions, ReferenceRange, SEGMENT_DETAIL_MAX_SPAN_MS, TimelineDetail, TimelineSegment,
-    TitleExtraction, WindowInstanceRef,
+    QueryUnclassifiedRequest, QueryUnclassifiedResponse, QueryVersions, ReferenceRange,
+    SEGMENT_DETAIL_MAX_SPAN_MS, TimelineDetail, TimelineSegment, TitleExtraction,
+    UNCLASSIFIED_MAX_DAYS, UNCLASSIFIED_MAX_SAMPLES, UNCLASSIFIED_MAX_SEARCH_SCALARS,
+    UnclassifiedGroupBy, UnclassifiedItem, UnclassifiedSampleRange, WindowInstanceRef, WorkEntity,
 };
 
 pub use annotations::{

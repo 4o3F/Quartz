@@ -288,6 +288,9 @@ pub enum Capability {
     /// Visible document rankings, extraction, references and details version 1.
     #[serde(rename = "query.documents.v1")]
     QueryDocumentsV1,
+    /// Grouped unclassified active work version 1.
+    #[serde(rename = "query.unclassified.v1")]
+    QueryUnclassifiedV1,
     /// A feature not understood by this client.
     #[serde(other, skip_serializing)]
     Unknown,

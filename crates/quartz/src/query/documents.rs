@@ -18,10 +18,10 @@ const MAX_REFERENCE_BYTES: usize = quartz_protocol::MAX_FRAME_LEN;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct DocumentIdentity {
-    app: ApplicationId,
-    document: String,
-    project: Option<String>,
-    profile: Option<String>,
+    pub(super) app: ApplicationId,
+    pub(super) document: String,
+    pub(super) project: Option<String>,
+    pub(super) profile: Option<String>,
 }
 impl DocumentIdentity {
     pub(super) fn from_segment(segment: &TimelineSegment) -> Option<Self> {

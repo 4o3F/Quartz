@@ -2274,3 +2274,456 @@ fn empty_unknown_and_workspace_only_extractions_are_excluded_from_rankings() {
     assert_eq!(ranking.documents.len(), 1);
     assert_eq!(ranking.documents[0].active_ms, 1000);
 }
+
+impl QueryFixture {
+    fn unclassified_request(
+        &self,
+        group_by: quartz_protocol::UnclassifiedGroupBy,
+    ) -> quartz_protocol::QueryUnclassifiedRequest {
+        let start_date: quartz_protocol::LocalDate = FIXTURE_DATE.parse().expect("date");
+        quartz_protocol::QueryUnclassifiedRequest {
+            start_date,
+            end_date: start_date.tomorrow().expect("next date"),
+            group_by,
+            search: None,
+            cursor: None,
+        }
+    }
+    fn unclassified(
+        &mut self,
+        request: quartz_protocol::QueryUnclassifiedRequest,
+    ) -> quartz_protocol::QueryUnclassifiedResponse {
+        let response = self
+            .run(QueryRequest::Unclassified(request))
+            .expect("unclassified query");
+        assert!(serde_json::to_vec(&response).expect("wire").len() <= QUERY_PAGE_BYTES);
+        let QueryResponse::Unclassified(page) = response else {
+            panic!("unclassified response")
+        };
+        page
+    }
+    fn unclassified_metric(&mut self) -> i64 {
+        let request = self.request_day();
+        let QueryResponse::Day(day) = self.run(request).expect("day") else {
+            panic!("day response")
+        };
+        day.metrics.expect("first page metrics").unclassified_ms
+    }
+}
+#[test]
+fn unclassified_groups_equal_day_metric_with_apps_and_omit_entityless_active_time() {
+    use quartz_protocol::{AnnotationKind, BuiltinCategory, UnclassifiedGroupBy};
+    let mut fixture = QueryFixture::new(4);
+    fixture.mask_idle(500, 750);
+    fixture.annotate(
+        1,
+        AnnotationKind::CategoryOverride,
+        1000,
+        2000,
+        Some(BuiltinCategory::Learning),
+    );
+    fixture.annotate(2, AnnotationKind::ActiveOverride, 500, 750, None);
+    fixture.annotate(3, AnnotationKind::Note, 0, 500, None);
+    let request = fixture.unclassified_request(UnclassifiedGroupBy::App);
+    let page = fixture.unclassified(request);
+    assert_eq!(
+        page.items.len(),
+        3,
+        "the classified app is removed; note and unclassified active override remain"
+    );
+    let grouped_ms: i64 = page.items.iter().map(|item| item.active_ms).sum();
+    assert_eq!(grouped_ms, 3000);
+    assert_eq!(
+        grouped_ms,
+        fixture.unclassified_metric(),
+        "without search, every unclassified active slice with a visible app contributes exactly once"
+    );
+    fixture.mask_idle(3000, 4000);
+    fixture.annotate(4, AnnotationKind::OfflineActivity, 3000, 4000, None);
+    let request = fixture.unclassified_request(UnclassifiedGroupBy::App);
+    let page = fixture.unclassified(request);
+    let grouped_ms: i64 = page.items.iter().map(|item| item.active_ms).sum();
+    assert_eq!(grouped_ms, 2000);
+    assert_eq!(
+        fixture.unclassified_metric() - grouped_ms,
+        1000,
+        "entityless offline time is the exact omitted duration"
+    );
+    let request = fixture.unclassified_request(UnclassifiedGroupBy::Document);
+    let documents = fixture.unclassified(request);
+    assert_eq!(
+        documents
+            .items
+            .iter()
+            .map(|item| item.active_ms)
+            .sum::<i64>(),
+        grouped_ms,
+        "these captured facts all have document identities"
+    );
+    fixture.replace_document_title(1, "");
+    let request = fixture.unclassified_request(UnclassifiedGroupBy::Document);
+    let documents = fixture.unclassified(request);
+    let document_ms: i64 = documents.items.iter().map(|item| item.active_ms).sum();
+    assert_eq!(document_ms, 1000);
+    assert!(document_ms <= grouped_ms && grouped_ms <= fixture.unclassified_metric());
+}
+#[test]
+fn unclassified_privacy_hides_stored_titles_and_excluded_apps_from_search_and_groups() {
+    use quartz_protocol::{UnclassifiedGroupBy, WorkEntity};
+    let mut fixture = QueryFixture::new(3);
+    diesel::update(intervals::table.filter(intervals::id.eq(Some(1_i64))))
+        .set(intervals::capture_level.eq(enums::CaptureLevel::Excluded))
+        .execute(&mut fixture.store.writer)
+        .expect("excluded");
+    diesel::update(intervals::table.filter(intervals::id.eq(Some(2_i64))))
+        .set(intervals::capture_level.eq(enums::CaptureLevel::TitleHidden))
+        .execute(&mut fixture.store.writer)
+        .expect("hidden title");
+    fixture.replace_document_title(3, "");
+    let request = fixture.unclassified_request(UnclassifiedGroupBy::App);
+    let page = fixture.unclassified(request);
+    assert_eq!(page.items.len(), 2);
+    assert!(matches!(
+        page.items[0].entity,
+        WorkEntity::App {
+            id: quartz_protocol::ApplicationId(2),
+            ..
+        }
+    ));
+    let wire = serde_json::to_string(&page).expect("wire");
+    assert!(!wire.contains("private title fixture"));
+    assert!(!wire.contains("Application 1"));
+    for grouping in [UnclassifiedGroupBy::App, UnclassifiedGroupBy::Document] {
+        let mut request = fixture.unclassified_request(grouping);
+        request.search = Some("private title fixture".into());
+        assert!(
+            fixture.unclassified(request).items.is_empty(),
+            "hidden fields never match"
+        );
+    }
+    let request = fixture.unclassified_request(UnclassifiedGroupBy::Document);
+    assert!(
+        fixture.unclassified(request).items.is_empty(),
+        "TitleHidden and empty titles have no document group"
+    );
+}
+#[test]
+fn unclassified_paging_is_complete_filtered_before_paging_and_rejects_stale_or_changed_requests() {
+    use quartz_protocol::{UnclassifiedGroupBy, WorkEntity};
+    let mut fixture = QueryFixture::new(1000);
+    for grouping in [UnclassifiedGroupBy::App, UnclassifiedGroupBy::Document] {
+        let mut request = fixture.unclassified_request(grouping);
+        let first = fixture.unclassified(request.clone());
+        let reference_range = first.reference_range.expect("first page reference range");
+        assert_eq!(reference_range.start_utc_ms, fixture.start);
+        let versions = first.versions.clone();
+        let cursor = first.next_cursor.clone().expect("multiple pages");
+        let mut items = first.items;
+        request.cursor = Some(cursor.clone());
+        loop {
+            let page = fixture.unclassified(request.clone());
+            assert!(page.reference_range.is_none());
+            assert_eq!(page.versions, versions);
+            items.extend(page.items);
+            let Some(next) = page.next_cursor else { break };
+            request.cursor = Some(next);
+        }
+        assert_eq!(items.len(), 1000);
+        for (index, item) in items.iter().enumerate() {
+            let app = match &item.entity {
+                WorkEntity::App { id, .. } => *id,
+                WorkEntity::Document {
+                    app, document_ref, ..
+                } => {
+                    let raw_request =
+                        QueryRequest::SegmentDetail(quartz_protocol::QuerySegmentDetailRequest {
+                            start_utc_ms: reference_range.start_utc_ms,
+                            end_utc_ms: reference_range.end_utc_ms,
+                            app: Some(*app),
+                            window_instance: None,
+                            cursor: None,
+                        });
+                    if index == 0 || index == items.len() - 1 {
+                        let QueryResponse::SegmentDetail(raw) =
+                            fixture.run(raw_request).expect("same range raw projection")
+                        else {
+                            panic!("raw response")
+                        };
+                        assert_eq!(raw.versions, versions);
+                        assert!(
+                            raw.intervals
+                                .iter()
+                                .any(|segment| segment.document_ref.as_ref() == Some(document_ref)),
+                            "document references agree across queries over the same range"
+                        );
+                    }
+                    *app
+                }
+            };
+            assert_eq!(app.0, i64::try_from(index).expect("index") + 1);
+        }
+        request.cursor = Some(cursor.clone());
+        request.search = Some("Application 1".into());
+        assert_eq!(
+            fixture
+                .run(QueryRequest::Unclassified(request.clone()))
+                .expect_err("changed search")
+                .kind(),
+            ErrorKind::BadRequest
+        );
+        request.cursor = None;
+        let page = fixture.unclassified(request.clone());
+        assert!(
+            page.next_cursor.is_none(),
+            "filter applied before the page budget"
+        );
+        assert_eq!(page.items.len(), 112);
+        request.search = None;
+        request.cursor = Some(QueryCursor::new(
+            versions.clone(),
+            quartz_protocol::CursorQuery::from(&request),
+            usize::MAX,
+        ));
+        assert_eq!(
+            fixture
+                .run(QueryRequest::Unclassified(request.clone()))
+                .expect_err("invalid position")
+                .kind(),
+            ErrorKind::BadRequest
+        );
+        request.cursor = Some(cursor);
+        fixture.bump_fact_version();
+        assert_eq!(
+            fixture
+                .run(QueryRequest::Unclassified(request))
+                .expect_err("changed inputs")
+                .kind(),
+            ErrorKind::StaleCursor
+        );
+    }
+}
+#[test]
+fn unclassified_folds_multiple_days_and_binds_the_entire_request_range() {
+    use quartz_protocol::UnclassifiedGroupBy;
+    let mut fixture = QueryFixture::new(2);
+    let tomorrow = fixture.start + UTC_DAY_MS;
+    diesel::update(capture_runs::table)
+        .set(capture_runs::ended_utc_ms.eq(Some(tomorrow + UTC_DAY_MS)))
+        .execute(&mut fixture.store.writer)
+        .expect("run end");
+    diesel::update(clock_segments::table)
+        .set(clock_segments::end_utc_ms.eq(Some(tomorrow + UTC_DAY_MS)))
+        .execute(&mut fixture.store.writer)
+        .expect("clock end");
+    diesel::update(clock_segments::table)
+        .set(clock_segments::end_mono_ms.eq(Some(2 * UTC_DAY_MS)))
+        .execute(&mut fixture.store.writer)
+        .expect("clock duration");
+    let mut row = intervals::table
+        .filter(intervals::id.eq(Some(2_i64)))
+        .select(crate::store::rows::IntervalsRow::as_select())
+        .first::<crate::store::rows::IntervalsRow>(&mut fixture.store.writer)
+        .expect("second fact");
+    row.start_utc_ms = tomorrow;
+    row.end_utc_ms = Some(tomorrow + 1000);
+    row.start_mono_ms = UTC_DAY_MS;
+    row.end_mono_ms = Some(UTC_DAY_MS + 1000);
+    row.app_id = Some(1);
+    diesel::update(intervals::table.filter(intervals::id.eq(Some(2_i64))))
+        .set(&row)
+        .execute(&mut fixture.store.writer)
+        .expect("next-day fact");
+    let mut request = fixture.unclassified_request(UnclassifiedGroupBy::Document);
+    request.end_date = request.end_date.tomorrow().expect("two days");
+    let page = fixture.unclassified(request.clone());
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].active_ms, 2000);
+    assert_eq!(page.items[0].sample_ranges.len(), 2);
+    assert_eq!(page.items[0].sample_ranges[1].start_utc_ms, tomorrow);
+    assert_eq!(
+        page.reference_range.expect("range").end_utc_ms,
+        tomorrow + UTC_DAY_MS
+    );
+    let mut sum = 0;
+    for date in [
+        request.start_date,
+        request.start_date.tomorrow().expect("tomorrow"),
+    ] {
+        let QueryResponse::Day(day) = fixture
+            .run(QueryRequest::Day(quartz_protocol::QueryDayRequest {
+                local_date: date,
+                cursor: None,
+            }))
+            .expect("daily baseline")
+        else {
+            panic!("day")
+        };
+        sum += day.metrics.expect("first metrics").unclassified_ms;
+    }
+    assert_eq!(page.items[0].active_ms, sum);
+    let mut cursor_request = request.clone();
+    cursor_request.cursor = Some(QueryCursor::new(
+        page.versions,
+        quartz_protocol::CursorQuery::from(&request),
+        0,
+    ));
+    let next_day = tomorrow.div_euclid(UTC_DAY_MS);
+    diesel::insert_into(crate::store::schema::data_day_versions::table)
+        .values(crate::store::rows::DataDayVersionsRow {
+            source: enums::DataSource::Intervals,
+            utc_date: next_day,
+            version: 1,
+        })
+        .execute(&mut fixture.store.writer)
+        .expect("later input version");
+    assert_eq!(
+        fixture
+            .run(QueryRequest::Unclassified(cursor_request))
+            .expect_err("later day changed")
+            .kind(),
+        ErrorKind::StaleCursor
+    );
+}
+#[test]
+fn unclassified_invalid_dates_and_search_return_bad_request_and_restore_the_reader() {
+    use quartz_protocol::UnclassifiedGroupBy;
+    let mut fixture = QueryFixture::new(1);
+    let mut request = fixture.unclassified_request(UnclassifiedGroupBy::App);
+    request.end_date = request.start_date;
+    assert_eq!(
+        fixture
+            .run(QueryRequest::Unclassified(request.clone()))
+            .expect_err("empty range")
+            .kind(),
+        ErrorKind::BadRequest
+    );
+    request.end_date = "2026-01-04".parse().expect("date");
+    assert_eq!(
+        fixture
+            .run(QueryRequest::Unclassified(request.clone()))
+            .expect_err("too many logical days")
+            .kind(),
+        ErrorKind::BadRequest
+    );
+    request.end_date = request.start_date.tomorrow().expect("date");
+    request.search = Some("界".repeat(quartz_protocol::UNCLASSIFIED_MAX_SEARCH_SCALARS + 1));
+    assert_eq!(
+        fixture
+            .run(QueryRequest::Unclassified(request))
+            .expect_err("search bound")
+            .kind(),
+        ErrorKind::BadRequest
+    );
+    let request = fixture.unclassified_request(UnclassifiedGroupBy::App);
+    assert_eq!(fixture.unclassified(request).items.len(), 1);
+}
+
+#[test]
+fn unclassified_document_ties_use_canonical_identity_and_distinguish_null_and_empty() {
+    use quartz_protocol::{UnclassifiedGroupBy, WorkEntity};
+    let mut fixture = QueryFixture::new(5);
+    diesel::update(intervals::table)
+        .set(intervals::app_id.eq(Some(1_i64)))
+        .execute(&mut fixture.store.writer)
+        .expect("same app");
+    fixture.install_document_rules("format='quartz-rules/1'\n[set]\nkey='user.document-tests'\nkind='extraction'\nname='Parts'\n[[rule]]\nid='parts'\nlabel='Parts'\napp=[{field='app.exe_name',op='regex',value='.*'}]\npattern='\\A(?P<document>[^|]+)(?:\\|(?P<project>[^|]*))?(?:\\|(?P<profile>[^|]*))?\\z'".into());
+    for (index, title) in [
+        "main.rs||",
+        "main.rs|",
+        "main.rs",
+        "cafe\u{301}.rs",
+        "café.rs",
+    ]
+    .iter()
+    .enumerate()
+    {
+        fixture.replace_document_title(i64::try_from(index).expect("index") + 1, title);
+    }
+    let request = fixture.unclassified_request(UnclassifiedGroupBy::Document);
+    let page = fixture.unclassified(request);
+    assert_eq!(page.items.len(), 4);
+    assert_eq!(page.items[0].active_ms, 2000);
+    let WorkEntity::Document { document, .. } = &page.items[0].entity else {
+        panic!("document")
+    };
+    assert_eq!(document, "café.rs");
+    for (index, item) in page.items.iter().enumerate().skip(1) {
+        let WorkEntity::Document {
+            document,
+            project,
+            profile,
+            ..
+        } = &item.entity
+        else {
+            panic!("document")
+        };
+        assert_eq!(document, "main.rs");
+        assert_eq!(project.as_deref(), if index == 1 { None } else { Some("") });
+        assert_eq!(profile.as_deref(), if index == 3 { Some("") } else { None });
+    }
+}
+#[test]
+fn unclassified_uses_final_rule_classification_and_classified_active_overrides() {
+    use quartz_protocol::{AnnotationKind, BuiltinCategory, UnclassifiedGroupBy};
+    let mut fixture = QueryFixture::new(3);
+    diesel::update(applications::table.filter(applications::id.eq(Some(1_i64))))
+        .set(applications::exe_name.eq("code.exe"))
+        .execute(&mut fixture.store.writer)
+        .expect("classified editor");
+    fixture.mask_idle(1000, 2000);
+    fixture.annotate(
+        1,
+        AnnotationKind::ActiveOverride,
+        1000,
+        2000,
+        Some(BuiltinCategory::Learning),
+    );
+    let request = fixture.unclassified_request(UnclassifiedGroupBy::App);
+    let page = fixture.unclassified(request);
+    assert_eq!(
+        page.items.len(),
+        1,
+        "rule and manual classification both remove active work"
+    );
+    assert_eq!(page.items[0].active_ms, 1000);
+    assert_eq!(fixture.unclassified_metric(), 1000);
+}
+#[test]
+fn unclassified_returns_effective_day_offset_and_rejects_cursors_after_offset_changes() {
+    use quartz_protocol::UnclassifiedGroupBy;
+    let mut fixture = QueryFixture::new(1);
+    let request = fixture.unclassified_request(UnclassifiedGroupBy::App);
+    let before = fixture.unclassified(request.clone());
+    let mut continuation = request.clone();
+    continuation.cursor = Some(QueryCursor::new(
+        before.versions,
+        quartz_protocol::CursorQuery::from(&request),
+        0,
+    ));
+    fixture
+        .store
+        .test_day_offset_write(240)
+        .expect("day offset");
+    assert_eq!(
+        fixture
+            .run(QueryRequest::Unclassified(continuation))
+            .expect_err("changed calendar")
+            .kind(),
+        ErrorKind::StaleCursor
+    );
+    let after = fixture.unclassified(request);
+    assert_eq!(after.day_start_offset_min, 240);
+    assert!(!after.time_zone.is_empty());
+    let expected = crate::query::calendar::DayCalendar::new(
+        FIXTURE_DATE.parse().expect("date"),
+        crate::query::calendar::DayStartOffset::try_from(240).expect("offset"),
+    )
+    .expect("offset calendar");
+    let range = after.reference_range.expect("first range");
+    assert_eq!(range.start_utc_ms, expected.range.start);
+    assert_eq!(range.end_utc_ms, expected.range.end);
+    assert!(
+        after.items.is_empty(),
+        "midnight fixture falls before the shifted day start"
+    );
+}

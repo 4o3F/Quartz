@@ -221,6 +221,10 @@ impl ReadSnapshot {
             .take()
             .expect("finished snapshot returns reader"))
     }
+    /// Restarts the bounded scans within the same snapshot for the next logical day.
+    pub(crate) fn restart_scan(&mut self) {
+        self.cursor = ScanCursor::initial();
+    }
     /// Every SQL fact scan returns at most READ_BATCH_ROWS rows before yielding to writes.
     pub(crate) fn read_batch(
         &mut self,

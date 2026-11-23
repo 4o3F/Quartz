@@ -220,7 +220,10 @@ impl ConnectionSession {
                         proto,
                         instance_id: status.instance_id.clone(),
                         core_version: status.core_version.clone(),
-                        capabilities: vec![quartz_protocol::Capability::QueryDocumentsV1],
+                        capabilities: vec![
+                            quartz_protocol::Capability::QueryDocumentsV1,
+                            quartz_protocol::Capability::QueryUnclassifiedV1,
+                        ],
                     },
                 )
             }
@@ -289,6 +292,7 @@ impl ConnectionSession {
                     | Op::QueryTimeline
                     | Op::QueryPendingAway
                     | Op::QuerySegmentDetail
+                    | Op::QueryUnclassified
                     | Op::QueryEntityDetail => Action::from_query(
                         id,
                         crate::query::QueryRequest::decode(request.op, request.body),
@@ -308,7 +312,6 @@ impl ConnectionSession {
                     }
                     Op::Hello
                     | Op::QueryRange
-                    | Op::QueryUnclassified
                     | Op::RuleSetsTree
                     | Op::RuleSetsGet
                     | Op::RuleSetsVersions
@@ -383,6 +386,30 @@ mod tests {
                 state: State::Ready(role),
                 allowed: AllowedRoles::Quartz,
             };
+            let unclassified = session.receive(request(5, Op::QueryUnclassified, serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":"app"})), &receiver.borrow().status);
+            assert!(matches!(
+                unclassified,
+                Action::Query {
+                    request: crate::query::QueryRequest::Unclassified(_),
+                    ..
+                }
+            ));
+            for body in [
+                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":"domain"}),
+                serde_json::json!({"start_date":"bad","end_date":"2025-01-03","group_by":"app"}),
+                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":"app","time_zone":"UTC"}),
+            ] {
+                let response = session.receive(
+                    request(6, Op::QueryUnclassified, body),
+                    &receiver.borrow().status,
+                );
+                assert_eq!(
+                    response.reply().outcome,
+                    ResponseOutcome::Err {
+                        error: ProtocolError::new(ErrorKind::BadRequest)
+                    }
+                );
+            }
             let segment = session.receive(
                 request(
                     2,
@@ -463,7 +490,10 @@ mod tests {
         let hello: HelloResponse = serde_json::from_value(body).expect("hello body");
         assert_eq!(
             hello.capabilities,
-            vec![quartz_protocol::Capability::QueryDocumentsV1]
+            vec![
+                quartz_protocol::Capability::QueryDocumentsV1,
+                quartz_protocol::Capability::QueryUnclassifiedV1
+            ]
         );
         assert!(matches!(
             session.receive(

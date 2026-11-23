@@ -1,0 +1,30 @@
+{
+  "time_zone": "Asia/Shanghai",
+  "day_start_offset_min": 240,
+  "reference_range": {
+    "start_utc_ms": 1735761600000,
+    "end_utc_ms": 1735848000000
+  },
+  "items": [
+    {
+      "entity": {
+        "kind": "document",
+        "document_ref": "doc:opaque",
+        "app": 3,
+        "document": "main.rs",
+        "project": "Quartz",
+        "profile": null
+      },
+      "active_ms": 1000,
+      "sample_ranges": [
+        {
+          "start_utc_ms": 1735776000000,
+          "end_utc_ms": 1735776001000,
+          "clock_segment_id": 2
+        }
+      ]
+    }
+  ],
+  "versions": "version-token",
+  "next_cursor": null
+}

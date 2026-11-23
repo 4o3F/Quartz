@@ -1907,3 +1907,165 @@ fn document_merges_keep_category_source_idle_gap_and_utc_boundaries() {
         "UTC gap survives document merge"
     );
 }
+
+fn unclassified_request(
+    group_by: quartz_protocol::UnclassifiedGroupBy,
+) -> quartz_protocol::QueryUnclassifiedRequest {
+    quartz_protocol::QueryUnclassifiedRequest {
+        start_date: "1970-01-01".parse().expect("date"),
+        end_date: "1970-01-02".parse().expect("date"),
+        group_by,
+        search: None,
+        cursor: None,
+    }
+}
+fn grouped_unclassified(
+    derived: &pipeline::DerivedSegments,
+    request: &quartz_protocol::QueryUnclassifiedRequest,
+) -> Vec<quartz_protocol::UnclassifiedItem> {
+    let mut accumulator = super::unclassified::UnclassifiedAccumulator::new(request);
+    for segment in &derived.segments {
+        accumulator.push(segment, &derived.facts);
+    }
+    accumulator
+        .finish()
+        .into_iter()
+        .map(|group| {
+            group
+                .into_item(
+                    quartz_protocol::ReferenceRange {
+                        start_utc_ms: 0,
+                        end_utc_ms: 1000,
+                    },
+                    &quartz_protocol::QueryVersions("test".into()),
+                )
+                .expect("group projection")
+        })
+        .collect()
+}
+#[test]
+fn unclassified_orders_active_durations_and_identity_ties_and_caps_chronological_samples() {
+    use quartz_protocol::{UnclassifiedGroupBy, WorkEntity};
+    let mut rows = vec![clock(1, 0, 0, 1000)];
+    for index in (0..8).rev() {
+        let mut input = classified_window(index + 1, index * 10, index * 10 + 10, "msedge.exe");
+        if let InputRow::Foreground(row) = &mut input {
+            edit_foreground(row, CaptureLevel::Full, |content| {
+                std::sync::Arc::make_mut(content.app.as_mut().expect("app")).id = ApplicationId(2);
+            });
+        }
+        rows.push(input);
+    }
+    rows.push(classified_window(3, 100, 120, "msedge.exe"));
+    rows.push(classified_window(1, 130, 150, "msedge.exe"));
+    let derived = derive_classified(
+        rows,
+        QueryRange {
+            start: 0,
+            end: 1000,
+        },
+        classifier(&[]),
+    );
+    let items = grouped_unclassified(&derived, &unclassified_request(UnclassifiedGroupBy::App));
+    assert_eq!(
+        items.iter().map(|item| item.active_ms).collect::<Vec<_>>(),
+        vec![80, 20, 20]
+    );
+    let ids: Vec<_> = items
+        .iter()
+        .map(|item| match item.entity {
+            WorkEntity::App { id, .. } => id.0,
+            _ => panic!("app group"),
+        })
+        .collect();
+    assert_eq!(ids, vec![2, 1, 3]);
+    assert_eq!(
+        items[0].sample_ranges.len(),
+        quartz_protocol::UNCLASSIFIED_MAX_SAMPLES
+    );
+    assert_eq!(
+        items[0]
+            .sample_ranges
+            .iter()
+            .map(|sample| sample.start_utc_ms)
+            .collect::<Vec<_>>(),
+        vec![0, 10, 20, 30, 40]
+    );
+    let documents = grouped_unclassified(
+        &derived,
+        &unclassified_request(UnclassifiedGroupBy::Document),
+    );
+    assert_eq!(
+        documents.iter().map(|item| item.active_ms).sum::<i64>(),
+        120
+    );
+}
+#[test]
+fn unclassified_search_folds_visible_names_documents_projects_and_profiles() {
+    use quartz_protocol::UnclassifiedGroupBy;
+    const EXTRACTOR: &str = "format='quartz-rules/1'\n[set]\nkey='user.search'\nkind='extraction'\nname='Search fields'\n[[rule]]\nid='parts'\nlabel='Parts'\napp=[{field='app.exe_name',op='equals',value='msedge.exe'}]\npattern='\\A(?P<document>[^|]+)\\|(?P<project>[^|]+)\\|(?P<profile>[^|]+)\\z'";
+    let mut input = classified_window(1, 0, 100, "msedge.exe");
+    if let InputRow::Foreground(row) = &mut input {
+        edit_foreground(row, CaptureLevel::Full, |content| {
+            content.title = Some("Ｓｔｒａße.rs|ＰＲＯＪＥＣＴ|ＷＯＲＫ".into());
+            std::sync::Arc::make_mut(content.app.as_mut().expect("app")).display_name =
+                "ＥＤＩＴＯＲ".into();
+        });
+    }
+    let derived = derive_classified(
+        vec![clock(1, 0, 0, 100), input],
+        QueryRange { start: 0, end: 100 },
+        classifier(&[EXTRACTOR]),
+    );
+    let mut request = unclassified_request(UnclassifiedGroupBy::Document);
+    for search in ["STRASSE", "project", "work", "editor", "ＭＳＥＤＧＥ", ""] {
+        request.search = Some(search.into());
+        assert_eq!(
+            grouped_unclassified(&derived, &request).len(),
+            1,
+            "search {search}"
+        );
+    }
+    request.search = Some("missing".into());
+    assert!(grouped_unclassified(&derived, &request).is_empty());
+    request.group_by = UnclassifiedGroupBy::App;
+    request.search = Some("strasse".into());
+    assert!(grouped_unclassified(&derived, &request).is_empty());
+}
+#[test]
+fn unclassified_sample_selection_orders_utc_before_clock_identity() {
+    use quartz_protocol::UnclassifiedGroupBy;
+    let mut later = classified_window(2, 100, 120, "msedge.exe");
+    if let InputRow::Foreground(row) = &mut later {
+        row.span.segment = ClockSegmentId(2);
+        row.span.start_utc_ms = 0;
+        row.span.end_utc_ms = 20;
+        edit_foreground(row, CaptureLevel::Full, |content| {
+            std::sync::Arc::make_mut(content.app.as_mut().expect("app")).id = ApplicationId(1)
+        });
+    }
+    let derived = derive_classified(
+        vec![
+            clock(1, 0, 0, 100),
+            clock(2, 0, 100, 100),
+            classified_window(1, 20, 40, "msedge.exe"),
+            later,
+        ],
+        QueryRange { start: 0, end: 100 },
+        classifier(&[]),
+    );
+    let items = grouped_unclassified(&derived, &unclassified_request(UnclassifiedGroupBy::App));
+    assert_eq!(items[0].active_ms, 40);
+    assert_eq!(
+        items[0]
+            .sample_ranges
+            .iter()
+            .map(|sample| sample.start_utc_ms)
+            .collect::<Vec<_>>(),
+        vec![0, 20]
+    );
+    assert_eq!(
+        items[0].sample_ranges[0].clock_segment_id,
+        Some(quartz_protocol::ClockSegmentId(2))
+    );
+}

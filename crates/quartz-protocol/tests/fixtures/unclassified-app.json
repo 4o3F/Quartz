@@ -1,0 +1,38 @@
+{
+  "time_zone": "Asia/Shanghai",
+  "day_start_offset_min": 240,
+  "reference_range": {
+    "start_utc_ms": 1735761600000,
+    "end_utc_ms": 1735848000000
+  },
+  "items": [
+    {
+      "entity": {
+        "kind": "app",
+        "id": 3,
+        "exe_name": "editor.exe",
+        "display_name": "Editor"
+      },
+      "active_ms": 1000,
+      "sample_ranges": [
+        {
+          "start_utc_ms": 1735776000000,
+          "end_utc_ms": 1735776001000,
+          "clock_segment_id": 2
+        }
+      ]
+    }
+  ],
+  "versions": "version-token",
+  "next_cursor": {
+    "versions": "version-token",
+    "query": {
+      "kind": "unclassified",
+      "start_date": "2025-01-02",
+      "end_date": "2025-01-03",
+      "group_by": "app",
+      "search": "Ｅｄｉｔｏｒ"
+    },
+    "position": 1
+  }
+}

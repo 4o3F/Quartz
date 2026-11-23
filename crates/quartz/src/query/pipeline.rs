@@ -56,7 +56,7 @@ pub(crate) enum Activity {
     },
 }
 impl Activity {
-    fn is_active(&self) -> bool {
+    pub(super) fn is_active(&self) -> bool {
         matches!(
             self,
             Self::Active | Self::ActiveOverride(_) | Self::OfflineActivity(_)
@@ -89,6 +89,11 @@ pub(crate) struct SegmentFacts {
     classifier: Classifier,
 }
 impl SegmentFacts {
+    /// Carries query-local classification and extraction caches into the next logical day.
+    pub(super) fn into_classifier(self) -> Classifier {
+        self.classifier
+    }
+
     #[cfg(test)]
     pub(super) fn rename_category(&mut self, segment: &DerivedSegment, name: &str) {
         if let CategoryRef::Classified { category } =
@@ -154,11 +159,14 @@ impl SegmentFacts {
             }),
         }
     }
-    fn app(&self, segment: &DerivedSegment) -> Option<&quartz_domain::facts::ApplicationRef> {
+    pub(super) fn app(
+        &self,
+        segment: &DerivedSegment,
+    ) -> Option<&quartz_domain::facts::ApplicationRef> {
         self.foreground(segment)
             .and_then(|row| row.visible_app().map(std::convert::AsRef::as_ref))
     }
-    fn document_identity(&self, segment: &DerivedSegment) -> Option<DocumentIdentity> {
+    pub(super) fn document_identity(&self, segment: &DerivedSegment) -> Option<DocumentIdentity> {
         DocumentIdentity::new(
             ApplicationId(self.app(segment)?.id.0),
             &self.extraction(segment),

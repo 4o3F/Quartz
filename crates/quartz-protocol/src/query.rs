@@ -105,6 +105,14 @@ pub enum CursorQuery {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference_range: Option<ReferenceRange>,
     },
+    /// Grouped unclassified work in a logical-date range.
+    Unclassified {
+        start_date: LocalDate,
+        end_date: LocalDate,
+        group_by: UnclassifiedGroupBy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        search: Option<String>,
+    },
     /// A UTC range and its display projection.
     Timeline {
         start_utc_ms: i64,
@@ -144,6 +152,85 @@ impl From<&QueryFactsRequest> for CursorQuery {
         }
     }
 }
+/// Maximum logical dates in one grouped query (04 §6.2.1).
+pub const UNCLASSIFIED_MAX_DAYS: usize = 366;
+/// Maximum search length in Unicode scalar values (04 §6.2.1).
+pub const UNCLASSIFIED_MAX_SEARCH_SCALARS: usize = 256;
+/// Maximum chronological samples retained per group (04 §6.2.1).
+pub const UNCLASSIFIED_MAX_SAMPLES: usize = 5;
+
+/// Entity identity used to group unclassified active work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnclassifiedGroupBy {
+    App,
+    Document,
+}
+/// A half-open range of logical dates, with core-side search and pagination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryUnclassifiedRequest {
+    pub start_date: LocalDate,
+    pub end_date: LocalDate,
+    pub group_by: UnclassifiedGroupBy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<QueryCursor>,
+}
+impl From<&QueryUnclassifiedRequest> for CursorQuery {
+    fn from(request: &QueryUnclassifiedRequest) -> Self {
+        Self::Unclassified {
+            start_date: request.start_date,
+            end_date: request.end_date,
+            group_by: request.group_by,
+            search: request.search.clone(),
+        }
+    }
+}
+/// Visible application or document identity, shared with range aggregation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkEntity {
+    App {
+        id: ApplicationId,
+        exe_name: Option<String>,
+        display_name: String,
+    },
+    Document {
+        document_ref: DocumentRef,
+        app: ApplicationId,
+        document: String,
+        project: Option<String>,
+        profile: Option<String>,
+    },
+}
+/// One active slice that can preselect a logical day and classification range.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct UnclassifiedSampleRange {
+    pub start_utc_ms: i64,
+    pub end_utc_ms: i64,
+    pub clock_segment_id: Option<ClockSegmentId>,
+}
+/// Total unclassified active time and earliest samples for a visible entity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnclassifiedItem {
+    pub entity: WorkEntity,
+    pub active_ms: i64,
+    pub sample_ranges: Vec<UnclassifiedSampleRange>,
+}
+/// One page of grouped work, using the core's effective logical-day calendar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryUnclassifiedResponse {
+    pub time_zone: String,
+    pub day_start_offset_min: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_range: Option<ReferenceRange>,
+    pub items: Vec<UnclassifiedItem>,
+    pub versions: QueryVersions,
+    pub next_cursor: Option<QueryCursor>,
+}
+
 /// Maximum detail range: two UTC days accommodate local-day boundaries and DST.
 pub const SEGMENT_DETAIL_MAX_SPAN_MS: i64 = 48 * 60 * 60 * 1000;
 /// Number of logical days included in an entity detail response.
@@ -666,6 +753,49 @@ mod tests {
         let page: QueryFactsResponse =
             serde_json::from_value(body.clone()).expect("typed facts response");
         assert_eq!(serde_json::to_value(page).expect("facts round trip"), body);
+    }
+    #[test]
+    fn unclassified_wire_snapshots_preserve_groups_samples_ranges_and_cursors() {
+        let request_wire: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/unclassified-request.json"))
+                .expect("request snapshot");
+        let request: QueryUnclassifiedRequest =
+            serde_json::from_value(request_wire.clone()).expect("request");
+        assert_eq!(
+            serde_json::to_value(&request).expect("request wire"),
+            request_wire
+        );
+        assert_eq!(
+            <QueryUnclassifiedRequest as crate::CoreRequest>::OP,
+            crate::Op::QueryUnclassified
+        );
+        for fixture in [
+            include_str!("../tests/fixtures/unclassified-app.json"),
+            include_str!("../tests/fixtures/unclassified-document.json"),
+            include_str!("../tests/fixtures/unclassified-continuation.json"),
+        ] {
+            let wire: serde_json::Value = serde_json::from_str(fixture).expect("response snapshot");
+            let response: QueryUnclassifiedResponse =
+                serde_json::from_value(wire.clone()).expect("response");
+            assert_eq!(
+                serde_json::to_value(&response).expect("response wire"),
+                wire
+            );
+            if let Some(cursor) = response.next_cursor {
+                assert_eq!(cursor.query(), &CursorQuery::from(&request));
+                assert_eq!(cursor.position(), 1);
+            }
+        }
+        let mut invalid = request_wire;
+        invalid["unused"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<QueryUnclassifiedRequest>(invalid).is_err());
+        for group_by in ["domain", "category", "APP"] {
+            assert!(serde_json::from_value::<QueryUnclassifiedRequest>(serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":group_by})).is_err());
+        }
+        assert_eq!(
+            serde_json::to_value(crate::Capability::QueryUnclassifiedV1).expect("capability"),
+            "query.unclassified.v1"
+        );
     }
     fn golden_category() -> CategoryRef {
         CategoryRef::Classified {

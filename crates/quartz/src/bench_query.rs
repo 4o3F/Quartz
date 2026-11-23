@@ -81,6 +81,7 @@ pub(crate) enum BenchQueryScope {
     #[default]
     All,
     Pipeline,
+    Unclassified,
 }
 /// Uses an isolated workload copy, or reads a previously prepared database unchanged.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -182,7 +183,7 @@ impl<'path> BenchQuery<'path> {
         reader = self.measure_pipeline(reader, from, memory::PrivateBytes::sample()?, output)?;
         match self.scope {
             BenchQueryScope::All => self.measure_fact_reads(&mut reader, from, output),
-            BenchQueryScope::Pipeline => Ok(()),
+            BenchQueryScope::Pipeline | BenchQueryScope::Unclassified => Ok(()),
         }
     }
     fn measure_fact_reads(
@@ -269,6 +270,9 @@ impl<'path> BenchQuery<'path> {
             .day_start_offset;
         let calendar =
             crate::query::calendar::DayCalendar::new(local_date, offset).context(QuerySnafu)?;
+        if self.scope == BenchQueryScope::Unclassified {
+            return self.measure_unclassified(reader, local_date, rules, idle, output);
+        }
         // 60 seconds per pixel gives a 1,440-pixel daily timeline.
         const BENCH_PIXEL_MS: u64 = 60_000;
         writeln!(output, "pipeline local_date={local_date} system_zone={:?} day_start_offset_min={} from_utc_ms={} day_to_utc_ms={} ms_per_pixel={BENCH_PIXEL_MS}", jiff::tz::TimeZone::system(), offset.minutes(), calendar.range.start, calendar.range.end).context(OutputSnafu)?;
@@ -299,7 +303,8 @@ impl<'path> BenchQuery<'path> {
         let mut workloads = Vec::new();
         for query in queries {
             let name = match &query {
-                QueryRequest::Facts(_)
+                QueryRequest::Unclassified(_)
+                | QueryRequest::Facts(_)
                 | QueryRequest::SegmentDetail(_)
                 | QueryRequest::EntityDetail(_) => {
                     unreachable!("benchmark workloads use derived queries")
@@ -363,6 +368,82 @@ impl<'path> BenchQuery<'path> {
             idle,
             output,
         )
+    }
+    fn measure_unclassified(
+        &self,
+        mut reader: ReadOnlyStore,
+        start_date: quartz_protocol::LocalDate,
+        rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
+        idle: memory::PrivateBytes,
+        output: &mut impl Write,
+    ) -> Result<ReadOnlyStore, BenchQueryError> {
+        use quartz_protocol::{QueryUnclassifiedRequest, UnclassifiedGroupBy};
+        struct Grouping {
+            value: UnclassifiedGroupBy,
+            day: &'static str,
+            day_search: &'static str,
+            week: &'static str,
+            week_search: &'static str,
+        }
+        for grouping in [
+            Grouping {
+                value: UnclassifiedGroupBy::App,
+                day: "pipeline.unclassified.app.day",
+                day_search: "pipeline.unclassified.app.day.search",
+                week: "pipeline.unclassified.app.week",
+                week_search: "pipeline.unclassified.app.week.search",
+            },
+            Grouping {
+                value: UnclassifiedGroupBy::Document,
+                day: "pipeline.unclassified.document.day",
+                day_search: "pipeline.unclassified.document.day.search",
+                week: "pipeline.unclassified.document.week",
+                week_search: "pipeline.unclassified.document.week.search",
+            },
+        ] {
+            for days in [1, WEEK_DAYS] {
+                let mut end_date = start_date;
+                for _ in 0..days {
+                    end_date = end_date
+                        .tomorrow()
+                        .map_err(crate::query::RunQueryError::from)
+                        .context(QuerySnafu)?;
+                }
+                // The mapped browser remains unclassified and has visible documents.
+                for search in [None, Some(String::from("edge"))] {
+                    let name = if days == WEEK_DAYS {
+                        if search.is_some() {
+                            grouping.week_search
+                        } else {
+                            grouping.week
+                        }
+                    } else if search.is_some() {
+                        grouping.day_search
+                    } else {
+                        grouping.day
+                    };
+                    reader = self.measure_workload(
+                        reader,
+                        PipelineWorkload {
+                            name,
+                            requests: vec![crate::query::QueryRequest::Unclassified(
+                                QueryUnclassifiedRequest {
+                                    start_date,
+                                    end_date,
+                                    group_by: grouping.value,
+                                    search,
+                                    cursor: None,
+                                },
+                            )],
+                        },
+                        rules.clone(),
+                        idle,
+                        output,
+                    )?;
+                }
+            }
+        }
+        Ok(reader)
     }
     fn measure_workload(
         &self,
@@ -593,6 +674,13 @@ mod tests {
         BenchQuery::new(&path, 2)
             .measure(reader, &mut output)
             .expect("benchmark");
+        BenchQuery::new(&path, 2)
+            .with_scope(BenchQueryScope::Unclassified)
+            .measure(
+                ReadOnlyStore::open(&isolated.database()).expect("unclassified reader"),
+                &mut output,
+            )
+            .expect("unclassified benchmark");
         let mut reader = store.take_query_reader();
         let request = crate::query::QueryRequest::Timeline(quartz_protocol::QueryTimelineRequest {
             start_utc_ms: extent.from_utc_ms,
@@ -644,6 +732,10 @@ mod tests {
             ".aggregate_merge p50_ms=",
             ".paging_encode p50_ms=",
             ".memory ",
+            "pipeline.unclassified.app.day first_page_bytes=",
+            "pipeline.unclassified.app.week.search first_page_bytes=",
+            "pipeline.unclassified.document.day.search first_page_bytes=",
+            "pipeline.unclassified.document.week first_page_bytes=",
         ] {
             assert!(output.contains(name), "missing {name}: {output}");
         }

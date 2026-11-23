@@ -66,6 +66,13 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
+            let response = database.port.call(QueryRequest::Unclassified(quartz_protocol::QueryUnclassifiedRequest {
+                start_date: crate::store::query::test_support::FIXTURE_DATE.parse().expect("date"),
+                end_date: "2025-01-03".parse().expect("date"),
+                group_by: quartz_protocol::UnclassifiedGroupBy::App,
+                search: None, cursor: None,
+            })).await.expect("unclassified dispatcher response");
+            assert!(matches!(response, QueryResponse::Unclassified(page) if page.items.len() == 4));
             let response = database.port.call(QueryRequest::SegmentDetail(quartz_protocol::QuerySegmentDetailRequest {
                 start_utc_ms: start, end_utc_ms: start + 4000, app: None, window_instance: None, cursor: None,
             })).await.expect("segment dispatcher response");

@@ -6,10 +6,10 @@ use crate::{
     PrivacyModeSetRequest, QueryDayRequest, QueryDayResponse, QueryEntityDetailRequest,
     QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse, QueryPendingAwayRequest,
     QueryPendingAwayResponse, QuerySegmentDetailRequest, QuerySegmentDetailResponse,
-    QueryTimelineRequest, QueryTimelineResponse, SettingsGetRequest, SettingsResponse,
-    SettingsSetRequest, Subscribe, SubscribeResponse, TimedPolicyResponse,
-    TrackingKeepAliveRequest, TrackingPauseRequest, TrackingResumeRequest, UiFirstFrameRequest,
-    UiHiddenRequest, UiOpenRequest, Unsubscribe,
+    QueryTimelineRequest, QueryTimelineResponse, QueryUnclassifiedRequest,
+    QueryUnclassifiedResponse, SettingsGetRequest, SettingsResponse, SettingsSetRequest, Subscribe,
+    SubscribeResponse, TimedPolicyResponse, TrackingKeepAliveRequest, TrackingPauseRequest,
+    TrackingResumeRequest, UiFirstFrameRequest, UiHiddenRequest, UiOpenRequest, Unsubscribe,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -55,6 +55,7 @@ requests! {
     Unsubscribe => Unsubscribe => SubscribeResponse,
     QueryFactsRequest => QueryFacts => QueryFactsResponse,
     QueryDayRequest => QueryDay => QueryDayResponse,
+    QueryUnclassifiedRequest => QueryUnclassified => QueryUnclassifiedResponse,
     QuerySegmentDetailRequest => QuerySegmentDetail => QuerySegmentDetailResponse,
     QueryEntityDetailRequest => QueryEntityDetail => QueryEntityDetailResponse,
     QueryTimelineRequest => QueryTimeline => QueryTimelineResponse,
