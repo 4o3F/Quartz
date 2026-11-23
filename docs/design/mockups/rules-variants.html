@@ -1,0 +1,2005 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Quartz — Extraction &amp; privacy rule editors (M4 V3)</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mockup.css">
+<!--
+  Document extraction and privacy rule editors mockup for Quartz (M4 V3).
+  Query parameters:
+    ?state=extraction | extraction-editor | extraction-regex-error |
+           privacy | privacy-editor | privacy-receipt-required |
+           privacy-preview-failed | privacy-builtin-override |
+           privacy-loosen-confirm | privacy-loading
+    &theme=light | dark
+    &lang=zh-CN | en | en-XA
+    &size=min          (optional: 640x480 minimum window per 07 §2.3; default 1280x800)
+-->
+<style>
+/* Minimum window 640x480 (Compact breakpoint per 07 §2.1 & §2.3) */
+html[data-size="min"],
+html[data-size="min"] body,
+html[data-size="min"] .window{width:640px;height:480px}
+
+.wrap{position:relative;overflow:hidden}
+.main-wrap{position:relative;flex:1;min-width:0;display:flex}
+.main{position:relative;padding:var(--space-xxl) var(--space-xxl) var(--space-l);gap:var(--space-s);overflow-y:auto;overflow-x:hidden}
+html[data-has-panel="true"] .main{padding:var(--space-xl) var(--space-l) var(--space-l)}
+html[data-size="min"] .main{padding:var(--space-l) var(--space-l) var(--space-l)}
+
+/* Fluent 2 overlay scrollbar indicator (11 §9.2) */
+.scroll-track{
+  display:none;
+  position:absolute;top:var(--space-xs);right:var(--space-xs);bottom:var(--space-xs);
+  width:6px;pointer-events:none;z-index:8;
+}
+.scrollable > .scroll-track{display:block}
+.scroll-thumb{
+  position:absolute;left:1px;right:1px;top:0;
+  border-radius:var(--radius-control);
+  background:var(--text-tertiary);
+}
+
+/* Nav text stays single-line with ellipsis in en-XA */
+.nav-item span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Page header & pivot — content-driven wrapping for en-XA and 640x480 */
+.page-head{
+  flex:none;
+  display:flex;align-items:center;flex-wrap:wrap;
+  gap:var(--space-s);
+  min-height:40px;
+}
+.page-head .h-title{flex:1;min-width:140px}
+.page-head-acts{display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap}
+
+.pivot{
+  height:auto;min-height:32px;
+  gap:var(--space-l);row-gap:var(--space-xs);
+  flex-wrap:wrap;
+}
+.pivot div{height:32px;white-space:nowrap}
+html[data-size="min"] .pivot{gap:var(--space-m);row-gap:0}
+
+/* Flexible buttons & badges safe for en-XA */
+.badge{max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;gap:3px}
+.badge .btxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn{min-height:var(--h-control-standard);height:auto;padding:4px 12px}
+.btn.compact{min-height:var(--h-control-compact);height:auto;padding:2px 10px}
+.btn.icon{width:var(--h-control-standard);height:var(--h-control-standard);padding:0}
+.btn.compact.icon{width:var(--h-control-compact);height:var(--h-control-compact);padding:0}
+
+/* Workspace split: rule-set tree + entries list (reused from V1) */
+.rules-grid{
+  flex:1;min-height:0;
+  display:flex;align-items:stretch;gap:var(--space-s);
+  margin-top:var(--space-xs);
+}
+.tree-card{
+  width:256px;flex:none;
+  padding:var(--space-m);
+  display:flex;flex-direction:column;gap:var(--space-xs);
+  align-self:flex-start;
+  max-height:100%;overflow:hidden;
+}
+html[data-has-panel="true"] .tree-card{width:228px}
+.list-card{
+  flex:1;min-width:0;
+  padding:var(--space-m) var(--space-m) var(--space-s);
+  display:flex;flex-direction:column;gap:var(--space-xs);
+  align-self:flex-start;
+  max-height:100%;overflow:hidden;
+}
+html[data-size="min"] .rules-grid{flex-direction:column;flex:none}
+html[data-size="min"] .tree-card,
+html[data-size="min"] .list-card{width:100%;max-height:none}
+
+/* Tree node refinements */
+.tree-head{display:flex;align-items:center;gap:var(--space-s);padding:0 var(--space-xs) var(--space-xs)}
+.tnode{min-height:48px;padding:6px 8px;gap:6px}
+.tnode.ind1{margin-left:14px}
+.tnode.disabled-ui{opacity:.6}
+.tnode .badges{display:flex;flex-wrap:wrap;gap:4px;margin-top:1px;min-width:0;max-width:100%}
+.tnode .sw{flex:none}
+.tnode .lock-ic{width:12px;height:12px;color:var(--text-tertiary);flex:none}
+.tree-foot-note{
+  margin-top:4px;
+  padding:6px 8px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;
+}
+
+/* List toolbar */
+.list-toolbar{
+  display:flex;align-items:center;flex-wrap:wrap;
+  gap:var(--space-s);
+  padding:0 var(--space-xs) var(--space-xs);
+}
+.list-toolbar .seg{flex:none}
+.list-toolbar-right{margin-left:auto;display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap}
+.list-meta{
+  display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-s);
+  padding:0 var(--space-xs) var(--space-xs);
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.list-meta .link{color:var(--accent-text);margin-left:auto;white-space:nowrap}
+
+/* Entries tables (extraction & privacy) */
+.rtbl-h,.rtbl-r{
+  display:flex;align-items:center;gap:var(--space-s);
+  min-height:36px;
+  padding:5px var(--space-s);
+  border-radius:var(--radius-control);
+}
+.rtbl-h{
+  min-height:var(--h-row-compact);
+  padding:4px var(--space-s);
+  font:var(--type-caption);color:var(--text-secondary);
+  border-bottom:1px solid var(--stroke-divider);
+  border-radius:0;
+}
+.rtbl-r{position:relative}
+.rtbl-r.sel{background:var(--fill-subtle-hover)}
+.rtbl-r.sel::before{
+  content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;
+  border-radius:2px;background:var(--accent-fill);
+}
+.rtbl-r.dim{color:var(--text-secondary)}
+.rtbl-r.dim .lbl{text-decoration:line-through}
+
+.col-rule{flex:1;min-width:110px;display:flex;flex-direction:column;gap:1px;overflow:hidden}
+.col-rule-top{display:flex;align-items:center;gap:5px;min-width:0}
+.col-rule-top .lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.col-rule-sub{font:var(--type-caption);color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.col-cond{flex:0 0 184px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:11.5px;line-height:16px;color:var(--text-secondary)}
+.col-fields{flex:0 0 188px;min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:3px;justify-content:flex-end}
+.col-act{flex:0 0 124px;min-width:0;display:flex;align-items:center;gap:4px}
+.col-src{flex:0 0 126px;min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:4px;font:var(--type-caption);color:var(--text-secondary)}
+
+html[data-has-panel="true"] .col-cond{flex:0 0 132px}
+html[data-has-panel="true"] .col-fields{flex:0 0 138px}
+html[data-has-panel="true"] .col-act{flex:0 0 96px}
+html[data-has-panel="true"] .col-src{display:none}
+html[data-lang="en-XA"] .col-act{flex:0 0 144px}
+html[data-has-panel="true"][data-lang="en-XA"] .col-fields{flex:0 0 116px}
+html[data-has-panel="true"][data-lang="en-XA"] .col-act{flex:0 0 118px}
+html[data-size="min"] .col-cond{flex:0 0 124px}
+html[data-size="min"] .col-fields{flex:0 0 122px}
+html[data-size="min"] .col-src{display:none}
+
+.field-tag{
+  display:inline-flex;align-items:center;height:18px;padding:0 5px;
+  border-radius:var(--radius-control);
+  background:var(--fill-subtle-hover);
+  border:1px solid var(--stroke-card);
+  font-family:var(--font-mono);font-size:11px;line-height:14px;
+  color:var(--text-primary);white-space:nowrap;
+}
+.field-tag.muted{color:var(--text-tertiary);background:transparent}
+.field-tag.ok{color:var(--status-success);background:var(--status-success-bg);border-color:color-mix(in srgb,var(--status-success) 24%,transparent)}
+.field-tag.warn{color:var(--status-caution);background:var(--status-caution-bg);border-color:color-mix(in srgb,var(--status-caution) 24%,transparent)}
+.field-tag.crit{color:var(--status-critical);background:var(--status-critical-bg);border-color:color-mix(in srgb,var(--status-critical) 24%,transparent)}
+
+.fallback-foot{
+  margin-top:4px;
+  padding:6px var(--space-s);
+  border-top:1px solid var(--stroke-divider);
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  font:var(--type-caption);color:var(--text-tertiary);
+}
+
+/* Inline banners (InfoBars, reused from V1) */
+.infobar{
+  flex:none;
+  padding:6px 10px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;word-break:break-word;
+}
+.infobar .ib-ic{flex:none;margin-top:1px;color:var(--text-secondary)}
+.infobar .ib-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow-wrap:anywhere}
+.infobar .ib-title{font:var(--type-body-strong);color:var(--text-primary);font-size:13px;line-height:18px;overflow-wrap:anywhere}
+.infobar .ib-acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px}
+.infobar.caution{
+  background:var(--status-caution-bg);
+  border-color:color-mix(in srgb,var(--status-caution) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.caution .ib-ic{color:var(--status-caution)}
+.infobar.critical{
+  background:var(--status-critical-bg);
+  border-color:color-mix(in srgb,var(--status-critical) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.critical .ib-ic{color:var(--status-critical)}
+
+/* Static skeleton primitives (zero looping animation per 07 §9 & 11 §1) */
+.skel{
+  display:inline-block;border-radius:var(--radius-control);
+  background:color-mix(in srgb,var(--text-tertiary) 18%,transparent);
+}
+.skel.soft{background:var(--fill-subtle-hover)}
+.seg.dim{opacity:.55}
+
+/* Right-hand panel (360px, reused from V1 & V2) */
+.panel-scrim{
+  display:none;
+  position:absolute;inset:0;
+  background:color-mix(in srgb,var(--fill-smoke) 42%,transparent);
+  z-index:15;
+}
+.details{
+  width:var(--w-details);flex:none;
+  border-left:1px solid var(--stroke-divider);
+  padding:0;gap:0;
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  background:transparent;
+}
+html[data-size="min"][data-panel-open="true"] .panel-scrim{display:block}
+html[data-size="min"] .details{
+  position:absolute;top:0;right:0;bottom:0;
+  width:360px;max-width:calc(100% - 16px);
+  background:linear-gradient(var(--fill-layer),var(--fill-layer)),var(--bg-base);
+  border-left:1px solid var(--stroke-divider);
+  box-shadow:var(--shadow-28);
+  z-index:20;
+}
+
+.ed-head{
+  flex:none;
+  padding:9px var(--space-l);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+}
+.ed-head-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.ed-head-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+
+.ed-body-wrap{position:relative;flex:1;min-height:0;display:flex}
+.ed-body{
+  flex:1;min-height:0;
+  overflow-y:auto;overflow-x:hidden;
+  padding:8px var(--space-l) 8px;
+  display:flex;flex-direction:column;gap:6px;
+}
+
+/* Single-row pinned footer (V2 overflow pattern — NEVER wraps) */
+.ed-foot-banner{
+  flex:none;
+  padding:5px var(--space-l);
+  border-top:1px solid color-mix(in srgb,var(--status-caution) 26%,transparent);
+  background:var(--status-caution-bg);
+  display:flex;align-items:center;gap:6px;
+  font:var(--type-caption);color:var(--text-primary);
+}
+.ed-foot-banner svg{flex:none;color:var(--status-caution)}
+.ed-foot-banner span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.ed-foot{
+  flex:none;
+  padding:8px var(--space-l);
+  border-top:1px solid var(--stroke-divider);
+  display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+}
+.ed-foot-main{
+  flex:1;min-width:0;
+  display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+}
+.ed-foot-main .btn{
+  padding:4px 10px;
+  min-width:0;max-width:100%;
+  overflow:hidden;
+}
+.ed-foot-main .btn.primary-slot{flex:0 1 auto}
+.ed-foot-main .btn:not(.primary-slot){flex:0 0 auto}
+.ed-foot-main .btn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-foot-copy,.ed-foot-more{flex:0 0 auto;margin-left:auto}
+
+/* Form controls inside editor */
+.ed-row{display:flex;gap:var(--space-s);align-items:flex-end}
+.ed-row.flex-wrap{flex-wrap:wrap}
+.field{display:flex;flex-direction:column;gap:3px;min-width:0}
+.field>label{font:var(--type-caption);color:var(--text-secondary);display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}
+.input{min-width:0}
+.input.focused{
+  border-color:var(--stroke-control);
+  border-bottom:2px solid var(--accent-fill);
+}
+.input.invalid{
+  border-color:var(--status-critical);
+  border-bottom:2px solid var(--status-critical);
+}
+.input.disabled{
+  background:var(--fill-control-disabled);
+  border-color:var(--stroke-control);
+  color:var(--text-disabled);
+}
+.caret{
+  display:inline-block;width:1.5px;height:13px;
+  background:var(--accent-fill);vertical-align:middle;margin-left:1px;flex:none;
+}
+.field-err{
+  display:flex;align-items:flex-start;gap:5px;
+  font-size:11.5px;line-height:15px;color:var(--status-critical);
+  overflow-wrap:anywhere;
+}
+.field-err svg{flex:none;margin-top:1px}
+.field-hint{font:var(--type-caption);color:var(--text-tertiary);overflow-wrap:anywhere}
+
+/* Multi-line monospace regex editor */
+.mono-area{
+  padding:5px 8px;
+  border-radius:var(--radius-control);
+  background:var(--fill-control);
+  border:1px solid var(--stroke-control);
+  border-bottom-color:var(--stroke-control-strong);
+  font-family:var(--font-mono);font-size:11.5px;line-height:15px;
+  color:var(--text-primary);
+  overflow-wrap:anywhere;word-break:break-all;
+  min-height:36px;
+}
+.mono-area.invalid{
+  border-color:var(--status-critical);
+  border-bottom:2px solid var(--status-critical);
+  background:color-mix(in srgb,var(--status-critical-bg) 28%,var(--fill-control));
+}
+.mono-area .err-hl{
+  background:var(--status-critical-bg);
+  color:var(--status-critical);
+  border-bottom:1.5px solid var(--status-critical);
+  border-radius:2px;
+  padding:0 1px;
+}
+.mono-area .cap-hl{
+  color:var(--accent-text);
+  font-weight:600;
+}
+.diag-list{
+  display:flex;flex-direction:column;gap:3px;
+  margin-top:2px;
+}
+
+/* Capture outputs compact 2x2 table */
+.cap-grid{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:4px;
+}
+.cap-cell{
+  display:flex;align-items:center;justify-content:space-between;gap:4px;
+  padding:4px 7px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  min-width:0;
+}
+.cap-cell.bad{
+  grid-column:1 / -1;
+  border-color:color-mix(in srgb,var(--status-critical) 35%,transparent);
+  background:color-mix(in srgb,var(--status-critical-bg) 42%,var(--fill-card-secondary));
+}
+.cap-cell-l{display:flex;flex-direction:column;min-width:0}
+.cap-name{font-family:var(--font-mono);font-size:11.5px;line-height:14px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cap-desc{font-size:10.5px;line-height:13px;color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cap-state{flex:none;max-width:56%}
+
+/* Inline test title box */
+.test-box{
+  padding:5px 7px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:4px;
+}
+.test-box.paused{opacity:.76}
+.test-out{
+  display:flex;align-items:center;flex-wrap:wrap;gap:4px;
+  font:var(--type-caption);
+}
+
+/* Condition row card (reused from V1) */
+.cond-list{display:flex;flex-direction:column;gap:5px}
+.cond-row{
+  padding:5px 7px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:4px;
+}
+.cond-line{display:flex;align-items:center;gap:4px;min-width:0}
+.neg-btn{
+  height:var(--h-control-compact);
+  padding:0 7px;flex:none;
+  display:inline-flex;align-items:center;justify-content:center;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-control);
+  background:var(--fill-control);
+  font:var(--type-caption);color:var(--text-secondary);
+  white-space:nowrap;
+}
+
+/* Order stepper */
+.order-ctrl{display:flex;align-items:center;gap:4px;height:var(--h-control-compact)}
+.order-pos{font:var(--type-caption);color:var(--text-secondary);white-space:nowrap;padding:0 3px}
+
+/* Full-width segmented controls inside 360px panel */
+.full-seg{width:100%;display:flex;height:auto;min-height:var(--h-control-compact)}
+.full-seg div{flex:1 1 0;min-width:0;padding:1px 6px;display:block;text-align:center;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Per-field privacy actions grid */
+.act-grid{
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  overflow:hidden;
+}
+.act-row{
+  display:flex;align-items:center;justify-content:space-between;gap:6px;
+  padding:4px 8px;
+  border-top:1px solid var(--stroke-divider);
+}
+.act-row:first-child{border-top:none}
+.act-field{display:flex;align-items:baseline;gap:5px;min-width:0}
+.act-field .af-lbl{font:var(--type-caption);color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act-field .af-key{font-family:var(--font-mono);font-size:11px;line-height:14px;color:var(--text-tertiary);flex:none}
+.act-seg{flex:none}
+.act-seg div{padding:0 8px}
+
+/* Read-only target card & destination box (privacy-builtin-override) */
+.target-card{
+  padding:7px 9px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:4px;
+}
+.dest-row{
+  padding:6px 8px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card);
+  display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;
+  font:var(--type-caption);
+}
+.dest-link{color:var(--accent-text);white-space:nowrap}
+
+/* Live preview card */
+.prev-card{
+  padding:7px 8px;
+  border-radius:var(--radius-overlay);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:5px;
+}
+.prev-head{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.prev-head .strong{flex:1;min-width:92px}
+.prev-content.stale{opacity:.52}
+.prev-metrics{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:5px;
+}
+.prev-metric{
+  padding:4px 6px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:1px;
+  min-width:0;
+}
+.prev-metric .pm-lbl{display:flex;align-items:center;gap:4px;font:var(--type-caption);color:var(--text-secondary)}
+.prev-metric .pm-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--status-neutral)}
+.prev-metric.eff .pm-dot{background:var(--status-success)}
+.prev-metric.warn .pm-dot{background:var(--status-caution)}
+.prev-metric .pm-val{font:var(--type-body-strong);color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prev-metric .pm-sub{font-size:11px;line-height:14px;color:var(--text-tertiary);overflow-wrap:anywhere}
+
+.prev-summary-line{
+  padding:4px 7px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  font:var(--type-caption);color:var(--text-primary);
+  overflow-wrap:anywhere;
+}
+.prev-samples-hdr{
+  display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;
+  padding-top:3px;border-top:1px solid var(--stroke-divider);
+  font:var(--type-caption);color:var(--text-secondary);
+}
+
+/* Extraction before/after sample card */
+.ba-sample{
+  padding:4px 6px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:2px;
+  font:var(--type-caption);
+}
+.ba-sample.fb{
+  border-style:dashed;
+  background:transparent;
+}
+.ba-title{
+  display:flex;align-items:center;gap:5px;min-width:0;
+  color:var(--text-primary);
+}
+.ba-title .bt-txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:11px}
+.ba-diff{
+  display:flex;align-items:center;flex-wrap:wrap;gap:4px;
+  color:var(--text-secondary);
+  font-size:11px;line-height:14px;
+}
+.ba-arrow{color:var(--text-tertiary);flex:none}
+
+/* Privacy-safe sample row */
+.psample-row{
+  display:flex;align-items:center;gap:5px;
+  min-height:21px;padding:1px 3px;
+  border-radius:var(--radius-control);
+  font:var(--type-caption);
+}
+.psample-time{flex:none;color:var(--text-tertiary);white-space:nowrap}
+.psample-app{flex:1;min-width:56px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.psample-row .badge{max-width:118px;flex:0 1 auto}
+.psample-dur{flex:none;color:var(--text-secondary);white-space:nowrap}
+
+/* Future-only scope & history cleanup entry box */
+.history-box{
+  padding:6px 8px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:4px;
+}
+.history-row{
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+}
+
+/* Verification status strip (shown in editors only per user decision) */
+.ver-note{
+  padding:5px 7px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:flex-start;gap:6px;
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;
+}
+.ver-note .badge{flex:none;margin-top:1px}
+.ver-note-inline{
+  display:flex;align-items:flex-start;gap:5px;
+  padding-top:4px;margin-top:2px;
+  border-top:1px solid var(--stroke-divider);
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;
+}
+.ver-note-inline .badge{flex:none;margin-top:1px}
+
+/* Fluent progress ring (reused from V1) */
+.ring-xs{width:14px;height:14px;display:block;flex:none}
+.ring-sm{width:16px;height:16px;display:block;flex:none}
+
+/* Preview inline error note (privacy-preview-failed) */
+.prev-fail-bar{
+  padding:4px 7px;
+  border-radius:var(--radius-control);
+  background:var(--status-caution-bg);
+  border:1px solid color-mix(in srgb,var(--status-caution) 26%,transparent);
+  display:flex;align-items:flex-start;gap:5px;
+  font:var(--type-caption);color:var(--text-primary);
+  overflow-wrap:anywhere;
+}
+.prev-fail-bar svg{flex:none;margin-top:1px;color:var(--status-caution)}
+
+/* Modal confirmation dialog (reused from V1 Fluent 2 modal tokens) */
+.modal-scrim{
+  position:absolute;inset:0;
+  background:var(--fill-smoke);
+  z-index:30;
+  display:flex;align-items:center;justify-content:center;
+  padding:var(--space-l);
+}
+.modal-dlg{
+  width:468px;max-width:100%;max-height:100%;
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-overlay);
+  box-shadow:var(--shadow-64);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.modal-head{
+  flex:none;
+  padding:var(--space-l) var(--space-xl) var(--space-m);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:center;gap:var(--space-s);
+}
+.modal-head-ic{color:var(--status-caution);flex:none}
+.modal-body-wrap{position:relative;flex:1;min-height:0;display:flex}
+.modal-body{
+  flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
+  padding:var(--space-m) var(--space-xl);
+  display:flex;flex-direction:column;gap:var(--space-m);
+}
+.modal-desc{font:var(--type-body);color:var(--text-secondary);overflow-wrap:anywhere}
+.modal-foot{
+  flex:none;
+  padding:var(--space-m) var(--space-xl);
+  border-top:1px solid var(--stroke-divider);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:center;justify-content:flex-end;gap:var(--space-s);flex-wrap:wrap;
+}
+.impact-box{
+  padding:8px 10px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:6px;
+}
+.impact-row{
+  display:flex;align-items:flex-start;gap:8px;
+  font:var(--type-caption);
+}
+.impact-k{
+  flex:0 0 84px;color:var(--text-secondary);
+  overflow-wrap:anywhere;
+}
+.impact-v{
+  flex:1;min-width:0;color:var(--text-primary);
+  display:flex;flex-direction:column;gap:3px;
+  overflow-wrap:anywhere;
+}
+.impact-tags{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.modal-note{
+  display:flex;align-items:flex-start;gap:6px;
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;
+}
+.modal-note svg{flex:none;margin-top:1px;color:var(--text-tertiary)}
+
+html[data-size="min"] .modal-scrim{padding:var(--space-s)}
+html[data-size="min"] .modal-head{padding:10px 14px}
+html[data-size="min"] .modal-body{padding:10px 14px;gap:8px}
+html[data-size="min"] .modal-foot{padding:8px 14px}
+html[data-size="min"] .impact-k{flex:0 0 74px}
+</style>
+<script>
+const __p = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = __p.get('theme') || 'light';
+if (__p.get('size') === 'min') document.documentElement.dataset.size = 'min';
+</script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.4" fill="currentColor"/></symbol>
+  <symbol id="week" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3M8 13h8M8 16.5h5"/></symbol>
+  <symbol id="tag" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z"/><circle cx="8.3" cy="8.3" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="tag-f" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z" fill="currentColor"/><circle cx="8.3" cy="8.3" r="1.3" fill="var(--cut)" stroke="none"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><path d="M10.29 4.59L10.47 2.32L13.53 2.32L13.71 4.59L16.03 5.55L17.76 4.07L19.93 6.24L18.45 7.97L19.41 10.29L21.68 10.47L21.68 13.53L19.41 13.71L18.45 16.03L19.93 17.76L17.76 19.93L16.03 18.45L13.71 19.41L13.53 21.68L10.47 21.68L10.29 19.41L7.97 18.45L6.24 19.93L4.07 17.76L5.55 16.03L4.59 13.71L2.32 13.53L2.32 10.47L4.59 10.29L5.55 7.97L4.07 6.24L6.24 4.07L7.97 5.55Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
+  <symbol id="arrow-u" viewBox="0 0 24 24"><path d="M12 18V6M7 11l5-5 5 5"/></symbol>
+  <symbol id="arrow-d" viewBox="0 0 24 24"><path d="M12 6v12M7 13l5 5 5-5"/></symbol>
+  <symbol id="menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5"/><path d="M15 15l5 5"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.3" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="crit-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></symbol>
+  <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><circle cx="12" cy="8" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="import" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/></symbol>
+  <symbol id="export" viewBox="0 0 24 24"><path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 19.5h14"/></symbol>
+  <symbol id="copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="shield" viewBox="0 0 24 24"><path d="M12 3.5l7 2.5v5.5c0 4-2.8 7.2-7 9-4.2-1.8-7-5-7-9V6z"/></symbol>
+  <symbol id="refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.2h-4.2"/></symbol>
+  <symbol id="history" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.8V9h4.2"/><path d="M12 8v4.5l3 1.8"/></symbol>
+  <symbol id="more" viewBox="0 0 24 24"><g fill="currentColor" stroke="none"><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/></g></symbol>
+  <symbol id="logo" viewBox="0 0 24 24"><path d="M12 2.5l8 4.5v10l-8 4.5-8-4.5V7z" fill="var(--accent-fill)" stroke="none"/><path d="M12 2.5v19M4 7l16 10M20 7L4 17" stroke="var(--text-on-accent)" stroke-width="1" opacity=".7"/></symbol>
+</defs></svg>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="app"><svg class="ic s16"><use href="#logo"/></svg><span>Quartz</span></div>
+    <div class="btns">
+      <div><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></div>
+    </div>
+  </div>
+  <div class="body">
+    <nav class="nav" id="nav"></nav>
+    <div class="wrap" id="wrap">
+      <div class="main-wrap" id="main-wrap">
+        <main class="main" id="main"></main>
+        <div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="main-thumb"></div></div>
+      </div>
+      <div class="panel-scrim" id="panel-scrim"></div>
+      <aside class="details" id="details" style="display:none"></aside>
+      <div class="modal-scrim" id="modal-scrim" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const rawLang = params.get('lang') || 'zh-CN';
+const lang = (rawLang === 'en' || rawLang === 'en-XA') ? rawLang : 'zh-CN';
+const stateKey = params.get('state') || 'extraction';
+const isMin = params.get('size') === 'min';
+document.documentElement.lang = lang === 'en-XA' ? 'en' : lang;
+document.documentElement.dataset.lang = lang;
+
+const EXTRACTION_STATES = new Set(['extraction', 'extraction-editor', 'extraction-regex-error']);
+const PANEL_STATES = new Set([
+  'extraction-editor',
+  'extraction-regex-error',
+  'privacy-editor',
+  'privacy-receipt-required',
+  'privacy-preview-failed',
+  'privacy-builtin-override',
+  'privacy-loosen-confirm',
+]);
+const isExtractionTab = EXTRACTION_STATES.has(stateKey);
+const hasPanel = PANEL_STATES.has(stateKey);
+if (hasPanel) document.documentElement.dataset.panelOpen = 'true';
+if (hasPanel && !isMin) document.documentElement.dataset.hasPanel = 'true';
+
+/* Pseudo-locale generator matching quartz-i18n/src/pseudo.rs (~40% tilde padding + brackets) */
+const ACCENT_MAP = {
+  A:'À',B:'Ɓ',C:'Ç',D:'Ď',E:'É',F:'Ƒ',G:'Ĝ',H:'Ĥ',I:'Î',J:'Ĵ',K:'Ķ',L:'Ļ',M:'Ḿ',
+  N:'Ñ',O:'Ö',P:'Ƥ',Q:'Ǫ',R:'Ŕ',S:'Š',T:'Ţ',U:'Û',V:'Ṽ',W:'Ŵ',X:'Ẋ',Y:'Ý',Z:'Ž',
+  a:'à',b:'ƀ',c:'ç',d:'đ',e:'é',f:'ƒ',g:'ĝ',h:'ĥ',i:'î',j:'ĵ',k:'ķ',l:'ļ',m:'ɱ',
+  n:'ñ',o:'ö',p:'ƥ',q:'ǫ',r:'ŕ',s:'š',t:'ţ',u:'û',v:'ṽ',w:'ŵ',x:'ẋ',y:'ý',z:'ž',
+};
+function pseudoStr(s) {
+  if (!s || typeof s !== 'string') return s;
+  const accented = [...s].map(ch => ACCENT_MAP[ch] || ch).join('');
+  const pad = Math.ceil((s.length * 2) / 5);
+  return '[' + accented + '~'.repeat(pad) + ']';
+}
+function pseudoObj(val, skipKeys = new Set(['key', 'id', 'field', 'op', 'val', 'code', 'cond', 'fields', 'rawTitle', 'src', 'ruleRef', 'presetKey'])) {
+  if (typeof val === 'string') return pseudoStr(val);
+  if (Array.isArray(val)) return val.map(v => pseudoObj(v, skipKeys));
+  if (val && typeof val === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      out[k] = skipKeys.has(k) ? v : pseudoObj(v, skipKeys);
+    }
+    return out;
+  }
+  return val;
+}
+
+const COPY = {
+  'zh-CN': {
+    nav: { today: '今天', week: '本周', rules: '分类与规则', settings: '设置' },
+    page: {
+      title: '分类与规则',
+      importBtn: '导入规则',
+      exportBtn: '导出规则',
+      tabs: {
+        categories: '分类',
+        rules: '规则',
+        queue: '未分类队列',
+        extraction: '文档提取规则',
+        privacy: '隐私规则',
+      },
+    },
+    common: {
+      segOwn: '本规则集条目',
+      segEff: '生效视图',
+      addRule: '新增规则',
+      searchPh: '筛选规则',
+      saveBtn: '保存',
+      cancelBtn: '取消',
+      copyBtn: '复制情况说明',
+      moreTitle: '更多操作（复制情况说明）',
+      negLabel: '非',
+      addCond: '添加条件',
+      matchLabel: '匹配方式',
+      matchAll: '全部成立',
+      matchAny: '任一成立',
+      prioLabel: '优先级',
+      orderLabel: '同优先级顺序',
+      orderPos: '第 1 / 2 位',
+      badgeAdd: '+新增',
+      badgeOvr: '~覆盖',
+      badgeDis: '−停用',
+      verified: '已验证',
+      unverified: '未验证',
+      customBadge: '用户',
+      historyLink: '版本历史 v2…',
+    },
+    ext: {
+      treeHeading: '文档提取规则集',
+      builtinName: '内置文档提取',
+      builtinCount: '22 条',
+      localName: '本地提取规则',
+      treeNote: '按优先级与深度取第一条匹配的应用与正则；均不匹配时使用通用回退。',
+      effMeta: '生效提取规则 · 23 条 · 第一条匹配生效，未命中走通用回退',
+      ownMeta: 'user.local.extraction · v2 · 2 项差异',
+      colRule: '规则',
+      colCond: '应用条件',
+      colFields: '输出字段',
+      fallbackNote: '通用回退：当没有提取规则命中时，保留规范化标题且不生成文档身份。',
+      titleOnlyTag: '仅保留标题',
+      verNote: '基于内置规则 builtin.extraction/vscode-project：尚未在真机 Windows 环境验证全部标题变体，请结合“测试标题”与预览确认。',
+      rows: [
+        { name: 'VS Code 标题（工作区与文档）', sub: 'user.local.extraction/vscode-project', cond: 'app.exe_name = code.exe', fields: ['document', 'project', 'dirty'], ver: 'custom', diff: 'ovr' },
+        { name: 'Obsidian 笔记库文档', sub: 'user.local.extraction/obsidian-vault', cond: 'app.exe_name = obsidian.exe', fields: ['document', 'project'], ver: 'custom', diff: 'add' },
+        { name: 'JetBrains RustRover', sub: 'builtin.extraction/jetbrains-rustrover', cond: 'rustrover(?:64)?\\.exe', fields: ['project', 'document'], ver: 'unverified' },
+        { name: 'Microsoft Word 文档', sub: 'builtin.extraction/office-word', cond: 'app.exe_name = winword.exe', fields: ['document'], ver: 'verified' },
+        { name: 'Edge 配置文件后缀', sub: 'builtin.extraction/browser-edge-profile', cond: 'app.exe_name = msedge.exe', fields: ['document', 'profile'], ver: 'unverified' },
+        { name: 'Windows Terminal 编辑器文件', sub: 'builtin.extraction/windows-terminal-document', cond: 'windowsterminal.exe', fields: ['document'], ver: 'unverified' },
+        { name: 'Windows Terminal 普通标签', sub: 'builtin.extraction/windows-terminal-tab', cond: 'windowsterminal.exe', fields: [], ver: 'unverified', titleOnly: true },
+      ],
+      edTitle: '编辑提取规则',
+      edNameLabel: '规则名称',
+      edNameVal: 'VS Code 标题（工作区与文档）',
+      appCondsLabel: '应用条件',
+      appCondsHint: '仅支持 app.* 字段',
+      regexLabel: '标题正则（pattern）',
+      regexHint: 'Rust regex · 作用于 title.raw',
+      capturesLabel: '捕获输出',
+      capturesHint: '支持 document / project / profile / dirty',
+      capPresent: '已捕获',
+      capMissing: '未定义',
+      capUnparsed: '未解析',
+      capInvalid: '未知组名',
+      capDescDoc: '文档名（参与文档身份）',
+      capDescProj: '项目 / 工作区名',
+      capDescProf: '配置文件后缀',
+      capDescDirty: '任意捕获视为未保存',
+      capDescUnknown: '仅允许 document/project/profile/dirty',
+      testLabel: '测试标题',
+      testHint: '实时试算当前正则',
+      testInput: '● rules-variants.html - Quartz - Visual Studio Code',
+      testMatched: '命中',
+      testPaused: '修正正则校验错误后可测试示例标题',
+      previewTitle: '过去 7 天预览',
+      matchMetricLbl: '正则命中',
+      matchMetricVal: '148 段',
+      matchMetricSub: '12 小时 18 分 · 含回退对比',
+      effMetricLbl: '生效提取',
+      effMetricVal: '142 段',
+      effMetricSub: '11 小时 54 分 · 活跃切片',
+      samplesHdr: '提取前后对比（前 50 条 · 显示 3 / 148）',
+      beforeLbl: '提取前',
+      afterLbl: '提取后',
+      fallbackBadge: '回退',
+      fallbackBefore: '回退 · evaluate.rs - Quartz',
+      fallbackNoMatch: '未命中本规则 → 通用回退（无文档身份）',
+      samples: [
+        { rawTitle: '● evaluate.rs - Quartz - Visual Studio Code', before: '回退：evaluate.rs - Quartz', after: 'doc: evaluate.rs · proj: Quartz · dirty' },
+        { rawTitle: 'Welcome - Visual Studio Code', fallback: true, after: '通用回退：仅保留 title.normalized，无文档身份' },
+        { rawTitle: '07-ui.md - Quartz (工作区) - Visual Studio Code', before: 'proj: Quartz (工作区)', after: 'doc: 07-ui.md · proj: Quartz' },
+      ],
+      errSummaryTitle: '有 3 项正则校验错误，无法保存',
+      errSummaryMsg: '请修正下方标出的正则表达式问题后再保存。',
+      errDiagSyntax: '正则语法无效：字符类缺少闭合括号 "]"（第 1 行第 37 列）',
+      errDiagGroup: '未知捕获组 "file"，且缺少有效命名捕获组（可用：document、project、profile、dirty）',
+      errDiagBounded: '包含无界嵌套重复 "(.+)*" 或超出编译大小上限，请改用有界量词与 \\A...\\z 锚点',
+      errPreviewPaused: '修正正则校验错误后，将恢复过去 7 天提取对比预览与标题测试。',
+    },
+    priv: {
+      treeHeading: '隐私规则集',
+      builtinName: '内置隐私规则',
+      builtinCount: '12 条',
+      localName: '本地隐私规则',
+      treeNote: '隐私规则不分先后，所有命中的规则按字段取最严格动作；入库前生效。',
+      effMeta: '生效隐私规则 · 14 条 · 命中时逐字段取最严格动作',
+      ownMeta: 'user.local.privacy · v2 · 2 条新增规则',
+      applyHistoryBtn: '应用到历史数据…',
+      colRule: '规则',
+      colCond: '条件摘要',
+      colAct: '预设 / 字段动作',
+      colSrc: '来源',
+      presetTitleHidden: '隐藏标题',
+      presetPrivateWin: '无痕窗口',
+      presetExcluded: '排除',
+      presetCustom: '自定义',
+      rows: [
+        { name: 'Outlook 隐藏窗口标题', sub: 'user.local.privacy/outlook-hide-title', cond: 'app.exe_name = outlook.exe', preset: 'title_hidden', src: 'user.local.privacy', diff: 'add' },
+        { name: '微信完全排除', sub: 'user.local.privacy/exclude-wechat', cond: 'app.exe_name = wechat.exe', preset: 'excluded', src: 'user.local.privacy', diff: 'add' },
+        { name: 'Edge InPrivate 窗口', sub: 'builtin.privacy/browser-private-edge', cond: 'msedge.exe · /InPrivate/', preset: 'private_window', src: 'builtin.privacy', builtin: true },
+        { name: 'KeePassXC 密码管理器', sub: 'builtin.privacy/password-manager-keepassxc', cond: 'app.exe_name = KeePassXC.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+        { name: '1Password 密码管理器', sub: 'builtin.privacy/password-manager-1password', cond: 'app.exe_name = 1Password.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+        { name: 'Windows 凭据弹窗', sub: 'builtin.privacy/credential-ui-credentialuibroker', cond: 'CredentialUIBroker.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+      ],
+      edTitle: '编辑隐私规则',
+      edNameLabel: '名称（隐私标签）',
+      edNameVal: 'Outlook 隐藏窗口标题',
+      condsLabel: '条件',
+      condsHint: '仅支持 app.* / window.class / title.raw',
+      actionsLabel: '隐私预设与字段动作',
+      fieldAppLbl: '应用身份',
+      fieldTitleLbl: '窗口标题',
+      actKeep: '保留',
+      actDrop: '丢弃',
+      actHint: '多条规则同时命中时按字段取最严格动作；丢弃应用时窗口标题同步丢弃。',
+      previewTitle: '过去 7 天预览',
+      receiptOk: '回执有效 · 4:32',
+      receiptOkOverride: '回执有效 · 4:48',
+      recomputingBadge: '正在重新计算…',
+      failedBadge: '预览失败',
+      retryBtn: '重试预览',
+      retryShort: '重试',
+      summaryMain: '现存事实中将进一步隐藏：18 段、18 个字段、2 小时 14 分（含非活跃）',
+      metricSegsLbl: '受影响段与字段',
+      metricSegsVal: '18 段 · 18 字段',
+      metricSegsSub: 'window_title × 18',
+      metricDurLbl: '涉及时长（含非活跃）',
+      metricDurVal: '2 小时 14 分',
+      metricDurSub: '活跃 1 小时 52 分 · 非活跃 22 分',
+      samplesHdr: '样本（前 50 条 · 仅显示前后均允许字段）',
+      samplesOmitNote: '将隐藏的窗口标题不在样本中显示',
+      transFullToHidden: '完整 → 隐藏标题',
+      transIdleHidden: '空闲 · 隐藏标题',
+      samples: [
+        { time: '今天 15:10', app: 'Outlook (outlook.exe)', dur: '26 分', idle: false },
+        { time: '今天 11:40', app: 'Outlook (outlook.exe)', dur: '19 分', idle: false },
+        { time: '昨天 16:05', app: 'Outlook (outlook.exe)', dur: '8 分', idle: true },
+      ],
+      futureNote: '保存仅改变后续采集策略，不会修改已记录的历史数据。',
+      historyDisabledHint: '请先保存当前修改，再通过独立向导预览并应用到历史数据。',
+      receiptBannerTitle: '正在重新计算预览，保存暂时锁定',
+      receiptBannerMsg: '停止输入约 0.5 秒后或 5 分钟回执过期时会自动重新计算；新回执到达后自动解锁“保存”。',
+      receiptFooterLock: '正在等待新预览回执，到达后自动解锁保存',
+      failedBannerTitle: '预览计算失败，无法保存',
+      failedBannerMsg: '自动重新计算预览失败，未取得有效回执。请点击重试以恢复预览并解锁保存。',
+      failedStaleNote: '上次预览结果已过期，需重试以获取与当前草稿一致的回执。',
+      failedFooterLock: '保存已锁定：预览计算失败，请重试预览获取有效回执',
+      ovrTitle: '覆盖内置隐私规则',
+      ovrBadge: '写入 user.local.privacy',
+      ovrWarnTitle: '正在放宽内置隐私保护',
+      ovrWarnMsg: '停用或放宽内置隐私规则会影响后续采集（命中窗口可能开始记录标题）；已丢弃的历史内容不会恢复。保存前必须完成预览，修改将以差异写入 user.local.privacy。',
+      ovrModeLabel: '修改方式',
+      ovrModeDisable: '停用此内置规则',
+      ovrModeOverride: '覆盖条件或动作',
+      ovrTargetHdr: '目标内置规则（只读）',
+      ovrTargetMeta: 'builtin.privacy/browser-private-edge · v1 · 预设：无痕窗口',
+      ovrTargetCond: 'app.exe_name = msedge.exe · window.class = Chrome_WidgetWin_1 · title.raw /InPrivate/',
+      ovrVerNote: '尚未在真机 Windows 环境下验证此内置规则，请结合下方预览确认匹配效果。',
+      ovrReasonLabel: '停用原因',
+      ovrReasonVal: '已由自定义规则单独管理 Edge 窗口隐私',
+      ovrDestLbl: '保存位置',
+      ovrDestVal: 'user.local.privacy（v2 → v3 · −停用）',
+      ovrOtherSet: '写入其他规则集…',
+      ovrSummaryZero: '现存事实中将进一步隐藏：0 段、0 个字段、0 分（含非活跃）',
+      ovrZeroNote: '此修改为放宽策略，不会进一步隐藏现存事实，也不会恢复历史已丢弃的标题。',
+      ovrSampleHdr: '历史参考（前 50 条 · 仅显示已保留字段）',
+      ovrSampleNote: '已丢弃标题保持隐藏；保存后新采集将不再命中该内置规则',
+      ovrSamples: [
+        { time: '今天 13:22', app: 'Microsoft Edge (msedge.exe)', dur: '12 分', badge: '原：无痕窗口' },
+        { time: '昨天 20:41', app: 'Microsoft Edge (msedge.exe)', dur: '9 分', badge: '原：无痕窗口' },
+      ],
+      ovrSaveBtn: '保存停用',
+      loosen: {
+        title: '确认放宽隐私保护',
+        desc: '本次保存将放宽现有隐私规则。后续采集会保留更多窗口字段；历史已丢弃的数据不会被恢复。',
+        changeLbl: '变更类型',
+        changeBadge: '−停用内置规则',
+        ruleLbl: '目标规则',
+        ruleVal: 'Edge InPrivate 窗口',
+        appsLbl: '受影响应用',
+        appsVal: 'Microsoft Edge (msedge.exe · /InPrivate/)',
+        fieldsLbl: '后续采集字段',
+        fieldTitleDiff: 'window_title（窗口标题）：丢弃 → 保留',
+        fieldAppSame: 'app（应用身份）：保持保留',
+        destLbl: '写入与回执',
+        destVal: 'user.local.privacy (v2 → v3) · 预览回执有效',
+        note: '仅放宽隐私（停用内置规则或减少隐藏字段）时弹出此确认；收紧隐私规则直接保存。',
+        confirmBtn: '确认放宽并保存',
+        cancelBtn: '返回编辑',
+      },
+    },
+  },
+  en: {
+    nav: { today: 'Today', week: 'This week', rules: 'Categories & rules', settings: 'Settings' },
+    page: {
+      title: 'Categories & rules',
+      importBtn: 'Import rules',
+      exportBtn: 'Export rules',
+      tabs: {
+        categories: 'Categories',
+        rules: 'Rules',
+        queue: 'Unclassified queue',
+        extraction: 'Extraction rules',
+        privacy: 'Privacy rules',
+      },
+    },
+    common: {
+      segOwn: 'Set entries',
+      segEff: 'Effective view',
+      addRule: 'Add rule',
+      searchPh: 'Filter rules',
+      saveBtn: 'Save',
+      cancelBtn: 'Cancel',
+      copyBtn: 'Copy situation',
+      moreTitle: 'More actions (Copy situation)',
+      negLabel: 'NOT',
+      addCond: 'Add condition',
+      matchLabel: 'Match mode',
+      matchAll: 'All',
+      matchAny: 'Any',
+      prioLabel: 'Priority',
+      orderLabel: 'Order (same priority)',
+      orderPos: '#1 of 2',
+      badgeAdd: '+Add',
+      badgeOvr: '~Override',
+      badgeDis: '−Disable',
+      verified: 'Verified',
+      unverified: 'Unverified',
+      customBadge: 'User',
+      historyLink: 'History v2…',
+    },
+    ext: {
+      treeHeading: 'Extraction rule sets',
+      builtinName: 'Builtin extraction',
+      builtinCount: '22 rules',
+      localName: 'Local extraction',
+      treeNote: 'First matching app condition and regex wins by priority & depth; generic fallback applies otherwise.',
+      effMeta: 'Effective extraction rules · 23 active · first match wins, generic fallback otherwise',
+      ownMeta: 'user.local.extraction · v2 · 2 diffs',
+      colRule: 'Rule',
+      colCond: 'App condition',
+      colFields: 'Output fields',
+      fallbackNote: 'Generic fallback: keeps normalized title without creating a document identity when no rule matches.',
+      titleOnlyTag: 'title only',
+      verNote: 'Based on builtin.extraction/vscode-project: not yet verified on real Windows builds; check with Test title and preview.',
+      rows: [
+        { name: 'VS Code title (workspace & file)', sub: 'user.local.extraction/vscode-project', cond: 'app.exe_name = code.exe', fields: ['document', 'project', 'dirty'], ver: 'custom', diff: 'ovr' },
+        { name: 'Obsidian vault document', sub: 'user.local.extraction/obsidian-vault', cond: 'app.exe_name = obsidian.exe', fields: ['document', 'project'], ver: 'custom', diff: 'add' },
+        { name: 'JetBrains RustRover', sub: 'builtin.extraction/jetbrains-rustrover', cond: 'rustrover(?:64)?\\.exe', fields: ['project', 'document'], ver: 'unverified' },
+        { name: 'Microsoft Word document', sub: 'builtin.extraction/office-word', cond: 'app.exe_name = winword.exe', fields: ['document'], ver: 'verified' },
+        { name: 'Edge profile suffix', sub: 'builtin.extraction/browser-edge-profile', cond: 'app.exe_name = msedge.exe', fields: ['document', 'profile'], ver: 'unverified' },
+        { name: 'Windows Terminal editor file', sub: 'builtin.extraction/windows-terminal-document', cond: 'windowsterminal.exe', fields: ['document'], ver: 'unverified' },
+        { name: 'Windows Terminal tab title', sub: 'builtin.extraction/windows-terminal-tab', cond: 'windowsterminal.exe', fields: [], ver: 'unverified', titleOnly: true },
+      ],
+      edTitle: 'Edit extraction rule',
+      edNameLabel: 'Rule name',
+      edNameVal: 'VS Code title (workspace & file)',
+      appCondsLabel: 'App conditions',
+      appCondsHint: 'app.* fields only',
+      regexLabel: 'Title regex (pattern)',
+      regexHint: 'Rust regex · runs on title.raw',
+      capturesLabel: 'Capture outputs',
+      capturesHint: 'document / project / profile / dirty',
+      capPresent: 'Captured',
+      capMissing: 'Not defined',
+      capUnparsed: 'Unavailable',
+      capInvalid: 'Unknown group',
+      capDescDoc: 'Document name (identity)',
+      capDescProj: 'Project / workspace',
+      capDescProf: 'Profile suffix',
+      capDescDirty: 'Unsaved indicator',
+      capDescUnknown: 'Allowed: document, project, profile, dirty',
+      testLabel: 'Test title',
+      testHint: 'Try a sample window title',
+      testInput: '● rules-variants.html - Quartz - Visual Studio Code',
+      testMatched: 'Matched',
+      testPaused: 'Fix regex diagnostics to test a window title',
+      previewTitle: 'Past 7 days preview',
+      matchMetricLbl: 'Pattern match',
+      matchMetricVal: '148 segs',
+      matchMetricSub: '12h 18m · before/after diff',
+      effMetricLbl: 'Effective extraction',
+      effMetricVal: '142 segs',
+      effMetricSub: '11h 54m · active segments',
+      samplesHdr: 'Before / after samples (first 50 · 3 of 148)',
+      beforeLbl: 'Before',
+      afterLbl: 'After',
+      fallbackBadge: 'Fallback',
+      fallbackBefore: 'Fallback · evaluate.rs - Quartz',
+      fallbackNoMatch: 'No match → Generic fallback (no doc identity)',
+      samples: [
+        { rawTitle: '● evaluate.rs - Quartz - Visual Studio Code', before: 'Fallback: evaluate.rs - Quartz', after: 'doc: evaluate.rs · proj: Quartz · dirty' },
+        { rawTitle: 'Welcome - Visual Studio Code', fallback: true, after: 'Generic fallback: normalized title only, no doc identity' },
+        { rawTitle: '07-ui.md - Quartz (Workspace) - Visual Studio Code', before: 'proj: Quartz (Workspace)', after: 'doc: 07-ui.md · proj: Quartz' },
+      ],
+      errSummaryTitle: '3 regex diagnostics prevent saving',
+      errSummaryMsg: 'Fix the regex issues highlighted below before saving.',
+      errDiagSyntax: 'Invalid regex syntax: unclosed character class "]" (line 1, col 37)',
+      errDiagGroup: 'Unknown capture group "file"; no valid capture group found (use document, project, profile, dirty)',
+      errDiagBounded: 'Unbounded nested quantifier "(.+)*" or regex size limit exceeded; use bounded quantifiers and \\A...\\z anchors',
+      errPreviewPaused: 'Past 7 days preview and title test resume after regex errors are fixed.',
+    },
+    priv: {
+      treeHeading: 'Privacy rule sets',
+      builtinName: 'Builtin privacy',
+      builtinCount: '12 rules',
+      localName: 'Local privacy',
+      treeNote: 'Privacy rules are order-independent: all matches merge to the strictest action per field before storage.',
+      effMeta: 'Effective privacy rules · 14 active · strictest field action wins',
+      ownMeta: 'user.local.privacy · v2 · 2 added rules',
+      applyHistoryBtn: 'Apply to history…',
+      colRule: 'Rule',
+      colCond: 'Conditions',
+      colAct: 'Preset / actions',
+      colSrc: 'Source',
+      presetTitleHidden: 'Hide title',
+      presetPrivateWin: 'Private window',
+      presetExcluded: 'Exclude',
+      presetCustom: 'Custom',
+      rows: [
+        { name: 'Hide Outlook window titles', sub: 'user.local.privacy/outlook-hide-title', cond: 'app.exe_name = outlook.exe', preset: 'title_hidden', src: 'user.local.privacy', diff: 'add' },
+        { name: 'Exclude WeChat completely', sub: 'user.local.privacy/exclude-wechat', cond: 'app.exe_name = wechat.exe', preset: 'excluded', src: 'user.local.privacy', diff: 'add' },
+        { name: 'Edge InPrivate window', sub: 'builtin.privacy/browser-private-edge', cond: 'msedge.exe · /InPrivate/', preset: 'private_window', src: 'builtin.privacy', builtin: true },
+        { name: 'KeePassXC password manager', sub: 'builtin.privacy/password-manager-keepassxc', cond: 'app.exe_name = KeePassXC.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+        { name: '1Password password manager', sub: 'builtin.privacy/password-manager-1password', cond: 'app.exe_name = 1Password.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+        { name: 'Windows Credential UI', sub: 'builtin.privacy/credential-ui-credentialuibroker', cond: 'CredentialUIBroker.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+      ],
+      edTitle: 'Edit privacy rule',
+      edNameLabel: 'Name (privacy label)',
+      edNameVal: 'Hide Outlook window titles',
+      condsLabel: 'Conditions',
+      condsHint: 'app.* / window.class / title.raw only',
+      actionsLabel: 'Preset & per-field actions',
+      fieldAppLbl: 'Application',
+      fieldTitleLbl: 'Window title',
+      actKeep: 'Keep',
+      actDrop: 'Drop',
+      actHint: 'Multiple matches merge to the strictest action per field; dropping app always drops title.',
+      previewTitle: 'Past 7 days preview',
+      receiptOk: 'Receipt valid · 4:32',
+      receiptOkOverride: 'Receipt valid · 4:48',
+      recomputingBadge: 'Recalculating…',
+      failedBadge: 'Preview failed',
+      retryBtn: 'Retry preview',
+      retryShort: 'Retry',
+      summaryMain: 'Existing facts to be further hidden: 18 segments, 18 fields, 2h 14m (incl. inactive)',
+      metricSegsLbl: 'Segments & fields',
+      metricSegsVal: '18 segs · 18 fields',
+      metricSegsSub: 'window_title × 18',
+      metricDurLbl: 'Duration (incl. inactive)',
+      metricDurVal: '2h 14m',
+      metricDurSub: 'Active 1h 52m · Inactive 22m',
+      samplesHdr: 'Samples (first 50 · permitted fields only)',
+      samplesOmitNote: 'Titles to be hidden are omitted here',
+      transFullToHidden: 'Full → Title hidden',
+      transIdleHidden: 'Idle · Title hidden',
+      samples: [
+        { time: 'Today 15:10', app: 'Outlook (outlook.exe)', dur: '26m', idle: false },
+        { time: 'Today 11:40', app: 'Outlook (outlook.exe)', dur: '19m', idle: false },
+        { time: 'Yest 16:05', app: 'Outlook (outlook.exe)', dur: '8m', idle: true },
+      ],
+      futureNote: 'Saving changes future capture only and does not alter recorded history.',
+      historyDisabledHint: 'Save current changes first to run the separate history preview and cleanup.',
+      receiptBannerTitle: 'Recalculating preview — save locked',
+      receiptBannerMsg: 'Preview recomputes automatically ~0.5 s after typing stops or when the 5-minute receipt expires. Save unlocks once the fresh receipt arrives.',
+      receiptFooterLock: 'Waiting for fresh preview receipt — Save unlocks automatically',
+      failedBannerTitle: 'Preview failed — cannot save',
+      failedBannerMsg: 'Automatic preview recomputation failed, so no valid receipt was returned. Retry to restore preview and unlock Save.',
+      failedStaleNote: 'Previous preview is stale; retry to get a receipt matching this draft.',
+      failedFooterLock: 'Save locked: preview failed — retry preview for a valid receipt',
+      ovrTitle: 'Override builtin privacy rule',
+      ovrBadge: 'Writes to user.local.privacy',
+      ovrWarnTitle: 'Loosening builtin privacy protection',
+      ovrWarnMsg: 'Disabling or loosening a builtin rule affects future capture (matching windows may start recording titles). Previously dropped history is never restored. A fresh preview is required; changes write to user.local.privacy.',
+      ovrModeLabel: 'Change type',
+      ovrModeDisable: 'Disable builtin rule',
+      ovrModeOverride: 'Override conditions/actions',
+      ovrTargetHdr: 'Target builtin rule (read-only)',
+      ovrTargetMeta: 'builtin.privacy/browser-private-edge · v1 · preset: private_window',
+      ovrTargetCond: 'app.exe_name = msedge.exe · window.class = Chrome_WidgetWin_1 · title.raw /InPrivate/',
+      ovrVerNote: 'Not yet verified on real Windows builds; confirm matching with the preview below.',
+      ovrReasonLabel: 'Disable reason',
+      ovrReasonVal: 'Managed by custom Edge privacy rule',
+      ovrDestLbl: 'Destination',
+      ovrDestVal: 'user.local.privacy (v2 → v3 · −disable)',
+      ovrOtherSet: 'Use another set…',
+      ovrSummaryZero: 'Existing facts to be further hidden: 0 segments, 0 fields, 0m (incl. inactive)',
+      ovrZeroNote: 'Loosening hides 0 existing facts and does not restore previously dropped titles.',
+      ovrSampleHdr: 'Historical reference (first 50 · permitted fields)',
+      ovrSampleNote: 'Dropped titles stay hidden; new capture will stop matching this builtin rule',
+      ovrSamples: [
+        { time: 'Today 13:22', app: 'Microsoft Edge (msedge.exe)', dur: '12m', badge: 'Was: Private' },
+        { time: 'Yest 20:41', app: 'Microsoft Edge (msedge.exe)', dur: '9m', badge: 'Was: Private' },
+      ],
+      ovrSaveBtn: 'Save disable',
+      loosen: {
+        title: 'Confirm loosening privacy',
+        desc: 'Saving this change loosens privacy protection. Future capture will keep more window fields; previously dropped history is not restored.',
+        changeLbl: 'Change',
+        changeBadge: '−Disable builtin rule',
+        ruleLbl: 'Target rule',
+        ruleVal: 'Edge InPrivate window',
+        appsLbl: 'Affected app',
+        appsVal: 'Microsoft Edge (msedge.exe · /InPrivate/)',
+        fieldsLbl: 'Future fields',
+        fieldTitleDiff: 'window_title (Window title): Drop → Keep',
+        fieldAppSame: 'app (Application): Keep (unchanged)',
+        destLbl: 'Write & receipt',
+        destVal: 'user.local.privacy (v2 → v3) · Receipt valid',
+        note: 'Shown only when loosening privacy (disabling a builtin rule or hiding fewer fields); tightening saves directly.',
+        confirmBtn: 'Confirm & save',
+        cancelBtn: 'Back to editor',
+      },
+    },
+  },
+};
+
+COPY['en-XA'] = pseudoObj(
+  COPY.en,
+  new Set(['sub', 'cond', 'fields', 'ver', 'diff', 'titleOnly', 'rawTitle', 'fallback', 'preset', 'src', 'builtin', 'idle', 'app'])
+);
+// Keep user-entered rule labels / technical identifiers readable per 10 §3 while stress-testing UI strings
+COPY['en-XA'].ext.rows = COPY.en.ext.rows.map(r => ({ ...r }));
+COPY['en-XA'].priv.rows = COPY.en.priv.rows.map(r => ({ ...r }));
+COPY['en-XA'].ext.edNameVal = COPY.en.ext.edNameVal;
+COPY['en-XA'].ext.testInput = COPY.en.ext.testInput;
+COPY['en-XA'].priv.edNameVal = COPY.en.priv.edNameVal;
+COPY['en-XA'].priv.ovrReasonVal = COPY.en.priv.ovrReasonVal;
+COPY['en-XA'].priv.ovrTargetCond = COPY.en.priv.ovrTargetCond;
+COPY['en-XA'].priv.loosen.ruleVal = COPY.en.priv.loosen.ruleVal;
+COPY['en-XA'].priv.loosen.appsVal = COPY.en.priv.loosen.appsVal;
+COPY['en-XA'].ext.ownMeta = 'user.local.extraction · v2 · ' + pseudoStr('2 diffs');
+COPY['en-XA'].priv.ownMeta = 'user.local.privacy · v2 · ' + pseudoStr('2 added rules');
+
+const T = COPY[lang];
+
+function ringSvg(cls, trackVar = 'var(--stroke-control-strong)', arcVar = 'var(--accent-fill)') {
+  return `<svg class="${cls}" viewBox="0 0 28 28" aria-hidden="true">` +
+    `<circle cx="14" cy="14" r="10.5" fill="none" stroke="${trackVar}" stroke-width="3"/>` +
+    `<path d="M14 3.5 A10.5 10.5 0 0 1 24.5 14" fill="none" stroke="${arcVar}" stroke-width="3" stroke-linecap="round"/>` +
+    `</svg>`;
+}
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  const isRail = isMin || hasPanel;
+  if (isRail) nav.classList.add('rail');
+  const menuRow = isMin
+    ? `<div style="height:4px;flex:none"></div>`
+    : `<div class="nav-item" style="margin-top:4px"><svg class="ic"><use href="#menu"/></svg></div>`;
+  nav.innerHTML =
+    menuRow +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#today"/></svg><span>${T.nav.today}</span></div>` +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#week"/></svg><span>${T.nav.week}</span></div>` +
+    `<div class="nav-item selected"><i class="ind"></i><svg class="ic"><use href="#tag-f"/></svg><span>${T.nav.rules}</span></div>` +
+    `<div class="spacer"></div>` +
+    `<div class="bottom"><div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#gear"/></svg><span>${T.nav.settings}</span></div></div>`;
+}
+
+function renderHeaderAndPivot({ disabled = false, loadingBadge = false } = {}) {
+  const dis = disabled ? ' disabled' : '';
+  const qBadge = loadingBadge
+    ? `<span class="skel soft" style="width:18px;height:16px"></span>`
+    : `<span class="badge">7</span>`;
+  return `<div class="page-head">` +
+    `<span class="h-title ell">${T.page.title}</span>` +
+    `<div class="page-head-acts">` +
+      `<button class="btn${dis}"><svg class="ic s16"><use href="#import"/></svg><span>${T.page.importBtn}</span></button>` +
+      `<button class="btn${dis}"><svg class="ic s16"><use href="#export"/></svg><span>${T.page.exportBtn}</span></button>` +
+    `</div>` +
+  `</div>` +
+  `<div class="pivot">` +
+    `<div>${T.page.tabs.categories}</div>` +
+    `<div>${T.page.tabs.rules}</div>` +
+    `<div>${T.page.tabs.queue}${qBadge}</div>` +
+    `<div${isExtractionTab ? ' class="on"' : ''}>${T.page.tabs.extraction}</div>` +
+    `<div${!isExtractionTab ? ' class="on"' : ''}>${T.page.tabs.privacy}</div>` +
+  `</div>`;
+}
+
+function renderTreeCard({ kind, selected = 'local', loading = false } = {}) {
+  const isExt = kind === 'extraction';
+  const heading = isExt ? T.ext.treeHeading : T.priv.treeHeading;
+
+  if (loading) {
+    const skelNodes = [
+      { ind: '', w1: 102, w2: 126 },
+      { ind: ' ind1', w1: 86, w2: 112 },
+    ];
+    return `<div class="card tree-card">` +
+      `<div class="tree-head"><span class="strong grow ell">${heading}</span><button class="btn compact icon disabled"><svg class="ic s16"><use href="#add"/></svg></button></div>` +
+      skelNodes.map(n =>
+        `<div class="tnode${n.ind}">` +
+          `<span class="skel soft" style="width:14px;height:14px;flex:none"></span>` +
+          `<div class="meta">` +
+            `<span class="skel" style="width:${n.w1}px;height:13px"></span>` +
+            `<span class="skel soft" style="width:${n.w2}px;height:10px;margin-top:2px"></span>` +
+          `</div>` +
+          `<span class="skel soft" style="width:34px;height:16px;border-radius:8px;flex:none"></span>` +
+        `</div>`
+      ).join('') +
+    `</div>`;
+  }
+
+  const bName = isExt ? T.ext.builtinName : T.priv.builtinName;
+  const bKey = isExt ? 'builtin.extraction · v1' : 'builtin.privacy · v1';
+  const bCount = isExt ? T.ext.builtinCount : T.priv.builtinCount;
+  const lName = isExt ? T.ext.localName : T.priv.localName;
+  const lKey = isExt ? 'user.local.extraction · v2' : 'user.local.privacy · v2';
+  const lBadges = isExt
+    ? `<span class="badge add">+1</span><span class="badge ovr">~1</span>`
+    : `<span class="badge add">+2</span>`;
+  const note = isExt ? T.ext.treeNote : T.priv.treeNote;
+
+  return `<div class="card tree-card">` +
+    `<div class="tree-head"><span class="strong grow ell">${heading}</span><button class="btn compact icon"><svg class="ic s16"><use href="#add"/></svg></button></div>` +
+    `<div class="tnode${selected === 'builtin' ? ' sel' : ''}">` +
+      `<svg class="ic s16" style="color:var(--text-secondary);flex:none"><use href="#chev-d"/></svg>` +
+      `<div class="meta">` +
+        `<div class="row gap4"><span class="strong ell">${bName}</span><svg class="ic s16 lock-ic"><use href="#lock"/></svg></div>` +
+        `<div class="cap sec ell">${bKey}</div>` +
+        `<div class="badges"><span class="badge">${bCount}</span></div>` +
+      `</div>` +
+      `<div class="sw sm on"></div>` +
+    `</div>` +
+    `<div class="tnode ind1${selected === 'local' ? ' sel' : ''}">` +
+      `<span style="width:14px;flex:none"></span>` +
+      `<div class="meta">` +
+        `<div class="row gap4"><span class="strong ell">${lName}</span></div>` +
+        `<div class="cap sec ell">${lKey}</div>` +
+        `<div class="badges">${lBadges}</div>` +
+      `</div>` +
+      `<div class="sw sm on"></div>` +
+    `</div>` +
+    `<div class="tree-foot-note">${note}</div>` +
+  `</div>`;
+}
+
+function renderExtractionList({ selectedIdx = -1, ownView = false } = {}) {
+  const e = T.ext;
+  const c = T.common;
+  const rows = ownView ? e.rows.slice(0, 2) : e.rows;
+  return `<div class="card list-card">` +
+    `<div class="list-toolbar">` +
+      `<div class="seg"><div${ownView ? ' class="on"' : ''}>${c.segOwn}</div><div${!ownView ? ' class="on"' : ''}>${c.segEff}</div></div>` +
+      `<div class="list-toolbar-right">` +
+        (!hasPanel ? `<div class="input" style="width:144px"><svg class="ic s16"><use href="#search"/></svg><span class="ph ell">${c.searchPh}</span></div>` : '') +
+        `<button class="btn compact"><svg class="ic s16"><use href="#add"/></svg><span>${c.addRule}</span></button>` +
+      `</div>` +
+    `</div>` +
+    `<div class="list-meta"><span>${ownView ? e.ownMeta : e.effMeta}</span>${ownView ? `<span class="link">${c.historyLink}</span>` : ''}</div>` +
+    `<div class="rtbl-h">` +
+      `<span class="col-rule">${e.colRule}</span>` +
+      `<span class="col-cond" style="font-family:var(--font-small)">${e.colCond}</span>` +
+      `<span class="col-fields">${e.colFields}</span>` +
+    `</div>` +
+    rows.map((r, i) => {
+      const diffBadge = r.diff === 'add'
+        ? `<span class="badge add">${c.badgeAdd}</span>`
+        : (r.diff === 'ovr' ? `<span class="badge ovr">${c.badgeOvr}</span>` : '');
+      const lockIc = !r.diff ? `<svg class="ic s16" style="width:12px;height:12px;color:var(--text-tertiary);flex:none"><use href="#lock"/></svg>` : '';
+      const fieldsHtml = r.titleOnly
+        ? `<span class="field-tag muted">${e.titleOnlyTag}</span>`
+        : r.fields.map(f => `<span class="field-tag">${f}</span>`).join('');
+      return `<div class="rtbl-r${i === selectedIdx ? ' sel' : ''}">` +
+        `<div class="col-rule">` +
+          `<div class="col-rule-top">${lockIc}<span class="lbl">${r.name}</span>${diffBadge}</div>` +
+          `<div class="col-rule-sub mono">${r.sub}</div>` +
+        `</div>` +
+        `<span class="col-cond" title="${r.cond}">${r.cond}</span>` +
+        `<div class="col-fields">${fieldsHtml}</div>` +
+      `</div>`;
+    }).join('') +
+    `<div class="fallback-foot"><svg class="ic s16" style="width:14px;height:14px;flex:none"><use href="#info"/></svg><span>${e.fallbackNote}</span></div>` +
+  `</div>`;
+}
+
+function presetBadgeHtml(preset) {
+  const p = T.priv;
+  if (preset === 'excluded') return `<span class="badge crit"><span class="btxt">${p.presetExcluded}</span></span>`;
+  if (preset === 'private_window') return `<span class="badge warn"><span class="btxt">${p.presetPrivateWin}</span></span>`;
+  return `<span class="badge"><span class="btxt">${p.presetTitleHidden}</span></span>`;
+}
+
+function renderPrivacyList({ selectedIdx = -1, ownView = false } = {}) {
+  const p = T.priv;
+  const c = T.common;
+  const rows = ownView ? p.rows.slice(0, 2) : p.rows;
+  return `<div class="card list-card">` +
+    `<div class="list-toolbar">` +
+      `<div class="seg"><div${ownView ? ' class="on"' : ''}>${c.segOwn}</div><div${!ownView ? ' class="on"' : ''}>${c.segEff}</div></div>` +
+      `<div class="list-toolbar-right">` +
+        (!hasPanel ? `<button class="btn compact"><svg class="ic s16"><use href="#history"/></svg><span>${p.applyHistoryBtn}</span></button>` : '') +
+        `<button class="btn compact"><svg class="ic s16"><use href="#add"/></svg><span>${c.addRule}</span></button>` +
+      `</div>` +
+    `</div>` +
+    `<div class="list-meta"><span>${ownView ? p.ownMeta : p.effMeta}</span>${ownView ? `<span class="link">${c.historyLink}</span>` : ''}</div>` +
+    `<div class="rtbl-h">` +
+      `<span class="col-rule">${p.colRule}</span>` +
+      `<span class="col-cond" style="font-family:var(--font-small)">${p.colCond}</span>` +
+      `<span class="col-act">${p.colAct}</span>` +
+      `<span class="col-src">${p.colSrc}</span>` +
+    `</div>` +
+    rows.map((r, i) => {
+      const lockIc = r.builtin ? `<svg class="ic s16" style="width:12px;height:12px;color:var(--text-tertiary);flex:none"><use href="#lock"/></svg>` : '';
+      const diffBadge = r.diff === 'add' ? `<span class="badge add">${c.badgeAdd}</span>` : '';
+      const srcHtml = r.builtin
+        ? `<svg class="ic s16" style="width:12px;height:12px;flex:none"><use href="#lock"/></svg><span class="ell">builtin.privacy</span>`
+        : `<span class="ell">${r.src}</span>${diffBadge}`;
+      return `<div class="rtbl-r${i === selectedIdx ? ' sel' : ''}">` +
+        `<div class="col-rule">` +
+          `<div class="col-rule-top">${lockIc}<span class="lbl">${r.name}</span>${hasPanel && diffBadge ? diffBadge : ''}</div>` +
+          `<div class="col-rule-sub mono">${r.sub}</div>` +
+        `</div>` +
+        `<span class="col-cond" title="${r.cond}">${r.cond}</span>` +
+        `<div class="col-act">${presetBadgeHtml(r.preset)}</div>` +
+        `<div class="col-src">${srcHtml}</div>` +
+      `</div>`;
+    }).join('') +
+  `</div>`;
+}
+
+function renderPrivacyLoading() {
+  const p = T.priv;
+  const c = T.common;
+  const rows = [152, 128, 164, 144, 136, 148];
+  return `<div class="card list-card">` +
+    `<div class="list-toolbar">` +
+      `<div class="seg dim"><div>${c.segOwn}</div><div class="on">${c.segEff}</div></div>` +
+      `<div class="list-toolbar-right">` +
+        `<span class="skel soft" style="width:118px;height:24px"></span>` +
+        `<span class="skel soft" style="width:82px;height:24px"></span>` +
+      `</div>` +
+    `</div>` +
+    `<div class="list-meta"><span class="skel soft" style="width:210px;height:12px"></span></div>` +
+    `<div class="rtbl-h">` +
+      `<span class="col-rule">${p.colRule}</span>` +
+      `<span class="col-cond" style="font-family:var(--font-small)">${p.colCond}</span>` +
+      `<span class="col-act">${p.colAct}</span>` +
+      `<span class="col-src">${p.colSrc}</span>` +
+    `</div>` +
+    rows.map(w =>
+      `<div class="rtbl-r">` +
+        `<div class="col-rule" style="gap:4px"><span class="skel" style="width:${w}px;height:13px"></span><span class="skel soft" style="width:${Math.round(w * 0.85)}px;height:10px"></span></div>` +
+        `<span class="col-cond"><span class="skel soft" style="width:128px;height:12px"></span></span>` +
+        `<div class="col-act"><span class="skel soft" style="width:68px;height:18px"></span></div>` +
+        `<div class="col-src"><span class="skel soft" style="width:86px;height:12px"></span></div>` +
+      `</div>`
+    ).join('') +
+  `</div>`;
+}
+
+function renderFooter({ primaryLabel, primaryDisabled = false } = {}) {
+  const c = T.common;
+  const useOverflow = isMin || lang !== 'zh-CN';
+  const priBtn = primaryDisabled
+    ? `<button class="btn disabled primary-slot"><span>${primaryLabel}</span></button>`
+    : `<button class="btn accent primary-slot"><span>${primaryLabel}</span></button>`;
+  const rightBtn = useOverflow
+    ? `<button class="btn icon ed-foot-more" title="${c.moreTitle}" aria-label="${c.moreTitle}"><svg class="ic s16"><use href="#more"/></svg></button>`
+    : `<button class="btn compact ed-foot-copy"><svg class="ic s16"><use href="#copy"/></svg><span>${c.copyBtn}</span></button>`;
+  return `<div class="ed-foot">` +
+    `<div class="ed-foot-main">${priBtn}<button class="btn"><span>${c.cancelBtn}</span></button></div>` +
+    rightBtn +
+  `</div>`;
+}
+
+function renderExtractionEditor({ isError = false } = {}) {
+  const e = T.ext;
+  const c = T.common;
+
+  const topBanner = isError
+    ? `<div class="infobar critical" role="alert">` +
+        `<svg class="ic s16 ib-ic"><use href="#crit-circle"/></svg>` +
+        `<div class="ib-body">` +
+          `<div class="ib-title">${e.errSummaryTitle}</div>` +
+          `<div>${e.errSummaryMsg}</div>` +
+          `<div class="mono" style="color:var(--text-secondary);margin-top:1px">rule_validation_failed · E-RULE-REGEX</div>` +
+        `</div>` +
+      `</div>`
+    : '';
+
+  const regexContent = isError
+    ? `<span class="err-hl">(?P&lt;file&gt;</span><span class="err-hl">(.+)*</span>) - Visual Studio Code<span class="err-hl">[</span>`
+    : `\\A(<span class="cap-hl">?P&lt;dirty&gt;</span>● )?(<span class="cap-hl">?P&lt;document&gt;</span>[^\\r\\n]+?) - (<span class="cap-hl">?P&lt;project&gt;</span>[^\\r\\n]+?)(?: \\((?:Workspace|工作区)\\))? - Visual Studio Code\\z`;
+
+  const diagHtml = isError
+    ? `<div class="diag-list">` +
+        `<div class="field-err"><svg class="ic s16" style="width:14px;height:14px"><use href="#crit-circle"/></svg><span>${e.errDiagSyntax} <span class="mono">(E-RULE-REGEX)</span></span></div>` +
+        `<div class="field-err"><svg class="ic s16" style="width:14px;height:14px"><use href="#crit-circle"/></svg><span>${e.errDiagGroup} <span class="mono">(E-RULE-REGEX)</span></span></div>` +
+        `<div class="field-err"><svg class="ic s16" style="width:14px;height:14px"><use href="#crit-circle"/></svg><span>${e.errDiagBounded} <span class="mono">(E-RULE-REGEX)</span></span></div>` +
+      `</div>`
+    : '';
+
+  const capRows = isError
+    ? [
+        { name: 'file', desc: e.capDescUnknown, badge: `<span class="badge crit"><span class="btxt">${e.capInvalid}</span></span>`, bad: true },
+        { name: 'document', desc: e.capDescDoc, badge: `<span class="badge"><span class="btxt">${e.capUnparsed}</span></span>` },
+        { name: 'project', desc: e.capDescProj, badge: `<span class="badge"><span class="btxt">${e.capUnparsed}</span></span>` },
+        { name: 'profile', desc: e.capDescProf, badge: `<span class="badge"><span class="btxt">${e.capUnparsed}</span></span>` },
+        { name: 'dirty', desc: e.capDescDirty, badge: `<span class="badge"><span class="btxt">${e.capUnparsed}</span></span>` },
+      ]
+    : [
+        { name: 'document', desc: e.capDescDoc, badge: `<span class="badge ok"><svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg><span class="btxt">${e.capPresent}</span></span>` },
+        { name: 'project', desc: e.capDescProj, badge: `<span class="badge ok"><svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg><span class="btxt">${e.capPresent}</span></span>` },
+        { name: 'profile', desc: e.capDescProf, badge: `<span class="badge"><span class="btxt">${e.capMissing}</span></span>` },
+        { name: 'dirty', desc: e.capDescDirty, badge: `<span class="badge ok"><svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg><span class="btxt">${e.capPresent}</span></span>` },
+      ];
+
+  const testBoxHtml = isError
+    ? `<div class="test-box paused">` +
+        `<div class="row gap8"><span class="cap strong">${e.testLabel}</span><span class="cap sec grow ell" style="text-align:right">${e.testPaused}</span></div>` +
+      `</div>`
+    : `<div class="test-box">` +
+        `<div class="row gap8"><span class="cap strong">${e.testLabel}</span><span class="cap ter grow ell" style="text-align:right">${e.testHint}</span></div>` +
+        `<div class="input focused"><span class="ell">${e.testInput}</span><span class="caret"></span></div>` +
+        `<div class="test-out">` +
+          `<span class="badge ok"><svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg><span class="btxt">${e.testMatched}</span></span>` +
+          `<span class="field-tag">document=rules-variants.html</span>` +
+          `<span class="field-tag">project=Quartz</span>` +
+          `<span class="field-tag ok">dirty=true</span>` +
+        `</div>` +
+      `</div>`;
+
+  const previewHtml = isError
+    ? `<div class="prev-card">` +
+        `<div class="prev-head"><span class="strong">${e.previewTitle}</span><span class="badge crit">E-RULE-REGEX</span></div>` +
+        `<div class="cap sec" style="overflow-wrap:anywhere">${e.errPreviewPaused}</div>` +
+      `</div>`
+    : `<div class="prev-card">` +
+        `<div class="prev-head">` +
+          `<span class="strong">${e.previewTitle}</span>` +
+          `<span class="badge"><span class="btxt">7d</span></span>` +
+        `</div>` +
+        `<div class="prev-metrics">` +
+          `<div class="prev-metric">` +
+            `<div class="pm-lbl"><i class="pm-dot"></i><span class="ell">${e.matchMetricLbl}</span></div>` +
+            `<div class="pm-val">${e.matchMetricVal}</div>` +
+            `<div class="pm-sub">${e.matchMetricSub}</div>` +
+          `</div>` +
+          `<div class="prev-metric eff">` +
+            `<div class="pm-lbl"><i class="pm-dot"></i><span class="ell">${e.effMetricLbl}</span></div>` +
+            `<div class="pm-val">${e.effMetricVal}</div>` +
+            `<div class="pm-sub">${e.effMetricSub}</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="prev-samples-hdr"><span>${e.samplesHdr}</span></div>` +
+        e.samples.map(s =>
+          s.fallback
+            ? `<div class="ba-sample fb">` +
+                `<div class="ba-title"><span class="bt-txt">${s.rawTitle}</span><span class="badge warn"><span class="btxt">${e.fallbackBadge}</span></span></div>` +
+                `<div class="ba-diff"><span>${s.after}</span></div>` +
+              `</div>`
+            : `<div class="ba-sample">` +
+                `<div class="ba-title"><span class="bt-txt">${s.rawTitle}</span></div>` +
+                `<div class="ba-diff">` +
+                  `<span class="ter">${e.beforeLbl}: ${s.before}</span>` +
+                  `<span class="ba-arrow">→</span>` +
+                  `<span style="color:var(--text-primary)">${e.afterLbl}: ${s.after}</span>` +
+                `</div>` +
+              `</div>`
+        ).join('') +
+      `</div>`;
+
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${e.edTitle}</span><span class="badge ovr">${c.badgeOvr}</span></div>` +
+        `<div class="cap sec ell mono">user.local.extraction/vscode-project</div>` +
+      `</div>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        topBanner +
+        `<div class="ver-note">` +
+          `<span class="badge"><span class="btxt">${c.unverified}</span></span>` +
+          `<span>${e.verNote}</span>` +
+        `</div>` +
+        `<div class="ed-row">` +
+          `<div class="field grow"><label>${e.edNameLabel}</label><div class="input std"><span class="ell">${e.edNameVal}</span></div></div>` +
+          `<div class="field" style="width:72px;flex:none"><label><span class="ell">${c.prioLabel}</span></label><div class="input std">50</div></div>` +
+        `</div>` +
+        `<div class="ed-row flex-wrap" style="justify-content:space-between">` +
+          `<div class="field grow"><label><span>${e.appCondsLabel}</span><span class="cap ter">${e.appCondsHint}</span></label></div>` +
+          `<div class="order-ctrl"><span class="order-pos">${c.orderPos}</span><button class="btn compact icon disabled"><svg class="ic s16"><use href="#arrow-u"/></svg></button><button class="btn compact icon"><svg class="ic s16"><use href="#arrow-d"/></svg></button></div>` +
+        `</div>` +
+        `<div class="cond-list">` +
+          `<div class="cond-row">` +
+            `<div class="cond-line">` +
+              `<span class="neg-btn">${c.negLabel}</span>` +
+              `<div class="input grow"><span class="mono grow ell">app.exe_name</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+              `<button class="btn compact icon subtle"><svg class="ic s16"><use href="#close"/></svg></button>` +
+            `</div>` +
+            `<div class="cond-line">` +
+              `<div class="input" style="flex:0 0 102px"><span class="mono grow ell">equals</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+              `<div class="input grow"><span class="mono ell">code.exe</span></div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="field">` +
+          `<label><span>${e.regexLabel}</span><span class="cap ter">${e.regexHint}</span></label>` +
+          `<div class="mono-area${isError ? ' invalid' : ''}">${regexContent}</div>` +
+          diagHtml +
+        `</div>` +
+        `<div class="field">` +
+          `<label><span>${e.capturesLabel}</span><span class="cap ter">${e.capturesHint}</span></label>` +
+          `<div class="cap-grid">` +
+            capRows.map(r =>
+              `<div class="cap-cell${r.bad ? ' bad' : ''}">` +
+                `<div class="cap-cell-l"><span class="cap-name">${r.name}</span><span class="cap-desc">${r.desc}</span></div>` +
+                `<span class="cap-state">${r.badge}</span>` +
+              `</div>`
+            ).join('') +
+          `</div>` +
+        `</div>` +
+        testBoxHtml +
+        previewHtml +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    renderFooter({ primaryLabel: c.saveBtn, primaryDisabled: isError });
+}
+
+function renderPrivacyEditor({ mode = 'normal' } = {}) {
+  const p = T.priv;
+  const c = T.common;
+  const isRecomputing = mode === 'receipt-required';
+  const isFailed = mode === 'preview-failed';
+  const isBlocked = isRecomputing || isFailed;
+  const isBuiltinOvr = mode === 'builtin-override';
+
+  if (isBuiltinOvr) {
+    const panel = document.getElementById('details');
+    panel.style.display = 'flex';
+    panel.innerHTML =
+      `<div class="ed-head">` +
+        `<div class="ed-head-txt">` +
+          `<div class="ed-head-title"><span class="strong">${p.ovrTitle}</span><span class="badge warn"><span class="btxt">${p.ovrBadge}</span></span></div>` +
+          `<div class="cap sec ell mono">builtin.privacy/browser-private-edge</div>` +
+        `</div>` +
+        `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+      `</div>` +
+      `<div class="ed-body-wrap" id="ed-body-wrap">` +
+        `<div class="ed-body" id="ed-body">` +
+          `<div class="infobar caution" role="alert">` +
+            `<svg class="ic s16 ib-ic"><use href="#warn"/></svg>` +
+            `<div class="ib-body">` +
+              `<div class="ib-title">${p.ovrWarnTitle}</div>` +
+              `<div>${p.ovrWarnMsg}</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="field">` +
+            `<label>${p.ovrModeLabel}</label>` +
+            `<div class="seg full-seg"><div class="on">${p.ovrModeDisable}</div><div>${p.ovrModeOverride}</div></div>` +
+          `</div>` +
+          `<div class="target-card">` +
+            `<div class="row gap4"><svg class="ic s16" style="width:13px;height:13px;color:var(--text-tertiary)"><use href="#lock"/></svg><span class="cap strong">${p.ovrTargetHdr}</span></div>` +
+            `<div class="cap sec" style="overflow-wrap:anywhere">${p.ovrTargetMeta}</div>` +
+            `<div class="mono ter" style="overflow-wrap:anywhere">${p.ovrTargetCond}</div>` +
+            `<div class="ver-note-inline">` +
+              `<span class="badge"><span class="btxt">${c.unverified}</span></span>` +
+              `<span>${p.ovrVerNote}</span>` +
+            `</div>` +
+          `</div>` +
+          `<div class="field">` +
+            `<label>${p.ovrReasonLabel}</label>` +
+            `<div class="input std"><span class="ell">${p.ovrReasonVal}</span></div>` +
+          `</div>` +
+          `<div class="dest-row">` +
+            `<span class="sec">${p.ovrDestLbl}: <span class="strong" style="color:var(--text-primary)">${p.ovrDestVal}</span></span>` +
+            `<span class="dest-link">${p.ovrOtherSet}</span>` +
+          `</div>` +
+          `<div class="prev-card">` +
+            `<div class="prev-head">` +
+              `<span class="strong">${p.previewTitle}</span>` +
+              `<span class="badge ok"><svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg><span class="btxt">${p.receiptOkOverride}</span></span>` +
+            `</div>` +
+            `<div class="prev-summary-line">${p.ovrSummaryZero}</div>` +
+            `<div class="cap sec" style="overflow-wrap:anywhere">${p.ovrZeroNote}</div>` +
+            `<div class="prev-samples-hdr"><span>${p.ovrSampleHdr}</span></div>` +
+            p.ovrSamples.map(s =>
+              `<div class="psample-row">` +
+                `<span class="psample-time">${s.time}</span>` +
+                `<span class="psample-app">${s.app}</span>` +
+                `<span class="badge"><span class="btxt">${s.badge}</span></span>` +
+                `<span class="psample-dur">${s.dur}</span>` +
+              `</div>`
+            ).join('') +
+            `<div class="cap ter" style="overflow-wrap:anywhere">${p.ovrSampleNote}</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+      `</div>` +
+      renderFooter({ primaryLabel: p.ovrSaveBtn, primaryDisabled: false });
+    return;
+  }
+
+  let topBanner = '';
+  if (isRecomputing) {
+    topBanner =
+      `<div class="infobar caution" role="status">` +
+        `<span style="flex:none;margin-top:1px">${ringSvg('ring-xs')}</span>` +
+        `<div class="ib-body">` +
+          `<div class="ib-title">${p.receiptBannerTitle}</div>` +
+          `<div>${p.receiptBannerMsg}</div>` +
+          `<div class="mono" style="color:var(--text-secondary);margin-top:1px">preview_pending · preview_expired (5 min)</div>` +
+        `</div>` +
+      `</div>`;
+  } else if (isFailed) {
+    topBanner =
+      `<div class="infobar caution" role="alert">` +
+        `<svg class="ic s16 ib-ic"><use href="#warn"/></svg>` +
+        `<div class="ib-body">` +
+          `<div class="ib-title">${p.failedBannerTitle}</div>` +
+          `<div>${p.failedBannerMsg}</div>` +
+          `<div class="mono" style="color:var(--text-secondary);margin-top:1px">error_code: busy · preview_required</div>` +
+          `<div class="ib-acts">` +
+            `<button class="btn compact"><svg class="ic s16"><use href="#refresh"/></svg><span>${p.retryBtn}</span></button>` +
+          `</div>` +
+        `</div>` +
+      `</div>`;
+  }
+
+  let previewHeadRight = `<span class="badge ok"><svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg><span class="btxt">${p.receiptOk}</span></span>`;
+  if (isRecomputing) {
+    previewHeadRight = `<span class="row gap4 cap" style="color:var(--accent-text)">${ringSvg('ring-xs')}<span>${p.recomputingBadge}</span></span>`;
+  } else if (isFailed) {
+    previewHeadRight =
+      `<span class="badge warn"><span class="btxt">${p.failedBadge}</span></span>` +
+      `<button class="btn compact"><svg class="ic s16"><use href="#refresh"/></svg><span>${p.retryShort}</span></button>`;
+  }
+
+  const previewFailNote = isFailed
+    ? `<div class="prev-fail-bar"><svg class="ic s16" style="width:14px;height:14px"><use href="#warn"/></svg><span>${p.failedStaleNote}</span></div>`
+    : '';
+
+  const footerLockBanner = isBlocked
+    ? `<div class="ed-foot-banner"><svg class="ic s16" style="width:14px;height:14px"><use href="#lock"/></svg><span>${isFailed ? p.failedFooterLock : p.receiptFooterLock}</span></div>`
+    : '';
+
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${p.edTitle}</span><span class="badge add">${c.badgeAdd}</span></div>` +
+        `<div class="cap sec ell mono">user.local.privacy/outlook-hide-title</div>` +
+      `</div>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        topBanner +
+        `<div class="field"><label>${p.edNameLabel}</label><div class="input std"><span class="ell">${p.edNameVal}</span></div></div>` +
+        `<div class="field">` +
+          `<label><span>${p.condsLabel}</span><div class="seg"><div class="on">${c.matchAll}</div><div>${c.matchAny}</div></div></label>` +
+          `<div class="cond-list">` +
+            `<div class="cond-row">` +
+              `<div class="cond-line">` +
+                `<span class="neg-btn">${c.negLabel}</span>` +
+                `<div class="input grow"><span class="mono grow ell">app.exe_name</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+                `<button class="btn compact icon subtle"><svg class="ic s16"><use href="#close"/></svg></button>` +
+              `</div>` +
+              `<div class="cond-line">` +
+                `<div class="input" style="flex:0 0 102px"><span class="mono grow ell">equals</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+                `<div class="input grow${isRecomputing ? ' focused' : ''}"><span class="mono ell">outlook.exe</span>${isRecomputing ? '<span class="caret"></span>' : ''}</div>` +
+              `</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="row gap8" style="flex-wrap:wrap"><button class="btn compact"><svg class="ic s16"><use href="#add"/></svg><span>${c.addCond}</span></button><span class="cap ter ell" style="min-width:0;flex:1;text-align:right">${p.condsHint}</span></div>` +
+        `</div>` +
+        `<div class="field">` +
+          `<label>${p.actionsLabel}</label>` +
+          `<div class="seg full-seg"><div class="on">${p.presetTitleHidden}</div><div>${p.presetExcluded}</div><div>${p.presetCustom}</div></div>` +
+          `<div class="act-grid">` +
+            `<div class="act-row">` +
+              `<div class="act-field"><span class="af-lbl">${p.fieldAppLbl}</span><span class="af-key">app</span></div>` +
+              `<div class="seg act-seg"><div class="on">${p.actKeep}</div><div>${p.actDrop}</div></div>` +
+            `</div>` +
+            `<div class="act-row">` +
+              `<div class="act-field"><span class="af-lbl">${p.fieldTitleLbl}</span><span class="af-key">window_title</span></div>` +
+              `<div class="seg act-seg"><div>${p.actKeep}</div><div class="on">${p.actDrop}</div></div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="prev-card">` +
+          `<div class="prev-head">` +
+            `<span class="strong">${p.previewTitle}</span>` +
+            previewHeadRight +
+          `</div>` +
+          previewFailNote +
+          `<div class="prev-content${isBlocked ? ' stale' : ''}" style="display:flex;flex-direction:column;gap:5px">` +
+            `<div class="prev-summary-line">` +
+              `<div style="font-weight:600">${p.summaryMain}</div>` +
+              `<div class="ter" style="margin-top:2px">${p.metricSegsSub} · ${p.metricDurSub}</div>` +
+            `</div>` +
+            `<div class="prev-samples-hdr"><span>${p.samplesHdr}</span></div>` +
+            p.samples.map(s =>
+              `<div class="psample-row">` +
+                `<span class="psample-time">${s.time}</span>` +
+                `<span class="psample-app">${s.app}</span>` +
+                `<span class="badge${s.idle ? ' dis' : ' warn'}"><span class="btxt">${s.idle ? p.transIdleHidden : p.transFullToHidden}</span></span>` +
+                `<span class="psample-dur">${s.dur}</span>` +
+              `</div>`
+            ).join('') +
+            `<div class="cap ter" style="overflow-wrap:anywhere">${p.samplesOmitNote}</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="history-box">` +
+          `<div class="row gap4"><svg class="ic s16" style="width:14px;height:14px;color:var(--text-secondary);flex:none"><use href="#info"/></svg><span class="cap" style="color:var(--text-primary);overflow-wrap:anywhere">${p.futureNote}</span></div>` +
+          `<div class="history-row">` +
+            `<button class="btn compact disabled"><svg class="ic s16"><use href="#history"/></svg><span>${p.applyHistoryBtn}</span></button>` +
+            `<span class="cap ter" style="flex:1;min-width:120px;overflow-wrap:anywhere">${p.historyDisabledHint}</span>` +
+          `</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    footerLockBanner +
+    renderFooter({ primaryLabel: c.saveBtn, primaryDisabled: isBlocked });
+}
+
+function renderLoosenConfirmModal() {
+  const m = T.priv.loosen;
+  const scrim = document.getElementById('modal-scrim');
+  scrim.style.display = 'flex';
+  scrim.innerHTML =
+    `<div class="modal-dlg" role="dialog" aria-modal="true">` +
+      `<div class="modal-head">` +
+        `<svg class="ic modal-head-ic"><use href="#warn"/></svg>` +
+        `<span class="h-sub grow ell">${m.title}</span>` +
+        `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+      `</div>` +
+      `<div class="modal-body-wrap" id="modal-body-wrap">` +
+        `<div class="modal-body" id="modal-body">` +
+          `<div class="modal-desc">${m.desc}</div>` +
+          `<div class="impact-box">` +
+            `<div class="impact-row">` +
+              `<span class="impact-k">${m.changeLbl}</span>` +
+              `<div class="impact-v"><div class="impact-tags"><span class="badge warn"><span class="btxt">${m.changeBadge}</span></span></div></div>` +
+            `</div>` +
+            `<div class="impact-row">` +
+              `<span class="impact-k">${m.ruleLbl}</span>` +
+              `<div class="impact-v">` +
+                `<span class="strong" style="font-size:12px;line-height:16px">${m.ruleVal}</span>` +
+                `<span class="mono ter" style="font-size:11px;line-height:14px">builtin.privacy/browser-private-edge</span>` +
+              `</div>` +
+            `</div>` +
+            `<div class="impact-row">` +
+              `<span class="impact-k">${m.appsLbl}</span>` +
+              `<div class="impact-v"><span class="mono" style="font-size:11.5px;line-height:15px">${m.appsVal}</span></div>` +
+            `</div>` +
+            `<div class="impact-row">` +
+              `<span class="impact-k">${m.fieldsLbl}</span>` +
+              `<div class="impact-v">` +
+                `<div class="impact-tags"><span class="field-tag warn" style="height:auto;padding:2px 6px;white-space:normal;overflow-wrap:anywhere">${m.fieldTitleDiff}</span></div>` +
+                `<span class="ter">${m.fieldAppSame}</span>` +
+              `</div>` +
+            `</div>` +
+            `<div class="impact-row">` +
+              `<span class="impact-k">${m.destLbl}</span>` +
+              `<div class="impact-v"><span>${m.destVal}</span></div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="modal-note">` +
+            `<svg class="ic s16" style="width:14px;height:14px"><use href="#info"/></svg>` +
+            `<span>${m.note}</span>` +
+          `</div>` +
+        `</div>` +
+        `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="modal-thumb"></div></div>` +
+      `</div>` +
+      `<div class="modal-foot">` +
+        `<button class="btn"><span>${m.cancelBtn}</span></button>` +
+        `<button class="btn accent"><span>${m.confirmBtn}</span></button>` +
+      `</div>` +
+    `</div>`;
+}
+
+function renderMain() {
+  const main = document.getElementById('main');
+
+  switch (stateKey) {
+    case 'extraction':
+      main.innerHTML =
+        renderHeaderAndPivot() +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'extraction', selected: 'local' })}${renderExtractionList({ selectedIdx: 0, ownView: false })}</div>`;
+      break;
+    case 'extraction-editor':
+      main.innerHTML =
+        renderHeaderAndPivot() +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'extraction', selected: 'local' })}${renderExtractionList({ selectedIdx: 0, ownView: true })}</div>`;
+      renderExtractionEditor({ isError: false });
+      break;
+    case 'extraction-regex-error':
+      main.innerHTML =
+        renderHeaderAndPivot() +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'extraction', selected: 'local' })}${renderExtractionList({ selectedIdx: 0, ownView: true })}</div>`;
+      renderExtractionEditor({ isError: true });
+      break;
+    case 'privacy':
+      main.innerHTML =
+        renderHeaderAndPivot() +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'privacy', selected: 'local' })}${renderPrivacyList({ selectedIdx: 0, ownView: false })}</div>`;
+      break;
+    case 'privacy-editor':
+      main.innerHTML =
+        renderHeaderAndPivot() +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'privacy', selected: 'local' })}${renderPrivacyList({ selectedIdx: 0, ownView: true })}</div>`;
+      renderPrivacyEditor({ mode: 'normal' });
+      break;
+    case 'privacy-receipt-required':
+      main.innerHTML =
+        renderHeaderAndPivot() +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'privacy', selected: 'local' })}${renderPrivacyList({ selectedIdx: 0, ownView: true })}</div>`;
+      renderPrivacyEditor({ mode: 'receipt-required' });
+      break;
+    case 'privacy-preview-failed':
+      main.innerHTML =
+        renderHeaderAndPivot() +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'privacy', selected: 'local' })}${renderPrivacyList({ selectedIdx: 0, ownView: true })}</div>`;
+      renderPrivacyEditor({ mode: 'preview-failed' });
+      break;
+    case 'privacy-builtin-override':
+      main.innerHTML =
+        renderHeaderAndPivot() +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'privacy', selected: 'builtin' })}${renderPrivacyList({ selectedIdx: 2, ownView: false })}</div>`;
+      renderPrivacyEditor({ mode: 'builtin-override' });
+      break;
+    case 'privacy-loosen-confirm':
+      main.innerHTML =
+        renderHeaderAndPivot() +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'privacy', selected: 'builtin' })}${renderPrivacyList({ selectedIdx: 2, ownView: false })}</div>`;
+      renderPrivacyEditor({ mode: 'builtin-override' });
+      renderLoosenConfirmModal();
+      break;
+    case 'privacy-loading':
+      main.innerHTML =
+        renderHeaderAndPivot({ disabled: true, loadingBadge: true }) +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'privacy', loading: true })}${renderPrivacyLoading()}</div>`;
+      break;
+    default:
+      main.innerHTML =
+        renderHeaderAndPivot() +
+        `<div class="rules-grid">${renderTreeCard({ kind: 'extraction', selected: 'local' })}${renderExtractionList({ selectedIdx: 0, ownView: false })}</div>`;
+      break;
+  }
+}
+
+function syncScroll(scrollEl, wrapEl, thumbEl) {
+  if (!scrollEl || !wrapEl || !thumbEl) return;
+  const overflow = scrollEl.scrollHeight > scrollEl.clientHeight + 1;
+  wrapEl.classList.toggle('scrollable', overflow);
+  if (!overflow) return;
+  const trackH = wrapEl.clientHeight - 8;
+  const ratio = scrollEl.clientHeight / scrollEl.scrollHeight;
+  const thumbH = Math.max(28, Math.round(trackH * ratio));
+  const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+  const top = maxScroll > 0 ? Math.round((scrollEl.scrollTop / maxScroll) * (trackH - thumbH)) : 0;
+  thumbEl.style.height = thumbH + 'px';
+  thumbEl.style.top = top + 'px';
+}
+
+renderNav();
+renderMain();
+
+const mainEl = document.getElementById('main');
+const mainWrapEl = document.getElementById('main-wrap');
+const mainThumbEl = document.getElementById('main-thumb');
+syncScroll(mainEl, mainWrapEl, mainThumbEl);
+mainEl.addEventListener('scroll', () => syncScroll(mainEl, mainWrapEl, mainThumbEl));
+
+const edBody = document.getElementById('ed-body');
+const edBodyWrap = document.getElementById('ed-body-wrap');
+const edThumb = document.getElementById('ed-thumb');
+if (edBody) {
+  syncScroll(edBody, edBodyWrap, edThumb);
+  edBody.addEventListener('scroll', () => syncScroll(edBody, edBodyWrap, edThumb));
+}
+
+const modalBody = document.getElementById('modal-body');
+const modalBodyWrap = document.getElementById('modal-body-wrap');
+const modalThumb = document.getElementById('modal-thumb');
+if (modalBody) {
+  syncScroll(modalBody, modalBodyWrap, modalThumb);
+  modalBody.addEventListener('scroll', () => syncScroll(modalBody, modalBodyWrap, modalThumb));
+}
+</script>
+</body>
+</html>
