@@ -1,0 +1,1723 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Quartz — Historical privacy cleanup (M4 V8)</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mockup.css">
+<!--
+  Historical privacy cleanup mockup for Quartz (M4 V8).
+  Query parameters:
+    ?state=history-range | history-preview | history-backups | history-confirm |
+           history-running | history-failed | history-resumed | history-completed
+    &theme=light | dark
+    &lang=zh-CN | en | en-XA
+    &size=min          (optional: 640x480 minimum window per 07 §2.3; default 1280x800)
+-->
+<style>
+/* Minimum window 640x480 (Compact breakpoint per 07 §2.1 & §2.3) */
+html[data-size="min"],
+html[data-size="min"] body,
+html[data-size="min"] .window{width:640px;height:480px}
+
+.wrap{position:relative;overflow:hidden}
+.main-wrap{position:relative;flex:1;min-width:0;display:flex}
+.main{position:relative;padding:var(--space-xxl) var(--space-xxl) var(--space-l);gap:var(--space-s);overflow-y:auto;overflow-x:hidden}
+html[data-size="min"] .main{padding:var(--space-l)}
+
+/* Fluent 2 overlay scrollbar indicator (11 §9.2) */
+.scroll-track{
+  display:none;
+  position:absolute;top:var(--space-xs);right:var(--space-xs);bottom:var(--space-xs);
+  width:6px;pointer-events:none;z-index:8;
+}
+.scrollable > .scroll-track{display:block}
+.scroll-thumb{
+  position:absolute;left:1px;right:1px;top:0;
+  border-radius:var(--radius-control);
+  background:var(--text-tertiary);
+}
+
+/* Nav & header primitives (reused from V1/V3) */
+.nav-item span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.page-head{
+  flex:none;display:flex;align-items:center;flex-wrap:wrap;
+  gap:var(--space-s);min-height:40px;
+}
+.page-head .h-title{flex:1;min-width:140px}
+.page-head-acts{display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap}
+
+.pivot{
+  height:auto;min-height:32px;
+  gap:var(--space-l);row-gap:var(--space-xs);
+  flex-wrap:wrap;
+}
+.pivot div{height:32px;white-space:nowrap}
+html[data-size="min"] .pivot{gap:var(--space-m);row-gap:0}
+
+.badge{max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;gap:3px}
+.badge .btxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn{min-height:var(--h-control-standard);height:auto;padding:4px 12px}
+.btn.compact{min-height:var(--h-control-compact);height:auto;padding:2px 10px}
+.btn.icon{width:var(--h-control-standard);height:var(--h-control-standard);padding:0}
+.btn.compact.icon{width:var(--h-control-compact);height:var(--h-control-compact);padding:0}
+
+/* Primary destructive CTA button — high-contrast status.critical fill + text.on_accent */
+.btn.destructive{
+  background:var(--status-critical);
+  border-color:var(--status-critical);
+  color:var(--text-on-accent);
+  box-shadow:var(--shadow-2);
+  font:var(--type-body-strong);
+}
+
+/* Privacy rules background workspace (reused from V3) */
+.rules-grid{
+  flex:1;min-height:0;
+  display:flex;align-items:stretch;gap:var(--space-s);
+  margin-top:var(--space-xs);
+}
+.tree-card{
+  width:256px;flex:none;
+  padding:var(--space-m);
+  display:flex;flex-direction:column;gap:var(--space-xs);
+  align-self:flex-start;
+  max-height:100%;overflow:hidden;
+}
+.list-card{
+  flex:1;min-width:0;
+  padding:var(--space-m) var(--space-m) var(--space-s);
+  display:flex;flex-direction:column;gap:var(--space-xs);
+  align-self:flex-start;
+  max-height:100%;overflow:hidden;
+}
+html[data-size="min"] .rules-grid{flex-direction:column;flex:none}
+html[data-size="min"] .tree-card,
+html[data-size="min"] .list-card{width:100%;max-height:none}
+
+.tree-head{display:flex;align-items:center;gap:var(--space-s);padding:0 var(--space-xs) var(--space-xs)}
+.tnode{min-height:48px;padding:6px 8px;gap:6px}
+.tnode.ind1{margin-left:14px}
+.tnode .badges{display:flex;flex-wrap:wrap;gap:4px;margin-top:1px;min-width:0;max-width:100%}
+.tnode .sw{flex:none}
+.tnode .lock-ic{width:12px;height:12px;color:var(--text-tertiary);flex:none}
+.tree-foot-note{
+  margin-top:4px;padding:6px 8px;border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);border:1px solid var(--stroke-card);
+  font:var(--type-caption);color:var(--text-secondary);overflow-wrap:anywhere;
+}
+
+.list-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-s);padding:0 var(--space-xs) var(--space-xs)}
+.list-toolbar .seg{flex:none}
+.list-toolbar-right{margin-left:auto;display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap}
+.list-meta{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-s);padding:0 var(--space-xs) var(--space-xs);font:var(--type-caption);color:var(--text-secondary)}
+
+.rtbl-h,.rtbl-r{display:flex;align-items:center;gap:var(--space-s);min-height:36px;padding:5px var(--space-s);border-radius:var(--radius-control)}
+.rtbl-h{min-height:var(--h-row-compact);padding:4px var(--space-s);font:var(--type-caption);color:var(--text-secondary);border-bottom:1px solid var(--stroke-divider);border-radius:0}
+.rtbl-r{position:relative}
+.rtbl-r.sel{background:var(--fill-subtle-hover)}
+.rtbl-r.sel::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:2px;background:var(--accent-fill)}
+.col-rule{flex:1;min-width:110px;display:flex;flex-direction:column;gap:1px;overflow:hidden}
+.col-rule-top{display:flex;align-items:center;gap:5px;min-width:0}
+.col-rule-top .lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.col-rule-sub{font:var(--type-caption);color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.col-cond{flex:0 0 184px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:11.5px;line-height:16px;color:var(--text-secondary)}
+.col-act{flex:0 0 124px;min-width:0;display:flex;align-items:center;gap:4px}
+.col-src{flex:0 0 126px;min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:4px;font:var(--type-caption);color:var(--text-secondary)}
+html[data-size="min"] .col-cond{flex:0 0 124px}
+html[data-size="min"] .col-src{display:none}
+
+/* Inline InfoBars */
+.infobar{
+  flex:none;
+  padding:8px 12px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card);
+  display:flex;align-items:flex-start;gap:10px;
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;word-break:break-word;
+}
+.infobar.subtle{background:var(--fill-card-secondary)}
+.infobar .ib-ic{flex:none;margin-top:2px;color:var(--text-secondary)}
+.infobar .ib-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;overflow-wrap:anywhere}
+.infobar .ib-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.infobar .ib-title{font:var(--type-body-strong);color:var(--text-primary);font-size:13px;line-height:18px;overflow-wrap:anywhere}
+.infobar .ib-right{flex:none;display:flex;align-items:center;gap:6px;margin-left:auto;align-self:center}
+.infobar.caution{
+  background:var(--status-caution-bg);
+  border-color:color-mix(in srgb,var(--status-caution) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.caution .ib-ic{color:var(--status-caution)}
+.infobar.critical{
+  background:var(--status-critical-bg);
+  border-color:color-mix(in srgb,var(--status-critical) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.critical .ib-ic{color:var(--status-critical)}
+.infobar.success{
+  background:var(--status-success-bg);
+  border-color:color-mix(in srgb,var(--status-success) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.success .ib-ic{color:var(--status-success)}
+.infobar.accent-bar{
+  background:var(--fill-card);
+  border-color:color-mix(in srgb,var(--accent-fill) 32%,var(--stroke-card));
+}
+.infobar.accent-bar .ib-ic{color:var(--accent-fill)}
+
+/* Fluent progress ring (static SVG arc per 07 §9 / 11 §1) */
+.ring-xs{width:14px;height:14px;display:block;flex:none}
+.ring-sm{width:16px;height:16px;display:block;flex:none}
+
+/* Determinate linear Fluent 2 progress bar */
+.pbar{
+  height:4px;width:100%;border-radius:2px;overflow:hidden;
+  background:var(--fill-subtle-hover);
+}
+.pbar-fill{
+  height:100%;border-radius:2px;background:var(--accent-fill);
+}
+.pbar-fill.ok{background:var(--status-success)}
+.pbar-fill.crit{background:var(--status-critical)}
+
+/* Compact horizontal mini phase pills inside Privacy tab InfoBar (history-resumed) */
+.mini-phases{
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  margin-top:4px;
+}
+.mp-item{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:1px 6px;border-radius:var(--radius-control);
+  background:var(--fill-subtle-hover);
+  font:var(--type-caption);color:var(--text-tertiary);
+  white-space:nowrap;
+}
+.mp-item.done{color:var(--status-success);background:var(--status-success-bg)}
+.mp-item.active{
+  color:var(--accent-text);
+  background:color-mix(in srgb,var(--accent-fill) 14%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent-fill) 32%,transparent);
+  font-weight:600;
+}
+.mp-item.fail{color:var(--status-critical);background:var(--status-critical-bg)}
+
+/* Toolbar anchor tooltip (inside window) for disabled entry during resumed job */
+.btn-tip-wrap{position:relative;display:inline-flex;align-items:center}
+.inline-tip{
+  position:absolute;top:calc(100% + 6px);right:0;
+  max-width:260px;padding:6px 9px;
+  background:var(--bg-flyout);border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-control);box-shadow:var(--shadow-8);
+  font:var(--type-caption);color:var(--text-secondary);
+  white-space:normal;overflow-wrap:anywhere;z-index:12;
+}
+
+/* Modal dialogs (Fluent 2 overlay tokens, reused from V3/V4) */
+.modal-scrim{
+  position:absolute;inset:0;
+  background:var(--fill-smoke);
+  z-index:30;
+  display:flex;align-items:center;justify-content:center;
+  padding:var(--space-l);
+}
+.modal-dlg{
+  width:656px;max-width:100%;max-height:100%;
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-overlay);
+  box-shadow:var(--shadow-64);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.modal-head{
+  flex:none;
+  padding:12px var(--space-xl);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:center;gap:var(--space-s);
+}
+.modal-head-txt{flex:1;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.modal-head-ic{flex:none}
+.modal-head-ic.warn{color:var(--status-caution)}
+.modal-head-ic.crit{color:var(--status-critical)}
+.modal-head-ic.ok{color:var(--status-success)}
+.modal-head-ic.accent{color:var(--accent-fill)}
+
+/* 4-step wizard bar */
+.wiz-steps{
+  flex:none;
+  display:flex;align-items:center;gap:6px;
+  padding:8px var(--space-xl);
+  border-bottom:1px solid var(--stroke-divider);
+  background:var(--fill-card-secondary);
+}
+.wiz-step{
+  flex:1;min-width:0;
+  display:flex;align-items:center;gap:6px;
+  font:var(--type-caption);color:var(--text-tertiary);
+}
+.wiz-step .ws-num{
+  width:18px;height:18px;border-radius:50%;flex:none;
+  display:grid;place-items:center;
+  background:var(--fill-subtle-hover);
+  border:1px solid var(--stroke-control-strong);
+  font-size:11px;font-weight:600;color:var(--text-secondary);
+}
+.wiz-step .ws-lbl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wiz-step.active{color:var(--text-primary);font-weight:600}
+.wiz-step.active .ws-num{
+  background:var(--accent-fill);border-color:var(--accent-fill);
+  color:var(--text-on-accent);
+}
+.wiz-step.done{color:var(--text-secondary)}
+.wiz-step.done .ws-num{
+  background:var(--status-success-bg);
+  border-color:color-mix(in srgb,var(--status-success) 35%,transparent);
+  color:var(--status-success);
+}
+.wiz-sep{width:12px;height:1px;background:var(--stroke-divider);flex:none}
+
+.modal-body-wrap{position:relative;flex:1;min-height:0;display:flex}
+.modal-body{
+  flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
+  padding:10px var(--space-xl);
+  display:flex;flex-direction:column;gap:8px;
+}
+
+/* Strictly single-row pinned footer (never wraps to 2 rows, even in en-XA / 640x480) */
+.modal-foot{
+  flex:none;
+  padding:10px var(--space-xl);
+  border-top:1px solid var(--stroke-divider);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:center;flex-wrap:nowrap;gap:8px;
+}
+.modal-foot-left{
+  display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+  margin-right:auto;min-width:0;flex:0 1 auto;
+}
+.modal-foot-right{
+  display:flex;align-items:center;flex-wrap:nowrap;gap:8px;
+  min-width:0;flex:0 1 auto;
+}
+.modal-foot .btn{min-width:0;max-width:100%;overflow:hidden}
+.modal-foot .btn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+html[data-size="min"] .modal-scrim{padding:var(--space-s)}
+html[data-size="min"] .modal-dlg{width:100%;height:100%}
+html[data-size="min"] .modal-head{padding:8px 12px}
+html[data-size="min"] .wiz-steps{padding:6px 12px;gap:4px}
+html[data-size="min"] .wiz-sep{width:6px}
+html[data-size="min"] .modal-body{padding:9px 12px;gap:8px}
+html[data-size="min"] .modal-foot{padding:8px 12px;gap:6px}
+html[data-size="min"] .modal-foot .btn{padding:4px 9px}
+
+/* Content cards inside modal */
+.box{
+  padding:9px 11px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:6px;
+}
+.box.surface{background:var(--fill-card)}
+.sect-hdr{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:8px;flex-wrap:wrap;
+}
+.sect-title{font:var(--type-body-strong);font-size:13px;line-height:18px;color:var(--text-primary)}
+
+/* Step 1: Range presets & custom date grid */
+.preset-grid{
+  display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:6px;
+}
+.preset-btn{
+  padding:7px 9px;border-radius:var(--radius-control);
+  background:var(--fill-control);
+  border:1px solid var(--stroke-control);
+  border-bottom-color:var(--stroke-control-strong);
+  display:flex;flex-direction:column;gap:2px;min-width:0;
+}
+.preset-btn .pb-t{font:var(--type-body-strong);font-size:13px;line-height:18px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.preset-btn .pb-s{font:var(--type-caption);color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.preset-btn.on{
+  background:color-mix(in srgb,var(--accent-fill) 10%,var(--fill-card));
+  border-color:var(--accent-fill);
+  box-shadow:inset 0 0 0 1px var(--accent-fill);
+}
+.preset-btn.on .pb-t{color:var(--accent-text)}
+
+.date-pair{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:10px;
+}
+.utc-pill{
+  padding:5px 8px;border-radius:var(--radius-control);
+  background:var(--bg-base);border:1px solid var(--stroke-card);
+  display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+  font:var(--type-caption);color:var(--text-secondary);
+}
+
+/* Snapshot rules chips */
+.snap-meta{
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.rule-pill{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:2px 7px;border-radius:var(--radius-control);
+  background:var(--fill-card);border:1px solid var(--stroke-card);
+  font:var(--type-caption);color:var(--text-primary);
+  max-width:100%;
+}
+
+/* Preview loading row */
+.scan-bar{
+  padding:8px 10px;border-radius:var(--radius-control);
+  border:1px solid color-mix(in srgb,var(--accent-fill) 28%,var(--stroke-card));
+  background:color-mix(in srgb,var(--accent-fill) 6%,var(--fill-card));
+  display:flex;align-items:center;gap:10px;
+}
+.scan-bar-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.scan-link{color:var(--accent-text);font:var(--type-caption);white-space:nowrap;flex:none}
+
+/* Step 2: Impact KPIs, per-rule breakdown, privacy-safe samples */
+.kpi-grid{
+  display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:8px;
+}
+.kpi-tile{
+  padding:8px 10px;border-radius:var(--radius-control);
+  background:var(--fill-card);border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:2px;min-width:0;
+}
+.kpi-lbl{display:flex;align-items:center;gap:5px;font:var(--type-caption);color:var(--text-secondary)}
+.kpi-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--status-caution)}
+.kpi-dot.ok{background:var(--status-success)}
+.kpi-dot.neu{background:var(--status-neutral)}
+.kpi-val{font:var(--type-subtitle);font-size:18px;line-height:24px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kpi-sub{font-size:11px;line-height:15px;color:var(--text-tertiary);overflow-wrap:anywhere}
+
+.rule-break-row{
+  display:flex;align-items:center;gap:8px;
+  padding:6px 8px;border-radius:var(--radius-control);
+  background:var(--fill-card);border:1px solid var(--stroke-card);
+}
+.rbr-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.rbr-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.rbr-stats{flex:none;text-align:right;font:var(--type-caption);color:var(--text-primary);white-space:nowrap}
+.rbr-stats-sub{font-size:11px;line-height:14px;color:var(--text-tertiary)}
+
+.psample-list{display:flex;flex-direction:column;gap:3px}
+.psample-row{
+  display:flex;align-items:center;gap:8px;
+  min-height:26px;padding:3px 7px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);border:1px solid var(--stroke-card);
+  font:var(--type-caption);
+}
+.psample-time{flex:none;color:var(--text-tertiary);white-space:nowrap}
+.psample-entity{flex:1;min-width:72px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.psample-entity.redacted{color:var(--text-secondary);font-style:italic}
+.psample-dur{flex:none;color:var(--text-secondary);white-space:nowrap}
+
+/* Step 3: Backup inventory rows with checkboxes */
+.chk{
+  width:18px;height:18px;border-radius:var(--radius-control);flex:none;
+  display:grid;place-items:center;
+  border:1px solid var(--stroke-control-strong);
+  background:var(--fill-control);
+  color:transparent;
+}
+.chk.on{
+  background:var(--accent-fill);
+  border-color:var(--accent-fill);
+  color:var(--text-on-accent);
+}
+.chk.crit.on{
+  background:var(--status-critical);
+  border-color:var(--status-critical);
+  color:var(--text-on-accent);
+}
+.bk-list{display:flex;flex-direction:column;gap:6px}
+.bk-row{
+  padding:8px 10px;border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card);
+  display:flex;align-items:center;gap:10px;
+}
+.bk-row.sel{
+  border-color:color-mix(in srgb,var(--status-critical) 42%,var(--stroke-card));
+  background:color-mix(in srgb,var(--status-critical-bg) 35%,var(--fill-card));
+}
+.bk-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.bk-name{font-family:var(--font-mono);font-size:12px;line-height:16px;color:var(--text-primary);overflow-wrap:anywhere}
+.bk-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font:var(--type-caption);color:var(--text-secondary)}
+.bk-right{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+.bk-size{font:var(--type-body-strong);font-size:12.5px;line-height:16px;color:var(--text-primary);white-space:nowrap}
+
+/* Step 4: Summary KV table & irreversible acknowledgement */
+.kv-box{
+  padding:9px 11px;border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:7px;
+}
+.kv-row{display:flex;align-items:flex-start;gap:10px;font:var(--type-caption)}
+.kv-k{flex:0 0 118px;color:var(--text-secondary);overflow-wrap:anywhere}
+.kv-v{flex:1;min-width:0;color:var(--text-primary);display:flex;flex-direction:column;gap:2px;overflow-wrap:anywhere}
+
+.ack-box{
+  padding:10px 12px;border-radius:var(--radius-control);
+  background:var(--status-critical-bg);
+  border:1px solid color-mix(in srgb,var(--status-critical) 36%,transparent);
+  display:flex;align-items:flex-start;gap:10px;
+}
+.ack-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;overflow-wrap:anywhere}
+.ack-title{font:var(--type-body-strong);font-size:13px;line-height:18px;color:var(--text-primary)}
+.ack-sub{font:var(--type-caption);color:var(--text-secondary)}
+
+/* Step 5/6/8: 6-phase vertical stepper */
+.stepper{
+  padding:6px 10px;border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:0;
+}
+.st-row{
+  position:relative;
+  display:flex;align-items:flex-start;gap:10px;
+  padding:4px 4px;
+}
+.st-row:not(:last-child)::after{
+  content:"";position:absolute;left:13px;top:24px;bottom:-4px;width:1.5px;
+  background:var(--stroke-divider);
+}
+.st-row.done:not(:last-child)::after{background:color-mix(in srgb,var(--status-success) 45%,transparent)}
+.st-row.active:not(:last-child)::after{background:color-mix(in srgb,var(--accent-fill) 45%,transparent)}
+.st-row.fail:not(:last-child)::after{background:color-mix(in srgb,var(--status-critical) 40%,transparent)}
+
+.st-ic{
+  width:20px;height:20px;border-radius:50%;flex:none;
+  display:grid;place-items:center;position:relative;z-index:1;
+  background:var(--fill-card);
+  border:1px solid var(--stroke-control-strong);
+  color:var(--text-tertiary);
+}
+.st-row.done .st-ic{
+  background:var(--status-success-bg);
+  border-color:color-mix(in srgb,var(--status-success) 40%,transparent);
+  color:var(--status-success);
+}
+.st-row.active .st-ic{
+  background:var(--bg-flyout);
+  border-color:var(--accent-fill);
+  color:var(--accent-fill);
+}
+.st-row.fail .st-ic{
+  background:var(--status-critical-bg);
+  border-color:color-mix(in srgb,var(--status-critical) 45%,transparent);
+  color:var(--status-critical);
+}
+
+.st-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.st-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.st-name{font:var(--type-body-strong);font-size:13px;line-height:18px;color:var(--text-primary)}
+.st-row.pending .st-name{font-weight:400;color:var(--text-secondary)}
+.st-count{margin-left:auto;font:var(--type-caption);color:var(--text-secondary);white-space:nowrap}
+.st-row.active .st-count{color:var(--accent-text);font-weight:600}
+.st-row.fail .st-count{color:var(--status-critical);font-weight:600}
+.st-desc{font:var(--type-caption);color:var(--text-secondary);overflow-wrap:anywhere}
+
+/* Failure error card (follows rules-states.html load-error pattern) + comparison split */
+.err-card{
+  flex:none;
+  padding:10px 12px;
+  border-radius:var(--radius-control);
+  background:var(--status-critical-bg);
+  border:1px solid color-mix(in srgb,var(--status-critical) 28%,transparent);
+  display:flex;align-items:flex-start;gap:10px;
+}
+.err-card-ic{color:var(--status-critical);margin-top:1px;flex:none}
+.err-card-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;overflow-wrap:anywhere}
+.err-card-title{font:var(--type-body-strong);font-size:13px;line-height:18px;color:var(--text-primary);overflow-wrap:anywhere}
+.err-card-msg{font:var(--type-caption);color:var(--text-primary);overflow-wrap:anywhere}
+.err-card-code{font:var(--type-caption);font-family:var(--font-mono);color:var(--text-tertiary);margin-top:2px;overflow-wrap:anywhere}
+
+.split-2{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:8px;
+}
+.split-card{
+  padding:8px 10px;border-radius:var(--radius-control);
+  background:var(--fill-card);border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:4px;min-width:0;
+}
+.split-card.done-irrev{border-left:3px solid var(--status-caution)}
+.split-card.remain{border-left:3px solid var(--status-critical)}
+
+/* Compact 640x480 reflow rules */
+html[data-size="min"] .preset-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+html[data-size="min"] .date-pair{grid-template-columns:minmax(0,1fr)}
+html[data-size="min"] .kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+html[data-size="min"] .kpi-tile{padding:6px 8px}
+html[data-size="min"] .kpi-val{font-size:15px;line-height:20px}
+html[data-size="min"] .kv-box{padding:7px 10px;gap:5px}
+html[data-size="min"] .ack-box{padding:8px 10px}
+html[data-size="min"] .split-2{grid-template-columns:minmax(0,1fr)}
+html[data-size="min"] .kv-k{flex:0 0 92px}
+html[data-size="min"] .rule-break-row{flex-wrap:wrap}
+html[data-size="min"] .rbr-stats{text-align:left;width:100%}
+html[data-lang="en-XA"] .kv-k{flex:0 0 132px}
+html[data-size="min"][data-lang="en-XA"] .kv-k{flex:0 0 96px}
+</style>
+<script>
+const __p = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = __p.get('theme') || 'light';
+if (__p.get('size') === 'min') document.documentElement.dataset.size = 'min';
+</script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.4" fill="currentColor"/></symbol>
+  <symbol id="week" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3M8 13h8M8 16.5h5"/></symbol>
+  <symbol id="tag" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z"/><circle cx="8.3" cy="8.3" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="tag-f" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z" fill="currentColor"/><circle cx="8.3" cy="8.3" r="1.3" fill="var(--cut)" stroke="none"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><path d="M10.29 4.59L10.47 2.32L13.53 2.32L13.71 4.59L16.03 5.55L17.76 4.07L19.93 6.24L18.45 7.97L19.41 10.29L21.68 10.47L21.68 13.53L19.41 13.71L18.45 16.03L19.93 17.76L17.76 19.93L16.03 18.45L13.71 19.41L13.53 21.68L10.47 21.68L10.29 19.41L7.97 18.45L6.24 19.93L4.07 17.76L5.55 16.03L4.59 13.71L2.32 13.53L2.32 10.47L4.59 10.29L5.55 7.97L4.07 6.24L6.24 4.07L7.97 5.55Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.5l2.5 2.5 4.8-5.2"/></symbol>
+  <symbol id="warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.3" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="crit-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></symbol>
+  <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><circle cx="12" cy="8" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="import" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/></symbol>
+  <symbol id="export" viewBox="0 0 24 24"><path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 19.5h14"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="shield" viewBox="0 0 24 24"><path d="M12 3.5l7 2.5v5.5c0 4-2.8 7.2-7 9-4.2-1.8-7-5-7-9V6z"/></symbol>
+  <symbol id="refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.2h-4.2"/></symbol>
+  <symbol id="history" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.8V9h4.2"/><path d="M12 8v4.5l3 1.8"/></symbol>
+  <symbol id="calendar" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3"/></symbol>
+  <symbol id="database" viewBox="0 0 24 24"><ellipse cx="12" cy="6.5" rx="7.5" ry="2.8"/><path d="M4.5 6.5v11c0 1.55 3.36 2.8 7.5 2.8s7.5-1.25 7.5-2.8v-11"/><path d="M4.5 12c0 1.55 3.36 2.8 7.5 2.8s7.5-1.25 7.5-2.8"/></symbol>
+  <symbol id="trash" viewBox="0 0 24 24"><path d="M4.5 7h15M9.5 7V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2M6.5 7l1 12.5a1.5 1.5 0 0 0 1.5 1.5h6a1.5 1.5 0 0 0 1.5-1.5L17.5 7"/></symbol>
+  <symbol id="logo" viewBox="0 0 24 24"><path d="M12 2.5l8 4.5v10l-8 4.5-8-4.5V7z" fill="var(--accent-fill)" stroke="none"/><path d="M12 2.5v19M4 7l16 10M20 7L4 17" stroke="var(--text-on-accent)" stroke-width="1" opacity=".7"/></symbol>
+</defs></svg>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="app"><svg class="ic s16"><use href="#logo"/></svg><span>Quartz</span></div>
+    <div class="btns">
+      <div><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></div>
+    </div>
+  </div>
+  <div class="body">
+    <nav class="nav" id="nav"></nav>
+    <div class="wrap" id="wrap">
+      <div class="main-wrap" id="main-wrap">
+        <main class="main" id="main"></main>
+        <div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="main-thumb"></div></div>
+      </div>
+      <div class="modal-scrim" id="modal-scrim" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const rawLang = params.get('lang') || 'zh-CN';
+const lang = (rawLang === 'en' || rawLang === 'en-XA') ? rawLang : 'zh-CN';
+const stateKey = params.get('state') || 'history-range';
+const isMin = params.get('size') === 'min';
+document.documentElement.lang = lang === 'en-XA' ? 'en' : lang;
+document.documentElement.dataset.lang = lang;
+
+/* Pseudo-locale generator matching quartz-i18n/src/pseudo.rs (~40% tilde padding + brackets) */
+const ACCENT_MAP = {
+  A:'À',B:'Ɓ',C:'Ç',D:'Ď',E:'É',F:'Ƒ',G:'Ĝ',H:'Ĥ',I:'Î',J:'Ĵ',K:'Ķ',L:'Ļ',M:'Ḿ',
+  N:'Ñ',O:'Ö',P:'Ƥ',Q:'Ǫ',R:'Ŕ',S:'Š',T:'Ţ',U:'Û',V:'Ṽ',W:'Ŵ',X:'Ẋ',Y:'Ý',Z:'Ž',
+  a:'à',b:'ƀ',c:'ç',d:'đ',e:'é',f:'ƒ',g:'ĝ',h:'ĥ',i:'î',j:'ĵ',k:'ķ',l:'ļ',m:'ɱ',
+  n:'ñ',o:'ö',p:'ƥ',q:'ǫ',r:'ŕ',s:'š',t:'ţ',u:'û',v:'ṽ',w:'ŵ',x:'ẋ',y:'ý',z:'ž',
+};
+function pseudoStr(s) {
+  if (!s || typeof s !== 'string') return s;
+  const accented = [...s].map(ch => ACCENT_MAP[ch] || ch).join('');
+  const pad = Math.ceil((s.length * 2) / 5);
+  return '[' + accented + '~'.repeat(pad) + ']';
+}
+function pseudoObj(val, skipKeys = new Set(['key', 'id', 'code', 'errCode', 'cond', 'src', 'sub', 'preset', 'state', 'badgeCls', 'fileName', 'utcRange', 'startVal', 'endVal', 'dateVal'])) {
+  if (typeof val === 'string') return pseudoStr(val);
+  if (Array.isArray(val)) return val.map(v => pseudoObj(v, skipKeys));
+  if (val && typeof val === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      out[k] = skipKeys.has(k) ? v : pseudoObj(v, skipKeys);
+    }
+    return out;
+  }
+  return val;
+}
+
+const COPY = {
+  'zh-CN': {
+    nav: { today: '今天', week: '本周', rules: '分类与规则', settings: '设置' },
+    page: {
+      title: '分类与规则',
+      importBtn: '导入规则',
+      exportBtn: '导出规则',
+      tabs: {
+        categories: '分类',
+        rules: '规则',
+        queue: '未分类队列',
+        extraction: '文档提取规则',
+        privacy: '隐私规则',
+      },
+    },
+    priv: {
+      treeHeading: '隐私规则集',
+      builtinName: '内置隐私规则',
+      builtinCount: '12 条',
+      localName: '本地隐私规则',
+      treeNote: '隐私规则不分先后，所有命中的规则按字段取最严格动作；入库前生效。',
+      segOwn: '本规则集条目',
+      segEff: '生效视图',
+      effMeta: '生效隐私规则 · 14 条 · 命中时逐字段取最严格动作',
+      applyHistoryBtn: '应用到历史数据…',
+      applyHistoryBusyTip: '已有历史隐私清理任务正在后台继续执行，完成后可发起新的清理。',
+      addRule: '新增规则',
+      colRule: '规则',
+      colCond: '条件摘要',
+      colAct: '预设 / 字段动作',
+      colSrc: '来源',
+      badgeAdd: '+新增',
+      presetTitleHidden: '隐藏标题',
+      presetPrivateWin: '无痕窗口',
+      presetExcluded: '排除',
+      rows: [
+        { name: 'Outlook 隐藏窗口标题', sub: 'user.local.privacy/outlook-hide-title', cond: 'app.exe_name = outlook.exe', preset: 'title_hidden', src: 'user.local.privacy', diff: 'add' },
+        { name: '微信完全排除', sub: 'user.local.privacy/exclude-wechat', cond: 'app.exe_name = wechat.exe', preset: 'excluded', src: 'user.local.privacy', diff: 'add' },
+        { name: 'Edge InPrivate 窗口', sub: 'builtin.privacy/browser-private-edge', cond: 'msedge.exe · /InPrivate/', preset: 'private_window', src: 'builtin.privacy', builtin: true },
+        { name: 'KeePassXC 密码管理器', sub: 'builtin.privacy/password-manager-keepassxc', cond: 'app.exe_name = KeePassXC.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+        { name: '1Password 密码管理器', sub: 'builtin.privacy/password-manager-1password', cond: 'app.exe_name = 1Password.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+        { name: 'Windows 凭据弹窗', sub: 'builtin.privacy/credential-ui-credentialuibroker', cond: 'CredentialUIBroker.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+      ],
+    },
+    wiz: {
+      title: '将隐私规则应用到历史数据',
+      steps: ['选择范围', '影响预览', '备份处理', '确认执行'],
+      btnCancel: '取消',
+      btnBack: '上一步',
+      btnClose: '关闭',
+      btnDone: '完成',
+      btnBg: '后台运行',
+      btnViewProgress: '查看进度',
+      btnViewDetails: '查看详情…',
+      btnViewRetry: '查看并重试',
+      range: {
+        snapHdr: '将应用的已生效隐私规则',
+        snapBadge: '14 条生效 · 当前版本',
+        snapDesc: '使用当前已保存并生效的隐私规则（内置隐私规则 v1 + 本地隐私规则 v2）。未保存的草稿不会生效；历史清理会单独重新计算影响范围。',
+        ruleChip1: 'Outlook 隐藏窗口标题（隐藏标题）',
+        ruleChip2: '微信完全排除（排除）',
+        ruleChipMore: '以及 12 条内置规则',
+        furtherTitle: '什么是“进一步隐藏”？',
+        furtherDesc: '仅对仍保留的历史记录应用更严格的隐藏方式（例如隐藏窗口标题或排除应用），不会恢复此前已清除的内容；包含空闲等非活跃时段，已排除的时段仍保留起止时间。',
+        pickHdr: '选择清理时间范围',
+        maxSpanBadge: '单次最长 366 天',
+        presets: [
+          { t: '过去 7 天', s: '11-15 至 11-22' },
+          { t: '过去 30 天', s: '10-23 至 11-22', on: true },
+          { t: '全部记录', s: '单次上限 366 天' },
+          { t: '自定义范围', s: '按日期精确指定' },
+        ],
+        startLbl: '起始日期（含）',
+        endLbl: '结束日期（不含）',
+        startVal: '2026-10-23',
+        endVal: '2026-11-22',
+        utcLabel: '清理区间（UTC，不含结束时刻）',
+        utcRange: '2026-10-23 00:00 — 2026-11-22 00:00',
+        utcSpan: '共 30 天（上限 366 天，更早记录可分批清理）',
+        loadingTitle: '正在评估历史影响并检查可管理备份…',
+        loadingSub: '正在按当前生效的隐私规则扫描这 30 天的历史记录',
+        cancelScan: '取消扫描',
+        nextLoading: '正在加载预览…',
+      },
+      preview: {
+        receiptBadge: '预览有效 · 4:45',
+        rangePill: '2026-10-23 — 2026-11-22（共 30 天 · UTC）',
+        snapPill: '内置隐私规则 v1 + 本地隐私规则 v2',
+        changeRange: '调整范围',
+        warnTitle: '历史清理不可撤销',
+        warnDesc: '确认执行后，将永久清除数据库中的对应信息；任务开始后无法取消，即使中途失败，已清除的内容也无法恢复。',
+        kpiSegLbl: '将进一步隐藏切片',
+        kpiSegVal: '342 段',
+        kpiSegSub: '活跃 284 段 · 非活跃/空闲 58 段',
+        kpiFieldLbl: '将清除字段数',
+        kpiFieldVal: '470 个字段',
+        kpiFieldSub: '窗口标题 342 项 · 应用名称 128 项',
+        kpiDurLbl: '涉及总时长（含非活跃）',
+        kpiDurVal: '38 小时 16 分',
+        kpiDurSub: '活跃 33 小时 34 分 · 非活跃 4 小时 42 分',
+        byRuleHdr: '按规则统计',
+        byRuleSub: '2 条本地规则命中进一步隐藏',
+        byRuleRows: [
+          { name: 'Outlook 隐藏窗口标题', ruleSet: '本地隐私规则 · v2', preset: 'title_hidden', main: '214 段 · 214 字段', subStat: '24 小时 08 分（含非活跃 3 小时 12 分）' },
+          { name: '微信完全排除', ruleSet: '本地隐私规则 · v2', preset: 'excluded', main: '128 段 · 256 字段', subStat: '14 小时 08 分（移除应用与标题）' },
+        ],
+        samplesHdr: '受影响样本（前 50 条 · 仅显示清理后允许保留的字段）',
+        samplesNote: '样本不暴露将被隐藏的窗口标题或被排除的应用身份。',
+        samples: [
+          { time: '11-22 15:10', entity: 'Outlook (outlook.exe)', badge: '完整 → 隐藏标题', badgeCls: 'warn', dur: '26 分', redacted: false },
+          { time: '11-22 14:20', entity: '已排除（应用身份与标题将移除）', badge: '完整 → 已排除', badgeCls: 'crit', dur: '18 分', redacted: true },
+          { time: '11-21 16:05', entity: 'Outlook (outlook.exe)', badge: '空闲 · 隐藏标题', badgeCls: 'dis', dur: '11 分', redacted: false },
+        ],
+        nextBtn: '下一步：检查备份',
+      },
+      backups: {
+        infoTitle: '备份文件包含清理前的历史数据',
+        infoDesc: '默认不勾选任何备份，避免误删恢复点。未勾选的备份会保持原样（仍包含清理前的窗口标题与应用记录）；勾选的备份将在历史记录清理完成后一并永久删除。',
+        invHdr: '可管理的备份清单',
+        invSummary: '已选 1 / 3 份 · 预计删除 142 MiB',
+        selAll: '全选',
+        selNone: '清空选择',
+        repreviewBadge: '已按当前备份选择更新预览 · 有效 4:58',
+        repreviewNote: '更改备份选择会自动刷新预览结果；当前仍有 2 份未选中的备份将保留清理前的历史数据。',
+        items: [
+          { fileName: 'pre-migrate-v3-20261118-091204.db', created: '2026-11-18 09:12', kind: '迁移前备份', size: '142 MiB', selected: true, status: '将一并删除' },
+          { fileName: 'quartz-backup-20261110-210433.db', created: '2026-11-10 21:04', kind: '手动备份', size: '128 MiB', selected: false, status: '保留 · 仍含旧数据' },
+          { fileName: 'pre-migrate-v2-20261028-140219.db', created: '2026-10-28 14:02', kind: '迁移前备份', size: '96 MiB', selected: false, status: '保留 · 仍含旧数据' },
+        ],
+        nextBtn: '下一步：确认执行',
+      },
+      confirm: {
+        title: '确认永久清理历史数据',
+        desc: '请核对以下清理范围、影响与备份选择。开始后将按当前已生效的隐私规则在后台完成清理。',
+        kRange: '清理时间范围',
+        vRange: '2026-10-23 至 2026-11-22（共 30 天，按 UTC 计，不含结束当天）',
+        kRules: '应用的隐私规则',
+        vRules: '内置隐私规则 v1 + 本地隐私规则 v2（共 14 条）',
+        vReceipt: '预览结果有效（剩余 4:32），已与当前范围和备份选择对应',
+        kImpact: '历史记录影响',
+        vImpact: '将永久进一步隐藏 342 段记录、清除 470 个字段，涉及 38 小时 16 分（含非活跃 4 小时 42 分）',
+        vImpactSub: '随后会清理不再使用的标题与缓存，并压缩数据库文件',
+        kDelBk: '将永久删除的备份',
+        vDelBk: '1 份 · pre-migrate-v3-20261118-091204.db (142 MiB)',
+        kKeepBk: '未勾选保留的备份',
+        vKeepBk: '2 份将保持原样（仍包含清理前的历史数据）',
+        ackTitle: '我已核对以上清理范围与备份选择，知晓该操作不可撤销',
+        ackSub: '任务开始后无法取消或撤回；即便执行中途失败，已清除的内容也无法恢复。',
+        confirmBtn: '开始永久清理',
+      },
+      running: {
+        title: '正在应用隐私规则到历史数据',
+        stateBadge: '运行中',
+        bgBannerTitle: '正在执行历史隐私清理（第 2 / 6 步：隐藏历史记录中的字段 · 2,140 / 4,500）',
+        bgBannerDesc: '清理正在后台运行，你可以继续使用其他功能，活动记录不受影响。',
+        usableTitle: '可以关闭此窗口，采集和界面操作不受影响',
+        usableDesc: '清理会在后台持续进行；关闭后可在“隐私规则”页顶部信息栏随时查看进度，应用重启后也会自动继续。',
+        footerNote: '清理开始后无法取消，重启后也会自动接着完成。',
+        phases: [
+          { name: '锁定清理范围', state: 'done', count: '1 / 1', desc: '已锁定本次清理的时间范围与规则，防止遗漏新写入的记录' },
+          { name: '隐藏历史记录中的字段', state: 'active', count: '2,140 / 4,500', pct: 48, desc: '正在分批移除匹配记录中的窗口标题或应用信息' },
+          { name: '清理不再使用的标题与缓存', state: 'pending', count: '等待中', desc: '删除不再被引用的历史标题和内存缓存' },
+          { name: '压缩数据库文件', state: 'pending', count: '等待中', desc: '整理并压缩数据库文件，彻底清除残留数据' },
+          { name: '删除选定的备份', state: 'pending', count: '1 份待删除', desc: '删除 pre-migrate-v3-20261118-091204.db，保留其余 2 份' },
+          { name: '完成', state: 'pending', count: '等待中', desc: '全部步骤完成后结束本次清理' },
+        ],
+      },
+      failed: {
+        title: '历史隐私清理未能完成',
+        stateBadge: '失败',
+        bgBannerTitle: '历史隐私清理在“压缩数据库文件”步骤暂停',
+        bgBannerDesc: '已完成进度已保留；关闭占用数据库的程序后可直接重试。',
+        errTitle: '数据库文件正被其他程序占用，暂时无法压缩',
+        errCode: 'checkpoint_blocked',
+        errDesc: '另一个程序（例如数据库查看器或第三方同步、备份工具）正在读取 Quartz 的数据库文件，因此这一步无法继续。请先关闭占用该文件的程序，再点击下方按钮重试。',
+        doneHdr: '已完成（不可撤销）',
+        doneBody: '已锁定本次清理范围；4,500 条历史记录中的匹配字段已永久隐藏且无法恢复；318 条不再使用的历史标题已清除。',
+        remHdr: '尚未完成（重试后继续）',
+        remBody: '数据库文件尚未压缩；1 份选定的备份（pre-migrate-v3-20261118-091204.db）尚未删除。',
+        retryNote: '点击重试会直接从“压缩数据库文件”步骤继续，无需重新选择范围或预览，已锁定的清理范围与隐私规则保持不变。',
+        retryBtn: '从失败步骤重试',
+        phases: [
+          { name: '锁定清理范围', state: 'done', count: '1 / 1' },
+          { name: '隐藏历史记录中的字段', state: 'done', count: '4,500 / 4,500' },
+          { name: '清理不再使用的标题与缓存', state: 'done', count: '318 / 318' },
+          { name: '压缩数据库文件', state: 'fail', count: '失败', desc: '数据库文件正被其他程序占用' },
+          { name: '删除选定的备份', state: 'pending', count: '1 份待删除' },
+          { name: '完成', state: 'pending', count: '未完成' },
+        ],
+      },
+      resumed: {
+        title: '正在继续上次的历史清理…',
+        badge: '重启后自动恢复',
+        desc: '应用重启后已自动接续上次未完成的历史清理。当前第 4 / 6 步：压缩数据库文件，随后将删除 1 份选定的备份。正常记录与界面操作不受影响。',
+        miniPhases: [
+          { label: '1 锁定范围', state: 'done' },
+          { label: '2 隐藏字段 (4,500)', state: 'done' },
+          { label: '3 清理缓存', state: 'done' },
+          { label: '4 压缩数据库', state: 'active' },
+          { label: '5 删除备份 (1)', state: 'pending' },
+          { label: '6 完成', state: 'pending' },
+        ],
+      },
+      completed: {
+        title: '历史隐私清理已完成',
+        stateBadge: '已完成',
+        bgBannerTitle: '历史隐私清理已完成 · 已进一步隐藏 342 段并删除 1 份选定备份',
+        bgBannerDesc: '历史记录清理与数据库压缩均已完成；2 份未选定的备份继续保留。',
+        kpi1Lbl: '已进一步隐藏',
+        kpi1Val: '342 段 · 470 字段',
+        kpi1Sub: '38 小时 16 分（含非活跃）',
+        kpi2Lbl: '数据库清理',
+        kpi2Val: '已清理并压缩',
+        kpi2Sub: '已清除 318 条未用标题并压缩文件',
+        kpi3Lbl: '选定备份已删除',
+        kpi3Val: '1 份 (142 MiB)',
+        kpi3Sub: 'pre-migrate-v3-20261118-091204.db',
+        unselectedTitle: '2 份未勾选的备份已保留',
+        unselectedDesc: '以下未选中的备份未被删除，仍包含清理前的历史数据：quartz-backup-20261110-210433.db (128 MiB)、pre-migrate-v2-20261028-140219.db (96 MiB)。如需彻底清除，可再次运行历史清理或手动管理备份目录。',
+        phases: [
+          { name: '锁定清理范围', state: 'done', count: '1 / 1' },
+          { name: '隐藏历史记录中的字段', state: 'done', count: '4,500 / 4,500' },
+          { name: '清理不再使用的标题与缓存', state: 'done', count: '318 / 318' },
+          { name: '压缩数据库文件', state: 'done', count: '1 / 1' },
+          { name: '删除选定的备份', state: 'done', count: '1 / 1' },
+          { name: '完成', state: 'done', count: '全部成功' },
+        ],
+      },
+    },
+  },
+  'en': {
+    nav: { today: 'Today', week: 'Week', rules: 'Categories & rules', settings: 'Settings' },
+    page: {
+      title: 'Categories & rules',
+      importBtn: 'Import rules',
+      exportBtn: 'Export rules',
+      tabs: {
+        categories: 'Categories',
+        rules: 'Rules',
+        queue: 'Unclassified',
+        extraction: 'Extraction',
+        privacy: 'Privacy',
+      },
+    },
+    priv: {
+      treeHeading: 'Privacy rule sets',
+      builtinName: 'Built-in privacy',
+      builtinCount: '12 rules',
+      localName: 'Local privacy',
+      treeNote: 'Order-independent: all matching rules merge by strictest action per field before storage.',
+      segOwn: 'This set',
+      segEff: 'Effective view',
+      effMeta: 'Effective privacy rules · 14 rules · strictest action per field',
+      applyHistoryBtn: 'Apply to history…',
+      applyHistoryBusyTip: 'A historical privacy cleanup is currently resuming in the background. Wait for it to finish before starting another.',
+      addRule: 'Add rule',
+      colRule: 'Rule',
+      colCond: 'Conditions',
+      colAct: 'Preset / action',
+      colSrc: 'Source',
+      badgeAdd: '+Added',
+      presetTitleHidden: 'Hide title',
+      presetPrivateWin: 'Private window',
+      presetExcluded: 'Exclude',
+      rows: [
+        { name: 'Outlook hide window title', sub: 'user.local.privacy/outlook-hide-title', cond: 'app.exe_name = outlook.exe', preset: 'title_hidden', src: 'user.local.privacy', diff: 'add' },
+        { name: 'Exclude WeChat completely', sub: 'user.local.privacy/exclude-wechat', cond: 'app.exe_name = wechat.exe', preset: 'excluded', src: 'user.local.privacy', diff: 'add' },
+        { name: 'Edge InPrivate window', sub: 'builtin.privacy/browser-private-edge', cond: 'msedge.exe · /InPrivate/', preset: 'private_window', src: 'builtin.privacy', builtin: true },
+        { name: 'KeePassXC password manager', sub: 'builtin.privacy/password-manager-keepassxc', cond: 'app.exe_name = KeePassXC.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+        { name: '1Password password manager', sub: 'builtin.privacy/password-manager-1password', cond: 'app.exe_name = 1Password.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+        { name: 'Windows credential prompt', sub: 'builtin.privacy/credential-ui-credentialuibroker', cond: 'CredentialUIBroker.exe', preset: 'title_hidden', src: 'builtin.privacy', builtin: true },
+      ],
+    },
+    wiz: {
+      title: 'Apply privacy rules to historical data',
+      steps: ['Range', 'Preview', 'Backups', 'Confirm'],
+      btnCancel: 'Cancel',
+      btnBack: 'Back',
+      btnClose: 'Close',
+      btnDone: 'Done',
+      btnBg: 'Run in background',
+      btnViewProgress: 'View progress',
+      btnViewDetails: 'View details…',
+      btnViewRetry: 'View & retry',
+      range: {
+        snapHdr: 'Active privacy rules to apply',
+        snapBadge: '14 active · current version',
+        snapDesc: 'Uses your currently saved privacy rules (Built-in privacy v1 + Local privacy v2). Unsaved drafts are ignored, and historical impact is calculated separately.',
+        ruleChip1: 'Outlook hide window title (Hide title)',
+        ruleChip2: 'Exclude WeChat completely (Exclude)',
+        ruleChipMore: '+ 12 built-in rules',
+        furtherTitle: 'What does "further hide" mean?',
+        furtherDesc: 'Only applies stricter hiding to retained history (such as hiding window titles or excluding apps). Previously removed content is never restored; inactive and idle time is included, and excluded time boundaries stay intact.',
+        pickHdr: 'Choose time range',
+        maxSpanBadge: 'Max 366 days per run',
+        presets: [
+          { t: 'Past 7 days', s: 'Nov 15 – Nov 22' },
+          { t: 'Past 30 days', s: 'Oct 23 – Nov 22', on: true },
+          { t: 'All history', s: 'Up to 366 days' },
+          { t: 'Custom', s: 'Pick exact dates' },
+        ],
+        startLbl: 'Start date (inclusive)',
+        endLbl: 'End date (exclusive)',
+        startVal: '2026-10-23',
+        endVal: '2026-11-22',
+        utcLabel: 'Cleanup window (UTC, end excluded)',
+        utcRange: '2026-10-23 00:00 – 2026-11-22 00:00',
+        utcSpan: '30 days (max 366 days per run; older ranges can be cleaned in batches)',
+        loadingTitle: 'Calculating historical impact and checking backups…',
+        loadingSub: 'Scanning retained history over these 30 days using your active privacy rules',
+        cancelScan: 'Cancel scan',
+        nextLoading: 'Loading preview…',
+      },
+      preview: {
+        receiptBadge: 'Preview valid · 4:45',
+        rangePill: '2026-10-23 – 2026-11-22 (30 days · UTC)',
+        snapPill: 'Built-in privacy v1 + Local privacy v2',
+        changeRange: 'Change range',
+        warnTitle: 'Historical cleanup cannot be undone',
+        warnDesc: 'Once started, matching details are permanently removed from your history database. Cleanup cannot be cancelled after it begins, and anything already removed before a failure cannot be restored.',
+        kpiSegLbl: 'Segments further hidden',
+        kpiSegVal: '342 segments',
+        kpiSegSub: '284 active · 58 inactive / idle',
+        kpiFieldLbl: 'Fields to remove',
+        kpiFieldVal: '470 fields',
+        kpiFieldSub: '342 window titles · 128 app names',
+        kpiDurLbl: 'Total duration (incl. inactive)',
+        kpiDurVal: '38h 16m',
+        kpiDurSub: 'Active 33h 34m · Inactive 4h 42m',
+        byRuleHdr: 'Breakdown by rule',
+        byRuleSub: '2 local rules produce further hiding',
+        byRuleRows: [
+          { name: 'Outlook hide window title', ruleSet: 'Local privacy · v2', preset: 'title_hidden', main: '214 segs · 214 fields', subStat: '24h 08m (incl. 3h 12m inactive)' },
+          { name: 'Exclude WeChat completely', ruleSet: 'Local privacy · v2', preset: 'excluded', main: '128 segs · 256 fields', subStat: '14h 08m (drops app & title)' },
+        ],
+        samplesHdr: 'Samples (first 50 · only fields allowed after cleanup)',
+        samplesNote: 'Window titles to be hidden and excluded app identities are never displayed here.',
+        samples: [
+          { time: 'Nov 22 15:10', entity: 'Outlook (outlook.exe)', badge: 'Full → Hide title', badgeCls: 'warn', dur: '26m', redacted: false },
+          { time: 'Nov 22 14:20', entity: 'Excluded (app & title will be dropped)', badge: 'Full → Excluded', badgeCls: 'crit', dur: '18m', redacted: true },
+          { time: 'Nov 21 16:05', entity: 'Outlook (outlook.exe)', badge: 'Idle · Hide title', badgeCls: 'dis', dur: '11m', redacted: false },
+        ],
+        nextBtn: 'Next: Backups',
+      },
+      backups: {
+        infoTitle: 'Backups still contain uncleaned historical data',
+        infoDesc: 'No backups are selected by default to prevent accidental loss of recovery points. Unselected backups remain untouched with older data; selected backups are permanently deleted after your history is cleaned.',
+        invHdr: 'Managed backup inventory',
+        invSummary: '1 / 3 selected · 142 MiB to delete',
+        selAll: 'Select all',
+        selNone: 'Clear',
+        repreviewBadge: 'Preview updated for backup selection · valid 4:58',
+        repreviewNote: 'Changing your backup selection refreshes the preview automatically; 2 unselected backups will remain and keep older data.',
+        items: [
+          { fileName: 'pre-migrate-v3-20261118-091204.db', created: '2026-11-18 09:12', kind: 'Pre-migration', size: '142 MiB', selected: true, status: 'Will be deleted' },
+          { fileName: 'quartz-backup-20261110-210433.db', created: '2026-11-10 21:04', kind: 'Manual backup', size: '128 MiB', selected: false, status: 'Kept · holds old data' },
+          { fileName: 'pre-migrate-v2-20261028-140219.db', created: '2026-10-28 14:02', kind: 'Pre-migration', size: '96 MiB', selected: false, status: 'Kept · holds old data' },
+        ],
+        nextBtn: 'Next: Confirm',
+      },
+      confirm: {
+        title: 'Confirm permanent historical cleanup',
+        desc: 'Review the time range, impact, and backup selection below. Once started, cleanup runs in the background using your current privacy rules.',
+        kRange: 'Time range',
+        vRange: '2026-10-23 to 2026-11-22 (30 days, UTC, end date excluded)',
+        kRules: 'Privacy rules',
+        vRules: 'Built-in privacy v1 + Local privacy v2 (14 active rules)',
+        vReceipt: 'Preview valid (4:32 left) for this range and backup selection',
+        kImpact: 'History impact',
+        vImpact: '342 segments, 470 fields, 38h 16m (incl. 4h 42m inactive) permanently hidden',
+        vImpactSub: 'Unused titles and caches will then be cleared and the database file compacted',
+        kDelBk: 'Backups to delete',
+        vDelBk: '1 file · pre-migrate-v3-20261118-091204.db (142 MiB)',
+        kKeepBk: 'Backups kept',
+        vKeepBk: '2 unselected backups remain untouched (still contain older data)',
+        ackTitle: 'I have reviewed the range and backups, and understand this cannot be undone',
+        ackSub: 'Once started, cleanup cannot be cancelled or undone; anything already removed before a failure cannot be restored.',
+        confirmBtn: 'Permanently clean up',
+      },
+      running: {
+        title: 'Applying privacy rules to history',
+        stateBadge: 'Running',
+        bgBannerTitle: 'Historical privacy cleanup running (Step 2 of 6: Hide fields in history · 2,140 / 4,500)',
+        bgBannerDesc: 'Running in the background. You can keep using Quartz and recording continues normally.',
+        usableTitle: 'You can close this dialog — recording and the app stay usable',
+        usableDesc: 'Cleanup continues in the background and resumes after restarts. Progress stays visible in the banner at the top of the Privacy tab.',
+        footerNote: 'Cleanup cannot be cancelled once started and will resume automatically if Quartz restarts.',
+        phases: [
+          { name: 'Lock cleanup range', state: 'done', count: '1 / 1', desc: 'Locked the time range and rules so no overlapping records are missed' },
+          { name: 'Hide fields in history', state: 'active', count: '2,140 / 4,500', pct: 48, desc: 'Removing window titles and app details from matching records in batches' },
+          { name: 'Clear unused titles and cache', state: 'pending', count: 'Waiting', desc: 'Remove unreferenced titles and temporary in-memory caches' },
+          { name: 'Compact database file', state: 'pending', count: 'Waiting', desc: 'Reclaim space and clear remaining data from the database file' },
+          { name: 'Delete selected backups', state: 'pending', count: '1 to delete', desc: 'Delete pre-migrate-v3-20261118-091204.db; keep 2 unselected' },
+          { name: 'Done', state: 'pending', count: 'Waiting', desc: 'Complete cleanup once every step succeeds' },
+        ],
+      },
+      failed: {
+        title: 'Historical privacy cleanup failed',
+        stateBadge: 'Failed',
+        bgBannerTitle: 'Historical cleanup paused at "Compact database file"',
+        bgBannerDesc: 'Completed progress is saved. Close any app using the database and retry.',
+        errTitle: 'Database file is in use by another program',
+        errCode: 'checkpoint_blocked',
+        errDesc: 'Another program (such as a database viewer or a third-party sync or backup tool) is currently reading the Quartz database file, so this step could not continue. Close that program, then retry below.',
+        doneHdr: 'Already completed (cannot be undone)',
+        doneBody: 'The cleanup range is locked; matching fields in 4,500 historical records were permanently hidden and cannot be restored; 318 unused titles were cleared.',
+        remHdr: 'Still remaining (continues on retry)',
+        remBody: 'The database file has not been compacted yet; 1 selected backup (pre-migrate-v3-20261118-091204.db) has not been deleted yet.',
+        retryNote: 'Retrying continues directly from "Compact database file" with the same range and privacy rules — no need to preview again.',
+        retryBtn: 'Retry from failed step',
+        phases: [
+          { name: 'Lock cleanup range', state: 'done', count: '1 / 1' },
+          { name: 'Hide fields in history', state: 'done', count: '4,500 / 4,500' },
+          { name: 'Clear unused titles and cache', state: 'done', count: '318 / 318' },
+          { name: 'Compact database file', state: 'fail', count: 'Failed', desc: 'Database file is in use by another program' },
+          { name: 'Delete selected backups', state: 'pending', count: '1 to delete' },
+          { name: 'Done', state: 'pending', count: 'Not completed' },
+        ],
+      },
+      resumed: {
+        title: 'Resuming previous historical cleanup…',
+        badge: 'Resumed after restart',
+        desc: 'Automatically resumed your unfinished historical cleanup after restart. Step 4 of 6: Compact database file, followed by deleting 1 selected backup. Recording and the app stay usable.',
+        miniPhases: [
+          { label: '1 Lock range', state: 'done' },
+          { label: '2 Hide fields (4,500)', state: 'done' },
+          { label: '3 Clear cache', state: 'done' },
+          { label: '4 Compact DB', state: 'active' },
+          { label: '5 Backups (1)', state: 'pending' },
+          { label: '6 Done', state: 'pending' },
+        ],
+      },
+      completed: {
+        title: 'Historical privacy cleanup completed',
+        stateBadge: 'Completed',
+        bgBannerTitle: 'Historical cleanup completed · 342 segments further hidden · 1 backup deleted',
+        bgBannerDesc: 'History cleanup and database compaction succeeded; 2 unselected backups were kept.',
+        kpi1Lbl: 'Further hidden',
+        kpi1Val: '342 segs · 470 fields',
+        kpi1Sub: '38h 16m (incl. inactive)',
+        kpi2Lbl: 'Database cleanup',
+        kpi2Val: 'Cleaned & compacted',
+        kpi2Sub: '318 unused titles cleared · file compacted',
+        kpi3Lbl: 'Selected backups deleted',
+        kpi3Val: '1 file (142 MiB)',
+        kpi3Sub: 'pre-migrate-v3-20261118-091204.db',
+        unselectedTitle: '2 unselected backups were kept',
+        unselectedDesc: 'The following unselected backups were left untouched and still contain pre-cleanup data: quartz-backup-20261110-210433.db (128 MiB), pre-migrate-v2-20261028-140219.db (96 MiB). Run cleanup again or manage the backup folder manually if you want them removed.',
+        phases: [
+          { name: 'Lock cleanup range', state: 'done', count: '1 / 1' },
+          { name: 'Hide fields in history', state: 'done', count: '4,500 / 4,500' },
+          { name: 'Clear unused titles and cache', state: 'done', count: '318 / 318' },
+          { name: 'Compact database file', state: 'done', count: '1 / 1' },
+          { name: 'Delete selected backups', state: 'done', count: '1 / 1' },
+          { name: 'Done', state: 'done', count: 'All succeeded' },
+        ],
+      },
+    },
+  },
+};
+
+const T = lang === 'en-XA' ? pseudoObj(COPY.en) : COPY[lang];
+
+function ringSvg(cls = 'ring-sm', color = 'var(--accent-fill)') {
+  return `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">` +
+    `<circle cx="12" cy="12" r="9" fill="none" stroke="var(--stroke-control-strong)" stroke-width="2.4"/>` +
+    `<circle cx="12" cy="12" r="9" fill="none" stroke="${color}" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="16 44" transform="rotate(-90 12 12)"/>` +
+  `</svg>`;
+}
+
+function presetBadgeHtml(preset) {
+  const p = T.priv;
+  if (preset === 'excluded') return `<span class="badge crit"><span class="btxt">${p.presetExcluded}</span></span>`;
+  if (preset === 'private_window') return `<span class="badge warn"><span class="btxt">${p.presetPrivateWin}</span></span>`;
+  return `<span class="badge"><span class="btxt">${p.presetTitleHidden}</span></span>`;
+}
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  if (isMin) nav.classList.add('rail');
+  const items = [
+    { id: 'today', ic: 'today', lbl: T.nav.today },
+    { id: 'week', ic: 'week', lbl: T.nav.week },
+    { id: 'rules', ic: 'tag-f', lbl: T.nav.rules, sel: true },
+  ];
+  const toggleBtn = isMin ? '' : `<div class="nav-item" style="margin-bottom:4px"><svg class="ic"><use href="#menu"/></svg></div>`;
+  nav.innerHTML = toggleBtn +
+    items.map(it =>
+      `<div class="nav-item${it.sel ? ' selected' : ''}"><i class="ind"></i><svg class="ic"><use href="#${it.ic}"/></svg><span>${it.lbl}</span></div>`
+    ).join('') +
+    `<div class="spacer"></div>` +
+    `<div class="nav-item bottom"><svg class="ic"><use href="#gear"/></svg><span>${T.nav.settings}</span></div>`;
+}
+
+function renderHeaderAndPivot() {
+  const tabs = T.page.tabs;
+  return `<div class="page-head">` +
+      `<div class="h-title ell">${T.page.title}</div>` +
+      `<div class="page-head-acts">` +
+        `<button class="btn"><svg class="ic s16"><use href="#import"/></svg><span>${T.page.importBtn}</span></button>` +
+        `<button class="btn"><svg class="ic s16"><use href="#export"/></svg><span>${T.page.exportBtn}</span></button>` +
+      `</div>` +
+    `</div>` +
+    `<div class="pivot">` +
+      `<div>${tabs.categories}</div>` +
+      `<div>${tabs.rules}</div>` +
+      `<div>${tabs.queue} <span class="badge">7</span></div>` +
+      `<div>${tabs.extraction}</div>` +
+      `<div class="on">${tabs.privacy}</div>` +
+    `</div>`;
+}
+
+function renderTopInfoBar() {
+  const w = T.wiz;
+  if (stateKey === 'history-resumed') {
+    const r = w.resumed;
+    return `<div class="infobar accent-bar" role="status">` +
+      `<span class="ib-ic">${ringSvg('ring-sm')}</span>` +
+      `<div class="ib-body">` +
+        `<div class="ib-top">` +
+          `<span class="ib-title">${r.title}</span>` +
+          `<span class="badge ovr"><span class="btxt">${r.badge}</span></span>` +
+        `</div>` +
+        `<div>${r.desc}</div>` +
+        `<div class="pbar" style="margin-top:4px"><div class="pbar-fill" style="width:66%"></div></div>` +
+        `<div class="mini-phases">` +
+          r.miniPhases.map(mp => {
+            const ic = mp.state === 'done'
+              ? `<svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg>`
+              : mp.state === 'active'
+                ? ringSvg('ring-xs')
+                : '';
+            return `<span class="mp-item ${mp.state}">${ic}<span>${mp.label}</span></span>`;
+          }).join('') +
+        `</div>` +
+      `</div>` +
+      `<div class="ib-right"><button class="btn compact"><span>${w.btnViewDetails}</span></button></div>` +
+    `</div>`;
+  }
+  if (stateKey === 'history-running') {
+    const r = w.running;
+    return `<div class="infobar accent-bar" role="status">` +
+      `<span class="ib-ic">${ringSvg('ring-sm')}</span>` +
+      `<div class="ib-body">` +
+        `<div class="ib-title">${r.bgBannerTitle}</div>` +
+        `<div>${r.bgBannerDesc}</div>` +
+      `</div>` +
+      `<div class="ib-right"><button class="btn compact"><span>${w.btnViewProgress}</span></button></div>` +
+    `</div>`;
+  }
+  if (stateKey === 'history-failed') {
+    const f = w.failed;
+    return `<div class="infobar critical" role="alert">` +
+      `<svg class="ic s16 ib-ic"><use href="#crit-circle"/></svg>` +
+      `<div class="ib-body">` +
+        `<div class="ib-title">${f.bgBannerTitle}</div>` +
+        `<div>${f.bgBannerDesc}</div>` +
+      `</div>` +
+      `<div class="ib-right"><button class="btn compact"><span>${w.btnViewRetry}</span></button></div>` +
+    `</div>`;
+  }
+  if (stateKey === 'history-completed') {
+    const c = w.completed;
+    return `<div class="infobar success" role="status">` +
+      `<svg class="ic s16 ib-ic"><use href="#check-circle"/></svg>` +
+      `<div class="ib-body">` +
+        `<div class="ib-title">${c.bgBannerTitle}</div>` +
+        `<div>${c.bgBannerDesc}</div>` +
+      `</div>` +
+      `<div class="ib-right"><button class="btn compact subtle icon"><svg class="ic s16"><use href="#close"/></svg></button></div>` +
+    `</div>`;
+  }
+  return '';
+}
+
+function renderPrivacyWorkspace() {
+  const p = T.priv;
+  const isResumed = stateKey === 'history-resumed';
+  const applyBtn = isResumed
+    ? `<span class="btn-tip-wrap">` +
+        `<button class="btn compact disabled"><svg class="ic s16"><use href="#history"/></svg><span>${p.applyHistoryBtn}</span></button>` +
+        `<div class="inline-tip" role="tooltip">${p.applyHistoryBusyTip}</div>` +
+      `</span>`
+    : `<button class="btn compact"><svg class="ic s16"><use href="#history"/></svg><span>${p.applyHistoryBtn}</span></button>`;
+
+  const treeCard = `<div class="card tree-card">` +
+    `<div class="tree-head"><span class="strong grow ell">${p.treeHeading}</span></div>` +
+    `<div class="tnode">` +
+      `<svg class="ic s16 lock-ic"><use href="#lock"/></svg>` +
+      `<div class="meta">` +
+        `<span class="ell">${p.builtinName}</span>` +
+        `<div class="badges"><span class="badge">v1</span><span class="badge">${p.builtinCount}</span></div>` +
+      `</div>` +
+      `<div class="sw on sm"></div>` +
+    `</div>` +
+    `<div class="tnode ind1 sel">` +
+      `<div class="meta">` +
+        `<span class="ell">${p.localName}</span>` +
+        `<div class="badges"><span class="badge">v2</span><span class="badge add">+2</span></div>` +
+      `</div>` +
+      `<div class="sw on sm"></div>` +
+    `</div>` +
+    `<div class="tree-foot-note">${p.treeNote}</div>` +
+  `</div>`;
+
+  const listCard = `<div class="card list-card">` +
+    `<div class="list-toolbar">` +
+      `<div class="seg"><div>${p.segOwn}</div><div class="on">${p.segEff}</div></div>` +
+      `<div class="list-toolbar-right">` +
+        applyBtn +
+        `<button class="btn compact"><svg class="ic s16"><use href="#add"/></svg><span>${p.addRule}</span></button>` +
+      `</div>` +
+    `</div>` +
+    `<div class="list-meta"><span>${p.effMeta}</span></div>` +
+    `<div class="rtbl-h">` +
+      `<span class="col-rule">${p.colRule}</span>` +
+      `<span class="col-cond" style="font-family:var(--font-small)">${p.colCond}</span>` +
+      `<span class="col-act">${p.colAct}</span>` +
+      `<span class="col-src">${p.colSrc}</span>` +
+    `</div>` +
+    p.rows.map((r, i) => {
+      const lockIc = r.builtin ? `<svg class="ic s16" style="width:12px;height:12px;color:var(--text-tertiary);flex:none"><use href="#lock"/></svg>` : '';
+      const diffBadge = r.diff === 'add' ? `<span class="badge add">${p.badgeAdd}</span>` : '';
+      const srcHtml = r.builtin
+        ? `<svg class="ic s16" style="width:12px;height:12px;flex:none"><use href="#lock"/></svg><span class="ell">builtin.privacy</span>`
+        : `<span class="ell">${r.src}</span>${diffBadge}`;
+      return `<div class="rtbl-r${i === 0 ? ' sel' : ''}">` +
+        `<div class="col-rule">` +
+          `<div class="col-rule-top">${lockIc}<span class="lbl">${r.name}</span></div>` +
+          `<div class="col-rule-sub mono">${r.sub}</div>` +
+        `</div>` +
+        `<span class="col-cond">${r.cond}</span>` +
+        `<div class="col-act">${presetBadgeHtml(r.preset)}</div>` +
+        `<div class="col-src">${srcHtml}</div>` +
+      `</div>`;
+    }).join('') +
+  `</div>`;
+
+  return `<div class="rules-grid">${treeCard}${listCard}</div>`;
+}
+
+function renderWizardSteps(activeStep) {
+  const steps = T.wiz.steps;
+  return `<div class="wiz-steps" aria-label="Progress">` +
+    steps.map((lbl, idx) => {
+      const stepNum = idx + 1;
+      const cls = stepNum < activeStep ? 'done' : stepNum === activeStep ? 'active' : '';
+      const numHtml = stepNum < activeStep
+        ? `<svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg>`
+        : String(stepNum);
+      return (idx > 0 ? `<div class="wiz-sep" aria-hidden="true"></div>` : '') +
+        `<div class="wiz-step ${cls}"><span class="ws-num">${numHtml}</span><span class="ws-lbl">${lbl}</span></div>`;
+    }).join('') +
+  `</div>`;
+}
+
+function renderStepper(phases) {
+  return `<div class="stepper">` +
+    phases.map(ph => {
+      let icHtml = `<span style="width:6px;height:6px;border-radius:50%;background:var(--text-tertiary)"></span>`;
+      if (ph.state === 'done') icHtml = `<svg class="ic s16" style="width:12px;height:12px"><use href="#check"/></svg>`;
+      else if (ph.state === 'active') icHtml = ringSvg('ring-xs');
+      else if (ph.state === 'fail') icHtml = `<svg class="ic s16" style="width:12px;height:12px"><use href="#close"/></svg>`;
+
+      const barHtml = ph.pct !== undefined
+        ? `<div class="pbar" style="margin-top:3px"><div class="pbar-fill" style="width:${ph.pct}%"></div></div>`
+        : '';
+      const descHtml = ph.desc ? `<div class="st-desc">${ph.desc}</div>` : '';
+
+      return `<div class="st-row ${ph.state}">` +
+        `<div class="st-ic">${icHtml}</div>` +
+        `<div class="st-main">` +
+          `<div class="st-top">` +
+            `<span class="st-name">${ph.name}</span>` +
+            `<span class="st-count">${ph.count}</span>` +
+          `</div>` +
+          descHtml +
+          barHtml +
+        `</div>` +
+      `</div>`;
+    }).join('') +
+  `</div>`;
+}
+
+function mountModal({ headIcon, headIconCls = 'accent', title, badgeHtml = '', wizardStep = 0, bodyHtml, footLeft = '', footRight = '' }) {
+  const scrim = document.getElementById('modal-scrim');
+  scrim.style.display = 'flex';
+  const icHtml = headIcon === 'ring'
+    ? `<span class="modal-head-ic">${ringSvg('ring-sm')}</span>`
+    : `<svg class="ic modal-head-ic ${headIconCls}"><use href="#${headIcon}"/></svg>`;
+  scrim.innerHTML =
+    `<div class="modal-dlg" role="dialog" aria-modal="true">` +
+      `<div class="modal-head">` +
+        icHtml +
+        `<div class="modal-head-txt">` +
+          `<span class="h-sub ell">${title}</span>` +
+          badgeHtml +
+        `</div>` +
+        `<button class="btn subtle icon compact" aria-label="${T.wiz.btnClose}"><svg class="ic s16"><use href="#close"/></svg></button>` +
+      `</div>` +
+      (wizardStep > 0 ? renderWizardSteps(wizardStep) : '') +
+      `<div class="modal-body-wrap" id="modal-body-wrap">` +
+        `<div class="modal-body" id="modal-body">${bodyHtml}</div>` +
+        `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="modal-thumb"></div></div>` +
+      `</div>` +
+      `<div class="modal-foot">` +
+        `<div class="modal-foot-left">${footLeft}</div>` +
+        `<div class="modal-foot-right">${footRight}</div>` +
+      `</div>` +
+    `</div>`;
+}
+
+function renderStateModal() {
+  const w = T.wiz;
+
+  if (stateKey === 'history-range') {
+    const r = w.range;
+    const bodyHtml =
+      `<div class="box">` +
+        `<div class="sect-hdr"><span class="sect-title">${r.snapHdr}</span><span class="badge ok"><span class="btxt">${r.snapBadge}</span></span></div>` +
+        `<div class="cap sec" style="overflow-wrap:anywhere">${r.snapDesc}</div>` +
+        `<div class="snap-meta">` +
+          `<span class="rule-pill"><svg class="ic s16" style="width:12px;height:12px;color:var(--accent-fill)"><use href="#shield"/></svg><span class="ell">${r.ruleChip1}</span></span>` +
+          `<span class="rule-pill"><svg class="ic s16" style="width:12px;height:12px;color:var(--status-critical)"><use href="#shield"/></svg><span class="ell">${r.ruleChip2}</span></span>` +
+          `<span class="badge"><span class="btxt">${r.ruleChipMore}</span></span>` +
+        `</div>` +
+      `</div>` +
+      `<div class="box surface">` +
+        `<div class="sect-hdr"><span class="sect-title">${r.pickHdr}</span><span class="badge"><span class="btxt">${r.maxSpanBadge}</span></span></div>` +
+        `<div class="preset-grid">` +
+          r.presets.map(pr =>
+            `<div class="preset-btn${pr.on ? ' on' : ''}"><span class="pb-t">${pr.t}</span><span class="pb-s">${pr.s}</span></div>`
+          ).join('') +
+        `</div>` +
+        `<div class="date-pair">` +
+          `<div class="field"><label>${r.startLbl}</label><div class="input std"><svg class="ic s16" style="color:var(--text-secondary)"><use href="#calendar"/></svg><span class="mono grow">${r.startVal}</span></div></div>` +
+          `<div class="field"><label>${r.endLbl}</label><div class="input std"><svg class="ic s16" style="color:var(--text-secondary)"><use href="#calendar"/></svg><span class="mono grow">${r.endVal}</span></div></div>` +
+        `</div>` +
+        `<div class="utc-pill">` +
+          `<span>${r.utcLabel}: <span class="mono" style="color:var(--text-primary)">${r.utcRange}</span></span>` +
+          `<span>${r.utcSpan}</span>` +
+        `</div>` +
+      `</div>` +
+      `<div class="infobar subtle">` +
+        `<svg class="ic s16 ib-ic"><use href="#info"/></svg>` +
+        `<div class="ib-body"><div class="ib-title">${r.furtherTitle}</div><div>${r.furtherDesc}</div></div>` +
+      `</div>` +
+      `<div class="scan-bar" role="status">` +
+        ringSvg('ring-sm') +
+        `<div class="scan-bar-txt">` +
+          `<span class="strong" style="font-size:13px;line-height:18px">${r.loadingTitle}</span>` +
+          `<span class="cap sec">${r.loadingSub}</span>` +
+        `</div>` +
+        `<span class="scan-link">${r.cancelScan}</span>` +
+      `</div>`;
+
+    mountModal({
+      headIcon: 'history',
+      title: w.title,
+      wizardStep: 1,
+      bodyHtml,
+      footRight:
+        `<button class="btn"><span>${w.btnCancel}</span></button>` +
+        `<button class="btn disabled">${ringSvg('ring-xs', 'var(--text-disabled)')}<span>${r.nextLoading}</span></button>`,
+    });
+    return;
+  }
+
+  if (stateKey === 'history-preview') {
+    const p = w.preview;
+    const bodyHtml =
+      `<div class="snap-meta">` +
+        `<span class="badge"><span class="btxt">${p.rangePill}</span></span>` +
+        `<span class="badge"><span class="btxt">${p.snapPill}</span></span>` +
+        `<span class="badge ok"><svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg><span class="btxt">${p.receiptBadge}</span></span>` +
+      `</div>` +
+      `<div class="infobar caution" role="alert">` +
+        `<svg class="ic s16 ib-ic"><use href="#warn"/></svg>` +
+        `<div class="ib-body"><div class="ib-title">${p.warnTitle}</div><div>${p.warnDesc}</div></div>` +
+      `</div>` +
+      `<div class="kpi-grid">` +
+        `<div class="kpi-tile">` +
+          `<div class="kpi-lbl"><i class="kpi-dot"></i><span class="ell">${p.kpiSegLbl}</span></div>` +
+          `<div class="kpi-val">${p.kpiSegVal}</div>` +
+          `<div class="kpi-sub">${p.kpiSegSub}</div>` +
+        `</div>` +
+        `<div class="kpi-tile">` +
+          `<div class="kpi-lbl"><i class="kpi-dot"></i><span class="ell">${p.kpiFieldLbl}</span></div>` +
+          `<div class="kpi-val">${p.kpiFieldVal}</div>` +
+          `<div class="kpi-sub">${p.kpiFieldSub}</div>` +
+        `</div>` +
+        `<div class="kpi-tile">` +
+          `<div class="kpi-lbl"><i class="kpi-dot neu"></i><span class="ell">${p.kpiDurLbl}</span></div>` +
+          `<div class="kpi-val">${p.kpiDurVal}</div>` +
+          `<div class="kpi-sub">${p.kpiDurSub}</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="box">` +
+        `<div class="sect-hdr"><span class="sect-title">${p.byRuleHdr}</span><span class="cap sec">${p.byRuleSub}</span></div>` +
+        p.byRuleRows.map(rr =>
+          `<div class="rule-break-row">` +
+            `<div class="rbr-main">` +
+              `<div class="rbr-top"><span class="strong" style="font-size:13px">${rr.name}</span>${presetBadgeHtml(rr.preset)}</div>` +
+              `<span class="cap ter" style="overflow-wrap:anywhere">${rr.ruleSet}</span>` +
+            `</div>` +
+            `<div class="rbr-stats">` +
+              `<div class="strong" style="font-size:12.5px">${rr.main}</div>` +
+              `<div class="rbr-stats-sub">${rr.subStat}</div>` +
+            `</div>` +
+          `</div>`
+        ).join('') +
+      `</div>` +
+      `<div class="box">` +
+        `<div class="sect-hdr"><span class="sect-title">${p.samplesHdr}</span></div>` +
+        `<div class="psample-list">` +
+          p.samples.map(s =>
+            `<div class="psample-row">` +
+              `<span class="psample-time">${s.time}</span>` +
+              `<span class="psample-entity${s.redacted ? ' redacted' : ''}">${s.entity}</span>` +
+              `<span class="badge ${s.badgeCls}"><span class="btxt">${s.badge}</span></span>` +
+              `<span class="psample-dur">${s.dur}</span>` +
+            `</div>`
+          ).join('') +
+        `</div>` +
+        `<div class="cap ter" style="overflow-wrap:anywhere">${p.samplesNote}</div>` +
+      `</div>`;
+
+    mountModal({
+      headIcon: 'history',
+      title: w.title,
+      wizardStep: 2,
+      bodyHtml,
+      footLeft: `<button class="btn"><span>${w.btnBack}</span></button>`,
+      footRight:
+        `<button class="btn"><span>${w.btnCancel}</span></button>` +
+        `<button class="btn accent"><span>${p.nextBtn}</span></button>`,
+    });
+    return;
+  }
+
+  if (stateKey === 'history-backups') {
+    const b = w.backups;
+    const bodyHtml =
+      `<div class="infobar caution">` +
+        `<svg class="ic s16 ib-ic"><use href="#warn"/></svg>` +
+        `<div class="ib-body"><div class="ib-title">${b.infoTitle}</div><div>${b.infoDesc}</div></div>` +
+      `</div>` +
+      `<div class="box">` +
+        `<div class="sect-hdr">` +
+          `<span class="sect-title">${b.invHdr}</span>` +
+          `<div class="row gap8" style="flex-wrap:wrap">` +
+            `<span class="cap sec">${b.invSummary}</span>` +
+            `<button class="btn compact"><span>${b.selAll}</span></button>` +
+            `<button class="btn compact"><span>${b.selNone}</span></button>` +
+          `</div>` +
+        `</div>` +
+        `<div class="bk-list">` +
+          b.items.map(it =>
+            `<div class="bk-row${it.selected ? ' sel' : ''}">` +
+              `<div class="chk crit${it.selected ? ' on' : ''}" role="checkbox" aria-checked="${it.selected}">` +
+                (it.selected ? `<svg class="ic s16" style="width:12px;height:12px"><use href="#check"/></svg>` : '') +
+              `</div>` +
+              `<div class="bk-info">` +
+                `<div class="bk-name">${it.fileName}</div>` +
+                `<div class="bk-meta"><span>${it.created}</span><span class="badge"><span class="btxt">${it.kind}</span></span></div>` +
+              `</div>` +
+              `<div class="bk-right">` +
+                `<span class="bk-size">${it.size}</span>` +
+                `<span class="badge ${it.selected ? 'crit' : ''}"><span class="btxt">${it.status}</span></span>` +
+              `</div>` +
+            `</div>`
+          ).join('') +
+        `</div>` +
+      `</div>` +
+      `<div class="infobar subtle">` +
+        `<svg class="ic s16 ib-ic" style="color:var(--status-success)"><use href="#check-circle"/></svg>` +
+        `<div class="ib-body">` +
+          `<div class="ib-top"><span class="badge ok"><span class="btxt">${b.repreviewBadge}</span></span></div>` +
+          `<div>${b.repreviewNote}</div>` +
+        `</div>` +
+      `</div>`;
+
+    mountModal({
+      headIcon: 'database',
+      title: w.title,
+      wizardStep: 3,
+      bodyHtml,
+      footLeft: `<button class="btn"><span>${w.btnBack}</span></button>`,
+      footRight:
+        `<button class="btn"><span>${w.btnCancel}</span></button>` +
+        `<button class="btn accent"><span>${b.nextBtn}</span></button>`,
+    });
+    return;
+  }
+
+  if (stateKey === 'history-confirm') {
+    const c = w.confirm;
+    const bodyHtml =
+      `<div class="cap sec" style="overflow-wrap:anywhere">${c.desc}</div>` +
+      `<div class="kv-box">` +
+        `<div class="kv-row"><span class="kv-k">${c.kRange}</span><div class="kv-v"><span class="strong" style="font-size:12.5px">${c.vRange}</span></div></div>` +
+        `<div class="kv-row"><span class="kv-k">${c.kRules}</span><div class="kv-v"><span>${c.vRules}</span><span class="ter">${c.vReceipt}</span></div></div>` +
+        `<div class="kv-row"><span class="kv-k">${c.kImpact}</span><div class="kv-v"><span class="strong" style="font-size:12.5px">${c.vImpact}</span><span class="ter">${c.vImpactSub}</span></div></div>` +
+        `<div class="kv-row"><span class="kv-k">${c.kDelBk}</span><div class="kv-v"><span class="badge crit" style="align-self:flex-start"><span class="btxt">${c.vDelBk}</span></span></div></div>` +
+        `<div class="kv-row"><span class="kv-k">${c.kKeepBk}</span><div class="kv-v"><span class="sec">${c.vKeepBk}</span></div></div>` +
+      `</div>` +
+      `<div class="ack-box">` +
+        `<div class="chk crit on" role="checkbox" aria-checked="true" style="margin-top:2px"><svg class="ic s16" style="width:12px;height:12px"><use href="#check"/></svg></div>` +
+        `<div class="ack-txt">` +
+          `<div class="ack-title">${c.ackTitle}</div>` +
+          `<div class="ack-sub">${c.ackSub}</div>` +
+        `</div>` +
+      `</div>`;
+
+    mountModal({
+      headIcon: 'warn',
+      headIconCls: 'warn',
+      title: c.title,
+      wizardStep: 4,
+      bodyHtml,
+      footLeft: `<button class="btn"><span>${w.btnBack}</span></button>`,
+      footRight:
+        `<button class="btn"><span>${w.btnCancel}</span></button>` +
+        `<button class="btn destructive"><svg class="ic s16"><use href="#trash"/></svg><span>${c.confirmBtn}</span></button>`,
+    });
+    return;
+  }
+
+  if (stateKey === 'history-running') {
+    const r = w.running;
+    const bodyHtml =
+      `<div class="infobar subtle">` +
+        `<svg class="ic s16 ib-ic"><use href="#info"/></svg>` +
+        `<div class="ib-body"><div class="ib-title">${r.usableTitle}</div><div>${r.usableDesc}</div></div>` +
+      `</div>` +
+      renderStepper(r.phases) +
+      `<div class="cap ter" style="overflow-wrap:anywhere">${r.footerNote}</div>`;
+
+    mountModal({
+      headIcon: 'ring',
+      title: r.title,
+      badgeHtml: `<span class="badge ovr"><span class="btxt">${r.stateBadge}</span></span>`,
+      bodyHtml,
+      footRight: `<button class="btn accent"><span>${w.btnBg}</span></button>`,
+    });
+    return;
+  }
+
+  if (stateKey === 'history-failed') {
+    const f = w.failed;
+    const bodyHtml =
+      `<div class="err-card" role="alert">` +
+        `<svg class="ic err-card-ic"><use href="#crit-circle"/></svg>` +
+        `<div class="err-card-body">` +
+          `<div class="err-card-title">${f.errTitle}</div>` +
+          `<div class="err-card-msg">${f.errDesc}</div>` +
+          `<div class="err-card-code">error_code: ${f.errCode}</div>` +
+        `</div>` +
+      `</div>` +
+      renderStepper(f.phases) +
+      `<div class="split-2">` +
+        `<div class="split-card done-irrev">` +
+          `<span class="strong" style="font-size:12.5px;color:var(--text-primary)">${f.doneHdr}</span>` +
+          `<span class="cap sec" style="overflow-wrap:anywhere">${f.doneBody}</span>` +
+        `</div>` +
+        `<div class="split-card remain">` +
+          `<span class="strong" style="font-size:12.5px;color:var(--text-primary)">${f.remHdr}</span>` +
+          `<span class="cap sec" style="overflow-wrap:anywhere">${f.remBody}</span>` +
+        `</div>` +
+      `</div>` +
+      `<div class="cap sec" style="overflow-wrap:anywhere">${f.retryNote}</div>`;
+
+    mountModal({
+      headIcon: 'crit-circle',
+      headIconCls: 'crit',
+      title: f.title,
+      badgeHtml: `<span class="badge crit"><span class="btxt">${f.stateBadge}</span></span>`,
+      bodyHtml,
+      footRight:
+        `<button class="btn"><span>${w.btnClose}</span></button>` +
+        `<button class="btn accent"><svg class="ic s16"><use href="#refresh"/></svg><span>${f.retryBtn}</span></button>`,
+    });
+    return;
+  }
+
+  if (stateKey === 'history-completed') {
+    const c = w.completed;
+    const bodyHtml =
+      `<div class="kpi-grid">` +
+        `<div class="kpi-tile">` +
+          `<div class="kpi-lbl"><i class="kpi-dot ok"></i><span class="ell">${c.kpi1Lbl}</span></div>` +
+          `<div class="kpi-val">${c.kpi1Val}</div>` +
+          `<div class="kpi-sub">${c.kpi1Sub}</div>` +
+        `</div>` +
+        `<div class="kpi-tile">` +
+          `<div class="kpi-lbl"><i class="kpi-dot ok"></i><span class="ell">${c.kpi2Lbl}</span></div>` +
+          `<div class="kpi-val">${c.kpi2Val}</div>` +
+          `<div class="kpi-sub">${c.kpi2Sub}</div>` +
+        `</div>` +
+        `<div class="kpi-tile">` +
+          `<div class="kpi-lbl"><i class="kpi-dot ok"></i><span class="ell">${c.kpi3Lbl}</span></div>` +
+          `<div class="kpi-val">${c.kpi3Val}</div>` +
+          `<div class="kpi-sub">${c.kpi3Sub}</div>` +
+        `</div>` +
+      `</div>` +
+      renderStepper(c.phases) +
+      `<div class="infobar caution">` +
+        `<svg class="ic s16 ib-ic"><use href="#info"/></svg>` +
+        `<div class="ib-body"><div class="ib-title">${c.unselectedTitle}</div><div>${c.unselectedDesc}</div></div>` +
+      `</div>`;
+
+    mountModal({
+      headIcon: 'check-circle',
+      headIconCls: 'ok',
+      title: c.title,
+      badgeHtml: `<span class="badge ok"><span class="btxt">${c.stateBadge}</span></span>`,
+      bodyHtml,
+      footRight: `<button class="btn accent"><span>${w.btnDone}</span></button>`,
+    });
+  }
+}
+
+function syncScroll(scrollEl, wrapEl, thumbEl) {
+  if (!scrollEl || !wrapEl || !thumbEl) return;
+  const overflow = scrollEl.scrollHeight > scrollEl.clientHeight + 1;
+  wrapEl.classList.toggle('scrollable', overflow);
+  if (!overflow) return;
+  const trackH = wrapEl.clientHeight - 8;
+  const ratio = scrollEl.clientHeight / scrollEl.scrollHeight;
+  const thumbH = Math.max(28, Math.round(trackH * ratio));
+  const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+  const top = maxScroll > 0 ? Math.round((scrollEl.scrollTop / maxScroll) * (trackH - thumbH)) : 0;
+  thumbEl.style.height = thumbH + 'px';
+  thumbEl.style.top = top + 'px';
+}
+
+renderNav();
+document.getElementById('main').innerHTML =
+  renderHeaderAndPivot() +
+  renderTopInfoBar() +
+  renderPrivacyWorkspace();
+renderStateModal();
+
+const mainEl = document.getElementById('main');
+const mainWrapEl = document.getElementById('main-wrap');
+const mainThumbEl = document.getElementById('main-thumb');
+syncScroll(mainEl, mainWrapEl, mainThumbEl);
+mainEl.addEventListener('scroll', () => syncScroll(mainEl, mainWrapEl, mainThumbEl));
+
+const modalBody = document.getElementById('modal-body');
+const modalBodyWrap = document.getElementById('modal-body-wrap');
+const modalThumb = document.getElementById('modal-thumb');
+if (modalBody) {
+  syncScroll(modalBody, modalBodyWrap, modalThumb);
+  modalBody.addEventListener('scroll', () => syncScroll(modalBody, modalBodyWrap, modalThumb));
+}
+</script>
+</body>
+</html>
