@@ -10,7 +10,7 @@
 - 时长：前台事实的 `duration_ms = end_mono_ms − start_mono_ms`；开放行用确认单调时间代替结束时间。统计按各时钟段中的实际长度累计，UTC 裁剪仅在同一时钟段内做。跨时钟段的重复 UTC 不相互抵消，时间轴标明时钟异常。`suspended` 的墙上时间边界见 02 第 5 节。
 - 取值固定的枚举列存小整数，编码从 1 开始，列注释写明编码。编码只追加，不改号、不复用；废弃的取值保留编码。名称记录在 `enum_labels` 表，排查时使用 `_v` 视图（第 2.9 节）。取值开放的列（浏览器种类、色板键）仍存文本。
 - 确认点列（`confirmed_utc_ms`、`confirmed_mono_ms`）只在开放行有值；行结束时置 NULL，因为此时它与结束时间相同。各表用 CHECK 约束保证“结束列为 NULL”与“确认点列非 NULL”同时成立。
-- 实体表用 `INTEGER PRIMARY KEY`。回执、版本与键值配置使用下文列出的复合键或文本键。创建类操作的实体带客户端生成的 `uuid TEXT NOT NULL UNIQUE`，重试返回已有实体。
+- 实体表用 `INTEGER PRIMARY KEY`。回执、版本与键值配置使用下文列出的复合键或文本键。分类和标注的创建带客户端生成的 `uuid TEXT NOT NULL UNIQUE`，重试返回已有实体；规则集以全局唯一 `key` 标识，创建与版本冲突见 04 第 6.3.1 节。
 - 规则条件这类结构化配置存为 JSON 文本，由核心解析。条件的解析、规范化与匹配是 `quartz-domain` 中的独立组件“条件引擎”，分类规则、隐私规则与以后的判例、国策评估（12）共用。
 - 逻辑日：“今天”与日统计按本地日期加设置 `day.start_offset_min`（默认 0，范围 0–720 分钟）切分。例如偏移 240 时，凌晨 3 点仍属于前一个逻辑日。偏移属于查询语义，进入日缓存键；存储层仍按 UTC 午夜拆分，与偏移无关。
 
@@ -304,7 +304,7 @@ schema 版本由 diesel 的 `__diesel_schema_migrations` 表记录，不另建�
 
 - 规则数量在数百条以内。核心启动或规则变化时，把每类规则的规则集树解析为生效规则列表并编译（正则、规范化后的条件值），组成不可变的规则快照常驻内存；查询与采集线程只读快照。规则的修改、快照发布与并发控制由规则注册表负责，见 01 第 6.2 节：注册表是规则表的唯一写者，修改先编译、后提交、再发布，并按 `base_version` 拒绝过期修改。
 - 每条生效规则带来源：定义它的规则集 key 与版本、规则 id，以及覆盖它的规则集。这份来源用于解释（`rules.explain`）、命中预览与隐私解释 ID。
-- 界面中“编辑内置规则”不修改内置规则集，而是写入用户选定的覆盖规则集（默认 `user.local`，以对应内置规则集为父）；编辑用户规则则生成该规则集的新版本。
+- 界面中“编辑内置规则”不修改内置规则集，而是写入用户选定的覆盖规则集（默认分别为 `user.local.classification`、`user.local.extraction`、`user.local.privacy`，以同 kind 的内置规则集为父）；编辑用户规则则生成该规则集的新版本。
 - 规则集创建后父级身份固定，删除后重新导入同一 key 也不改变父级；需要换父级时新建规则集。历史基线只由 `rule_set_versions.parent_version` 沿固定父级链追溯。
 - 历史版本全部保留（体积很小），用于版本 diff、回退与三方对比。分类规则的条件字段有：`app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`、`web.domain`、`web.tab_title`、`browser.profile_label`。判例与国策检查另可使用 `category`、`category.tendency`、`activity`。隐私规则另用 06 第 4 节的字段白名单，保存时拒绝 `doc.*` 与 `title.normalized`。
 
@@ -325,7 +325,9 @@ CREATE TABLE data_day_versions (
 
 `intervals` 来源也覆盖时钟段范围的建立、结束和确认点推进，使尚无前台事实的采集范围变化能使查询与日订阅失效。
 
-`settings.metadata_version` 在应用显示名、浏览器 profile 标签、分类名称、颜色、倾向或层级变化时，在同一事务加一。日缓存、托盘摘要和 `day` 订阅同时失效。限时策略的 UTC 截止时间由核心的截止时间调度器管理，重启后检查是否到期（01 第 6.1 节）。
+`settings.metadata_version` 在应用显示名、浏览器 profile 标签、分类创建、名称、颜色、倾向、层级、排序或归档状态变化时，在同一事务加一。日缓存、托盘摘要和 `day` 订阅同时失效。限时策略的 UTC 截止时间由核心的截止时间调度器管理，重启后检查是否到期（01 第 6.1 节）。
+
+规则修订号（含 `base_version`、`parent_version`、内置修订号）统一为 u32，已保存版本从 1 开始，0 仅表示创建；日数据与元数据计数使用 u64，SQLite 持久值不超过 i64::MAX。递增溢出拒绝事务，不回绕。规则内容哈希为 SHA-256，查询 `versions` 是不透明摘要；wire 约定见 [04 第 3.1 节](04-ipc.md#31-版本与数值)。
 
 首版不建立持久的派生表，派生结果放在内存缓存里（见第 5 节）。
 
@@ -357,7 +359,7 @@ CREATE TABLE capture_gaps (
 );
 ```
 
-删除屏障保留 14 天，与回执期限相同。入库前按屏障与当前隐私策略过滤迟到消息。缺口在时钟段边界拆分，不保存应用、标题或域名。
+删除屏障至少保留 14 天，与采集回执期限相同；仍在执行或失败待恢复的清理任务所需屏障继续保留，任务完成后才可按期限清理。入库前按屏障与当前隐私策略过滤迟到消息。缺口在时钟段边界拆分，不保存应用、标题或域名。
 
 ### 2.9 枚举编码与排查视图
 
@@ -557,7 +559,11 @@ struct DerivedSegment {
 
 输出 `{document, project, profile, dirty, normalized_title, extractor_rule, status}`，其中 `extractor_rule` 为 `<规则集>/<规则>@<版本>`。`status` 取 `extracted`、`fallback`、`empty` 或 `unknown`。
 
-规范化只在已识别的格式里进行。比如 VS Code 的 `● ` 前缀，只在 VS Code 的规则中去掉，并记为 `dirty = true`。通用回退不删除数字和括号，以免把合法的文件名改掉。
+文档身份为 `(app_id, document, project, profile)`。三个文本分量按 NFC 规范化并保留大小写；缺失（null）与空字符串不同。`document` 缺失、为空或 `status` 为 `empty` / `unknown` 时没有文档身份；隐私投影隐藏应用或标题时也不生成身份。`dirty`、`normalized_title`、`extractor_rule` 不参与身份。相同应用中同名但项目或 profile 不同的文档分开统计。
+
+查询只向客户端提供不透明 `document_ref` 与允许显示的提取字段；引用绑定生成它的查询输入版本和覆盖日期范围，不能作为持久实体主键。文档排行、详情与时间轴共用此身份，引用格式和过期处理见 [04 第 6.2.1 节](04-ipc.md#621-m4-查询补充)。
+
+标题格式处理只在已识别的格式里进行。比如 VS Code 的 `● ` 前缀，只在 VS Code 的规则中去掉，并记为 `dirty = true`。通用回退不删除数字和括号，以免把合法的文件名改掉。
 
 ### 5.3 分类
 
@@ -575,20 +581,20 @@ struct DerivedSegment {
 | `entertainment` | `distraction` | `cat.13` | 3 |
 | `system` | `neutral` | `cat.10` | 4 |
 
-`builtin.classification` 包含 50 条规则：开发 17 条、学习 10 条、沟通 10 条、娱乐 8 条、系统与工具 5 条。规则以可执行文件名精确匹配，覆盖编辑器、开发环境、终端、Office、阅读与学习工具、聊天、邮件、会议、游戏及启动器、播放器和系统工具；浏览器按应用保持未分类。分类导入仅接受查询能够提供的 `app.identity_key`、`app.exe_name`、`app.display_name`、`title.raw`，未知或尚未提供的字段返回 `E-RULE-FIELD`。文档提取与网页上下文的交付范围见 09。
+`builtin.classification` 包含 50 条规则：开发 17 条、学习 10 条、沟通 10 条、娱乐 8 条、系统与工具 5 条。规则以可执行文件名精确匹配，覆盖编辑器、开发环境、终端、Office、阅读与学习工具、聊天、邮件、会议、游戏及启动器、播放器和系统工具；浏览器按应用保持未分类。M4 分类导入接受 `app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`；窗口类名取自已存储窗口实例，提取先于分类。网页字段在 M5 接入；未知或尚未提供的字段返回 `E-RULE-FIELD`。
 
-分类规则只读取采集级别允许保留的字段：`TitleHidden` 提供应用字段，`title.raw` 缺失；`Excluded` 不参与分类。普通条件对缺失字段不成立，取反条件的行为遵循规则格式第 2 节。导入时把内置键、分类名或 UUID 解析为分类 UUID；查询中第一条匹配规则引用的分类已归档或不存在时，结果为未分类，并记录包含规则 ID 和分类 UUID 的诊断。
+分类规则只读取采集级别允许保留的字段：`TitleHidden` 提供应用与已保留的窗口类名，标题及提取字段缺失；`Excluded` 不参与分类。普通条件对缺失字段不成立，取反条件的行为遵循规则格式第 2 节。导入时把内置键、分类名或 UUID 解析为分类 UUID；查询中第一条匹配规则引用的分类已归档或不存在时，结果为未分类，并记录包含规则 ID 和分类 UUID 的诊断。
 
 专注和分心占比以活跃时长为分母，分母为零时均为 0。最长连续专注段是同一时钟段内 UTC 首尾相接、倾向均为 `focus` 的活跃片段的单调时长之和；允许跨应用和跨专注分类，非活跃片段、其他倾向或时间间隙会中断连续段。没有时钟段的连续专注离线活动按 UTC 时长累计；进入或离开采集时钟段会中断连续段。
 
 ### 5.4 缓存
 
-分类按前台事实计算一次，切片通过查询内的结果索引读取分类。单次查询内使用 `HashMap`，键为 `(app_id, title_id, capture_level)`，规则哈希由持有缓存的规则快照固定；只有有效规则读取 `title.raw` 时才把标题 ID 放入键中，应用规则可以跨标题复用结果。只为规则实际读取的字段构造规范化文本。应用元数据按批次收集尚未读取的应用 ID，在同一数据库快照内读取一次并通过共享引用供事实使用；分类元数据和规则标识也共享存储，切片与聚合克隆引用。查询结束即释放这些缓存和结果表。`TitleHidden` 的标题键为空，`Excluded` 不进入缓存。分类与日结果的跨查询 LRU 只在 `bench-query` 实测的日、周查询 P95 未达到 08 第 1.4 节目标时启用；当前直接运行查询管线（实测见[测量记录](../measurements.md)）。
+分类按前台事实计算一次，切片通过查询内的结果索引读取分类。单次查询内使用 `HashMap`，键包含实际读取的应用、窗口类名、标题与采集等级，规则哈希由持有缓存的规则快照固定；读取 `title.raw`、`title.normalized` 或 `doc.*` 时包含标题 ID，读取 `window.class` 时包含其值，纯应用规则可以跨标题复用结果。只为规则实际读取的字段构造规范化文本。应用元数据按批次收集尚未读取的应用 ID，在同一数据库快照内读取一次并通过共享引用供事实使用；分类元数据和规则标识也共享存储，切片与聚合克隆引用。查询结束即释放这些缓存和结果表。`TitleHidden` 的标题键为空，`Excluded` 不进入缓存。分类与日结果的跨查询 LRU 只在 `bench-query` 实测的日、周查询 P95 未达到 08 第 1.4 节目标时启用；M4 必须交付跨查询提取缓存，并测量完整管线；分类与日结果缓存继续按此条件启用（已有测量见[测量记录](../measurements.md)）。
 
 | 层 | 键 | 值 | 失效 |
 |---|---|---|---|
 | 提取缓存 | `(app_id, title_id, extractor_version, metadata_version)` | 提取结果 | 提取规则或元数据版本变化 |
-| 分类匹配缓存 | `(classification_version, extractor_version, metadata_version, app_id, title_id, capture_level, domain_id, tab_title_id, stream_id)` | `(category_id, rule_id)` | 任一输入版本变化 |
+| 分类匹配缓存 | `(classification_version, extractor_version, metadata_version, app_id, title_id, capture_level, window_class, domain_id, tab_title_id, stream_id)` | `(category_id, rule_id)` | 任一输入版本变化 |
 | 日结果缓存 | `(逻辑日期, 时区, 日起点偏移, 查询语义版本, metadata_version, 各规则版本, 覆盖的 UTC 日期的 data_day_versions 摘要)` | 该日完整的派生片段和各维度完整聚合 | 任一依赖版本变化 |
 
 分类匹配字段与缓存依赖：
@@ -597,6 +603,7 @@ struct DerivedSegment {
 |---|---|
 | `app.identity_key`、`app.exe_name` | `app_id` |
 | `app.display_name` | `app_id`、`metadata_version` |
+| `window.class` | 已存储的窗口类名值 |
 | `title.raw` | `title_id` |
 | `title.normalized`、`doc.*` | `app_id`、`title_id`、`extractor_version`、`metadata_version` |
 | `web.domain` | `domain_id` |
@@ -606,12 +613,12 @@ struct DerivedSegment {
 
 缺失字段用独立空值，与空字符串区分。分类条件的增删改由 `classification_version` 覆盖。
 
-- 跨查询缓存启用后使用内存 LRU：提取和分类各 4,096 条；日结果最多 31 天，总字节预算 8 MiB。单日超过 2 MiB 不缓存，直接分页计算。
+- 提取缓存使用内存 LRU，最多 4,096 条并按实际字节计费，达到查询内存预算时提前逐出；按实测启用的分类缓存也最多 4,096 条；日结果最多 31 天，总字节预算 8 MiB。单日超过 2 MiB 不缓存，直接分页计算。
 - 日结果保存完整的分组，不截断成前 N 名。展示时再取前 N 名，否则跨日累加会出错。
 - 今天的结果分两部分：已完成的部分可以缓存，进行中的区间每次请求时现算。
 - 计算时读取一个一致快照。发布缓存前再检查一次输入版本，有变化就丢弃这次结果。
 - 展示数据按需计算。托盘摘要只在打开菜单、刷新提示（60 秒一次或悬停）、policy_changed 或今天的日版本变化时计算今天的聚合；计算在 I/O runtime 发起，主线程展示最新缓存（07 第 1 节）。
-- 一年数据的日、周查询 P95 不达标（目标见 08）时，再加持久的日缓存表 `derived_day_cache`。
+- 内存缓存启用后仍未达性能目标时，持久日缓存 `derived_day_cache` 作为独立工作包评审，再决定是否交付。
 
 ### 5.5 正则安全
 
@@ -626,8 +633,10 @@ struct DerivedSegment {
 | 网页区间的标签标题 | 同标题 | `tab_title_id` 置空，`tab_title_status = purged`，再清理无引用标题 |
 | 域名 | 永久 | — |
 | 标注 | 永久 | 不受自动保留期影响 |
-| `ingest_receipts`、`deletion_barriers` | 14 天 | 按接收或创建时间删除 |
+| `ingest_receipts`、`deletion_barriers` | 14 天；未完成清理任务的屏障继续保留 | 按接收或创建时间清理已到期且不再被任务使用的记录 |
 | 迁移备份 | 最近 2 份 | 删除更旧的迁移备份；手动备份由用户管理 |
+
+M4 交付隐私规则的历史字段降级；下列通用范围删除与保留期清理在 M6 交付。历史任务范围、回执和完成状态见 [06 第 4.2 节](06-privacy.md#42-历史隐私清理)。
 
 删除操作：
 

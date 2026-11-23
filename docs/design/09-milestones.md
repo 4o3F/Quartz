@@ -82,18 +82,40 @@
 
 **交付**
 
-- 查询管线完整实现，带三层缓存（03 第 5 节）。
+- 查询管线完整实现，必须交付跨查询提取缓存；分类与日结果缓存仅在完整管线实测的日/周 P95 未达标时启用（03 第 5.4 节）。
 - 在 M2 分类基础上补齐文档提取内置规则与依赖提取字段的分类规则。
 - 分类与规则页：规则编辑与命中预览、未分类队列、提取规则、隐私规则。
 - 在 M2 标注存储与覆盖语义基础上完成编辑体验：待标注离开、时间轴拖选批量标注、右键“归类为…”。
-- 隐私规则应用到历史数据。
+- 隐私规则应用到历史数据，包含版本绑定预览、可恢复任务、主库/WAL 与所选备份清理；通用“删除相关数据”在 M6 启用。
 - 规则集树页、生效视图、版本 diff 与回退、三方对比、片段解释（`rule_sets.*`、`rules.explain`、`rules_text.*`、`quartz rules preview/diff/explain/tree`），“复制情况说明”；规则格式文档中的字段表、操作符表与错误码表由源码生成或由测试校验一致。
 
 **验收**
 
-- 同一份事实在今天页、时间轴、排行、规则预览中得到相同的分类和时长。
-- 接受规则版本变化使全部日缓存失效；标注与事实修改按日期失效。应用显示名、profile 标签与分类元数据变化递增 metadata_version，日缓存、托盘与 day 订阅同步失效。
-- 一年模拟数据的查询性能满足 08 第 1.4 节。
+1. A1：同一事实与输入版本在今天页、时间轴、应用/文档排行、范围聚合、未分类队列与预览中使用相同的最终分类和活跃时长；预览分开显示条件命中与有效贡献，隐私统计包含将进一步隐藏的非活跃事实。文档身份覆盖跨应用、项目/profile、大小写、NFC、缺失与空值及 dirty 变化用例。
+2. A2：提取缓存必须验证容量与失效；三类规则版本、元数据与语义变化使相关结果失效，标注与事实修改按日期失效。启用的跨查询缓存结果须与直接计算一致；未触发分类/日缓存时记录实测和未启用决定。托盘与 day 订阅接收相同版本变化。
+3. A3：一年模拟数据满足 08 第 1.4 节，记录完整管线的冷/热日、周、年查询及内存；按结果决定是否执行 M4-F4/F5。冷年聚合未达标时先解决或由用户决定后续方案。
+4. A4：规则集 key、u32 修订、base_version=0 创建、过期编辑、完整分页、只读内置、分类归档、标注完整值读取和 UI/CLI 权限符合 04；规则格式字段、操作符和诊断表一致，文本导出/导入语义往返一致。
+5. A5：预览期限、取消、50 项样本、隐私保存回执覆盖全部修改入口；草稿、数据、父链、元数据变化和过期回执均拒绝保存。规则版本比较、三方对比与分片解释可完整分页。
+6. A6：历史清理在屏障前后、事实降级、字典、WAL、备份各阶段中断重启均能恢复；UUID 重试不重复创建任务，SQL 与物理文件检查通过后才 completed，未选备份保留。
+7. A7：M4 编辑流程截图与键盘验收通过，包括 Pan 初始模式、Select 拖选/端点/取消、原子批量标注、归类范围、隐私历史确认和进度。覆盖 zh-CN/en/en-XA、640×480、高对比度与 225% 文字大小。
+
+### M4 操作与验收映射
+
+M4-A 冻结上述决策及 [04 的 wire 契约](04-ipc.md#63-规则标注与设置)，下表是后续实施步骤编号与验收项的对应关系。
+
+| 操作或契约 | M4 步骤 | 验收项 |
+|---|---|---|
+| query.day/timeline/segment_detail 文档字段、query.entity_detail document | B1–B4、H12 | A1、A2 |
+| query.unclassified / query.range | B5/B6、H11 | A1、A3 |
+| categories.list/create/update/reorder/archive | C1/C2、H2 | A4 |
+| query.annotations、annotations.create/update/delete | C3、H13/H14 | A4、A7 |
+| rule_sets.tree/get/versions、全部 rule_sets 写操作 | D1/D2、H1/H3/H4/H8 | A4、A5 |
+| rules_text.validate/export | D3、E5、H7 | A4 |
+| rules.preview / rules_text.preview / rules_text.import、requests.cancel | E1/E2/E5、H5/H6/H7 | A1、A5 |
+| rules_text.diff / rules.explain | E3/E4/E5、H8/H9/H10 | A5 |
+| data.delete.preview / data.delete / data.delete.status（privacy_rules） | G1–G6、H16 | A6、A7 |
+| 版本、错误、capabilities、提取缓存与实测启用策略 | F1–F3，按实测执行 F4/F5 | A2、A3、A4 |
+| Pan/Select、上下文归类与隐私入口 | H11/H14/H15 | A7 |
 
 ## M5 浏览器
 
@@ -165,7 +187,7 @@
 | H5 | 用户在用的浏览器无痕窗口可以从类名或标题识别 | M1-E2b 已测：Edge 157、Firefox 160 的 zh-CN 与 en-US 无痕窗口可由标题识别；Chrome 157 无痕标题与普通窗口相同，无法识别，记为已知缺口（未启用保守规则）。[测量记录](../measurements.md)；M5 扩充样本 | M5 起以扩展关联为准，未关联窗口隐藏标题；未接入扩展的浏览器由标题模式兜底并在设置页提示（06 第 3.4 节） |
 | H6 | 已决定使用独立 console 子系统 `quartz-host.exe` 承接浏览器 stdio | M0 已由设计解决 | — |
 | H7 | 验证常见应用窗口的显示亲和性查询覆盖、错误码与成本 | M1 | 查询失败记 unknown，其他识别器与用户规则继续求值 |
-| H8 | 一年数据下，内存缓存就能满足查询性能 | M4 | 加持久日缓存表 |
+| H8 | 一年数据下，内存缓存就能满足查询性能 | M4 | 评审持久日缓存的独立方案或性能预算调整 |
 | H9 | diesel 的泛型代码对 release 体积、编译时间与核心内存的影响可以接受 | M1-B 已测：release +2.036 MiB；Windows debug 一行增量编译 9.028 s；短时 Private Bytes +0.754 MiB、线程数不变。[测量记录](../measurements.md)；10 分钟资源回归待 M1 完成 | 热路径写入改用 `sql_query`，或把 store 拆成独立 crate 缩短增量编译 |
 | H10 | ICU4X 规范化与大小写折叠数据加入核心后，核心体积与内存仍满足 08 | M1-A 已测：规范化与折叠 +156 KiB，含 IDN +292.5 KiB；[测量记录](../measurements.md)，常驻内存待 M1 回归 | 改用 `unicode-normalization` 与 `caseless` 等更小的 crate，保持第 10 章的比较语义 |
 | H11 | GPUI 能在 Windows 上正确呈现 Mica 窗口与半透明令牌，并通过 DirectWrite 选中 Segoe UI Variable 的光学尺寸实例和 `tnum` 特性 | M3；M3-A 已验证 Mica 壁纸染色，字体项待 M3 | Mica 不可用时用 `bg.base` 纯色；字体退回 `Segoe UI Variable` 单一字族，等宽数字用固定宽度容器 |
@@ -179,4 +201,4 @@
 | Q2 | 已决定通过 `windows` 直接调用 `Shell_NotifyIconW`，以接收悬停事件并减少依赖。 | M0 |
 | Q3 | 复核预热默认开启、电池时关闭 | M3 实测后复核 |
 | Q4 | 数据库是否加密 | 以后 |
-| Q5 | 内置提取规则覆盖哪些应用 | M4，按用户实际常用的应用列表 |
+| Q5 | M4 首版内置提取覆盖 VS Code、JetBrains、Office、浏览器 profile 后缀、Windows Terminal | 03 第 5.2 节；其他应用按实际样本扩充 |

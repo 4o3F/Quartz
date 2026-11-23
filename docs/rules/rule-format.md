@@ -53,7 +53,7 @@ reason = "B 站改由本规则集细分"
 
 - `key` 只能包含小写字母、数字、`.`、`-`、`_`。`builtin.` 前缀保留给 Quartz 内置规则集；用户规则集请用 `user.` 前缀。
 - 规则的 `id` 在规则集内唯一，只能包含字母、数字、`-`、`_`。规则的全名是 `<规则集 key>/<规则 id>`，例如 `user.study-sites/bili-tutorial`。
-- 再次导入同一 `key` 的文件，生成该规则集的新版本；旧版本保留，可以对比和回退。
+- 规则集以 `key` 标识，规则的 `id` 只在该集内唯一。再次导入同一 key 生成新版本；旧版本保留，可以对比和回退。wire 写入携带当前 `base_version`，创建不存在或已删除的 key 使用 0；保存版本为 u32，从 1 开始，删除后恢复沿用历史版本递增。
 - 文件编码 UTF-8，注释用 `#`。未知的键会报错，不会被忽略。
 - 内置规则集另有几个只供内置使用的键（`detector`、`languages`、`verified`、`label_key`），出现在用户规则集中会报 `E-RULE-KEY`。
 
@@ -82,7 +82,8 @@ builtin.classification          （内置，随 Quartz 更新）
 - 停用一个规则集时，它的整个子树一起停用，因为子规则集的差异依赖父级。
 - 两个互不为祖先的规则集，不能 `override` 或 `disable` 同一条规则。需要叠加修改时，让其中一个成为另一个的子规则集。
 - `precedent` 规则集只能使用 `[[rule]]`，不能覆盖或停用，因为判例永久有效。
-- 内置规则集不能直接编辑，只能通过子规则集修改。
+- 内置规则集不能直接编辑，只能通过子规则集修改。默认用户子集分别为 `user.local.classification`、`user.local.extraction`、`user.local.privacy`，以同类型 builtin 集为父；key 全局唯一。
+- 同一 key 创建后 kind 与 parent 固定，删除后恢复也沿用原身份；换父级时新建 key。
 
 ### 1.2 生效规则的计算
 
@@ -147,11 +148,11 @@ when = [
 
 | 规则类型 | 可用字段 | 原因 |
 |---|---|---|
-| `classification` | `app.identity_key`、`app.exe_name`、`app.display_name`、`title.raw` | 使用当前查询输入，不能依赖分类本身 |
+| `classification` | `app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`；M5 加入 `web.*`、`browser.profile_label` | 使用当前查询输入，不能依赖分类本身 |
 | `privacy` | `app.*`、`window.class`、`title.raw`、`web.domain`、`web.tab_title`、`browser.profile_label` | 隐私规则在入库前求值，只能用采集时就有的字段 |
 | `precedent`、`policy_check` | 全部字段 | 基于已入库并已分类的片段 |
 
-`title.normalized`、`doc.*` 和 `web.*` 在 M4/M5 接入查询输入前均于校验阶段返回 `E-RULE-FIELD`，其他尚未接入的字段也按此处理。
+M4 先提取再分类，窗口类名取自已保留的窗口实例；标题隐藏时 `title.raw`、`title.normalized` 与 `doc.*` 缺失。分类的 `web.*` 与 `browser.profile_label` 待 M5，`precedent` / `policy_check` 待 M7；尚未交付的字段或规则类型在校验阶段返回 `E-RULE-FIELD` 或 `E-RULE-SET`。
 
 `web.*` 只在浏览器扩展已连接且关联到当前窗口时存在。字段不存在时，普通条件不成立，`negate = true` 的条件成立。
 
@@ -211,6 +212,7 @@ priority = 50
 - `app`：选择应用的条件，格式同 `when`，只能使用 `app.*` 字段。
 - `pattern`：作用于 `title.raw` 的正则，用命名捕获组输出结果。可用的组名：`document`、`project`、`profile`、`dirty`（捕获到任意内容即视为有未保存修改）。
 - 第一条应用条件和正则都匹配成功的规则生效（顺序见 1.2）；都不匹配时使用通用回退。
+- 输出与文档身份见 [03 第 5.2 节](../design/03-data-model.md#52-文档身份提取)：身份为应用加 NFC 规范化的 document/project/profile，保留大小写和缺失/空串区别；dirty、规范化标题与提取规则来源不参与身份。document 为空或未知时不生成身份，客户端使用版本绑定的不透明引用。
 
 ### 3.3 隐私规则 `privacy`
 
@@ -297,7 +299,7 @@ when = [{ field = "category", op = "equals", value = "builtin:entertainment" }]
 | 命令 | 作用 | 需要核心运行 |
 |---|---|---|
 | `quartz rules check <文件>...` | 校验一个或多个规则文件，包括它们与已安装规则集组成的树 | 否（树检查使用本地已安装规则集的只读副本） |
-| `quartz rules preview <文件> --days 7` | 每条规则在过去几天会命中的片段数、时长和样例 | 是 |
+| `quartz rules preview <文件> --days 7` | 每条规则的条件命中段数/时长、有效活跃贡献及最多 50 个样例 | 是 |
 | `quartz rules diff <文件> --days 7` | 与同一 `key` 当前版本对比：规则级差异，以及过去几天哪些片段的结果会改变 | 是 |
 | `quartz rules explain --at "2026-11-16 14:05"` | 解释某一时刻的片段：每个规则集、每条规则、每个条件是否成立，最终采用了哪条规则，哪些规则被遮蔽 | 是 |
 | `quartz rules tree [--kind classification]` | 显示已安装的规则集树、版本与启用状态 | 是 |
@@ -330,7 +332,7 @@ error[E-RULE-TARGET]: user.my-tweaks: override[0].target: "builtin.classificatio
 | `E-RULE-REF` | 引用的分类、链或国策不存在 |
 | `E-RULE-DUP` | 规则集内 `id` 重复 |
 
-判例和隐私规则必须在界面中看过预览才能保存。
+M4 隐私保存必须携带对应预览回执，覆盖导入、编辑、启停、排序、删除与回退中影响保留动作的操作。回执绑定完整修改、基础与父链版本、事实/标注和元数据输入、预览范围，有效期五分钟；数据或草稿变化后重新预览。预览区分条件命中与最终有效贡献，隐私影响只计仍保留且将进一步隐藏的事实；历史清理另行预览确认。请求、取消、期限和错误以 [04 第 6.3.2–6.3.4 节](../design/04-ipc.md#632-预览期限与回执) 为准；E-RULE-* 是内容诊断，preview_required 等是 IPC 操作错误。M7 判例保存也须预览。
 
 ### 4.3 内置规则更新
 
