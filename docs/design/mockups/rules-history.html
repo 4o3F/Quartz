@@ -1,0 +1,2605 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Quartz — Rule text, version history &amp; three-way comparison (M4 V4)</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mockup.css">
+<!--
+  Rule text import/export, version history with diff/rollback, and three-way upstream comparison mockup (M4 V4: H7 / H8 / H9).
+  Query parameters:
+    ?state=import | import-invalid | import-preview | export |
+           history | history-diff | history-revert |
+           three-way | three-way-pending | three-way-removed
+    &theme=light | dark
+    &lang=zh-CN | en | en-XA
+    &size=min          (optional: 640x480 minimum window per 07 §2.3; default 1280x800)
+-->
+<style>
+/* Minimum window 640x480 (Compact breakpoint per 07 §2.1 & §2.3) */
+html[data-size="min"],
+html[data-size="min"] body,
+html[data-size="min"] .window{width:640px;height:480px}
+
+.wrap{position:relative;overflow:hidden}
+.main-wrap{position:relative;flex:1;min-width:0;display:flex}
+.main{position:relative;padding:var(--space-xxl) var(--space-xxl) var(--space-l);gap:var(--space-s);overflow-y:auto;overflow-x:hidden}
+html[data-wide-view="true"] .main{padding:10px var(--space-xl) 10px;gap:6px}
+html[data-size="min"] .main{padding:var(--space-s) var(--space-m) var(--space-l)}
+
+/* Fluent 2 overlay scrollbar indicator (11 §9.2) */
+.scroll-track{
+  display:none;
+  position:absolute;top:var(--space-xs);right:var(--space-xs);bottom:var(--space-xs);
+  width:6px;pointer-events:none;z-index:8;
+}
+.scrollable > .scroll-track{display:block}
+.scroll-thumb{
+  position:absolute;left:1px;right:1px;top:0;
+  border-radius:var(--radius-control);
+  background:var(--text-tertiary);
+}
+
+/* Nav text stays single-line with ellipsis in en-XA */
+.nav-item span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Page header & pivot */
+.page-head{
+  flex:none;
+  display:flex;align-items:center;flex-wrap:wrap;
+  gap:var(--space-s);
+  min-height:40px;
+}
+.page-head .h-title{flex:1;min-width:140px}
+.page-head-acts{display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap}
+
+.pivot{
+  height:auto;min-height:32px;
+  gap:var(--space-l);row-gap:var(--space-xs);
+  flex-wrap:wrap;
+}
+.pivot div{height:32px;white-space:nowrap}
+html[data-size="min"] .pivot{gap:var(--space-m);row-gap:0}
+
+/* Flexible buttons & badges safe for en-XA */
+.badge{max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;gap:3px}
+.badge .btxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn{min-height:var(--h-control-standard);height:auto;padding:4px 12px}
+.btn.compact{min-height:var(--h-control-compact);height:auto;padding:2px 10px}
+.btn.icon{width:var(--h-control-standard);height:var(--h-control-standard);padding:0}
+.btn.compact.icon{width:var(--h-control-compact);height:var(--h-control-compact);padding:0}
+
+/* Workspace split: rule-set tree + list/history card */
+.rules-grid{
+  flex:1;min-height:0;
+  display:flex;align-items:stretch;gap:var(--space-s);
+  margin-top:var(--space-xs);
+}
+.tree-card{
+  width:256px;flex:none;
+  padding:var(--space-m);
+  display:flex;flex-direction:column;gap:var(--space-xs);
+  align-self:flex-start;
+  max-height:100%;overflow:hidden;
+}
+.list-card{
+  flex:1;min-width:0;
+  padding:var(--space-m) var(--space-m) var(--space-s);
+  display:flex;flex-direction:column;gap:var(--space-xs);
+  align-self:flex-start;
+  max-height:100%;overflow:hidden;
+}
+html[data-size="min"] .rules-grid{flex-direction:column;flex:none}
+html[data-size="min"] .tree-card,
+html[data-size="min"] .list-card{width:100%;max-height:none}
+
+/* Tree nodes (reused from V1) */
+.tree-head{display:flex;align-items:center;gap:var(--space-s);padding:0 var(--space-xs) var(--space-xs)}
+.tnode{min-height:48px;padding:6px 8px;gap:6px}
+.tnode.ind1{margin-left:14px}
+.tnode.ind2{margin-left:28px}
+.tnode .badges{display:flex;flex-wrap:wrap;gap:4px;margin-top:1px;min-width:0;max-width:100%}
+.tnode .sw{flex:none}
+.tnode .lock-ic{width:12px;height:12px;color:var(--text-tertiary);flex:none}
+
+/* List toolbar & background entries table (reused from V1) */
+.list-toolbar{
+  display:flex;align-items:center;flex-wrap:wrap;
+  gap:var(--space-s);
+  padding:0 var(--space-xs) var(--space-xs);
+}
+.list-toolbar-right{margin-left:auto;display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap}
+.list-meta{
+  display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-s);
+  padding:0 var(--space-xs) var(--space-xs);
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.list-meta .link{color:var(--accent-text);margin-left:auto;white-space:nowrap}
+
+.rtbl-h,.rtbl-r{
+  display:flex;align-items:center;gap:var(--space-s);
+  min-height:var(--h-row-compact);
+  padding:4px var(--space-s);
+  border-radius:var(--radius-control);
+}
+.rtbl-h{
+  font:var(--type-caption);color:var(--text-secondary);
+  border-bottom:1px solid var(--stroke-divider);
+  border-radius:0;
+}
+.rtbl-r.sel{background:var(--fill-subtle-hover)}
+.rtbl-r.dim{color:var(--text-secondary)}
+.rtbl-r.dim .lbl{text-decoration:line-through}
+.rtbl-name{flex:1;min-width:96px;display:flex;align-items:center;gap:6px;overflow:hidden}
+.rtbl-name .lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rtbl-cat{flex:0 0 auto;min-width:74px;max-width:124px}
+.rtbl-prio{flex:0 0 auto;min-width:44px;text-align:right;white-space:nowrap;font:var(--type-caption);color:var(--text-secondary)}
+.rtbl-diff{flex:0 0 auto;min-width:60px;display:flex;justify-content:flex-end}
+
+/* Inline banners (InfoBars, reused from V1/V3) */
+.infobar{
+  flex:none;
+  padding:7px 11px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;word-break:break-word;
+}
+.infobar .ib-ic{flex:none;margin-top:1px;color:var(--text-secondary)}
+.infobar .ib-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow-wrap:anywhere}
+.infobar .ib-title{font:var(--type-body-strong);color:var(--text-primary);font-size:13px;line-height:18px;overflow-wrap:anywhere}
+.infobar .ib-acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px}
+.infobar.caution{
+  background:var(--status-caution-bg);
+  border-color:color-mix(in srgb,var(--status-caution) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.caution .ib-ic{color:var(--status-caution)}
+.infobar.critical{
+  background:var(--status-critical-bg);
+  border-color:color-mix(in srgb,var(--status-critical) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.critical .ib-ic{color:var(--status-critical)}
+
+/* Modal dialogs (Import, Export, Revert confirmation) */
+.modal-scrim{
+  position:absolute;inset:0;
+  background:var(--fill-smoke);
+  z-index:30;
+  display:flex;align-items:center;justify-content:center;
+  padding:var(--space-l);
+}
+.modal-dlg{
+  width:640px;max-width:100%;max-height:100%;
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-overlay);
+  box-shadow:var(--shadow-64);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.modal-dlg.wide{width:736px}
+.modal-dlg.narrow{width:548px}
+.modal-head{
+  flex:none;
+  padding:12px var(--space-xl);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:center;gap:var(--space-s);
+}
+.modal-head-txt{flex:1;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.modal-body-wrap{position:relative;flex:1;min-height:0;display:flex}
+.modal-body{
+  flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
+  padding:10px var(--space-xl);
+  display:flex;flex-direction:column;gap:8px;
+}
+.modal-foot{
+  flex:none;
+  padding:10px var(--space-xl);
+  border-top:1px solid var(--stroke-divider);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:center;justify-content:flex-end;gap:var(--space-s);flex-wrap:wrap;
+}
+.modal-foot-left{margin-right:auto;display:flex;align-items:center;gap:6px;min-width:0}
+
+html[data-size="min"] .modal-scrim{padding:var(--space-s)}
+html[data-size="min"] .modal-dlg{width:100%;height:100%}
+html[data-size="min"] .modal-head{padding:8px 12px}
+html[data-size="min"] .modal-body{padding:8px 12px;gap:8px}
+html[data-size="min"] .modal-foot{padding:8px 12px;gap:6px}
+
+/* Import drop zone & TOML text box */
+.dropzone{
+  padding:10px 12px;
+  border-radius:var(--radius-control);
+  border:1.5px dashed var(--stroke-control-strong);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+}
+.dropzone-ic{
+  width:32px;height:32px;border-radius:var(--radius-control);flex:none;
+  background:var(--fill-subtle-hover);color:var(--accent-text);
+  display:grid;place-items:center;
+}
+.dropzone-txt{flex:1;min-width:180px;display:flex;flex-direction:column;gap:2px}
+
+.code-box-wrap{position:relative;display:flex;border-radius:var(--radius-control);border:1px solid var(--stroke-control);border-bottom-color:var(--stroke-control-strong);background:var(--bg-base);overflow:hidden}
+.code-box{
+  flex:1;min-width:0;
+  max-height:212px;overflow-y:auto;overflow-x:hidden;
+  padding:8px 10px;
+  font-family:var(--font-mono);font-size:11.5px;line-height:17px;
+  color:var(--text-primary);
+  white-space:pre-wrap;overflow-wrap:anywhere;
+}
+.code-box.tall{max-height:312px}
+.code-box.compact{max-height:112px;font-size:11px;line-height:16px}
+.code-ln{display:flex;gap:10px;min-width:0}
+.code-lno{width:22px;flex:none;text-align:right;color:var(--text-tertiary);user-select:none}
+.code-ltxt{flex:1;min-width:0;overflow-wrap:anywhere}
+.tok-sec{color:var(--accent-text);font-weight:600}
+.tok-key{color:var(--text-secondary)}
+.tok-cmt{color:var(--text-tertiary)}
+.tok-err{background:var(--status-critical-bg);color:var(--status-critical);border-radius:2px;padding:0 2px}
+
+/* Detected destination card in import */
+.dest-detect{
+  padding:9px 12px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:6px;
+}
+.dest-kv-grid{
+  display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:8px;
+}
+.dest-kv{display:flex;flex-direction:column;gap:2px;min-width:0}
+.dest-kv .dk{font:var(--type-caption);color:var(--text-secondary)}
+.dest-kv .dv{font-family:var(--font-mono);font-size:12px;line-height:16px;color:var(--text-primary);overflow-wrap:anywhere}
+.dest-status{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+  padding-top:6px;border-top:1px solid var(--stroke-divider);
+}
+html[data-size="min"] .dest-kv-grid{grid-template-columns:minmax(0,1fr)}
+
+/* Validation diagnostics list (import-invalid) */
+.diag-card-list{display:flex;flex-direction:column;gap:6px}
+.diag-item{
+  padding:8px 10px;
+  border-radius:var(--radius-control);
+  border:1px solid color-mix(in srgb,var(--status-critical) 30%,transparent);
+  background:color-mix(in srgb,var(--status-critical-bg) 28%,var(--fill-card-secondary));
+  display:flex;flex-direction:column;gap:4px;
+}
+.diag-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.diag-path{font-family:var(--font-mono);font-size:11.5px;line-height:16px;color:var(--text-primary);overflow-wrap:anywhere}
+.diag-loc{font-family:var(--font-mono);font-size:11px;line-height:15px;color:var(--text-secondary);margin-left:auto;white-space:nowrap}
+.diag-msg{font:var(--type-caption);color:var(--text-primary);overflow-wrap:anywhere}
+.diag-params{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.param-pill{
+  display:inline-flex;align-items:center;gap:3px;
+  padding:1px 6px;border-radius:var(--radius-control);
+  background:var(--fill-card);border:1px solid var(--stroke-card);
+  font-family:var(--font-mono);font-size:11px;line-height:15px;color:var(--text-secondary);
+  max-width:100%;overflow-wrap:anywhere;
+}
+.inline-note{
+  padding:7px 10px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:flex-start;gap:7px;
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;
+}
+.inline-note svg{flex:none;margin-top:1px;color:var(--text-tertiary)}
+
+/* Rule-level diff rows (import-preview, history-diff, history-revert) */
+.sect-hdr{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+}
+.sect-badges{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.diff-list{display:flex;flex-direction:column;gap:4px}
+.diff-row{
+  padding:5px 9px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:2px;
+}
+.diff-row.add{border-left:3px solid var(--status-success)}
+.diff-row.chg{border-left:3px solid var(--accent-fill)}
+.diff-row.rem{border-left:3px solid var(--status-critical)}
+.diff-row.dis{border-left:3px solid var(--status-neutral)}
+.diff-row.same{opacity:.72}
+.diff-row-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.diff-row-id{font-family:var(--font-mono);font-size:11px;line-height:15px;color:var(--text-tertiary);overflow-wrap:anywhere}
+.diff-paths{display:flex;flex-direction:column;gap:2px;padding-left:2px}
+.diff-path-line{
+  display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;
+}
+.diff-path-k{font-family:var(--font-mono);font-size:11px;color:var(--text-tertiary)}
+.diff-old{text-decoration:line-through;color:var(--text-tertiary)}
+.diff-new{color:var(--text-primary);font-weight:600}
+
+/* Dual-duration impact tiles (reused from V1) + Category deltas */
+.prev-metrics{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:8px;
+}
+html[data-size="min"] .prev-metrics{grid-template-columns:minmax(0,1fr)}
+.prev-metric{
+  padding:5px 8px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:1px;
+  min-width:0;
+}
+.prev-metric .pm-lbl{display:flex;align-items:center;gap:5px;font:var(--type-caption);color:var(--text-secondary)}
+.prev-metric .pm-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--status-neutral)}
+.prev-metric.eff .pm-dot{background:var(--status-success)}
+.prev-metric .pm-val{font:var(--type-body-strong);color:var(--text-primary);overflow-wrap:anywhere}
+.prev-metric .pm-sub{font:var(--type-caption);color:var(--text-tertiary);overflow-wrap:anywhere}
+
+.delta-grid{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:6px;
+}
+html[data-size="min"] .delta-grid{grid-template-columns:minmax(0,1fr)}
+.delta-item{
+  padding:4px 8px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;
+  font:var(--type-caption);
+}
+.delta-cat{display:flex;align-items:center;gap:6px;min-width:0}
+.delta-cat i{width:8px;height:8px;border-radius:2px;background:var(--c);flex:none}
+.delta-vals{display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:var(--text-secondary)}
+.delta-diff{font-weight:600;color:var(--text-primary)}
+.delta-diff.up{color:var(--status-success)}
+.delta-diff.dn{color:var(--status-caution)}
+
+/* Impact sample rows */
+.sample-list{display:flex;flex-direction:column;gap:3px}
+.sample-row{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:4px 7px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  font:var(--type-caption);
+}
+.sample-time{flex:none;color:var(--text-tertiary);white-space:nowrap}
+.sample-doc{flex:1;min-width:110px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sample-trans{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
+.sample-dur{flex:none;color:var(--text-secondary);white-space:nowrap}
+
+/* Export controls row */
+.export-row{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:10px;
+}
+html[data-size="min"] .export-row{grid-template-columns:minmax(0,1fr)}
+.field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.field>label{font:var(--type-caption);color:var(--text-secondary)}
+
+/* Version History table (history state) */
+.hist-bar{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:0 var(--space-xs) var(--space-xs);
+  border-bottom:1px solid var(--stroke-divider);
+}
+.hist-row{
+  display:flex;align-items:flex-start;gap:10px;
+  padding:9px 10px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+}
+.hist-row.sel{
+  border-color:var(--accent-fill);
+  background:color-mix(in srgb,var(--accent-fill) 6%,var(--fill-card));
+}
+.hist-chk{
+  width:22px;height:22px;border-radius:var(--radius-control);flex:none;margin-top:1px;
+  border:1.5px solid var(--stroke-control-strong);
+  background:var(--fill-control);
+  display:grid;place-items:center;
+  font:var(--type-caption);font-weight:600;color:var(--text-secondary);
+}
+.hist-row.sel .hist-chk{
+  border-color:var(--accent-fill);
+  background:var(--accent-fill);
+  color:var(--text-on-accent);
+}
+.hist-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.hist-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.hist-ver{font:var(--type-body-strong);font-family:var(--font-mono);color:var(--text-primary)}
+.hist-note{font:var(--type-body);font-size:13px;line-height:18px;color:var(--text-primary);overflow-wrap:anywhere}
+.hist-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font:var(--type-caption);color:var(--text-tertiary)}
+.hist-acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:none;align-self:center}
+
+/* Full-width subview header (history-diff, three-way, three-way-removed) */
+.subview-head{
+  flex:none;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:8px 12px;
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  border-radius:var(--radius-overlay);
+}
+.subview-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1;min-width:160px}
+.subview-acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto}
+
+/* Two-version comparison split (history-diff) */
+.hdiff-grid{
+  display:grid;
+  grid-template-columns:minmax(0,44%) minmax(0,1fr);
+  gap:var(--space-s);
+  align-items:start;
+}
+html[data-size="min"] .hdiff-grid{
+  grid-template-columns:minmax(0,1fr);
+}
+.hdiff-col{
+  display:flex;flex-direction:column;gap:10px;min-width:0;
+}
+.pager{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+  padding-top:8px;border-top:1px solid var(--stroke-divider);
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.pager-btns{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.pg-num{
+  min-width:24px;height:24px;padding:0 6px;
+  border-radius:var(--radius-control);
+  display:inline-flex;align-items:center;justify-content:center;
+  font:var(--type-caption);color:var(--text-secondary);
+  border:1px solid transparent;
+}
+.pg-num.on{
+  background:var(--accent-fill);color:var(--text-on-accent);font-weight:600;
+}
+
+/* Privacy preview summary inside revert modal */
+.priv-box{
+  padding:8px 10px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:6px;
+}
+.psample-row{
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  padding:3px 6px;border-radius:var(--radius-control);
+  background:var(--fill-card);border:1px solid var(--stroke-card);
+  font:var(--type-caption);
+}
+
+/* Three-way upstream comparison (three-way, three-way-pending, three-way-removed) */
+.tw-list{display:flex;flex-direction:column;gap:6px}
+.tw-entry{
+  padding:7px 11px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:5px;
+}
+.tw-entry.tw-pending{
+  border-color:color-mix(in srgb,var(--status-caution) 48%,transparent);
+}
+.tw-entry.removed{
+  border-color:color-mix(in srgb,var(--status-critical) 35%,transparent);
+}
+.tw-entry-head{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+  padding-bottom:5px;border-bottom:1px solid var(--stroke-divider);
+}
+.tw-entry-id{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.tw-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.choice-btn{
+  min-height:28px;padding:3px 10px;
+  display:inline-flex;align-items:center;gap:6px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-control);
+  border-bottom-color:var(--stroke-control-strong);
+  background:var(--fill-control);
+  font:var(--type-caption);color:var(--text-primary);
+  white-space:normal;text-align:left;
+}
+.choice-btn.sel{
+  border-color:var(--accent-fill);
+  background:color-mix(in srgb,var(--accent-fill) 14%,var(--fill-card));
+  color:var(--accent-text);
+  font-weight:600;
+}
+.choice-btn.sel-danger{
+  border-color:var(--status-caution);
+  background:var(--status-caution-bg);
+  color:var(--status-caution);
+  font-weight:600;
+}
+.choice-dot{
+  width:14px;height:14px;border-radius:50%;flex:none;
+  border:1.5px solid var(--text-secondary);
+  display:grid;place-items:center;
+}
+.choice-btn.sel .choice-dot{border-color:var(--accent-fill);background:var(--accent-fill)}
+.choice-btn.sel .choice-dot::after{content:"";width:6px;height:6px;border-radius:50%;background:var(--text-on-accent)}
+
+/* Three columns at 1280x800; stacked vertical cards at 640x480 (size=min) so all 3 sides remain simultaneously comparable with zero horizontal scroll */
+.tw-cols{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:10px;
+  align-items:stretch;
+}
+html[data-size="min"] .tw-cols{
+  grid-template-columns:minmax(0,1fr);
+  gap:8px;
+}
+.tw-col{
+  padding:6px 8px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:4px;
+  min-width:0;
+}
+.tw-col.cur-parent{
+  border-color:color-mix(in srgb,var(--status-caution) 36%,transparent);
+  background:color-mix(in srgb,var(--status-caution-bg) 22%,var(--fill-card-secondary));
+}
+.tw-col.user-ovr{
+  border-color:color-mix(in srgb,var(--accent-fill) 36%,transparent);
+  background:color-mix(in srgb,var(--accent-fill) 5%,var(--fill-card-secondary));
+}
+.tw-col.gone{
+  border:1px dashed color-mix(in srgb,var(--status-critical) 55%,transparent);
+  background:color-mix(in srgb,var(--status-critical-bg) 35%,var(--fill-card-secondary));
+}
+.tw-col-hdr{
+  display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;
+  padding-bottom:5px;border-bottom:1px solid var(--stroke-divider);
+}
+.tw-col-step{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:18px;height:18px;border-radius:50%;flex:none;
+  background:var(--fill-subtle-hover);
+  font:var(--type-caption);font-weight:600;color:var(--text-secondary);
+}
+.tw-kv{display:flex;flex-direction:column;gap:4px;font:var(--type-caption)}
+.tw-field{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;overflow-wrap:anywhere}
+.tw-k{font-family:var(--font-mono);font-size:11px;color:var(--text-tertiary);flex:none}
+.tw-v{color:var(--text-primary);overflow-wrap:anywhere}
+.tw-v.changed{
+  background:color-mix(in srgb,var(--status-caution-bg) 75%,transparent);
+  color:var(--text-primary);
+  padding:0 4px;border-radius:3px;font-weight:600;
+}
+.tw-v.ovr-hl{
+  background:color-mix(in srgb,var(--accent-fill) 14%,transparent);
+  color:var(--accent-text);
+  padding:0 4px;border-radius:3px;font-weight:600;
+}
+.tw-cond{
+  padding:4px 6px;border-radius:var(--radius-control);
+  background:var(--fill-card);border:1px solid var(--stroke-card);
+  font-family:var(--font-mono);font-size:11px;line-height:15px;color:var(--text-primary);
+  overflow-wrap:anywhere;
+}
+.tw-cond.added{
+  border-color:color-mix(in srgb,var(--status-success) 45%,transparent);
+  background:color-mix(in srgb,var(--status-success-bg) 50%,var(--fill-card));
+}
+.tw-gone-box{
+  display:flex;flex-direction:column;align-items:center;text-align:center;gap:4px;
+  padding:6px 6px;margin:auto 0;
+}
+.tw-gone-ic{
+  width:32px;height:32px;border-radius:50%;
+  background:var(--status-critical-bg);color:var(--status-critical);
+  display:grid;place-items:center;
+}
+
+/* Resolution radio options for three-way-removed */
+.res-opts{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:8px;
+}
+html[data-size="min"] .res-opts{grid-template-columns:minmax(0,1fr)}
+.res-card{
+  padding:8px 10px;border-radius:var(--radius-control);
+  border:1px solid var(--stroke-control);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:5px;
+}
+.res-card.sel{
+  border-color:var(--accent-fill);
+  background:color-mix(in srgb,var(--accent-fill) 6%,var(--fill-card));
+}
+.res-card-top{display:flex;align-items:center;gap:7px}
+
+/* Bottom bar + auto-computed 7-day preview for three-way commit flow */
+.tw-foot{
+  flex:none;
+  padding:8px 11px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:7px;
+}
+.tw-prev{
+  padding:6px 9px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:5px;
+}
+.tw-prev.tw-pending{
+  flex-direction:row;align-items:center;gap:8px;flex-wrap:wrap;
+  background:var(--status-caution-bg);
+  border-color:color-mix(in srgb,var(--status-caution) 28%,transparent);
+}
+.tw-prev-head{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+}
+.tw-prev-metrics{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:8px;
+}
+html[data-size="min"] .tw-prev-metrics{grid-template-columns:minmax(0,1fr)}
+.tw-prev-tile{
+  padding:4px 8px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap;
+  min-width:0;
+}
+.tw-prev-tile .pt-lbl{
+  display:inline-flex;align-items:center;gap:5px;
+  font:var(--type-caption);color:var(--text-secondary);
+  min-width:0;overflow-wrap:anywhere;
+}
+.tw-prev-tile .pt-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--status-neutral)}
+.tw-prev-tile.eff .pt-dot{background:var(--status-success)}
+.tw-prev-tile .pt-val{
+  font:var(--type-body-strong);font-size:13px;line-height:18px;
+  color:var(--text-primary);overflow-wrap:anywhere;
+}
+.tw-foot-bar{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+}
+html[data-size="min"] .subview-head{padding:6px 10px;gap:6px}
+.tw-foot-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.tw-foot-btns{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+</style>
+<script>
+const __p = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = __p.get('theme') || 'light';
+if (__p.get('size') === 'min') document.documentElement.dataset.size = 'min';
+</script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.4" fill="currentColor"/></symbol>
+  <symbol id="week" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3M8 13h8M8 16.5h5"/></symbol>
+  <symbol id="tag" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z"/><circle cx="8.3" cy="8.3" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="tag-f" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z" fill="currentColor"/><circle cx="8.3" cy="8.3" r="1.3" fill="var(--cut)" stroke="none"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><path d="M10.29 4.59L10.47 2.32L13.53 2.32L13.71 4.59L16.03 5.55L17.76 4.07L19.93 6.24L18.45 7.97L19.41 10.29L21.68 10.47L21.68 13.53L19.41 13.71L18.45 16.03L19.93 17.76L17.76 19.93L16.03 18.45L13.71 19.41L13.53 21.68L10.47 21.68L10.29 19.41L7.97 18.45L6.24 19.93L4.07 17.76L5.55 16.03L4.59 13.71L2.32 13.53L2.32 10.47L4.59 10.29L5.55 7.97L4.07 6.24L6.24 4.07L7.97 5.55Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="arrow-l" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+  <symbol id="arrow-r" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="swap" viewBox="0 0 24 24"><path d="M7 7h11M14 4l4 3-4 3M17 17H6M10 14l-4 3 4 3"/></symbol>
+  <symbol id="chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
+  <symbol id="add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5"/><path d="M15 15l5 5"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.3" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="crit-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></symbol>
+  <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><circle cx="12" cy="8" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="import" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/></symbol>
+  <symbol id="export" viewBox="0 0 24 24"><path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 19.5h14"/></symbol>
+  <symbol id="file" viewBox="0 0 24 24"><path d="M7 3.5h7l4 4v13H7z"/><path d="M14 3.5v4h4"/></symbol>
+  <symbol id="copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="shield" viewBox="0 0 24 24"><path d="M12 3.5l7 2.5v5.5c0 4-2.8 7.2-7 9-4.2-1.8-7-5-7-9V6z"/></symbol>
+  <symbol id="history" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.8V9h4.2"/><path d="M12 8v4.5l3 1.8"/></symbol>
+  <symbol id="revert" viewBox="0 0 24 24"><path d="M7 9H3.5V5.5"/><path d="M4 9a8 8 0 1 1 1.5 9.5"/></symbol>
+  <symbol id="diff" viewBox="0 0 24 24"><path d="M9 6h10M9 12h10M9 18h10M5 6h.01M5 12h.01M5 18h.01"/></symbol>
+  <symbol id="logo" viewBox="0 0 24 24"><path d="M12 2.5l8 4.5v10l-8 4.5-8-4.5V7z" fill="var(--accent-fill)" stroke="none"/><path d="M12 2.5v19M4 7l16 10M20 7L4 17" stroke="var(--text-on-accent)" stroke-width="1" opacity=".7"/></symbol>
+</defs></svg>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="app"><svg class="ic s16"><use href="#logo"/></svg><span>Quartz</span></div>
+    <div class="btns">
+      <div><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></div>
+    </div>
+  </div>
+  <div class="body">
+    <nav class="nav" id="nav"></nav>
+    <div class="wrap" id="wrap">
+      <div class="main-wrap" id="main-wrap">
+        <main class="main" id="main"></main>
+        <div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="main-thumb"></div></div>
+      </div>
+      <div class="modal-scrim" id="modal-scrim" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const rawLang = params.get('lang') || 'zh-CN';
+const lang = (rawLang === 'en' || rawLang === 'en-XA') ? rawLang : 'zh-CN';
+const stateKey = params.get('state') || 'import';
+const isMin = params.get('size') === 'min';
+document.documentElement.lang = lang === 'en-XA' ? 'en' : lang;
+document.documentElement.dataset.lang = lang;
+
+const WIDE_STATES = new Set(['three-way', 'three-way-pending', 'three-way-removed']);
+const isWideView = WIDE_STATES.has(stateKey);
+if (isWideView && !isMin) document.documentElement.dataset.wideView = 'true';
+
+/* Pseudo-locale generator matching quartz-i18n/src/pseudo.rs (~40% tilde padding + brackets) */
+const ACCENT_MAP = {
+  A:'À',B:'Ɓ',C:'Ç',D:'Ď',E:'É',F:'Ƒ',G:'Ĝ',H:'Ĥ',I:'Î',J:'Ĵ',K:'Ķ',L:'Ļ',M:'Ḿ',
+  N:'Ñ',O:'Ö',P:'Ƥ',Q:'Ǫ',R:'Ŕ',S:'Š',T:'Ţ',U:'Û',V:'Ṽ',W:'Ŵ',X:'Ẋ',Y:'Ý',Z:'Ž',
+  a:'à',b:'ƀ',c:'ç',d:'đ',e:'é',f:'ƒ',g:'ĝ',h:'ĥ',i:'î',j:'ĵ',k:'ķ',l:'ļ',m:'ɱ',
+  n:'ñ',o:'ö',p:'ƥ',q:'ǫ',r:'ŕ',s:'š',t:'ţ',u:'û',v:'ṽ',w:'ŵ',x:'ẋ',y:'ý',z:'ž',
+};
+function pseudoStr(s) {
+  if (!s || typeof s !== 'string') return s;
+  const accented = [...s].map(ch => ACCENT_MAP[ch] || ch).join('');
+  const pad = Math.ceil((s.length * 2) / 5);
+  return '[' + accented + '~'.repeat(pad) + ']';
+}
+function pseudoObj(val, skipKeys = new Set([
+  'c', 'code', 'key', 'id', 'path', 'loc', 'ver', 'time', 'toml', 'cond', 'params',
+  'ruleRef', 'parentVer', 'date', 'newId', 'kind', 'dir', 'author', 'diff', 'cat',
+  'k', 'sel', 'setKey', 'srcFile', 'fmtBadge', 'verArrow', 'e1Ref', 'e2Ref', 'remE1Ref', 'remE2Ref',
+])) {
+  if (typeof val === 'string') return pseudoStr(val);
+  if (Array.isArray(val)) return val.map(v => pseudoObj(v, skipKeys));
+  if (val && typeof val === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      out[k] = skipKeys.has(k) ? v : pseudoObj(v, skipKeys);
+    }
+    return out;
+  }
+  return val;
+}
+
+const COPY = {
+  'zh-CN': {
+    nav: { today: '今天', week: '本周', rules: '分类与规则', settings: '设置' },
+    page: {
+      title: '分类与规则',
+      importBtn: '导入规则',
+      exportBtn: '导出规则',
+      tabs: {
+        categories: '分类',
+        rules: '规则',
+        queue: '未分类队列',
+        extraction: '文档提取规则',
+        privacy: '隐私规则',
+      },
+    },
+    cats: { dev: '开发', learn: '学习', comm: '沟通', ent: '娱乐', sys: '系统与工具', uncat: '未分类' },
+    tree: {
+      heading: '分类规则集',
+      privHeading: '隐私规则集',
+      builtinName: '内置分类规则',
+      builtinPrivName: '内置隐私规则',
+      localName: '本地分类',
+      localPrivName: '本地隐私',
+      examName: '备考期间',
+      builtinCount: '50 条',
+      builtinPrivCount: '12 条',
+      upstreamChanged: '上游已变更',
+      targetDeleted: '目标已删除',
+    },
+    bgList: {
+      segOwn: '本规则集条目',
+      segEff: '生效视图',
+      addRule: '新增规则',
+      searchPh: '筛选规则',
+      ownMeta: 'user.local.classification · v3 · 4 项差异',
+      historyLink: '版本历史 v3…',
+      colRule: '规则',
+      colCat: '分类',
+      colPrio: '优先级',
+      colDiff: '差异',
+      badgeAdd: '+新增',
+      badgeOvr: '~覆盖',
+      badgeDis: '−停用',
+      rows: [
+        { name: 'VS Code 学习笔记算学习', cat: 'learn', c: 'var(--cat-1)', prio: '70', diff: 'add' },
+        { name: 'Word 需求文档算开发', cat: 'dev', c: 'var(--cat-8)', prio: '65', diff: 'add' },
+        { name: 'Windows Terminal 算系统', cat: 'sys', c: 'var(--cat-11)', prio: '50', diff: 'ovr' },
+        { name: '微信算沟通（内置）', cat: 'comm', c: 'var(--cat-3)', prio: '50', diff: 'dis', dim: true },
+      ],
+    },
+    imp: {
+      title: '导入规则文本',
+      fmtBadge: 'quartz-rules/1',
+      dropTitle: '拖放 .toml 规则文件到此处，或从磁盘打开',
+      dropSub: '仅支持 UTF-8 编码 · 单规则集上限 192 KiB',
+      openFileBtn: '打开 .toml 文件…',
+      pasteLbl: '规则文本（可直接粘贴或修改）',
+      pasteMeta: 'UTF-8 · 1.1 KiB / 192 KiB',
+      detectTitle: '已从 [set] 识别目标规则集',
+      kKey: '规则集键 (key)',
+      kKind: '规则类型 (kind)',
+      kParent: '父规则集 (parent)',
+      kindCls: 'classification（分类规则）',
+      destExistingBadge: '更新已有规则集',
+      destExistingDesc: '将基于 user.local.classification 当前 v3 创建新修订 v4（base_version = 3）',
+      destNewHint: '若 [set].key 尚未安装或已删除，将自动以 base_version = 0 新建规则集并保留历史身份。',
+      cancelBtn: '取消',
+      nextBtn: '校验并预览',
+      invalidTitle: '导入规则文本 — 校验未通过',
+      srcFile: 'user.local.classification.toml',
+      srcMeta: 'UTF-8 · 1.6 KiB · 35 行',
+      reopenBtn: '更换文件',
+      editTextBtn: '编辑原文',
+      errSummaryTitle: '发现 3 处规则校验错误，尚未写入',
+      errSummaryMsg: '已结合已安装规则集树与当前分类目录检查（rules_text.validate，单次最多返回 100 项）。',
+      copyAllBtn: '复制全部错误',
+      diags: [
+        {
+          code: 'E-RULE-FIELD',
+          path: 'rule[0].when[1].field',
+          loc: 'L14:C19',
+          locHuman: '第 14 行, 第 19 列',
+          msg: '未知字段 "app.name"（classification 规则允许使用 app.*、window.class、title.*、doc.*）',
+          params: ['field="app.name"', 'kind="classification"'],
+        },
+        {
+          code: 'E-RULE-TARGET',
+          path: 'override[0].target',
+          loc: 'L22:C10',
+          locHuman: '第 22 行, 第 10 列',
+          msg: '覆盖目标 "builtin.classification/terminal" 不在祖先规则集 builtin.classification 中',
+          params: ['target="builtin.classification/terminal"', 'parent="builtin.classification"'],
+        },
+        {
+          code: 'E-RULE-REGEX',
+          path: 'rule[1].when[0].value',
+          loc: 'L31:C42',
+          locHuman: '第 31 行, 第 42 列',
+          msg: '正则表达式编译失败：未闭合的字符类 "["',
+          params: ['pattern="(?i)(笔记|notes["', 'offset=14'],
+        },
+      ],
+      plainHdr: '可复制诊断文本（可原样贴回 AI 助手修改）',
+      copyBtn: '复制文本',
+      precheckNote: '导入前置拦截：非 UTF-8 编码文件会在解析前提示另存为 UTF-8；超过 192 KiB 的文本直接返回 bad_request 而不进入解析。',
+      backEditBtn: '返回编辑',
+      prevTitle: '导入预览与确认',
+      validOkBadge: '校验通过',
+      verArrow: 'user.local.classification · v3 → v4',
+      diffHdr: '规则级差异（对比当前 v3）',
+      bAdd: '+1 新增',
+      bChg: '~1 变更',
+      bRem: '−1 移除',
+      bDis: '1 停用',
+      tagAdd: '+新增',
+      tagChg: '~变更',
+      tagRem: '−移除',
+      tagDis: '−停用',
+      diffs: [
+        {
+          kind: 'add',
+          name: 'VS Code 学习笔记算学习',
+          id: 'user.local.classification/vscode-notes',
+          lines: [{ k: 'when', oldVal: null, newVal: 'app.exe_name = "code.exe" 且 doc.project = "StudyNotes" → 学习 (优先级 70)' }],
+        },
+        {
+          kind: 'chg',
+          name: 'Windows Terminal 算系统',
+          id: 'override builtin.classification/windows-terminal',
+          lines: [
+            { k: 'category', oldVal: '开发 (builtin:development)', newVal: '系统与工具 (builtin:system)' },
+            { k: 'priority', oldVal: '50', newVal: '60' },
+          ],
+        },
+        {
+          kind: 'rem',
+          name: '记事本临时草稿算学习',
+          id: 'user.local.classification/notepad-scratch',
+          lines: [{ k: 'removed', oldVal: 'app.exe_name = "notepad.exe" 且 doc.document 包含 "草稿"', newVal: null }],
+        },
+        {
+          kind: 'dis',
+          name: '微信算沟通（内置）',
+          id: 'disable builtin.classification/wechat',
+          lines: [{ k: 'reason', oldVal: null, newVal: '工作与私人微信混合，不计入自动沟通统计' }],
+        },
+      ],
+      impactHdr: '过去 7 天结果影响（2026-11-16 至 2026-11-22）',
+      mCondLbl: '条件命中（规则草稿）',
+      mCondVal: '5 小时 42 分 · 34 段',
+      mCondSub: '含被遮蔽与空闲切片',
+      mEffLbl: '有效贡献（结果变更）',
+      mEffVal: '3 小时 15 分 · 24 段',
+      mEffSub: '按今天页最终活跃时长口径',
+      deltas: [
+        { catLbl: '开发', c: 'var(--cat-8)', before: '18h 20m', after: '16h 45m', diff: '−1h 35m', dir: 'dn' },
+        { catLbl: '系统与工具', c: 'var(--cat-11)', before: '1h 10m', after: '2h 15m', diff: '+1h 05m', dir: 'up' },
+        { catLbl: '学习', c: 'var(--cat-1)', before: '4h 05m', after: '4h 45m', diff: '+40m', dir: 'up' },
+        { catLbl: '沟通', c: 'var(--cat-3)', before: '2h 50m', after: '2h 20m', diff: '−30m', dir: 'dn' },
+      ],
+      samplesHdr: '变更片段样例（前 50 条 · 展示 3 条）',
+      samples: [
+        { time: '11-22 14:10', doc: 'Windows Terminal · pwsh', from: '开发', to: '系统与工具', dur: '22 分' },
+        { time: '11-22 10:35', doc: 'VS Code · rust-notes.md', from: '开发', to: '学习', dur: '34 分' },
+        { time: '11-21 19:20', doc: 'WeChat', from: '沟通', to: '未分类', dur: '18 分' },
+      ],
+      privNote: '隐私规则集（kind = "privacy"）导入须等待预览签发 5 分钟有效回执（preview_receipt）后才解锁确认；若包含放宽隐私的变更，确认时将额外弹出放宽影响确认框。',
+      prevStepBtn: '上一步',
+      confirmImportBtn: '确认导入为 v4',
+    },
+    exp: {
+      title: '导出规则文本',
+      fmtBadge: 'quartz-rules/1',
+      setLbl: '选择规则集',
+      setVal: '本地分类 · user.local.classification（分类规则）',
+      verLbl: '选择版本',
+      verVal: 'v3（当前修订）· 2026-11-22 16:40',
+      metaLeft: '规范导出文本 · UTF-8 · 1.2 KiB / 192 KiB',
+      metaRight: '保留条目顺序、override/disable 与分类 UUID 引用',
+      closeBtn: '关闭',
+      copyBtn: '复制文本',
+      saveFileBtn: '保存为 .toml 文件…',
+    },
+    hist: {
+      backBtn: '返回条目',
+      title: '版本历史',
+      subtitle: '本地分类 · user.local.classification · 4 个修订',
+      privSubtitle: '本地隐私 · user.local.privacy · 3 个修订',
+      compareBtn: '对比所选版本 (v1 → v4)',
+      hint: '勾选任意两个修订即可对比结构差异与过去 7 天结果影响；回退会基于历史内容创建新修订，不删除已有历史。',
+      authorUi: '界面编辑',
+      authorImport: '导入',
+      authorRevert: '回退',
+      curBadge: '当前',
+      selA: 'A',
+      selB: 'B',
+      parentLbl: '父级版本',
+      exportBtn: '导出',
+      revertBtn: '回退到此版本',
+      revisions: [
+        {
+          ver: 'v4',
+          date: '2026-11-22 16:40',
+          parentVer: 'builtin.classification@v2',
+          author: 'ui',
+          current: true,
+          sel: 'B',
+          note: '将 Windows Terminal 覆盖为系统与工具（优先级 60），新增 VS Code 学习笔记规则',
+        },
+        {
+          ver: 'v3',
+          date: '2026-11-20 21:15',
+          parentVer: 'builtin.classification@v2',
+          author: 'import',
+          current: false,
+          sel: null,
+          note: '从规则文本导入：新增 Obsidian Quartz 项目开发规则与 Word 需求文档规则',
+        },
+        {
+          ver: 'v2',
+          date: '2026-11-18 10:05',
+          parentVer: 'builtin.classification@v1',
+          author: 'revert',
+          current: false,
+          sel: null,
+          note: '回退至 v1：撤销备考期间临时调整的桌面分类规则',
+        },
+        {
+          ver: 'v1',
+          date: '2026-11-15 09:30',
+          parentVer: 'builtin.classification@v1',
+          author: 'ui',
+          current: false,
+          sel: 'A',
+          note: '初始创建本地分类规则集，停用内置微信规则',
+        },
+      ],
+    },
+    hdiff: {
+      backBtn: '版本历史',
+      title: '两版本对比',
+      setKey: 'user.local.classification',
+      verFrom: 'v1 · 2026-11-15',
+      verTo: 'v4（当前）· 2026-11-22',
+      revertToBtn: '回退到 v1…',
+      infoLine: '各自沿用保存时的父链（v1 基于 builtin@v1，v4 基于 builtin@v2）· 过去 7 天结果影响窗口：2026-11-16 至 2026-11-22',
+      structHdr: '结构化条目差异',
+      bAdd: '+2 新增',
+      bChg: '~1 变更',
+      bSame: '1 不变',
+      tagAdd: '+新增',
+      tagChg: '~变更',
+      tagSame: '=不变',
+      entries: [
+        {
+          kind: 'add',
+          name: 'VS Code 学习笔记算学习',
+          id: 'user.local.classification/vscode-notes',
+          lines: [{ k: 'when', oldVal: null, newVal: 'code.exe + doc.project = "StudyNotes" → 学习 (优先级 70)' }],
+        },
+        {
+          kind: 'add',
+          name: 'Obsidian Quartz 项目算开发',
+          id: 'user.local.classification/obsidian-quartz',
+          lines: [{ k: 'when', oldVal: null, newVal: 'obsidian.exe + doc.project = "Quartz" → 开发 (优先级 65)' }],
+        },
+        {
+          kind: 'chg',
+          name: 'Windows Terminal 算系统',
+          id: 'override builtin.classification/windows-terminal',
+          lines: [
+            { k: 'category', oldVal: '开发 (builtin:development)', newVal: '系统与工具 (builtin:system)' },
+            { k: 'priority', oldVal: '50', newVal: '60' },
+          ],
+        },
+        {
+          kind: 'same',
+          name: '微信算沟通（内置）',
+          id: 'disable builtin.classification/wechat',
+          lines: [{ k: 'state', oldVal: null, newVal: '保持停用（未变化）' }],
+        },
+      ],
+      impactHdr: '结果影响（过去 7 天）',
+      impactScopeBadge: '分类规则 · 26 段变化',
+      impactSub: '活跃时长变更：2 小时 48 分 · 文档提取变化：0 处 · 隐私进一步隐藏：0 段',
+      deltas: [
+        { catLbl: '开发', c: 'var(--cat-8)', before: '18h 20m', after: '16h 30m', diff: '−1h 50m', dir: 'dn' },
+        { catLbl: '系统与工具', c: 'var(--cat-11)', before: '55m', after: '2h 10m', diff: '+1h 15m', dir: 'up' },
+        { catLbl: '学习', c: 'var(--cat-1)', before: '4h 10m', after: '4h 45m', diff: '+35m', dir: 'up' },
+      ],
+      samplesHdr: '变更片段样例（分页 · 上限 50 条）',
+      samples: [
+        { time: '11-22 15:12', doc: 'Windows Terminal · pwsh', from: '开发', to: '系统与工具', dur: '28 分' },
+        { time: '11-22 11:04', doc: 'VS Code · rust-notes.md', from: '开发', to: '学习', dur: '35 分' },
+        { time: '11-21 16:40', doc: 'Obsidian · architecture.md', from: '学习', to: '开发', dur: '42 分' },
+        { time: '11-20 09:50', doc: 'Windows Terminal · cargo test', from: '开发', to: '系统与工具', dur: '19 分' },
+      ],
+      pageInfo: '第 1 / 3 页 · 显示 1–10 / 共 26 段',
+      prevPage: '上一页',
+      nextPage: '下一页',
+    },
+    rev: {
+      title: '确认回退版本',
+      setBadge: 'user.local.privacy · 隐私规则',
+      desc: '将使用 v1（2026-11-15 09:30）的规则内容创建新的当前修订 v4。原有 v2 与 v3 历史完整保留，随时可以再次对比或回退。',
+      bannerTitle: '非破坏性回退：v3 → v4（采用 v1 内容）',
+      bannerSub: 'base_version = 3 · target_version = 1 · 父级版本 builtin.privacy@v1',
+      changesHdr: '本次回退的规则变更（对比当前 v3）',
+      tagRestore: '+恢复',
+      tagRem: '−移除',
+      changes: [
+        {
+          kind: 'add',
+          name: 'Outlook 隐藏窗口标题',
+          id: 'user.local.privacy/outlook-hide-title',
+          lines: [{ k: 'action', oldVal: null, newVal: 'app.exe_name = "outlook.exe" → preset = title_hidden（隐藏标题）' }],
+        },
+        {
+          kind: 'rem',
+          name: 'KeePassXC 停用覆盖（临时测试）',
+          id: 'disable builtin.privacy/password-manager-keepassxc',
+          lines: [{ k: 'removed', oldVal: '停用内置 KeePassXC 标题隐藏规则（将恢复内置保护）', newVal: null }],
+        },
+      ],
+      privHdr: '隐私预览与回执（隐私规则集回退必填）',
+      receiptOk: '回执有效 · 4:38',
+      furtherHidden: '现存事实中将进一步隐藏：14 段、14 个字段、1 小时 26 分（含非活跃）',
+      furtherSub: '回退仅影响保存后的未来采集，不会自动修改已存历史数据。',
+      samples: [
+        { time: '11-22 15:20', app: 'Microsoft Outlook', trans: '完整 → 隐藏标题', dur: '19 分' },
+        { time: '11-21 10:05', app: 'KeePassXC', trans: '完整 → 隐藏标题', dur: '4 分' },
+      ],
+      omitNote: '样例仅显示前后均允许可见的字段（已省略将被隐藏的窗口标题）。分类与提取规则集回退无需预览回执；若隐私回退包含放宽保护的项，确认后还会弹出二次放宽确认。',
+      cancelBtn: '取消',
+      confirmBtn: '确认回退并创建 v4',
+    },
+    tw: {
+      backBtn: '返回规则集',
+      title: '三方对比 · 处理上游变更',
+      setKey: 'user.local.classification',
+      warnBadge: '2 处上游已变更',
+      noAutoPill: '不自动合并 · 需逐条确认',
+      infoTitle: '内置父规则集 builtin.classification 已从 v1 升级到 v2',
+      infoMsg: '以下 2 条被你覆盖的内置规则在上游发生了变化。Quartz 不会自动合并你的修改与新上游；请逐条对比三列并明确选择“保留覆盖”或“移除覆盖（采用新上游）”，全部选完后自动计算过去 7 天影响并解锁保存。',
+      col1Title: '保存时的上游',
+      col1Sub: '创建覆盖时 · builtin@v1',
+      col2Title: '当前新上游',
+      col2Sub: '已升级 · builtin@v2',
+      col3Title: '你的覆盖',
+      col3Sub: 'user.local.classification@v4',
+      changedTag: '上游新增条件',
+      ovrTag: '用户改动',
+      keepBtn: '保留覆盖',
+      removeBtn: '移除覆盖（采用新上游）',
+      pendingBadge: '待选择',
+      e1Title: 'Windows Terminal',
+      e1Ref: 'builtin.classification/windows-terminal',
+      e1Badge: '上游已变更',
+      e1Hint: '已选择“保留覆盖”：你的覆盖将保留并更新基线至 builtin@v2（不会自动合入新上游新增的 wt.exe 条件）。',
+      e2Title: 'Microsoft Outlook',
+      e2Ref: 'builtin.classification/outlook',
+      e2Badge: '上游已变更',
+      e2Hint: '已选择“移除覆盖（采用新上游）”：上游 v2 已包含 olk.exe，移除冗余覆盖后将直接使用内置规则。',
+      e2PendingHint: '尚未选择处理方式：请选择“保留覆盖”或“移除覆盖（采用新上游）”，全部选完后将自动计算过去 7 天影响。',
+      prevTitle: '过去 7 天影响（自动预览）',
+      prevBadgeOk: '已就绪',
+      prevCondLbl: '条件命中',
+      prevCondVal: '2 小时 16 分 · 14 段',
+      prevEffLbl: '有效贡献',
+      prevEffVal: '1 小时 32 分 · 10 段',
+      prevPrivHint: '防抖自动预览 · 隐私规则集沿用 V3 预览回执流程',
+      remPrevCondVal: '54 分 · 7 段',
+      remPrevEffVal: '41 分 · 5 段',
+      pendingPrevMsg: '还有 1 项待选择 — 完成全部条目选择后将自动计算过去 7 天影响（双口径时长；隐私规则集沿用 V3 回执流程）并解锁保存。',
+      footSummary: '已确认 2 / 2 项（保留覆盖 1 · 移除覆盖 1）',
+      footReadyNote: '预览已更新，可直接保存为 v5',
+      pendingFootSummary: '已确认 1 / 2 项',
+      pendingFootNote: '还有 1 项待选择',
+      cancelBtn: '取消',
+      saveBtn: '保存为 v5',
+      remTitle: '三方对比 · 上游目标已删除',
+      remBadge: '2 处目标已删除',
+      remInfoTitle: '被覆盖或停用的内置规则已从 builtin.classification v2 移除',
+      remInfoMsg: '指向已删除目标的 [[override]] 与 [[disable]] 当前处于 target_missing 状态且不再生效。请逐条选择“转为独立规则保留”或“移除”，全部选完后自动计算过去 7 天影响并解锁保存。',
+      goneTitle: '此规则已在上游 v2 中删除',
+      goneDesc: 'builtin.classification/windows-mail 已在 v2 移除（由新版 Outlook 规则替代）。',
+      remE1Title: 'Windows 邮件（旧版）',
+      remE1Ref: 'override builtin.classification/windows-mail',
+      remE1Badge: '目标已删除',
+      optStandaloneTitle: '转为独立规则保留',
+      optStandaloneDesc: '将当前覆盖内容转为独立的 [[rule]]，保存后立即恢复生效。',
+      optStandaloneIdLbl: '新规则 ID：',
+      optStandaloneIdHint: '原目标 ID 未在本规则集中使用，已默认填入；若已被占用则建议 windows-mail-standalone。',
+      optRemoveTitle: '移除此覆盖',
+      optRemoveDesc: '从 user.local.classification 删除此失效覆盖条目。',
+      remE2Title: 'Skype（停用项）',
+      remE2Ref: 'disable builtin.classification/skype',
+      remE2Desc: '目标内置规则已在上游 v2 中删除；[[disable]] 无独立规则体，仅需移除此停用项。',
+      remE2Btn: '已选：移除此停用项',
+      remFootSummary: '已确认 2 / 2 项（转为独立规则 1 · 移除 1）',
+    },
+  },
+  'en': {
+    nav: { today: 'Today', week: 'This Week', rules: 'Categories & Rules', settings: 'Settings' },
+    page: {
+      title: 'Categories & Rules',
+      importBtn: 'Import rules',
+      exportBtn: 'Export rules',
+      tabs: {
+        categories: 'Categories',
+        rules: 'Rules',
+        queue: 'Unclassified Queue',
+        extraction: 'Extraction Rules',
+        privacy: 'Privacy Rules',
+      },
+    },
+    cats: { dev: 'Development', learn: 'Learning', comm: 'Communication', ent: 'Entertainment', sys: 'System & Tools', uncat: 'Unclassified' },
+    tree: {
+      heading: 'Classification rule sets',
+      privHeading: 'Privacy rule sets',
+      builtinName: 'Builtin classification',
+      builtinPrivName: 'Builtin privacy',
+      localName: 'Local classification',
+      localPrivName: 'Local privacy',
+      examName: 'Exam prep',
+      builtinCount: '50 rules',
+      builtinPrivCount: '12 rules',
+      upstreamChanged: 'Upstream changed',
+      targetDeleted: 'Target deleted',
+    },
+    bgList: {
+      segOwn: 'This rule set',
+      segEff: 'Effective view',
+      addRule: 'Add rule',
+      searchPh: 'Filter rules',
+      ownMeta: 'user.local.classification · v3 · 4 diffs',
+      historyLink: 'Version history v3…',
+      colRule: 'Rule',
+      colCat: 'Category',
+      colPrio: 'Priority',
+      colDiff: 'Diff',
+      badgeAdd: '+Added',
+      badgeOvr: '~Override',
+      badgeDis: '−Disabled',
+      rows: [
+        { name: 'VS Code study notes → Learning', cat: 'learn', c: 'var(--cat-1)', prio: '70', diff: 'add' },
+        { name: 'Word spec docs → Development', cat: 'dev', c: 'var(--cat-8)', prio: '65', diff: 'add' },
+        { name: 'Windows Terminal → System', cat: 'sys', c: 'var(--cat-11)', prio: '50', diff: 'ovr' },
+        { name: 'WeChat (builtin)', cat: 'comm', c: 'var(--cat-3)', prio: '50', diff: 'dis', dim: true },
+      ],
+    },
+    imp: {
+      title: 'Import rule text',
+      fmtBadge: 'quartz-rules/1',
+      dropTitle: 'Drop a .toml rule file here, or open from disk',
+      dropSub: 'UTF-8 only · max 192 KiB per rule set',
+      openFileBtn: 'Open .toml file…',
+      pasteLbl: 'Rule text (paste or edit directly)',
+      pasteMeta: 'UTF-8 · 1.1 KiB / 192 KiB',
+      detectTitle: 'Target rule set detected from [set]',
+      kKey: 'Rule set key',
+      kKind: 'Rule kind',
+      kParent: 'Parent rule set',
+      kindCls: 'classification',
+      destExistingBadge: 'New version of existing set',
+      destExistingDesc: 'Creates revision v4 on top of user.local.classification v3 (base_version = 3)',
+      destNewHint: 'If [set].key does not exist yet or was deleted, it will be created with base_version = 0 while preserving prior key identity.',
+      cancelBtn: 'Cancel',
+      nextBtn: 'Validate & preview',
+      invalidTitle: 'Import rule text — Validation failed',
+      srcFile: 'user.local.classification.toml',
+      srcMeta: 'UTF-8 · 1.6 KiB · 35 lines',
+      reopenBtn: 'Choose file',
+      editTextBtn: 'Edit text',
+      errSummaryTitle: '3 validation errors found — nothing was written',
+      errSummaryMsg: 'Checked against installed rule-set tree and active categories (rules_text.validate, up to 100 diagnostics).',
+      copyAllBtn: 'Copy all errors',
+      diags: [
+        {
+          code: 'E-RULE-FIELD',
+          path: 'rule[0].when[1].field',
+          loc: 'L14:C19',
+          locHuman: 'Line 14, Col 19',
+          msg: 'Unknown field "app.name" (classification allows app.*, window.class, title.*, doc.*)',
+          params: ['field="app.name"', 'kind="classification"'],
+        },
+        {
+          code: 'E-RULE-TARGET',
+          path: 'override[0].target',
+          loc: 'L22:C10',
+          locHuman: 'Line 22, Col 10',
+          msg: 'Override target "builtin.classification/terminal" not found in ancestor builtin.classification',
+          params: ['target="builtin.classification/terminal"', 'parent="builtin.classification"'],
+        },
+        {
+          code: 'E-RULE-REGEX',
+          path: 'rule[1].when[0].value',
+          loc: 'L31:C42',
+          locHuman: 'Line 31, Col 42',
+          msg: 'Regex compilation failed: unclosed character class "["',
+          params: ['pattern="(?i)(notes|study["', 'offset=14'],
+        },
+      ],
+      plainHdr: 'Copyable plain-text diagnostics (paste straight back to an AI assistant)',
+      copyBtn: 'Copy text',
+      precheckNote: 'Pre-parse checks: invalid UTF-8 files prompt to re-save as UTF-8 before parsing; inputs exceeding 192 KiB fail immediately with bad_request.',
+      backEditBtn: 'Back to edit',
+      prevTitle: 'Import preview & confirmation',
+      validOkBadge: 'Valid',
+      verArrow: 'user.local.classification · v3 → v4',
+      diffHdr: 'Rule-level diff (vs current v3)',
+      bAdd: '+1 added',
+      bChg: '~1 changed',
+      bRem: '−1 removed',
+      bDis: '1 disabled',
+      tagAdd: '+Added',
+      tagChg: '~Changed',
+      tagRem: '−Removed',
+      tagDis: '−Disabled',
+      diffs: [
+        {
+          kind: 'add',
+          name: 'VS Code study notes → Learning',
+          id: 'user.local.classification/vscode-notes',
+          lines: [{ k: 'when', oldVal: null, newVal: 'app.exe_name = "code.exe" AND doc.project = "StudyNotes" → Learning (prio 70)' }],
+        },
+        {
+          kind: 'chg',
+          name: 'Windows Terminal → System',
+          id: 'override builtin.classification/windows-terminal',
+          lines: [
+            { k: 'category', oldVal: 'Development (builtin:development)', newVal: 'System & Tools (builtin:system)' },
+            { k: 'priority', oldVal: '50', newVal: '60' },
+          ],
+        },
+        {
+          kind: 'rem',
+          name: 'Notepad scratch notes → Learning',
+          id: 'user.local.classification/notepad-scratch',
+          lines: [{ k: 'removed', oldVal: 'app.exe_name = "notepad.exe" AND doc.document contains "scratch"', newVal: null }],
+        },
+        {
+          kind: 'dis',
+          name: 'WeChat (builtin)',
+          id: 'disable builtin.classification/wechat',
+          lines: [{ k: 'reason', oldVal: null, newVal: 'Mixed work/personal chats; classify manually' }],
+        },
+      ],
+      impactHdr: 'Past 7-day result impact (2026-11-16 to 2026-11-22)',
+      mCondLbl: 'Condition matches (draft)',
+      mCondVal: '5h 42m · 34 segs',
+      mCondSub: 'Includes shadowed & idle slices',
+      mEffLbl: 'Effective contribution (changed)',
+      mEffVal: '3h 15m · 24 segs',
+      mEffSub: 'Matches Today active-time totals',
+      deltas: [
+        { catLbl: 'Development', c: 'var(--cat-8)', before: '18h 20m', after: '16h 45m', diff: '−1h 35m', dir: 'dn' },
+        { catLbl: 'System & Tools', c: 'var(--cat-11)', before: '1h 10m', after: '2h 15m', diff: '+1h 05m', dir: 'up' },
+        { catLbl: 'Learning', c: 'var(--cat-1)', before: '4h 05m', after: '4h 45m', diff: '+40m', dir: 'up' },
+        { catLbl: 'Communication', c: 'var(--cat-3)', before: '2h 50m', after: '2h 20m', diff: '−30m', dir: 'dn' },
+      ],
+      samplesHdr: 'Changed segment samples (first 50 · showing 3)',
+      samples: [
+        { time: '11-22 14:10', doc: 'Windows Terminal · pwsh', from: 'Development', to: 'System & Tools', dur: '22m' },
+        { time: '11-22 10:35', doc: 'VS Code · rust-notes.md', from: 'Development', to: 'Learning', dur: '34m' },
+        { time: '11-21 19:20', doc: 'WeChat', from: 'Communication', to: 'Unclassified', dur: '18m' },
+      ],
+      privNote: 'Privacy rule sets (kind = "privacy") require a fresh 5-minute preview_receipt before Confirm unlocks, plus an extra confirmation dialog if any change loosens privacy.',
+      prevStepBtn: 'Back',
+      confirmImportBtn: 'Confirm import as v4',
+    },
+    exp: {
+      title: 'Export rule text',
+      fmtBadge: 'quartz-rules/1',
+      setLbl: 'Rule set',
+      setVal: 'Local classification · user.local.classification',
+      verLbl: 'Revision',
+      verVal: 'v3 (current) · 2026-11-22 16:40',
+      metaLeft: 'Canonical text · UTF-8 · 1.2 KiB / 192 KiB',
+      metaRight: 'Preserves entry order, override/disable & category UUIDs',
+      closeBtn: 'Close',
+      copyBtn: 'Copy text',
+      saveFileBtn: 'Save as .toml file…',
+    },
+    hist: {
+      backBtn: 'Back to entries',
+      title: 'Version history',
+      subtitle: 'Local classification · user.local.classification · 4 revisions',
+      privSubtitle: 'Local privacy · user.local.privacy · 3 revisions',
+      compareBtn: 'Compare selected (v1 → v4)',
+      hint: 'Select any two revisions to compare structural changes and 7-day result impact. Rollback creates a new revision without erasing history.',
+      authorUi: 'UI edit',
+      authorImport: 'Import',
+      authorRevert: 'Rollback',
+      curBadge: 'Current',
+      selA: 'A',
+      selB: 'B',
+      parentLbl: 'Parent version',
+      exportBtn: 'Export',
+      revertBtn: 'Revert to this',
+      revisions: [
+        {
+          ver: 'v4',
+          date: '2026-11-22 16:40',
+          parentVer: 'builtin.classification@v2',
+          author: 'ui',
+          current: true,
+          sel: 'B',
+          note: 'Override Windows Terminal to System & Tools (prio 60), add VS Code study notes rule',
+        },
+        {
+          ver: 'v3',
+          date: '2026-11-20 21:15',
+          parentVer: 'builtin.classification@v2',
+          author: 'import',
+          current: false,
+          sel: null,
+          note: 'Imported text: add Obsidian Quartz project and Word spec doc rules',
+        },
+        {
+          ver: 'v2',
+          date: '2026-11-18 10:05',
+          parentVer: 'builtin.classification@v1',
+          author: 'revert',
+          current: false,
+          sel: null,
+          note: 'Reverted to v1: undo temporary exam-week desktop rules',
+        },
+        {
+          ver: 'v1',
+          date: '2026-11-15 09:30',
+          parentVer: 'builtin.classification@v1',
+          author: 'ui',
+          current: false,
+          sel: 'A',
+          note: 'Initial local classification set; disable builtin WeChat rule',
+        },
+      ],
+    },
+    hdiff: {
+      backBtn: 'History',
+      title: 'Compare revisions',
+      setKey: 'user.local.classification',
+      verFrom: 'v1 · 2026-11-15',
+      verTo: 'v4 (current) · 2026-11-22',
+      revertToBtn: 'Revert to v1…',
+      infoLine: 'Each revision uses its saved parent chain (v1 on builtin@v1, v4 on builtin@v2) · 7-day impact window: 2026-11-16 to 2026-11-22',
+      structHdr: 'Structural entry diff',
+      bAdd: '+2 added',
+      bChg: '~1 changed',
+      bSame: '1 unchanged',
+      tagAdd: '+Added',
+      tagChg: '~Changed',
+      tagSame: '=Same',
+      entries: [
+        {
+          kind: 'add',
+          name: 'VS Code study notes → Learning',
+          id: 'user.local.classification/vscode-notes',
+          lines: [{ k: 'when', oldVal: null, newVal: 'code.exe + doc.project = "StudyNotes" → Learning (prio 70)' }],
+        },
+        {
+          kind: 'add',
+          name: 'Obsidian Quartz project → Development',
+          id: 'user.local.classification/obsidian-quartz',
+          lines: [{ k: 'when', oldVal: null, newVal: 'obsidian.exe + doc.project = "Quartz" → Development (prio 65)' }],
+        },
+        {
+          kind: 'chg',
+          name: 'Windows Terminal → System',
+          id: 'override builtin.classification/windows-terminal',
+          lines: [
+            { k: 'category', oldVal: 'Development (builtin:development)', newVal: 'System & Tools (builtin:system)' },
+            { k: 'priority', oldVal: '50', newVal: '60' },
+          ],
+        },
+        {
+          kind: 'same',
+          name: 'WeChat (builtin)',
+          id: 'disable builtin.classification/wechat',
+          lines: [{ k: 'state', oldVal: null, newVal: 'Remains disabled (unchanged)' }],
+        },
+      ],
+      impactHdr: 'Result impact (past 7 days)',
+      impactScopeBadge: 'Classification · 26 segments changed',
+      impactSub: 'Active time shifted: 2h 48m · Extraction changes: 0 · Privacy further hidden: 0',
+      deltas: [
+        { catLbl: 'Development', c: 'var(--cat-8)', before: '18h 20m', after: '16h 30m', diff: '−1h 50m', dir: 'dn' },
+        { catLbl: 'System & Tools', c: 'var(--cat-11)', before: '55m', after: '2h 10m', diff: '+1h 15m', dir: 'up' },
+        { catLbl: 'Learning', c: 'var(--cat-1)', before: '4h 10m', after: '4h 45m', diff: '+35m', dir: 'up' },
+      ],
+      samplesHdr: 'Changed segment samples (paged · max 50)',
+      samples: [
+        { time: '11-22 15:12', doc: 'Windows Terminal · pwsh', from: 'Development', to: 'System & Tools', dur: '28m' },
+        { time: '11-22 11:04', doc: 'VS Code · rust-notes.md', from: 'Development', to: 'Learning', dur: '35m' },
+        { time: '11-21 16:40', doc: 'Obsidian · architecture.md', from: 'Learning', to: 'Development', dur: '42m' },
+        { time: '11-20 09:50', doc: 'Windows Terminal · cargo test', from: 'Development', to: 'System & Tools', dur: '19m' },
+      ],
+      pageInfo: 'Page 1 / 3 · showing 1–10 of 26 segments',
+      prevPage: 'Previous',
+      nextPage: 'Next',
+    },
+    rev: {
+      title: 'Confirm rollback',
+      setBadge: 'user.local.privacy · Privacy',
+      desc: 'Creates a new current revision v4 with the contents of v1 (2026-11-15 09:30). Existing revisions v2 and v3 remain in history.',
+      bannerTitle: 'Non-destructive rollback: v3 → v4 (content from v1)',
+      bannerSub: 'base_version = 3 · target_version = 1 · parent builtin.privacy@v1',
+      changesHdr: 'Changes introduced by rollback (vs current v3)',
+      tagRestore: '+Restored',
+      tagRem: '−Removed',
+      changes: [
+        {
+          kind: 'add',
+          name: 'Hide Outlook window titles',
+          id: 'user.local.privacy/outlook-hide-title',
+          lines: [{ k: 'action', oldVal: null, newVal: 'app.exe_name = "outlook.exe" → preset = title_hidden' }],
+        },
+        {
+          kind: 'rem',
+          name: 'Disable KeePassXC override (temp test)',
+          id: 'disable builtin.privacy/password-manager-keepassxc',
+          lines: [{ k: 'removed', oldVal: 'Disable builtin KeePassXC title-hide rule (restores builtin protection)', newVal: null }],
+        },
+      ],
+      privHdr: 'Privacy preview & receipt (required for privacy rollback)',
+      receiptOk: 'Receipt valid · 4:38',
+      furtherHidden: 'Further hidden in retained facts: 14 segments, 14 fields, 1h 26m (incl. inactive)',
+      furtherSub: 'Rollback affects future capture only; existing stored facts are not modified automatically.',
+      samples: [
+        { time: '11-22 15:20', app: 'Microsoft Outlook', trans: 'Full → Title hidden', dur: '19m' },
+        { time: '11-21 10:05', app: 'KeePassXC', trans: 'Full → Title hidden', dur: '4m' },
+      ],
+      omitNote: 'Samples show only fields visible both before and after (titles to hide are omitted). Classification/extraction rollbacks do not need a receipt; loosening privacy triggers an extra confirmation.',
+      cancelBtn: 'Cancel',
+      confirmBtn: 'Revert & create v4',
+    },
+    tw: {
+      backBtn: 'Back to rule sets',
+      title: 'Three-way comparison · Upstream changes',
+      setKey: 'user.local.classification',
+      warnBadge: '2 upstream changes',
+      noAutoPill: 'No auto-merge · decide per entry',
+      infoTitle: 'Builtin parent builtin.classification upgraded from v1 to v2',
+      infoMsg: 'Two builtin rules you overrode changed upstream. Quartz never auto-merges changes; compare all three columns and pick an explicit action per entry. Once every entry is decided, 7-day impact previews automatically and Save unlocks.',
+      col1Title: 'Saved parent',
+      col1Sub: 'When override was made · builtin@v1',
+      col2Title: 'Current parent',
+      col2Sub: 'Upgraded · builtin@v2',
+      col3Title: 'User overlay',
+      col3Sub: 'user.local.classification@v4',
+      changedTag: 'Upstream added',
+      ovrTag: 'Your change',
+      keepBtn: 'Keep override',
+      removeBtn: 'Remove override (adopt upstream)',
+      pendingBadge: 'Undecided',
+      e1Title: 'Windows Terminal',
+      e1Ref: 'builtin.classification/windows-terminal',
+      e1Badge: 'Upstream changed',
+      e1Hint: 'Selected "Keep override": your override stays active and rebases to builtin@v2 (upstream\'s new wt.exe condition is not merged automatically).',
+      e2Title: 'Microsoft Outlook',
+      e2Ref: 'builtin.classification/outlook',
+      e2Badge: 'Upstream changed',
+      e2Hint: 'Selected "Remove override (adopt upstream)": upstream v2 now includes olk.exe, so removing the redundant override adopts the new builtin rule.',
+      e2PendingHint: 'No choice selected yet: pick "Keep override" or "Remove override (adopt upstream)" to trigger automatic 7-day impact preview.',
+      prevTitle: 'Past 7-day impact (auto-preview)',
+      prevBadgeOk: 'Ready',
+      prevCondLbl: 'Condition matches',
+      prevCondVal: '2h 16m · 14 segs',
+      prevEffLbl: 'Effective contribution',
+      prevEffVal: '1h 32m · 10 segs',
+      prevPrivHint: 'Debounced auto-preview · Privacy sets use the V3 receipt flow',
+      remPrevCondVal: '54m · 7 segs',
+      remPrevEffVal: '41m · 5 segs',
+      pendingPrevMsg: '1 item still undecided — complete all choices to auto-compute 7-day impact (dual duration; V3 receipt flow for privacy sets) and unlock Save.',
+      footSummary: 'Decided 2 / 2 entries (1 keep · 1 remove)',
+      footReadyNote: 'Preview ready — Save as v5 unlocked',
+      pendingFootSummary: 'Decided 1 / 2 entries',
+      pendingFootNote: '1 item pending',
+      cancelBtn: 'Cancel',
+      saveBtn: 'Save as v5',
+      remTitle: 'Three-way comparison · Upstream target removed',
+      remBadge: '2 targets removed',
+      remInfoTitle: 'Overridden or disabled builtin rules were removed in builtin.classification v2',
+      remInfoMsg: 'Dangling [[override]] and [[disable]] entries are currently inactive (target_missing). Choose to keep as a standalone rule or remove each entry; once every entry is decided, 7-day impact previews automatically and Save unlocks.',
+      goneTitle: 'Removed in upstream v2',
+      goneDesc: 'builtin.classification/windows-mail was removed in v2 (replaced by new Outlook).',
+      remE1Title: 'Windows Mail (legacy)',
+      remE1Ref: 'override builtin.classification/windows-mail',
+      remE1Badge: 'Target deleted',
+      optStandaloneTitle: 'Keep as standalone rule',
+      optStandaloneDesc: 'Converts this override into an independent [[rule]] so it takes effect again immediately.',
+      optStandaloneIdLbl: 'New rule ID:',
+      optStandaloneIdHint: 'Original target ID is unused in this set; falls back to windows-mail-standalone if taken.',
+      optRemoveTitle: 'Remove override',
+      optRemoveDesc: 'Deletes the dangling override entry from user.local.classification.',
+      remE2Title: 'Skype (disable entry)',
+      remE2Ref: 'disable builtin.classification/skype',
+      remE2Desc: 'Target builtin rule was removed in upstream v2; [[disable]] has no rule body to keep, so only removal applies.',
+      remE2Btn: 'Selected: remove disable entry',
+      remFootSummary: 'Decided 2 / 2 entries (1 standalone · 1 remove)',
+    },
+  },
+};
+
+const T = lang === 'en-XA' ? pseudoObj(COPY['en']) : COPY[lang];
+
+const IMPORT_TOML_LINES = [
+  { t: 'format = "quartz-rules/1"', cls: '' },
+  { t: '', cls: '' },
+  { t: '[set]', cls: 'tok-sec' },
+  { t: 'key = "user.local.classification"', cls: '' },
+  { t: 'kind = "classification"', cls: '' },
+  { t: 'name = "本地分类"', cls: '' },
+  { t: 'parent = "builtin.classification"', cls: '' },
+  { t: '', cls: '' },
+  { t: '[[rule]]', cls: 'tok-sec' },
+  { t: 'id = "vscode-notes"', cls: '' },
+  { t: 'label = "VS Code 学习笔记算学习"', cls: '' },
+  { t: 'category = "builtin:learning"', cls: '' },
+  { t: 'priority = 70', cls: '' },
+  { t: 'match = "all"', cls: '' },
+  { t: 'when = [', cls: '' },
+  { t: '  { field = "app.exe_name", op = "equals", value = "code.exe" },', cls: '' },
+  { t: '  { field = "doc.project", op = "equals", value = "StudyNotes" },', cls: '' },
+  { t: ']', cls: '' },
+  { t: '', cls: '' },
+  { t: '[[override]]', cls: 'tok-sec' },
+  { t: 'target = "builtin.classification/windows-terminal"', cls: '' },
+  { t: 'label = "Windows Terminal 算系统"', cls: '' },
+  { t: 'category = "builtin:system"', cls: '' },
+  { t: 'priority = 60', cls: '' },
+  { t: 'when = [{ field = "app.exe_name", op = "equals", value = "windowsterminal.exe" }]', cls: '' },
+];
+
+const EXPORT_TOML_LINES = [
+  { t: 'format = "quartz-rules/1"', cls: '' },
+  { t: '', cls: '' },
+  { t: '[set]', cls: 'tok-sec' },
+  { t: 'key = "user.local.classification"', cls: '' },
+  { t: 'kind = "classification"', cls: '' },
+  { t: 'name = "本地分类"', cls: '' },
+  { t: 'parent = "builtin.classification"', cls: '' },
+  { t: '', cls: '' },
+  { t: '# Canonical export: category references use stable UUIDs', cls: 'tok-cmt' },
+  { t: '[[rule]]', cls: 'tok-sec' },
+  { t: 'id = "vscode-notes"', cls: '' },
+  { t: 'label = "VS Code 学习笔记算学习"', cls: '' },
+  { t: 'category = "00000000-0000-4000-8000-000000000002"', cls: '' },
+  { t: 'priority = 70', cls: '' },
+  { t: 'match = "all"', cls: '' },
+  { t: 'when = [', cls: '' },
+  { t: '  { field = "app.exe_name", op = "equals", value = "code.exe" },', cls: '' },
+  { t: '  { field = "doc.project", op = "equals", value = "StudyNotes" },', cls: '' },
+  { t: ']', cls: '' },
+  { t: '', cls: '' },
+  { t: '[[override]]', cls: 'tok-sec' },
+  { t: 'target = "builtin.classification/windows-terminal"', cls: '' },
+  { t: 'label = "Windows Terminal 算系统"', cls: '' },
+  { t: 'category = "00000000-0000-4000-8000-000000000005"', cls: '' },
+  { t: 'priority = 60', cls: '' },
+  { t: 'match = "all"', cls: '' },
+  { t: 'when = [', cls: '' },
+  { t: '  { field = "app.exe_name", op = "equals", value = "windowsterminal.exe" },', cls: '' },
+  { t: ']', cls: '' },
+  { t: '', cls: '' },
+  { t: '[[disable]]', cls: 'tok-sec' },
+  { t: 'target = "builtin.classification/wechat"', cls: '' },
+  { t: 'reason = "工作与私人微信混合，不计入自动沟通统计"', cls: '' },
+];
+
+const PLAIN_DIAG_TEXT =
+  'error[E-RULE-FIELD]: user.local.classification: rule[0].when[1].field (14:19): field="app.name" kind="classification"\n' +
+  'error[E-RULE-TARGET]: user.local.classification: override[0].target (22:10): target="builtin.classification/terminal"\n' +
+  'error[E-RULE-REGEX]: user.local.classification: rule[1].when[0].value (31:42): unclosed character class "["';
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderCodeLines(lines) {
+  return lines.map((ln, idx) =>
+    `<div class="code-ln"><span class="code-lno">${idx + 1}</span><span class="code-ltxt${ln.cls ? ' ' + ln.cls : ''}">${ln.t ? esc(ln.t) : '&nbsp;'}</span></div>`
+  ).join('');
+}
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  const collapsed = isMin || isWideView;
+  nav.className = collapsed ? 'nav rail' : 'nav';
+  const showToggle = !isMin;
+  nav.innerHTML =
+    (showToggle ? `<div class="nav-item"><svg class="ic"><use href="#menu"/></svg><span></span></div>` : '') +
+    `<div class="nav-item"><svg class="ic"><use href="#today"/></svg><span>${T.nav.today}</span></div>` +
+    `<div class="nav-item"><svg class="ic"><use href="#week"/></svg><span>${T.nav.week}</span></div>` +
+    `<div class="nav-item selected"><i class="ind"></i><svg class="ic"><use href="#tag-f"/></svg><span>${T.nav.rules}</span></div>` +
+    `<div class="spacer"></div>` +
+    `<div class="nav-item bottom"><svg class="ic"><use href="#gear"/></svg><span>${T.nav.settings}</span></div>`;
+}
+
+function renderHeaderAndPivot({ activeTab = 'rules' } = {}) {
+  const tabs = T.page.tabs;
+  return (
+    `<div class="page-head">` +
+      `<div class="h-title ell">${T.page.title}</div>` +
+      `<div class="page-head-acts">` +
+        `<button class="btn"><svg class="ic s16"><use href="#import"/></svg><span>${T.page.importBtn}</span></button>` +
+        `<button class="btn"><svg class="ic s16"><use href="#export"/></svg><span>${T.page.exportBtn}</span></button>` +
+      `</div>` +
+    `</div>` +
+    `<div class="pivot">` +
+      `<div${activeTab === 'categories' ? ' class="on"' : ''}>${tabs.categories}</div>` +
+      `<div${activeTab === 'rules' ? ' class="on"' : ''}>${tabs.rules}</div>` +
+      `<div${activeTab === 'queue' ? ' class="on"' : ''}>${tabs.queue} <span class="badge">7</span></div>` +
+      `<div${activeTab === 'extraction' ? ' class="on"' : ''}>${tabs.extraction}</div>` +
+      `<div${activeTab === 'privacy' ? ' class="on"' : ''}>${tabs.privacy}</div>` +
+    `</div>`
+  );
+}
+
+function renderTreeCard({ privacy = false, localVer = 'v4' } = {}) {
+  const tr = T.tree;
+  if (privacy) {
+    return (
+      `<div class="card tree-card">` +
+        `<div class="tree-head"><span class="strong grow ell">${tr.privHeading}</span><button class="btn compact icon"><svg class="ic s16"><use href="#add"/></svg></button></div>` +
+        `<div class="tnode">` +
+          `<div class="meta">` +
+            `<div class="row gap4"><svg class="ic lock-ic"><use href="#lock"/></svg><span class="strong ell">${tr.builtinPrivName}</span></div>` +
+            `<div class="cap ter ell">builtin.privacy · v1 · ${tr.builtinPrivCount}</div>` +
+          `</div>` +
+          `<div class="sw on sm"></div>` +
+        `</div>` +
+        `<div class="tnode ind1 sel">` +
+          `<div class="meta">` +
+            `<div class="strong ell">${tr.localPrivName}</div>` +
+            `<div class="cap ter ell">user.local.privacy · v3</div>` +
+            `<div class="badges"><span class="badge add"><span class="btxt">+1</span></span><span class="badge dis"><span class="btxt">−1</span></span></div>` +
+          `</div>` +
+          `<div class="sw on sm"></div>` +
+        `</div>` +
+      `</div>`
+    );
+  }
+  return (
+    `<div class="card tree-card">` +
+      `<div class="tree-head"><span class="strong grow ell">${tr.heading}</span><button class="btn compact icon"><svg class="ic s16"><use href="#add"/></svg></button></div>` +
+      `<div class="tnode">` +
+        `<div class="meta">` +
+          `<div class="row gap4"><svg class="ic lock-ic"><use href="#lock"/></svg><span class="strong ell">${tr.builtinName}</span></div>` +
+          `<div class="cap ter ell">builtin.classification · v2 · ${tr.builtinCount}</div>` +
+        `</div>` +
+        `<div class="sw on sm"></div>` +
+      `</div>` +
+      `<div class="tnode ind1 sel">` +
+        `<div class="meta">` +
+          `<div class="strong ell">${tr.localName}</div>` +
+          `<div class="cap ter ell">user.local.classification · ${localVer}</div>` +
+          `<div class="badges">` +
+            `<span class="badge add"><span class="btxt">+2</span></span>` +
+            `<span class="badge ovr"><span class="btxt">~1</span></span>` +
+            `<span class="badge dis"><span class="btxt">−1</span></span>` +
+            `<span class="badge warn"><span class="btxt">${tr.upstreamChanged}</span></span>` +
+          `</div>` +
+        `</div>` +
+        `<div class="sw on sm"></div>` +
+      `</div>` +
+      `<div class="tnode ind2 off">` +
+        `<div class="meta">` +
+          `<div class="strong ell">${tr.examName}</div>` +
+          `<div class="cap ter ell">user.exam-prep · v1</div>` +
+          `<div class="badges"><span class="badge add"><span class="btxt">+3</span></span></div>` +
+        `</div>` +
+        `<div class="sw sm"></div>` +
+      `</div>` +
+    `</div>`
+  );
+}
+
+function renderBgRulesList() {
+  const l = T.bgList;
+  const rowsHtml = l.rows.map((r, i) => {
+    const bCls = r.diff === 'add' ? 'add' : r.diff === 'ovr' ? 'ovr' : 'dis';
+    const bTxt = r.diff === 'add' ? l.badgeAdd : r.diff === 'ovr' ? l.badgeOvr : l.badgeDis;
+    return (
+      `<div class="rtbl-r${i === 0 ? ' sel' : ''}${r.dim ? ' dim' : ''}">` +
+        `<div class="rtbl-name"><span class="lbl">${r.name}</span></div>` +
+        `<div class="rtbl-cat"><span class="chip" style="--c:${r.c}"><i></i><span>${T.cats[r.cat]}</span></span></div>` +
+        `<div class="rtbl-prio">${r.prio}</div>` +
+        `<div class="rtbl-diff"><span class="badge ${bCls}"><span class="btxt">${bTxt}</span></span></div>` +
+      `</div>`
+    );
+  }).join('');
+  return (
+    `<div class="card list-card">` +
+      `<div class="list-toolbar">` +
+        `<div class="seg"><div class="on">${l.segOwn}</div><div>${l.segEff}</div></div>` +
+        `<div class="list-toolbar-right">` +
+          `<div class="input" style="width:156px"><svg class="ic s16 ter"><use href="#search"/></svg><span class="ph ell">${l.searchPh}</span></div>` +
+          `<button class="btn compact accent"><svg class="ic s16"><use href="#add"/></svg><span>${l.addRule}</span></button>` +
+        `</div>` +
+      `</div>` +
+      `<div class="list-meta"><span>${l.ownMeta}</span><span class="link">${l.historyLink}</span></div>` +
+      `<div class="rtbl-h"><div class="rtbl-name">${l.colRule}</div><div class="rtbl-cat">${l.colCat}</div><div class="rtbl-prio">${l.colPrio}</div><div class="rtbl-diff">${l.colDiff}</div></div>` +
+      rowsHtml +
+    `</div>`
+  );
+}
+
+function renderDiffRows(items, tags) {
+  return (
+    `<div class="diff-list">` +
+      items.map(it => {
+        const bCls = it.kind === 'add' ? 'add' : it.kind === 'chg' ? 'ovr' : it.kind === 'rem' ? 'crit' : 'dis';
+        const bTxt = tags[it.kind];
+        return (
+          `<div class="diff-row ${it.kind}">` +
+            `<div class="diff-row-top">` +
+              `<span class="badge ${bCls}"><span class="btxt">${bTxt}</span></span>` +
+              `<span class="strong" style="font-size:13px;line-height:18px;overflow-wrap:anywhere">${it.name}</span>` +
+              `<span class="diff-row-id">${it.id}</span>` +
+            `</div>` +
+            `<div class="diff-paths">` +
+              it.lines.map(ln =>
+                `<div class="diff-path-line">` +
+                  `<span class="diff-path-k">${ln.k}:</span>` +
+                  (ln.oldVal ? `<span class="diff-old">${ln.oldVal}</span>` : '') +
+                  (ln.oldVal && ln.newVal ? `<span class="ter">→</span>` : '') +
+                  (ln.newVal ? `<span class="diff-new">${ln.newVal}</span>` : '') +
+                `</div>`
+              ).join('') +
+            `</div>` +
+          `</div>`
+        );
+      }).join('') +
+    `</div>`
+  );
+}
+
+/* 1. Import dialog */
+function renderImportModal() {
+  const m = T.imp;
+  const scrim = document.getElementById('modal-scrim');
+  scrim.style.display = 'flex';
+  scrim.innerHTML =
+    `<div class="modal-dlg" role="dialog" aria-modal="true">` +
+      `<div class="modal-head">` +
+        `<svg class="ic s16" style="color:var(--accent-text)"><use href="#import"/></svg>` +
+        `<div class="modal-head-txt"><span class="h-sub">${m.title}</span><span class="badge"><span class="btxt mono">${m.fmtBadge}</span></span></div>` +
+        `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+      `</div>` +
+      `<div class="modal-body-wrap" id="modal-body-wrap">` +
+        `<div class="modal-body" id="modal-body">` +
+          `<div class="dropzone">` +
+            `<div class="dropzone-ic"><svg class="ic"><use href="#file"/></svg></div>` +
+            `<div class="dropzone-txt">` +
+              `<span class="strong" style="font-size:13px;line-height:18px">${m.dropTitle}</span>` +
+              `<span class="cap sec">${m.dropSub}</span>` +
+            `</div>` +
+            `<button class="btn compact"><svg class="ic s16"><use href="#file"/></svg><span>${m.openFileBtn}</span></button>` +
+          `</div>` +
+          `<div class="field">` +
+            `<label class="row" style="justify-content:space-between;flex-wrap:wrap;gap:6px"><span>${m.pasteLbl}</span><span class="mono ter">${m.pasteMeta}</span></label>` +
+            `<div class="code-box-wrap" id="code-wrap">` +
+              `<div class="code-box" id="code-scroll">${renderCodeLines(IMPORT_TOML_LINES)}</div>` +
+              `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="code-thumb"></div></div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="dest-detect">` +
+            `<div class="row gap8" style="flex-wrap:wrap">` +
+              `<svg class="ic s16" style="color:var(--status-success)"><use href="#check"/></svg>` +
+              `<span class="strong" style="font-size:13px;line-height:18px">${m.detectTitle}</span>` +
+            `</div>` +
+            `<div class="dest-kv-grid">` +
+              `<div class="dest-kv"><span class="dk">${m.kKey}</span><span class="dv">user.local.classification</span></div>` +
+              `<div class="dest-kv"><span class="dk">${m.kKind}</span><span class="dv">${m.kindCls}</span></div>` +
+              `<div class="dest-kv"><span class="dk">${m.kParent}</span><span class="dv">builtin.classification</span></div>` +
+            `</div>` +
+            `<div class="dest-status">` +
+              `<span class="badge ovr"><span class="btxt">${m.destExistingBadge}</span></span>` +
+              `<span class="cap" style="color:var(--text-primary);flex:1;min-width:180px;overflow-wrap:anywhere">${m.destExistingDesc}</span>` +
+            `</div>` +
+            `<div class="cap ter" style="overflow-wrap:anywhere">${m.destNewHint}</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="modal-thumb"></div></div>` +
+      `</div>` +
+      `<div class="modal-foot">` +
+        `<button class="btn"><span>${m.cancelBtn}</span></button>` +
+        `<button class="btn accent"><span>${m.nextBtn}</span></button>` +
+      `</div>` +
+    `</div>`;
+}
+
+/* 2. Import invalid diagnostics dialog */
+function renderImportInvalidModal() {
+  const m = T.imp;
+  const scrim = document.getElementById('modal-scrim');
+  scrim.style.display = 'flex';
+  scrim.innerHTML =
+    `<div class="modal-dlg wide" role="dialog" aria-modal="true">` +
+      `<div class="modal-head">` +
+        `<svg class="ic s16" style="color:var(--status-critical)"><use href="#crit-circle"/></svg>` +
+        `<div class="modal-head-txt"><span class="h-sub">${m.invalidTitle}</span></div>` +
+        `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+      `</div>` +
+      `<div class="modal-body-wrap" id="modal-body-wrap">` +
+        `<div class="modal-body" id="modal-body">` +
+          `<div class="row gap8" style="flex-wrap:wrap;padding:6px 10px;border-radius:var(--radius-control);background:var(--fill-card-secondary);border:1px solid var(--stroke-card)">` +
+            `<svg class="ic s16 sec"><use href="#file"/></svg>` +
+            `<span class="mono strong" style="font-size:12px">${m.srcFile}</span>` +
+            `<span class="cap ter">${m.srcMeta}</span>` +
+            `<div class="row gap8" style="margin-left:auto;flex-wrap:wrap">` +
+              `<button class="btn compact"><span>${m.reopenBtn}</span></button>` +
+              `<button class="btn compact"><span>${m.editTextBtn}</span></button>` +
+            `</div>` +
+          `</div>` +
+          `<div class="infobar critical" role="alert">` +
+            `<svg class="ic s16 ib-ic"><use href="#crit-circle"/></svg>` +
+            `<div class="ib-body">` +
+              `<div class="ib-title">${m.errSummaryTitle}</div>` +
+              `<div>${m.errSummaryMsg}</div>` +
+            `</div>` +
+            `<button class="btn compact" style="flex:none"><svg class="ic s16"><use href="#copy"/></svg><span>${m.copyAllBtn}</span></button>` +
+          `</div>` +
+          `<div class="diag-card-list">` +
+            m.diags.map(d =>
+              `<div class="diag-item">` +
+                `<div class="diag-top">` +
+                  `<span class="badge crit"><span class="btxt mono">${d.code}</span></span>` +
+                  `<span class="diag-path">${d.path}</span>` +
+                  `<span class="diag-loc">${d.locHuman} (${d.loc})</span>` +
+                `</div>` +
+                `<div class="diag-msg">${d.msg}</div>` +
+                `<div class="diag-params">` +
+                  d.params.map(p => `<span class="param-pill">${esc(p)}</span>`).join('') +
+                `</div>` +
+              `</div>`
+            ).join('') +
+          `</div>` +
+          `<div class="field">` +
+            `<label class="row" style="justify-content:space-between;flex-wrap:wrap;gap:6px">` +
+              `<span>${m.plainHdr}</span>` +
+              `<button class="btn compact subtle" style="color:var(--accent-text)"><svg class="ic s16"><use href="#copy"/></svg><span>${m.copyBtn}</span></button>` +
+            `</label>` +
+            `<div class="code-box-wrap"><div class="code-box compact">${esc(PLAIN_DIAG_TEXT)}</div></div>` +
+          `</div>` +
+          `<div class="inline-note">` +
+            `<svg class="ic s16"><use href="#info"/></svg>` +
+            `<span>${m.precheckNote}</span>` +
+          `</div>` +
+        `</div>` +
+        `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="modal-thumb"></div></div>` +
+      `</div>` +
+      `<div class="modal-foot">` +
+        `<button class="btn" style="margin-right:auto"><span>${m.backEditBtn}</span></button>` +
+        `<button class="btn"><span>${m.cancelBtn}</span></button>` +
+        `<button class="btn accent disabled"><span>${m.nextBtn}</span></button>` +
+      `</div>` +
+    `</div>`;
+}
+
+/* 3. Import preview & confirm dialog (also verified at 640x480) */
+function renderImportPreviewModal() {
+  const m = T.imp;
+  const scrim = document.getElementById('modal-scrim');
+  scrim.style.display = 'flex';
+  scrim.innerHTML =
+    `<div class="modal-dlg wide" role="dialog" aria-modal="true">` +
+      `<div class="modal-head">` +
+        `<svg class="ic s16" style="color:var(--status-success)"><use href="#check"/></svg>` +
+        `<div class="modal-head-txt">` +
+          `<span class="h-sub">${m.prevTitle}</span>` +
+          `<span class="badge ok"><span class="btxt">${m.validOkBadge}</span></span>` +
+          `<span class="cap mono sec">${m.verArrow}</span>` +
+        `</div>` +
+        `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+      `</div>` +
+      `<div class="modal-body-wrap" id="modal-body-wrap">` +
+        `<div class="modal-body" id="modal-body">` +
+          `<div class="sect-hdr">` +
+            `<span class="strong">${m.diffHdr}</span>` +
+            `<div class="sect-badges">` +
+              `<span class="badge add"><span class="btxt">${m.bAdd}</span></span>` +
+              `<span class="badge ovr"><span class="btxt">${m.bChg}</span></span>` +
+              `<span class="badge crit"><span class="btxt">${m.bRem}</span></span>` +
+              `<span class="badge dis"><span class="btxt">${m.bDis}</span></span>` +
+            `</div>` +
+          `</div>` +
+          renderDiffRows(m.diffs, { add: m.tagAdd, chg: m.tagChg, rem: m.tagRem, dis: m.tagDis }) +
+          `<div class="sect-hdr" style="margin-top:4px"><span class="strong">${m.impactHdr}</span></div>` +
+          `<div class="prev-metrics">` +
+            `<div class="prev-metric">` +
+              `<div class="pm-lbl"><i class="pm-dot"></i><span class="ell">${m.mCondLbl}</span></div>` +
+              `<div class="pm-val">${m.mCondVal}</div>` +
+              `<div class="pm-sub">${m.mCondSub}</div>` +
+            `</div>` +
+            `<div class="prev-metric eff">` +
+              `<div class="pm-lbl"><i class="pm-dot"></i><span class="ell">${m.mEffLbl}</span></div>` +
+              `<div class="pm-val">${m.mEffVal}</div>` +
+              `<div class="pm-sub">${m.mEffSub}</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="delta-grid">` +
+            m.deltas.map(d =>
+              `<div class="delta-item">` +
+                `<span class="delta-cat"><i style="--c:${d.c}"></i><span>${d.catLbl}</span></span>` +
+                `<span class="delta-vals"><span>${d.before} → ${d.after}</span><span class="delta-diff ${d.dir}">${d.diff}</span></span>` +
+              `</div>`
+            ).join('') +
+          `</div>` +
+          `<div class="cap sec">${m.samplesHdr}</div>` +
+          `<div class="sample-list">` +
+            m.samples.map(s =>
+              `<div class="sample-row">` +
+                `<span class="sample-time">${s.time}</span>` +
+                `<span class="sample-doc">${s.doc}</span>` +
+                `<span class="sample-trans"><span class="badge"><span class="btxt">${s.from}</span></span><span class="ter">→</span><span class="badge ovr"><span class="btxt">${s.to}</span></span></span>` +
+                `<span class="sample-dur">${s.dur}</span>` +
+              `</div>`
+            ).join('') +
+          `</div>` +
+          `<div class="inline-note">` +
+            `<svg class="ic s16"><use href="#shield"/></svg>` +
+            `<span>${m.privNote}</span>` +
+          `</div>` +
+        `</div>` +
+        `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="modal-thumb"></div></div>` +
+      `</div>` +
+      `<div class="modal-foot">` +
+        `<button class="btn" style="margin-right:auto"><span>${m.prevStepBtn}</span></button>` +
+        `<button class="btn"><span>${m.cancelBtn}</span></button>` +
+        `<button class="btn accent"><span>${m.confirmImportBtn}</span></button>` +
+      `</div>` +
+    `</div>`;
+}
+
+/* 4. Export dialog */
+function renderExportModal() {
+  const m = T.exp;
+  const scrim = document.getElementById('modal-scrim');
+  scrim.style.display = 'flex';
+  scrim.innerHTML =
+    `<div class="modal-dlg" role="dialog" aria-modal="true">` +
+      `<div class="modal-head">` +
+        `<svg class="ic s16" style="color:var(--accent-text)"><use href="#export"/></svg>` +
+        `<div class="modal-head-txt"><span class="h-sub">${m.title}</span><span class="badge"><span class="btxt mono">${m.fmtBadge}</span></span></div>` +
+        `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+      `</div>` +
+      `<div class="modal-body-wrap" id="modal-body-wrap">` +
+        `<div class="modal-body" id="modal-body">` +
+          `<div class="export-row">` +
+            `<div class="field">` +
+              `<label>${m.setLbl}</label>` +
+              `<div class="input std"><span class="grow ell">${m.setVal}</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+            `</div>` +
+            `<div class="field">` +
+              `<label>${m.verLbl}</label>` +
+              `<div class="input std"><span class="grow ell">${m.verVal}</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="row gap8" style="justify-content:space-between;flex-wrap:wrap">` +
+            `<span class="cap mono sec">${m.metaLeft}</span>` +
+            `<span class="cap ter">${m.metaRight}</span>` +
+          `</div>` +
+          `<div class="code-box-wrap" id="code-wrap">` +
+            `<div class="code-box tall" id="code-scroll">${renderCodeLines(EXPORT_TOML_LINES)}</div>` +
+            `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="code-thumb"></div></div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="modal-thumb"></div></div>` +
+      `</div>` +
+      `<div class="modal-foot">` +
+        `<button class="btn" style="margin-right:auto"><span>${m.closeBtn}</span></button>` +
+        `<button class="btn"><svg class="ic s16"><use href="#copy"/></svg><span>${m.copyBtn}</span></button>` +
+        `<button class="btn accent"><svg class="ic s16"><use href="#export"/></svg><span>${m.saveFileBtn}</span></button>` +
+      `</div>` +
+    `</div>`;
+}
+
+/* 5. Version history list */
+function renderHistoryCard({ privacy = false } = {}) {
+  const h = T.hist;
+  const sub = privacy ? h.privSubtitle : h.subtitle;
+  const authorMeta = (a) => {
+    if (a === 'import') return { cls: 'ovr', lbl: h.authorImport };
+    if (a === 'revert') return { cls: 'warn', lbl: h.authorRevert };
+    return { cls: '', lbl: h.authorUi };
+  };
+  return (
+    `<div class="card list-card">` +
+      `<div class="hist-bar">` +
+        `<button class="btn compact"><svg class="ic s16"><use href="#arrow-l"/></svg><span>${h.backBtn}</span></button>` +
+        `<div class="grow" style="min-width:140px">` +
+          `<div class="strong">${h.title}</div>` +
+          `<div class="cap sec ell">${sub}</div>` +
+        `</div>` +
+        `<button class="btn compact accent"><svg class="ic s16"><use href="#diff"/></svg><span>${h.compareBtn}</span></button>` +
+      `</div>` +
+      `<div class="cap sec" style="padding:2px 4px 4px;overflow-wrap:anywhere">${h.hint}</div>` +
+      `<div style="display:flex;flex-direction:column;gap:6px">` +
+        h.revisions.map(r => {
+          const am = authorMeta(r.author);
+          return (
+            `<div class="hist-row${r.sel ? ' sel' : ''}">` +
+              `<div class="hist-chk">${r.sel ? (r.sel === 'A' ? h.selA : h.selB) : ''}</div>` +
+              `<div class="hist-main">` +
+                `<div class="hist-top">` +
+                  `<span class="hist-ver">${r.ver}</span>` +
+                  (r.current ? `<span class="badge ok"><span class="btxt">${h.curBadge}</span></span>` : '') +
+                  `<span class="badge ${am.cls}"><span class="btxt">${am.lbl}</span></span>` +
+                  `<span class="cap ter">${r.date}</span>` +
+                `</div>` +
+                `<div class="hist-note">${r.note}</div>` +
+                `<div class="hist-meta"><span>${h.parentLbl}: <span class="mono">${r.parentVer}</span></span></div>` +
+              `</div>` +
+              `<div class="hist-acts">` +
+                `<button class="btn compact"><svg class="ic s16"><use href="#export"/></svg><span>${h.exportBtn}</span></button>` +
+                (r.current ? '' : `<button class="btn compact"><svg class="ic s16"><use href="#revert"/></svg><span>${h.revertBtn}</span></button>`) +
+              `</div>` +
+            `</div>`
+          );
+        }).join('') +
+      `</div>` +
+    `</div>`
+  );
+}
+
+/* 6. Two-version comparison (also verified at 640x480) */
+function renderHistoryDiffView() {
+  const d = T.hdiff;
+  return (
+    `<div class="subview-head">` +
+      `<button class="btn compact"><svg class="ic s16"><use href="#arrow-l"/></svg><span>${d.backBtn}</span></button>` +
+      `<div class="subview-title">` +
+        `<span class="strong">${d.title}</span>` +
+        `<span class="badge"><span class="btxt mono">${d.setKey}</span></span>` +
+      `</div>` +
+      `<div class="subview-acts">` +
+        `<div class="input" style="max-width:190px"><span class="ell">${d.verFrom}</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+        `<button class="btn compact icon subtle" title="Swap"><svg class="ic s16"><use href="#swap"/></svg></button>` +
+        `<div class="input" style="max-width:210px"><span class="ell">${d.verTo}</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+        `<button class="btn compact"><svg class="ic s16"><use href="#revert"/></svg><span>${d.revertToBtn}</span></button>` +
+      `</div>` +
+    `</div>` +
+    `<div class="inline-note">` +
+      `<svg class="ic s16"><use href="#info"/></svg>` +
+      `<span>${d.infoLine}</span>` +
+    `</div>` +
+    `<div class="hdiff-grid">` +
+      `<div class="card hdiff-col">` +
+        `<div class="sect-hdr">` +
+          `<span class="strong">${d.structHdr}</span>` +
+          `<div class="sect-badges">` +
+            `<span class="badge add"><span class="btxt">${d.bAdd}</span></span>` +
+            `<span class="badge ovr"><span class="btxt">${d.bChg}</span></span>` +
+            `<span class="badge dis"><span class="btxt">${d.bSame}</span></span>` +
+          `</div>` +
+        `</div>` +
+        renderDiffRows(d.entries, { add: d.tagAdd, chg: d.tagChg, same: d.tagSame }) +
+      `</div>` +
+      `<div class="card hdiff-col">` +
+        `<div class="sect-hdr">` +
+          `<span class="strong">${d.impactHdr}</span>` +
+          `<span class="badge ovr"><span class="btxt">${d.impactScopeBadge}</span></span>` +
+        `</div>` +
+        `<div class="cap sec" style="overflow-wrap:anywhere">${d.impactSub}</div>` +
+        `<div class="delta-grid">` +
+          d.deltas.map(x =>
+            `<div class="delta-item">` +
+              `<span class="delta-cat"><i style="--c:${x.c}"></i><span>${x.catLbl}</span></span>` +
+              `<span class="delta-vals"><span>${x.before} → ${x.after}</span><span class="delta-diff ${x.dir}">${x.diff}</span></span>` +
+            `</div>`
+          ).join('') +
+        `</div>` +
+        `<div class="cap sec">${d.samplesHdr}</div>` +
+        `<div class="sample-list">` +
+          d.samples.map(s =>
+            `<div class="sample-row">` +
+              `<span class="sample-time">${s.time}</span>` +
+              `<span class="sample-doc">${s.doc}</span>` +
+              `<span class="sample-trans"><span class="badge"><span class="btxt">${s.from}</span></span><span class="ter">→</span><span class="badge ovr"><span class="btxt">${s.to}</span></span></span>` +
+              `<span class="sample-dur">${s.dur}</span>` +
+            `</div>`
+          ).join('') +
+        `</div>` +
+        `<div class="pager">` +
+          `<span>${d.pageInfo}</span>` +
+          `<div class="pager-btns">` +
+            `<button class="btn compact disabled"><span>${d.prevPage}</span></button>` +
+            `<span class="pg-num on">1</span><span class="pg-num">2</span><span class="pg-num">3</span>` +
+            `<button class="btn compact"><span>${d.nextPage}</span></button>` +
+          `</div>` +
+        `</div>` +
+      `</div>` +
+    `</div>`
+  );
+}
+
+/* 7. Rollback confirmation modal (privacy set demonstrating preview receipt requirement) */
+function renderRevertModal() {
+  const r = T.rev;
+  const scrim = document.getElementById('modal-scrim');
+  scrim.style.display = 'flex';
+  scrim.innerHTML =
+    `<div class="modal-dlg wide" role="dialog" aria-modal="true">` +
+      `<div class="modal-head">` +
+        `<svg class="ic s16" style="color:var(--accent-text)"><use href="#revert"/></svg>` +
+        `<div class="modal-head-txt">` +
+          `<span class="h-sub">${r.title}</span>` +
+          `<span class="badge warn"><span class="btxt">${r.setBadge}</span></span>` +
+        `</div>` +
+        `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+      `</div>` +
+      `<div class="modal-body-wrap" id="modal-body-wrap">` +
+        `<div class="modal-body" id="modal-body">` +
+          `<div class="cap sec" style="font-size:13px;line-height:19px;overflow-wrap:anywhere">${r.desc}</div>` +
+          `<div class="infobar">` +
+            `<svg class="ic s16 ib-ic"><use href="#history"/></svg>` +
+            `<div class="ib-body">` +
+              `<div class="ib-title">${r.bannerTitle}</div>` +
+              `<div class="mono">${r.bannerSub}</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="sect-hdr"><span class="strong">${r.changesHdr}</span></div>` +
+          renderDiffRows(r.changes, { add: r.tagRestore, rem: r.tagRem }) +
+          `<div class="priv-box">` +
+            `<div class="sect-hdr">` +
+              `<span class="row gap8"><svg class="ic s16" style="color:var(--accent-text)"><use href="#shield"/></svg><span class="strong" style="font-size:13px">${r.privHdr}</span></span>` +
+              `<span class="badge ok"><svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg><span class="btxt">${r.receiptOk}</span></span>` +
+            `</div>` +
+            `<div class="cap strong" style="color:var(--text-primary);overflow-wrap:anywhere">${r.furtherHidden}</div>` +
+            `<div class="cap sec" style="overflow-wrap:anywhere">${r.furtherSub}</div>` +
+            `<div class="sample-list">` +
+              r.samples.map(s =>
+                `<div class="psample-row">` +
+                  `<span class="sample-time">${s.time}</span>` +
+                  `<span class="sample-doc">${s.app}</span>` +
+                  `<span class="badge warn"><span class="btxt">${s.trans}</span></span>` +
+                  `<span class="sample-dur">${s.dur}</span>` +
+                `</div>`
+              ).join('') +
+            `</div>` +
+            `<div class="cap ter" style="overflow-wrap:anywhere">${r.omitNote}</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="modal-thumb"></div></div>` +
+      `</div>` +
+      `<div class="modal-foot">` +
+        `<button class="btn"><span>${r.cancelBtn}</span></button>` +
+        `<button class="btn accent"><svg class="ic s16"><use href="#revert"/></svg><span>${r.confirmBtn}</span></button>` +
+      `</div>` +
+    `</div>`;
+}
+
+/* 8. Three-way upstream comparison (also verified at 640x480; pending=true for three-way-pending) */
+function renderThreeWayView({ pending = false } = {}) {
+  const tw = T.tw;
+  const footHtml = pending
+    ? `<div class="tw-foot">` +
+        `<div class="tw-prev tw-pending">` +
+          `<svg class="ic s16" style="color:var(--status-caution);flex:none"><use href="#warn"/></svg>` +
+          `<span class="cap" style="color:var(--text-primary);flex:1;min-width:180px;overflow-wrap:anywhere">${tw.pendingPrevMsg}</span>` +
+        `</div>` +
+        `<div class="tw-foot-bar">` +
+          `<div class="tw-foot-status">` +
+            `<span class="strong cap" style="color:var(--text-primary)">${tw.pendingFootSummary}</span>` +
+            `<span class="badge warn"><span class="btxt">${tw.pendingFootNote}</span></span>` +
+          `</div>` +
+          `<div class="tw-foot-btns">` +
+            `<button class="btn"><span>${tw.cancelBtn}</span></button>` +
+            `<button class="btn disabled"><span>${tw.saveBtn}</span></button>` +
+          `</div>` +
+        `</div>` +
+      `</div>`
+    : `<div class="tw-foot">` +
+        `<div class="tw-prev">` +
+          `<div class="tw-prev-head">` +
+            `<span class="row gap8" style="flex-wrap:wrap">` +
+              `<svg class="ic s16" style="color:var(--status-success)"><use href="#check"/></svg>` +
+              `<span class="strong cap" style="color:var(--text-primary)">${tw.prevTitle}</span>` +
+              `<span class="badge ok"><span class="btxt">${tw.prevBadgeOk}</span></span>` +
+            `</span>` +
+            `<span class="cap ter" style="overflow-wrap:anywhere"><svg class="ic s16" style="width:12px;height:12px;vertical-align:-2px;margin-right:3px"><use href="#shield"/></svg>${tw.prevPrivHint}</span>` +
+          `</div>` +
+          `<div class="tw-prev-metrics">` +
+            `<div class="tw-prev-tile">` +
+              `<span class="pt-lbl"><i class="pt-dot"></i><span>${tw.prevCondLbl}</span></span>` +
+              `<span class="pt-val">${tw.prevCondVal}</span>` +
+            `</div>` +
+            `<div class="tw-prev-tile eff">` +
+              `<span class="pt-lbl"><i class="pt-dot"></i><span>${tw.prevEffLbl}</span></span>` +
+              `<span class="pt-val">${tw.prevEffVal}</span>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="tw-foot-bar">` +
+          `<div class="tw-foot-status">` +
+            `<span class="strong cap" style="color:var(--text-primary)">${tw.footSummary}</span>` +
+            `<span class="cap sec">${tw.footReadyNote}</span>` +
+          `</div>` +
+          `<div class="tw-foot-btns">` +
+            `<button class="btn"><span>${tw.cancelBtn}</span></button>` +
+            `<button class="btn accent"><span>${tw.saveBtn}</span></button>` +
+          `</div>` +
+        `</div>` +
+      `</div>`;
+
+  return (
+    `<div class="subview-head">` +
+      `<button class="btn compact"><svg class="ic s16"><use href="#arrow-l"/></svg><span>${tw.backBtn}</span></button>` +
+      `<div class="subview-title">` +
+        `<span class="strong">${tw.title}</span>` +
+        `<span class="badge"><span class="btxt mono">${tw.setKey}</span></span>` +
+        `<span class="badge warn"><span class="btxt">${tw.warnBadge}</span></span>` +
+      `</div>` +
+      `<span class="badge"><span class="btxt">${tw.noAutoPill}</span></span>` +
+    `</div>` +
+    `<div class="infobar caution" role="alert">` +
+      `<svg class="ic s16 ib-ic"><use href="#warn"/></svg>` +
+      `<div class="ib-body">` +
+        `<div class="ib-title">${tw.infoTitle}</div>` +
+        `<div>${tw.infoMsg}</div>` +
+      `</div>` +
+    `</div>` +
+    `<div class="tw-list">` +
+      /* Entry 1: Windows Terminal (Keep override) */
+      `<div class="tw-entry">` +
+        `<div class="tw-entry-head">` +
+          `<div class="tw-entry-id">` +
+            `<span class="strong">${tw.e1Title}</span>` +
+            `<span class="mono cap ter">${tw.e1Ref}</span>` +
+            `<span class="badge warn"><span class="btxt">${tw.e1Badge}</span></span>` +
+          `</div>` +
+          `<div class="tw-actions">` +
+            `<span class="choice-btn sel"><span class="choice-dot"></span><span>${tw.keepBtn}</span></span>` +
+            `<span class="choice-btn"><span class="choice-dot"></span><span>${tw.removeBtn}</span></span>` +
+          `</div>` +
+        `</div>` +
+        `<div class="tw-cols">` +
+          `<div class="tw-col">` +
+            `<div class="tw-col-hdr"><span class="row gap8"><span class="tw-col-step">1</span><span class="strong cap">${tw.col1Title}</span></span><span class="cap ter">${tw.col1Sub}</span></div>` +
+            `<div class="tw-kv">` +
+              `<div class="tw-field"><span class="tw-k">category:</span><span class="tw-v">${T.cats.dev} (builtin:development)</span></div>` +
+              `<div class="tw-field"><span class="tw-k">priority:</span><span class="tw-v">50 · match = any</span></div>` +
+              `<div class="tw-cond">app.exe_name equals "windowsterminal.exe"</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="tw-col cur-parent">` +
+            `<div class="tw-col-hdr"><span class="row gap8"><span class="tw-col-step">2</span><span class="strong cap">${tw.col2Title}</span></span><span class="badge warn"><span class="btxt">${tw.changedTag}</span></span></div>` +
+            `<div class="tw-kv">` +
+              `<div class="tw-field"><span class="tw-k">category:</span><span class="tw-v">${T.cats.dev} (builtin:development)</span></div>` +
+              `<div class="tw-field"><span class="tw-k">priority:</span><span class="tw-v">50 · match = any</span></div>` +
+              `<div class="tw-cond">app.exe_name equals "windowsterminal.exe"</div>` +
+              `<div class="tw-cond added">+ app.exe_name equals "wt.exe"</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="tw-col user-ovr">` +
+            `<div class="tw-col-hdr"><span class="row gap8"><span class="tw-col-step">3</span><span class="strong cap">${tw.col3Title}</span></span><span class="badge ovr"><span class="btxt">${tw.ovrTag}</span></span></div>` +
+            `<div class="tw-kv">` +
+              `<div class="tw-field"><span class="tw-k">category:</span><span class="tw-v ovr-hl">${T.cats.sys} (builtin:system)</span></div>` +
+              `<div class="tw-field"><span class="tw-k">priority:</span><span class="tw-v ovr-hl">60</span><span class="tw-v">· match = all</span></div>` +
+              `<div class="tw-cond">app.exe_name equals "windowsterminal.exe"</div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="cap sec" style="overflow-wrap:anywhere">${tw.e1Hint}</div>` +
+      `</div>` +
+
+      /* Entry 2: Microsoft Outlook (decided in three-way, undecided in three-way-pending) */
+      `<div class="tw-entry${pending ? ' tw-pending' : ''}">` +
+        `<div class="tw-entry-head">` +
+          `<div class="tw-entry-id">` +
+            `<span class="strong">${tw.e2Title}</span>` +
+            `<span class="mono cap ter">${tw.e2Ref}</span>` +
+            `<span class="badge warn"><span class="btxt">${tw.e2Badge}</span></span>` +
+            (pending ? `<span class="badge warn"><span class="btxt">${tw.pendingBadge}</span></span>` : '') +
+          `</div>` +
+          `<div class="tw-actions">` +
+            `<span class="choice-btn"><span class="choice-dot"></span><span>${tw.keepBtn}</span></span>` +
+            `<span class="choice-btn${pending ? '' : ' sel'}"><span class="choice-dot"></span><span>${tw.removeBtn}</span></span>` +
+          `</div>` +
+        `</div>` +
+        `<div class="tw-cols">` +
+          `<div class="tw-col">` +
+            `<div class="tw-col-hdr"><span class="row gap8"><span class="tw-col-step">1</span><span class="strong cap">${tw.col1Title}</span></span><span class="cap ter">${tw.col1Sub}</span></div>` +
+            `<div class="tw-kv">` +
+              `<div class="tw-field"><span class="tw-k">category:</span><span class="tw-v">${T.cats.comm} · prio 50</span></div>` +
+              `<div class="tw-cond">app.exe_name equals "outlook.exe"</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="tw-col cur-parent">` +
+            `<div class="tw-col-hdr"><span class="row gap8"><span class="tw-col-step">2</span><span class="strong cap">${tw.col2Title}</span></span><span class="badge warn"><span class="btxt">${tw.changedTag}</span></span></div>` +
+            `<div class="tw-kv">` +
+              `<div class="tw-field"><span class="tw-k">category:</span><span class="tw-v">${T.cats.comm} · prio 50</span></div>` +
+              `<div class="tw-cond">app.exe_name equals "outlook.exe"</div>` +
+              `<div class="tw-cond added">+ app.exe_name equals "olk.exe"</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="tw-col user-ovr">` +
+            `<div class="tw-col-hdr"><span class="row gap8"><span class="tw-col-step">3</span><span class="strong cap">${tw.col3Title}</span></span><span class="badge ovr"><span class="btxt">${tw.ovrTag}</span></span></div>` +
+            `<div class="tw-kv">` +
+              `<div class="tw-field"><span class="tw-k">category:</span><span class="tw-v">${T.cats.comm} · prio 50</span></div>` +
+              `<div class="tw-cond">app.exe_name equals "outlook.exe"</div>` +
+              `<div class="tw-cond">app.exe_name equals "olk.exe"</div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+        (pending
+          ? `<div class="cap" style="color:var(--status-caution);overflow-wrap:anywhere">${tw.e2PendingHint}</div>`
+          : `<div class="cap sec" style="overflow-wrap:anywhere">${tw.e2Hint}</div>`) +
+      `</div>` +
+    `</div>` +
+    footHtml
+  );
+}
+
+/* 9. Three-way target removed upstream */
+function renderThreeWayRemovedView() {
+  const tw = T.tw;
+  return (
+    `<div class="subview-head">` +
+      `<button class="btn compact"><svg class="ic s16"><use href="#arrow-l"/></svg><span>${tw.backBtn}</span></button>` +
+      `<div class="subview-title">` +
+        `<span class="strong">${tw.remTitle}</span>` +
+        `<span class="badge"><span class="btxt mono">${tw.setKey}</span></span>` +
+        `<span class="badge crit"><span class="btxt">${tw.remBadge}</span></span>` +
+      `</div>` +
+      `<span class="badge"><span class="btxt">${tw.noAutoPill}</span></span>` +
+    `</div>` +
+    `<div class="infobar critical" role="alert">` +
+      `<svg class="ic s16 ib-ic"><use href="#crit-circle"/></svg>` +
+      `<div class="ib-body">` +
+        `<div class="ib-title">${tw.remInfoTitle}</div>` +
+        `<div>${tw.remInfoMsg}</div>` +
+      `</div>` +
+    `</div>` +
+    `<div class="tw-list">` +
+      `<div class="tw-entry removed">` +
+        `<div class="tw-entry-head">` +
+          `<div class="tw-entry-id">` +
+            `<span class="strong">${tw.remE1Title}</span>` +
+            `<span class="mono cap ter">${tw.remE1Ref}</span>` +
+            `<span class="badge crit"><span class="btxt">${tw.remE1Badge}</span></span>` +
+          `</div>` +
+        `</div>` +
+        `<div class="tw-cols">` +
+          `<div class="tw-col">` +
+            `<div class="tw-col-hdr"><span class="row gap8"><span class="tw-col-step">1</span><span class="strong cap">${tw.col1Title}</span></span><span class="cap ter">${tw.col1Sub}</span></div>` +
+            `<div class="tw-kv">` +
+              `<div class="tw-field"><span class="tw-k">category:</span><span class="tw-v">${T.cats.comm} · prio 50</span></div>` +
+              `<div class="tw-cond">app.exe_name equals "hxmail.exe"</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="tw-col gone">` +
+            `<div class="tw-col-hdr"><span class="row gap8"><span class="tw-col-step">2</span><span class="strong cap">${tw.col2Title}</span></span><span class="badge crit"><span class="btxt">${tw.remE1Badge}</span></span></div>` +
+            `<div class="tw-gone-box">` +
+              `<div class="tw-gone-ic"><svg class="ic s16"><use href="#crit-circle"/></svg></div>` +
+              `<div class="strong cap" style="color:var(--status-critical)">${tw.goneTitle}</div>` +
+              `<div class="cap sec" style="overflow-wrap:anywhere">${tw.goneDesc}</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="tw-col user-ovr">` +
+            `<div class="tw-col-hdr"><span class="row gap8"><span class="tw-col-step">3</span><span class="strong cap">${tw.col3Title}</span></span><span class="badge ovr"><span class="btxt">${tw.ovrTag}</span></span></div>` +
+            `<div class="tw-kv">` +
+              `<div class="tw-field"><span class="tw-k">category:</span><span class="tw-v ovr-hl">${T.cats.comm} · prio 60</span></div>` +
+              `<div class="tw-cond">app.exe_name equals "hxmail.exe"</div>` +
+              `<div class="tw-cond">title.raw contains "Inbox"</div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="res-opts">` +
+          `<div class="res-card sel">` +
+            `<div class="res-card-top"><span class="choice-btn sel" style="border:none;background:none;padding:0;min-height:0"><span class="choice-dot"></span><span>${tw.optStandaloneTitle}</span></span></div>` +
+            `<div class="cap sec" style="padding-left:20px;overflow-wrap:anywhere">${tw.optStandaloneDesc}</div>` +
+            `<div class="row gap8" style="padding-left:20px;flex-wrap:wrap"><span class="cap ter">${tw.optStandaloneIdLbl}</span><div class="input" style="flex:1;min-width:140px"><span class="mono ell">windows-mail</span></div></div>` +
+            `<div class="cap ter" style="padding-left:20px;overflow-wrap:anywhere">${tw.optStandaloneIdHint}</div>` +
+          `</div>` +
+          `<div class="res-card">` +
+            `<div class="res-card-top"><span class="choice-btn" style="border:none;background:none;padding:0;min-height:0"><span class="choice-dot"></span><span>${tw.optRemoveTitle}</span></span></div>` +
+            `<div class="cap sec" style="padding-left:20px;overflow-wrap:anywhere">${tw.optRemoveDesc}</div>` +
+          `</div>` +
+        `</div>` +
+      `</div>` +
+
+      `<div class="tw-entry removed">` +
+        `<div class="tw-entry-head" style="border-bottom:none;padding-bottom:0">` +
+          `<div class="tw-entry-id">` +
+            `<span class="strong">${tw.remE2Title}</span>` +
+            `<span class="mono cap ter">${tw.remE2Ref}</span>` +
+            `<span class="badge crit"><span class="btxt">${tw.remE1Badge}</span></span>` +
+          `</div>` +
+          `<span class="choice-btn sel"><span class="choice-dot"></span><span>${tw.remE2Btn}</span></span>` +
+        `</div>` +
+        `<div class="cap sec" style="overflow-wrap:anywhere">${tw.remE2Desc}</div>` +
+      `</div>` +
+    `</div>` +
+    `<div class="tw-foot">` +
+      `<div class="tw-prev">` +
+        `<div class="tw-prev-head">` +
+          `<span class="row gap8" style="flex-wrap:wrap">` +
+            `<svg class="ic s16" style="color:var(--status-success)"><use href="#check"/></svg>` +
+            `<span class="strong cap" style="color:var(--text-primary)">${tw.prevTitle}</span>` +
+            `<span class="badge ok"><span class="btxt">${tw.prevBadgeOk}</span></span>` +
+          `</span>` +
+          `<span class="cap ter" style="overflow-wrap:anywhere"><svg class="ic s16" style="width:12px;height:12px;vertical-align:-2px;margin-right:3px"><use href="#shield"/></svg>${tw.prevPrivHint}</span>` +
+        `</div>` +
+        `<div class="tw-prev-metrics">` +
+          `<div class="tw-prev-tile">` +
+            `<span class="pt-lbl"><i class="pt-dot"></i><span>${tw.prevCondLbl}</span></span>` +
+            `<span class="pt-val">${tw.remPrevCondVal}</span>` +
+          `</div>` +
+          `<div class="tw-prev-tile eff">` +
+            `<span class="pt-lbl"><i class="pt-dot"></i><span>${tw.prevEffLbl}</span></span>` +
+            `<span class="pt-val">${tw.remPrevEffVal}</span>` +
+          `</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="tw-foot-bar">` +
+        `<div class="tw-foot-status">` +
+          `<span class="strong cap" style="color:var(--text-primary)">${tw.remFootSummary}</span>` +
+          `<span class="cap sec">${tw.footReadyNote}</span>` +
+        `</div>` +
+        `<div class="tw-foot-btns">` +
+          `<button class="btn"><span>${tw.cancelBtn}</span></button>` +
+          `<button class="btn accent"><span>${tw.saveBtn}</span></button>` +
+        `</div>` +
+      `</div>` +
+    `</div>`
+  );
+}
+
+function renderMain() {
+  const main = document.getElementById('main');
+  switch (stateKey) {
+    case 'import':
+      main.innerHTML = renderHeaderAndPivot() + `<div class="rules-grid">${renderTreeCard({ localVer: 'v3' })}${renderBgRulesList()}</div>`;
+      renderImportModal();
+      break;
+    case 'import-invalid':
+      main.innerHTML = renderHeaderAndPivot() + `<div class="rules-grid">${renderTreeCard({ localVer: 'v3' })}${renderBgRulesList()}</div>`;
+      renderImportInvalidModal();
+      break;
+    case 'import-preview':
+      main.innerHTML = renderHeaderAndPivot() + `<div class="rules-grid">${renderTreeCard({ localVer: 'v3' })}${renderBgRulesList()}</div>`;
+      renderImportPreviewModal();
+      break;
+    case 'export':
+      main.innerHTML = renderHeaderAndPivot() + `<div class="rules-grid">${renderTreeCard({ localVer: 'v3' })}${renderBgRulesList()}</div>`;
+      renderExportModal();
+      break;
+    case 'history':
+      main.innerHTML = renderHeaderAndPivot() + `<div class="rules-grid">${renderTreeCard()}${renderHistoryCard()}</div>`;
+      break;
+    case 'history-diff':
+      main.innerHTML = renderHeaderAndPivot() + renderHistoryDiffView();
+      break;
+    case 'history-revert':
+      main.innerHTML = renderHeaderAndPivot({ activeTab: 'privacy' }) + `<div class="rules-grid">${renderTreeCard({ privacy: true })}${renderHistoryCard({ privacy: true })}</div>`;
+      renderRevertModal();
+      break;
+    case 'three-way':
+      main.innerHTML = renderHeaderAndPivot() + renderThreeWayView();
+      break;
+    case 'three-way-pending':
+      main.innerHTML = renderHeaderAndPivot() + renderThreeWayView({ pending: true });
+      break;
+    case 'three-way-removed':
+      main.innerHTML = renderHeaderAndPivot() + renderThreeWayRemovedView();
+      break;
+    default:
+      main.innerHTML = renderHeaderAndPivot() + `<div class="rules-grid">${renderTreeCard()}${renderBgRulesList()}</div>`;
+      renderImportModal();
+      break;
+  }
+}
+
+function syncScroll(scrollEl, wrapEl, thumbEl) {
+  if (!scrollEl || !wrapEl || !thumbEl) return;
+  const overflow = scrollEl.scrollHeight > scrollEl.clientHeight + 1;
+  wrapEl.classList.toggle('scrollable', overflow);
+  if (!overflow) return;
+  const trackH = wrapEl.clientHeight - 8;
+  const ratio = scrollEl.clientHeight / scrollEl.scrollHeight;
+  const thumbH = Math.max(28, Math.round(trackH * ratio));
+  const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+  const top = maxScroll > 0 ? Math.round((scrollEl.scrollTop / maxScroll) * (trackH - thumbH)) : 0;
+  thumbEl.style.height = thumbH + 'px';
+  thumbEl.style.top = top + 'px';
+}
+
+renderNav();
+renderMain();
+
+const mainEl = document.getElementById('main');
+const mainWrapEl = document.getElementById('main-wrap');
+const mainThumbEl = document.getElementById('main-thumb');
+syncScroll(mainEl, mainWrapEl, mainThumbEl);
+mainEl.addEventListener('scroll', () => syncScroll(mainEl, mainWrapEl, mainThumbEl));
+
+const modalBody = document.getElementById('modal-body');
+const modalBodyWrap = document.getElementById('modal-body-wrap');
+const modalThumb = document.getElementById('modal-thumb');
+if (modalBody) {
+  syncScroll(modalBody, modalBodyWrap, modalThumb);
+  modalBody.addEventListener('scroll', () => syncScroll(modalBody, modalBodyWrap, modalThumb));
+}
+
+const codeScroll = document.getElementById('code-scroll');
+const codeWrap = document.getElementById('code-wrap');
+const codeThumb = document.getElementById('code-thumb');
+if (codeScroll) {
+  syncScroll(codeScroll, codeWrap, codeThumb);
+  codeScroll.addEventListener('scroll', () => syncScroll(codeScroll, codeWrap, codeThumb));
+}
+</script>
+</body>
+</html>
