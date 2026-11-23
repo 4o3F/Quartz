@@ -473,6 +473,8 @@ mod tests {
                 .expect("UUID"),
         );
         let first = wire::TimelineSegment {
+            extraction: None,
+            document_ref: None,
             start_utc_ms: 1,
             end_utc_ms: 2001,
             duration_ms: 2000,
@@ -499,6 +501,7 @@ mod tests {
         offline.title = None;
         offline.window_instance = None;
         let timeline = wire::QueryTimelineResponse {
+            reference_range: None,
             segments: vec![first, offline],
             versions: wire::QueryVersions("v1".into()),
             next_cursor: None,

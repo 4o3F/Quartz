@@ -7,6 +7,51 @@ use std::num::NonZeroU64;
 /// Maximum encoded response size, including its envelope allowance (04 §6.2).
 pub const QUERY_PAGE_BYTES: usize = 200 * 1024;
 
+/// Opaque, version-bound document reference issued by the core.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DocumentRef(String);
+impl DocumentRef {
+    /// Wraps an encoded core reference; validation belongs to the core query boundary.
+    pub fn from_encoded(value: String) -> Self {
+        Self(value)
+    }
+    /// Borrows the encoded value for core validation or unchanged client forwarding.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Debug for DocumentRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DocumentRef([opaque])")
+    }
+}
+/// Half-open UTC range whose inputs determine a document reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReferenceRange {
+    pub start_utc_ms: i64,
+    pub end_utc_ms: i64,
+}
+/// Extraction outcome, independent of display language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionStatus {
+    Extracted,
+    Fallback,
+    Empty,
+    Unknown,
+}
+/// Visible extraction output; hidden or unavailable fields are null.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleExtraction {
+    pub document: Option<String>,
+    pub project: Option<String>,
+    pub profile: Option<String>,
+    pub dirty: Option<bool>,
+    pub normalized_title: Option<String>,
+    pub extractor_rule: Option<String>,
+    pub status: Option<ExtractionStatus>,
+}
 /// Opaque continuation value; clients preserve and return its JSON object unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryCursor {
@@ -129,6 +174,8 @@ impl From<&QuerySegmentDetailRequest> for CursorQuery {
 /// One page of clipped slices, preserving the timeline's clock-segment order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuerySegmentDetailResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_range: Option<ReferenceRange>,
     pub intervals: Vec<TimelineSegment>,
     pub versions: QueryVersions,
     pub next_cursor: Option<QueryCursor>,
@@ -466,6 +513,11 @@ pub struct QueryTimelineRequest {
 /// A projected display segment; durations retain segment-local monotonic time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineSegment {
+    /// Supplied for app/raw projections, including null fields after privacy filtering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<TitleExtraction>,
+    #[serde(default)]
+    pub document_ref: Option<DocumentRef>,
     pub start_utc_ms: i64,
     pub end_utc_ms: i64,
     pub duration_ms: i64,
@@ -484,6 +536,8 @@ pub struct TimelineSegment {
 /// One timeline page with the input version token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryTimelineResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_range: Option<ReferenceRange>,
     pub segments: Vec<TimelineSegment>,
     pub versions: QueryVersions,
     pub next_cursor: Option<QueryCursor>,
@@ -645,8 +699,20 @@ mod tests {
     #[test]
     fn timeline_response_matches_golden_json() {
         let response = QueryTimelineResponse {
+            reference_range: Some(ReferenceRange {
+                start_utc_ms: 0,
+                end_utc_ms: 2000,
+            }),
             segments: vec![
                 TimelineSegment {
+                    extraction: Some(TitleExtraction {
+                        document: Some("document".into()),
+                        dirty: Some(false),
+                        normalized_title: Some("document".into()),
+                        status: Some(ExtractionStatus::Fallback),
+                        ..Default::default()
+                    }),
+                    document_ref: Some(DocumentRef::from_encoded("doc:opaque".into())),
                     start_utc_ms: 0,
                     end_utc_ms: 1000,
                     duration_ms: 1000,
@@ -665,6 +731,8 @@ mod tests {
                     title: Some("document".into()),
                 },
                 TimelineSegment {
+                    extraction: Some(TitleExtraction::default()),
+                    document_ref: None,
                     start_utc_ms: 1000,
                     end_utc_ms: 2000,
                     duration_ms: 1000,
@@ -693,6 +761,47 @@ mod tests {
         );
     }
     #[test]
+    fn additive_document_fields_preserve_legacy_and_detail_json() {
+        let wire: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/timeline.json"))
+                .expect("timeline snapshot");
+        let timeline: QueryTimelineResponse =
+            serde_json::from_value(wire.clone()).expect("timeline");
+        let detail = QuerySegmentDetailResponse {
+            reference_range: timeline.reference_range,
+            intervals: timeline.segments.clone(),
+            versions: timeline.versions.clone(),
+            next_cursor: None,
+        };
+        let expected = serde_json::json!({"reference_range": wire["reference_range"], "intervals": wire["segments"], "versions": wire["versions"], "next_cursor": null});
+        assert_eq!(
+            serde_json::to_value(&detail).expect("detail JSON"),
+            expected
+        );
+        assert_eq!(
+            serde_json::from_value::<QuerySegmentDetailResponse>(expected)
+                .expect("detail roundtrip"),
+            detail
+        );
+        let mut legacy = wire;
+        let object = legacy.as_object_mut().expect("response object");
+        object.remove("reference_range");
+        for segment in object["segments"].as_array_mut().expect("segments") {
+            let object = segment.as_object_mut().expect("segment");
+            object.remove("extraction");
+            object.remove("document_ref");
+        }
+        let decoded: QueryTimelineResponse =
+            serde_json::from_value(legacy).expect("old core response");
+        assert!(decoded.reference_range.is_none());
+        assert!(
+            decoded
+                .segments
+                .iter()
+                .all(|segment| segment.extraction.is_none() && segment.document_ref.is_none())
+        );
+    }
+    #[test]
     fn annotated_timeline_and_pending_away_match_new_golden_json() {
         let id = |number: u32| {
             AnnotationId(
@@ -702,8 +811,11 @@ mod tests {
             )
         };
         let response = QueryTimelineResponse {
+            reference_range: None,
             segments: vec![
                 TimelineSegment {
+                    extraction: None,
+                    document_ref: None,
                     start_utc_ms: 0,
                     end_utc_ms: 1000,
                     duration_ms: 1000,
@@ -716,6 +828,8 @@ mod tests {
                     title: None,
                 },
                 TimelineSegment {
+                    extraction: None,
+                    document_ref: None,
                     start_utc_ms: 1000,
                     end_utc_ms: 2000,
                     duration_ms: 1000,

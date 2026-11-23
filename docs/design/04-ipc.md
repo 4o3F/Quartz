@@ -117,6 +117,8 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 协议只传键、编码、数字与原始数据，不传翻译后的句子（10 第 3 节）。UI 完成握手后订阅 `state`，从首个快照的 `logical_date` 取得核心当前逻辑日期，字段见第 7 节。
 
+B3 的提取字段、文档引用与引用范围为增量字段，握手协议版本保持 1，旧客户端忽略未知字段；新客户端允许这些字段缺失。`query.documents.v1` 在 B4 完成文档排行与文档实体详情后声明。
+
 协议版本和数据库 schema 版本分开演进。协议版本范围没有交集时，核心返回 `proto_mismatch`，并在响应里附上自己的版本，让界面能提示"核心与界面版本不一致，请重启 Quartz"。
 
 ## 5. 角色与权限
@@ -209,7 +211,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 分类引用为 `{kind:"unclassified"}` 或 `{kind:"classified", id, uuid, builtin_key, name, color, tendency}`。`builtin_key` 是稳定内置键，`name` 为用户输入或 null；名称为 null 时由界面翻译 `category.builtin.<key>`。规则来源为 `{kind:"rule", rule:"<规则集>/<规则>@<版本>"}`，注解来源为 `{kind:"annotation", annotation:"<UUID>"}`，未分类来源为 `{kind:"unclassified"}`。活动状态新增 `{kind:"active_override", annotation:"<UUID>"}` 和 `{kind:"offline_activity", annotation:"<UUID>"}`。分类元数据从查询的数据库快照读取，求值使用生成游标规则哈希的同一规则快照。
 
-时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。M4 的 `app` 细节对同窗口实例、同非空文档身份的连续片段先合并，保留分类与来源边界；无身份时要求原始标题相同；合并不跨时钟段或活动状态边界。dirty 等可变提取显示字段不阻止 app 合并，合并后采用最后切片的提取显示值。`raw` 保留原始标题与提取输出边界。其余像素合并规则为：相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`app` 与 `raw` 均要求文档身份相同（含两者皆空），`raw` 还要求标题与提取输出相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。M4 查询语义版本为 4，版本摘要包含该版本，因此此前语义生成的游标返回 `stale_cursor`。
+时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。M4 的 `app` 细节对同窗口实例、同非空文档身份的连续片段先合并，保留分类与来源边界；无身份时要求原始标题相同；合并不跨时钟段或活动状态边界。dirty 等可变提取显示字段不阻止 app 合并，合并后采用最后切片的提取显示值。`raw` 保留原始标题与提取输出边界。其余像素合并规则为：相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`app` 与 `raw` 均要求文档身份相同（含两者皆空），`raw` 还要求标题与提取输出相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。M4 查询语义版本为 5，版本摘要包含该版本，因此此前语义生成的游标返回 `stale_cursor`。
 
 游标是 `quartz-protocol::QueryCursor` 的 JSON 对象，私有字段保存 `versions`、类型化的 `query` 参数和下一项 `position`，客户端原样保存和回传。
 
@@ -221,6 +223,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 - `query.day` 增加分页 `documents: [{document_ref, app, document, project, profile, active_ms}]`，应用与文档列表分别完整分页；第一页还带 `reference_range:{start_utc_ms,end_utc_ms}`（覆盖截至所选日的 7 个逻辑日），分页摘要也覆盖此引用范围。文档按 `active_ms` 降序，同值按 03 第 5.2 节身份分量排序（null 在空串之前，文本按 Unicode 标量序）；没有身份的事实不进入文档排行。
 - 时间轴的 `app` / `raw` 与原始详情增加 `extraction: {document, project, profile, dirty, normalized_title, extractor_rule, status}` 和可空的 `document_ref`。隐藏字段为 null，`extractor_rule` 在回退时为 null。`query.timeline` 和 `query.segment_detail` 的引用覆盖本次 UTC 范围，并在第一页返回该 `reference_range`。
+- B3 的引用编码为 `quartz.document.v1:<sha256>:<JSON>`，JSON 仅含可见身份、引用 UTC 范围和输入版本摘要。校验和为 SHA-256（固定前缀与原样 JSON 字节），用于检测传输或存储损坏；读取引用仍须校验当前范围与输入版本，并按当前隐私投影重算身份。编码无密钥、无服务端引用表，同范围、同版本和同身份产生相同字符串；引用内容不承担访问授权。
 - `document_ref` 为不透明字符串，绑定身份及 `reference_range` 内全部查询输入版本；客户端只保存、比较和回传。`query.entity_detail` 的 document 请求附原样 `reference_range`，该范围必须包含详情所需的 7 日；核心校验引用覆盖范围与版本后按身份重算各日，`daily` 与文档排行一致，其余分页、标题和最终分类来源沿用 app 详情。引用覆盖范围不足或格式无效返回 `bad_request`，依赖变化返回 `stale_document_ref`。相同 reference_range 和输入版本内，相同身份使用相同引用。
 - `query.range` 的 `bucket` 为 `day | week`；`dimensions` 为非空且无重复的 `category | app | document` 数组。响应 `buckets: [{start_date, end_date, active_ms, groups: [{dimension, entity, active_ms}]}]`；每个 dimension 独立聚合，分母为同一活跃时长。按桶日期、请求维度顺序、时长降序和实体身份排序。周桶按有效每周首日切分，首尾桶裁剪到请求范围；完整桶总时长仅在该桶首次出现时返回，分组可续页。category entity 为 `{kind:"category",category}`（沿用分类引用），app entity 为 `{kind:"app",id,exe_name,display_name}`；document entity 为 `{kind:"document", document_ref, app, document, project, profile}`，其中 app 为 ApplicationId，引用覆盖整个请求范围，响应第一页返回其 UTC `reference_range`。
 - `query.unclassified` 的 `group_by` 为 `app | document`。只累计最终分类为空的活跃切片（人工覆盖已应用），返回 `items: [{entity, active_ms, sample_ranges}]`，entity 沿用 query.range 的 app/document 形状；每组按时序取最多 5 个 `{start_utc_ms,end_utc_ms,clock_segment_id}`，供片段归类。缺少所选实体的事实不成组，因此分组总计可以小于全日未分类时长。排序同排行；`search` 最多 256 个 Unicode 标量，对可见名称、文档、项目、profile 做 NFKC 与大小写折叠后包含匹配，过滤和分页均在核心完成。document 引用覆盖请求范围，第一页返回其 UTC `reference_range`。

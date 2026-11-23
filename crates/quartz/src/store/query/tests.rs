@@ -20,6 +20,7 @@ fn collect_timeline(
         let QueryResponse::Timeline(page) = response else {
             panic!("timeline response")
         };
+        assert_eq!(page.reference_range.is_some(), request.cursor.is_none());
         all.extend(page.segments);
         let Some(cursor) = page.next_cursor else {
             break;
@@ -69,7 +70,24 @@ fn unpaged_timeline(
     fixture
         .store
         .return_query_reader(snapshot.finish().expect("finish snapshot"));
-    projection.into_segments()
+    let QueryResponse::Timeline(page) = fixture
+        .run(QueryRequest::Timeline(request.clone()))
+        .expect("reference versions")
+    else {
+        panic!("timeline");
+    };
+    let mut segments = projection.into_segments();
+    let mut references = crate::query::documents::PageDocumentReferences::new(
+        quartz_protocol::ReferenceRange {
+            start_utc_ms: range.start,
+            end_utc_ms: range.end,
+        },
+        &page.versions,
+    );
+    for segment in &mut segments {
+        references.attach(segment).expect("attach reference");
+    }
+    segments
 }
 #[test]
 fn known_day_applies_idle_and_clips_open_rows_at_their_confirmation() {
@@ -1235,6 +1253,12 @@ fn segment_detail_pages_bound_ranges_and_reject_changed_versions_and_parameters(
     loop {
         let page = segment_page(&mut fixture, request.clone());
         assert!(serde_json::to_vec(&page).expect("page encoding").len() <= QUERY_PAGE_BYTES);
+        assert_eq!(page.reference_range.is_some(), request.cursor.is_none());
+        assert!(
+            page.intervals
+                .iter()
+                .all(|interval| interval.document_ref.is_some())
+        );
         count += page.intervals.len();
         let Some(cursor) = page.next_cursor else {
             break;

@@ -31,6 +31,7 @@ impl From<super::settings::AccessSettingError> for ReadQueryError {
             | super::settings::AccessSettingError::Json { .. }
             | super::settings::AccessSettingError::Deadline { .. }
             | super::settings::AccessSettingError::DayStartOffset
+            | super::settings::AccessSettingError::StatsPolicyVersion
             | super::settings::AccessSettingError::MetadataVersion => Self::InvalidSettings,
         }
     }

@@ -13,6 +13,7 @@ use serde::{Serialize, de::DeserializeOwned};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingKey {
     MetadataVersion,
+    StatsPolicyVersion,
     DeviceId,
     DayStartOffset,
     MaintenanceDeadline,
@@ -30,6 +31,7 @@ impl SettingKey {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::MetadataVersion => "metadata_version",
+            Self::StatsPolicyVersion => "stats_policy_version",
             Self::DeviceId => "device_id",
             Self::DayStartOffset => "day.start_offset_min",
             Self::MaintenanceDeadline => "capture.deadline.maintenance",
@@ -76,6 +78,8 @@ pub(crate) enum AccessSettingError {
     },
     #[snafu(display("day start offset must be between 0 and 720 minutes"))]
     DayStartOffset,
+    #[snafu(display("statistics policy version must be nonnegative"))]
+    StatsPolicyVersion,
     #[snafu(display("metadata version must be nonnegative"))]
     MetadataVersion,
 }
@@ -147,6 +151,16 @@ impl Settings<'_> {
     }
     pub(super) fn put_device_id(&mut self, value: &str) -> Result<(), AccessSettingError> {
         self.put(SettingKey::DeviceId, value)
+    }
+    /// Databases without a statistics policy counter start at version zero.
+    pub(super) fn stats_policy_version(&mut self) -> Result<i64, AccessSettingError> {
+        let value = self
+            .get::<i64>(SettingKey::StatsPolicyVersion)?
+            .unwrap_or(0);
+        if value < 0 {
+            return Err(AccessSettingError::StatsPolicyVersion);
+        }
+        Ok(value)
     }
     pub(super) fn metadata_version(&mut self) -> Result<i64, AccessSettingError> {
         let value = self.get(SettingKey::MetadataVersion)?.unwrap_or_default();

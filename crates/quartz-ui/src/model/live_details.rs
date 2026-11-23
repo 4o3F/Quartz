@@ -307,7 +307,10 @@ mod tests {
                 serde_json::from_value(serde_json::to_value(first).expect("entity JSON"))
                     .expect("entity fixture");
             let segments = wire::QuerySegmentDetailResponse {
+                reference_range: None,
                 intervals: vec![wire::TimelineSegment {
+                    extraction: None,
+                    document_ref: None,
                     start_utc_ms: 100,
                     end_utc_ms: 200,
                     duration_ms: 75,

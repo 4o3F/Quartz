@@ -89,20 +89,28 @@ pub(crate) struct StoredVersions {
 pub(crate) struct QuerySettings {
     pub day_start_offset: crate::query::calendar::DayStartOffset,
     pub metadata_version: i64,
+    pub stats_policy_version: i64,
 }
 
-impl ReadOnlyStore {
-    pub(crate) fn query_settings(&mut self) -> Result<QuerySettings, ReadQueryError> {
-        let mut settings = Settings::new(&mut self.connection);
-        let offset = settings.day_start_offset()?;
-        let metadata = settings.metadata_version()?;
+impl Settings<'_> {
+    fn query_settings(&mut self) -> Result<QuerySettings, ReadQueryError> {
         Ok(QuerySettings {
-            day_start_offset: offset,
-            metadata_version: metadata,
+            day_start_offset: self.day_start_offset()?,
+            metadata_version: self.metadata_version()?,
+            stats_policy_version: self.stats_policy_version()?,
         })
     }
 }
+impl ReadOnlyStore {
+    pub(crate) fn query_settings(&mut self) -> Result<QuerySettings, ReadQueryError> {
+        Settings::new(&mut self.connection).query_settings()
+    }
+}
 impl Store {
+    #[cfg(any(windows, test))]
+    pub(crate) fn query_settings(&mut self) -> Result<QuerySettings, ReadQueryError> {
+        Settings::new(&mut self.writer).query_settings()
+    }
     #[cfg(any(windows, test))]
     pub(crate) fn version_state(&mut self) -> Result<StoredVersions, ReadQueryError> {
         let settings = self

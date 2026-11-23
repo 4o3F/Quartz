@@ -5,6 +5,7 @@ pub(crate) mod classification;
 mod details;
 #[cfg(any(windows, test))]
 pub(crate) mod dispatch;
+pub(crate) mod documents;
 pub(crate) mod input;
 mod paging;
 mod pending_away;
@@ -33,7 +34,7 @@ use serde::Serialize;
 use timing::{QueryStage, QueryTimer, QueryTimings};
 
 /// Increment whenever matching, slicing, duration, aggregation, or projection semantics change.
-pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 4;
+pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 5;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
 const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
 
@@ -47,6 +48,10 @@ pub(crate) enum RunQueryError {
     InvalidCursor,
     #[snafu(display("query input versions changed"))]
     StaleCursor,
+    #[snafu(display("invalid document reference"))]
+    InvalidDocumentRef,
+    #[snafu(display("document reference inputs changed"))]
+    StaleDocumentRef,
     #[snafu(display("invalid logical day offset"))]
     InvalidDayOffset,
     #[snafu(display("query reader is unavailable"))]
@@ -93,7 +98,10 @@ impl RunQueryError {
     pub(crate) fn kind(&self) -> ErrorKind {
         match self {
             Self::InvalidRange | Self::Calendar { .. } => ErrorKind::InvalidRange,
-            Self::InvalidCursor | Self::InvalidDetailRange => ErrorKind::BadRequest,
+            Self::InvalidCursor | Self::InvalidDetailRange | Self::InvalidDocumentRef => {
+                ErrorKind::BadRequest
+            }
+            Self::StaleDocumentRef => ErrorKind::StaleDocumentRef,
             Self::StaleCursor => ErrorKind::StaleCursor,
             _ => ErrorKind::Internal,
         }
@@ -196,7 +204,7 @@ impl QueryJob {
             .take()
             .ok_or(RunQueryError::ReaderUnavailable)?
             .snapshot();
-        match Self::prepare(&mut snapshot, &request, &rules.hashes().classification) {
+        match Self::prepare(&mut snapshot, &request, rules.hashes()) {
             Ok(prepared) => Ok(Self {
                 snapshot,
                 range: prepared.range,
@@ -224,7 +232,7 @@ impl QueryJob {
     fn prepare(
         snapshot: &mut ReadSnapshot,
         request: &QueryRequest,
-        classification_hash: &quartz_domain::rules::ContentHash,
+        rule_hashes: &quartz_domain::rules::registry::SnapshotHashes,
     ) -> Result<PreparedQuery, RunQueryError> {
         snapshot.begin()?;
         let settings = snapshot.settings()?;
@@ -308,7 +316,8 @@ impl QueryJob {
                 .map(|fact| (fact.key, fact.version))
                 .collect(),
             settings,
-            classification_hash: classification_hash.to_owned(),
+            rule_hashes: rule_hashes.clone(),
+            time_zone: jiff::tz::TimeZone::try_system()?,
         }
         .digest(range);
         let parameters = request.parameters();
@@ -521,6 +530,7 @@ impl QueryJob {
             }
             Aggregation::SegmentDetail(detail) => {
                 QueryResponse::SegmentDetail(QuerySegmentDetailResponse {
+                    reference_range: self.reference_range(),
                     intervals: detail.finish(),
                     versions: self.versions.clone(),
                     next_cursor: None,
@@ -530,11 +540,20 @@ impl QueryJob {
                 QueryResponse::EntityDetail(detail.finish(self.versions.clone(), self.position))
             }
             Aggregation::Timeline(projection) => QueryResponse::Timeline(QueryTimelineResponse {
+                reference_range: self.reference_range(),
                 segments: projection.into_segments(),
                 versions: self.versions.clone(),
                 next_cursor: None,
             }),
         }
+    }
+    fn reference_range(&self) -> Option<quartz_protocol::ReferenceRange> {
+        self.position
+            .is_first()
+            .then_some(quartz_protocol::ReferenceRange {
+                start_utc_ms: self.range.start,
+                end_utc_ms: self.range.end,
+            })
     }
     fn page_response(&self, mut response: QueryResponse) -> Result<QueryResponse, RunQueryError> {
         match &mut response {
@@ -565,7 +584,15 @@ impl QueryJob {
             }
             QueryResponse::SegmentDetail(detail) => {
                 let items = std::mem::take(&mut detail.intervals);
-                let page = PageBudget::new(detail)?.page(items, self.position)?;
+                let mut references = documents::PageDocumentReferences::new(
+                    quartz_protocol::ReferenceRange {
+                        start_utc_ms: self.range.start,
+                        end_utc_ms: self.range.end,
+                    },
+                    &self.versions,
+                );
+                let page = PageBudget::new(detail)?
+                    .page_with(items, self.position, |segment| references.attach(segment))?;
                 detail.intervals = page.items;
                 detail.next_cursor = page.next.map(|position| {
                     QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
@@ -581,7 +608,16 @@ impl QueryJob {
             }
             QueryResponse::Timeline(timeline) => {
                 let items = std::mem::take(&mut timeline.segments);
-                let page = PageBudget::new(timeline)?.page(items, self.position)?;
+                let mut references = documents::PageDocumentReferences::new(
+                    quartz_protocol::ReferenceRange {
+                        start_utc_ms: self.range.start,
+                        end_utc_ms: self.range.end,
+                    },
+                    &self.versions,
+                );
+                let page =
+                    PageBudget::new(timeline)?
+                        .page_with(items, self.position, |segment| references.attach(segment))?;
                 timeline.segments = page.items;
                 timeline.next_cursor = page.next.map(|position| {
                     QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)

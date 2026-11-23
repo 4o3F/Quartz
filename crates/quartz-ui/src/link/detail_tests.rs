@@ -75,6 +75,8 @@ impl DetailHarness {
     }
     fn interval(source: CategorySource, start: i64) -> TimelineSegment {
         TimelineSegment {
+            extraction: None,
+            document_ref: None,
             start_utc_ms: start,
             end_utc_ms: start + 100,
             duration_ms: 75,
@@ -195,6 +197,7 @@ async fn paged_intervals_and_entity_rules_map_labels_and_absent_titles() {
         .ok(
             query,
             serde_json::to_value(QuerySegmentDetailResponse {
+                reference_range: None,
                 intervals: vec![DetailHarness::interval(
                     CategorySource::Rule {
                         rule: DetailHarness::rule().rule,
@@ -229,6 +232,7 @@ async fn paged_intervals_and_entity_rules_map_labels_and_absent_titles() {
         .ok(
             next,
             serde_json::to_value(QuerySegmentDetailResponse {
+                reference_range: None,
                 intervals: vec![manual, unclassified],
                 versions: version,
                 next_cursor: None,
@@ -427,6 +431,7 @@ async fn changed_segment_page_version_restarts_and_an_empty_range_stays_empty() 
         .ok(
             first,
             serde_json::to_value(QuerySegmentDetailResponse {
+                reference_range: None,
                 intervals: vec![DetailHarness::interval(CategorySource::Unclassified, 0)],
                 versions: version,
                 next_cursor: Some(cursor),
@@ -440,6 +445,7 @@ async fn changed_segment_page_version_restarts_and_an_empty_range_stays_empty() 
         .ok(
             next,
             serde_json::to_value(QuerySegmentDetailResponse {
+                reference_range: None,
                 intervals: Vec::new(),
                 versions: QueryVersions("new".into()),
                 next_cursor: None,
@@ -459,6 +465,7 @@ async fn changed_segment_page_version_restarts_and_an_empty_range_stays_empty() 
         .ok(
             restart,
             serde_json::to_value(QuerySegmentDetailResponse {
+                reference_range: None,
                 intervals: Vec::new(),
                 versions: QueryVersions("new".into()),
                 next_cursor: None,

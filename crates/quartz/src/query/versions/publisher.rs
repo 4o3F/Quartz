@@ -3,7 +3,7 @@ use super::VersionState;
 use crate::query::RunQueryError;
 use crate::store::Store;
 use crossbeam_channel::{Receiver, Sender};
-use quartz_domain::rules::{ContentHash, registry::SnapshotCell};
+use quartz_domain::rules::registry::SnapshotCell;
 use quartz_protocol::{DayChanged, ErrorKind, LocalDate, ProtocolError};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::sync::{oneshot, watch};
@@ -78,10 +78,8 @@ impl VersionPublisher {
         store: &mut Store,
         snapshots: SnapshotCell,
     ) -> Result<VersionChannel, RunQueryError> {
-        let state = VersionState::from_stored(
-            store.version_state()?,
-            snapshots.load().hashes().classification.clone(),
-        );
+        let state =
+            VersionState::from_stored(store.version_state()?, snapshots.load().hashes().clone())?;
         let (requests, received) = crossbeam_channel::bounded(VERSION_CHANNEL_CAPACITY);
         let (published, updates) = watch::channel(PublishedVersions::default());
         let publisher = Self {
@@ -93,9 +91,6 @@ impl VersionPublisher {
         };
         let port = VersionPort { requests, updates };
         Ok(VersionChannel { publisher, port })
-    }
-    pub(crate) fn classification_hash(&self) -> ContentHash {
-        self.snapshots.load().hashes().classification.clone()
     }
     pub(crate) fn receive(&mut self, command: VersionCommand) {
         self.subscriptions.insert(command.subscriber, command.dates);
@@ -122,17 +117,19 @@ impl VersionPublisher {
         store: &mut Store,
         day: impl Fn(&VersionState, LocalDate) -> Result<DayChanged, RunQueryError>,
     ) -> Result<Option<crate::query::calendar::DayStartOffset>, RunQueryError> {
+        let hashes = self.snapshots.load().hashes().clone();
+        let time_zone = jiff::tz::TimeZone::try_system()?;
+        let settings = store.query_settings()?;
         let changes = store.take_committed_versions();
-        let hash = self.classification_hash();
         if changes.facts.is_empty()
             && changes.metadata_version.is_none()
-            && self.state.classification_hash == hash
+            && self.state.rule_hashes == hashes
+            && self.state.time_zone == time_zone
+            && self.state.settings.stats_policy_version == settings.stats_policy_version
         {
             return Ok(None);
         }
-        let offset = store
-            .day_start_offset()
-            .map_err(crate::store::query_error::ReadQueryError::from)?;
+        let offset = settings.day_start_offset;
         let changed_offset = (offset != self.state.settings.day_start_offset).then_some(offset);
         self.state.settings.day_start_offset = offset;
         for fact in changes.facts {
@@ -141,7 +138,9 @@ impl VersionPublisher {
         if let Some(version) = changes.metadata_version {
             self.state.settings.metadata_version = version;
         }
-        self.state.classification_hash = hash;
+        self.state.rule_hashes = hashes;
+        self.state.time_zone = time_zone;
+        self.state.settings.stats_policy_version = settings.stats_policy_version;
         let dates: Vec<_> = self.published.borrow().days.keys().copied().collect();
         let mut days = BTreeMap::new();
         for date in dates {

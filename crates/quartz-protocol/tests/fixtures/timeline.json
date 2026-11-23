@@ -28,7 +28,17 @@
         "aumid": null
       },
       "window_instance": 5,
-      "title": "document"
+      "title": "document",
+      "document_ref": "doc:opaque",
+      "extraction": {
+        "document": "document",
+        "project": null,
+        "profile": null,
+        "dirty": false,
+        "normalized_title": "document",
+        "extractor_rule": null,
+        "status": "fallback"
+      }
     },
     {
       "start_utc_ms": 1000,
@@ -43,9 +53,23 @@
       },
       "category_source": {
         "kind": "unclassified"
+      },
+      "document_ref": null,
+      "extraction": {
+        "document": null,
+        "project": null,
+        "profile": null,
+        "dirty": null,
+        "normalized_title": null,
+        "extractor_rule": null,
+        "status": null
       }
     }
   ],
   "versions": "version-token",
-  "next_cursor": null
+  "next_cursor": null,
+  "reference_range": {
+    "start_utc_ms": 0,
+    "end_utc_ms": 2000
+  }
 }

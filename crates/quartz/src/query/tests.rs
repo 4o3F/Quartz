@@ -1613,3 +1613,297 @@ fn builtin_manifest_rules_are_narrow_and_user_overrides_win() {
         }
     }
 }
+
+#[test]
+fn document_app_merge_ignores_dirty_churn_and_preserves_raw_display_and_boundaries() {
+    use quartz_domain::facts::{TitleId, WindowInstanceId};
+    use quartz_protocol::TimelineDetail;
+    let mut first = classified_window(1, 0, 10, "code.exe");
+    let mut second = classified_window(2, 10, 20, "code.exe");
+    for input in [&mut first, &mut second] {
+        let InputRow::Foreground(row) = input else {
+            panic!("foreground")
+        };
+        let title = if row.span.id == FactId(1) {
+            "main.rs - Quartz - Visual Studio Code"
+        } else {
+            "● main.rs - Quartz - Visual Studio Code"
+        };
+        let id = row.span.id.0;
+        edit_foreground(row, CaptureLevel::Full, |content| {
+            content.window_instance = Some(WindowInstanceId(1));
+            content.title_id = Some(TitleId(id));
+            content.title = Some(title.into());
+            std::sync::Arc::make_mut(content.app.as_mut().expect("app")).id = ApplicationId(1);
+        });
+    }
+    let mut pipeline = Pipeline::new(QueryRange { start: 0, end: 20 }, classifier(&[]));
+    for row in [clock(1, 0, 0, 20), first, second] {
+        pipeline.ingest(row).expect("row");
+    }
+    pipeline.finish_input();
+    while !pipeline.advance() {}
+    let derived = pipeline.into_segments();
+    let mut app = TimelineProjection::default();
+    let mut raw = TimelineProjection::default();
+    let request = QuerySegmentDetailRequest {
+        start_utc_ms: 0,
+        end_utc_ms: 20,
+        app: None,
+        window_instance: None,
+        cursor: None,
+    };
+    let mut detail = details::SegmentDetailProjection::default();
+    for segment in &derived.segments {
+        app.push(segment, &derived.facts, TimelineDetail::App, 1);
+        raw.push(segment, &derived.facts, TimelineDetail::Raw, 100);
+        detail.push(segment, &derived.facts, &request);
+    }
+    let app = app.into_segments();
+    let raw = raw.into_segments();
+    assert_eq!(app.len(), 1, "document merge precedes pixel merge");
+    assert_eq!(app[0].duration_ms, 20);
+    let extraction = app[0].extraction.as_ref().expect("visible extraction");
+    assert_eq!(extraction.document.as_deref(), Some("main.rs"));
+    assert_eq!(extraction.project.as_deref(), Some("Quartz"));
+    assert_eq!(extraction.dirty, Some(true));
+    assert!(app[0].title.is_none());
+    assert_eq!(raw.len(), 2);
+    assert_eq!(
+        raw,
+        detail.finish(),
+        "raw detail preserves each original fact and extraction"
+    );
+    assert_eq!(
+        raw[0].extraction.as_ref().expect("first").dirty,
+        Some(false)
+    );
+    assert_eq!(
+        raw[1].title.as_deref(),
+        Some("● main.rs - Quartz - Visual Studio Code")
+    );
+
+    let mut boundaries = derived.clone();
+    boundaries.segments[1].clock_segment_id = Some(ClockSegmentId(2));
+    let mut app = TimelineProjection::default();
+    for segment in &boundaries.segments {
+        app.push(segment, &boundaries.facts, TimelineDetail::App, 100);
+    }
+    assert_eq!(
+        app.into_segments().len(),
+        2,
+        "document merge respects clock segments"
+    );
+}
+
+#[test]
+fn extraction_projection_hides_private_fields_and_preserves_missing_and_empty() {
+    use quartz_protocol::{ExtractionStatus, TimelineDetail, TitleExtraction};
+    for level in [
+        CaptureLevel::Full,
+        CaptureLevel::TitleHidden,
+        CaptureLevel::Excluded,
+    ] {
+        for title in [None, Some("")] {
+            let mut row = window(1, 0, 10);
+            let InputRow::Foreground(foreground) = &mut row else {
+                panic!("foreground")
+            };
+            edit_foreground(foreground, level, |content| {
+                content.title = title.map(str::to_owned)
+            });
+            let derived = derive(
+                vec![clock(1, 0, 0, 10), row],
+                QueryRange { start: 0, end: 10 },
+            );
+            let raw = TimelineProjection::project(
+                &derived.segments[0],
+                &derived.facts,
+                TimelineDetail::Raw,
+            );
+            let extraction = raw.extraction.expect("raw extraction shape");
+            assert!(raw.document_ref.is_none());
+            if level == CaptureLevel::Full {
+                assert_eq!(
+                    extraction.status,
+                    Some(if title.is_none() {
+                        ExtractionStatus::Unknown
+                    } else {
+                        ExtractionStatus::Empty
+                    })
+                );
+                assert!(extraction.document.is_none());
+            } else {
+                assert_eq!(extraction, TitleExtraction::default());
+            }
+            assert!(
+                TimelineProjection::project(
+                    &derived.segments[0],
+                    &derived.facts,
+                    TimelineDetail::Category
+                )
+                .extraction
+                .is_none()
+            );
+        }
+    }
+}
+
+#[test]
+fn app_merge_separates_documents_projects_profiles_case_and_unknown_titles() {
+    use quartz_domain::facts::{TitleId, WindowInstanceId};
+    use quartz_protocol::TimelineDetail;
+    struct Case {
+        first: &'static str,
+        second: &'static str,
+        exe: &'static str,
+        second_app: i64,
+        expected: usize,
+    }
+    for case in [
+        Case {
+            first: "main.rs - Quartz - Visual Studio Code",
+            second: "main.rs - Other - Visual Studio Code",
+            exe: "code.exe",
+            second_app: 1,
+            expected: 2,
+        },
+        Case {
+            first: "main.rs - Quartz - Visual Studio Code",
+            second: "Main.rs - Quartz - Visual Studio Code",
+            exe: "code.exe",
+            second_app: 1,
+            expected: 2,
+        },
+        Case {
+            first: "café.rs - Quartz - Visual Studio Code",
+            second: "cafe\u{301}.rs - Quartz - Visual Studio Code",
+            exe: "code.exe",
+            second_app: 1,
+            expected: 1,
+        },
+        Case {
+            first: "main.rs - Quartz - Visual Studio Code",
+            second: "main.rs - Quartz - Visual Studio Code",
+            exe: "code.exe",
+            second_app: 2,
+            expected: 2,
+        },
+        Case {
+            first: "Page - Google Chrome - Personal",
+            second: "Page - Google Chrome - Work",
+            exe: "chrome.exe",
+            second_app: 1,
+            expected: 2,
+        },
+        Case {
+            first: "Quartz (Workspace) - Visual Studio Code",
+            second: "Other (Workspace) - Visual Studio Code",
+            exe: "code.exe",
+            second_app: 1,
+            expected: 2,
+        },
+        Case {
+            first: "Quartz (Workspace) - Visual Studio Code",
+            second: "Quartz (Workspace) - Visual Studio Code",
+            exe: "code.exe",
+            second_app: 1,
+            expected: 1,
+        },
+    ] {
+        let mut first = classified_window(1, 0, 10, case.exe);
+        let mut second = classified_window(2, 10, 20, case.exe);
+        let InputRow::Foreground(row) = &mut first else {
+            panic!("foreground")
+        };
+        edit_foreground(row, CaptureLevel::Full, |content| {
+            content.title = Some(case.first.into())
+        });
+        let InputRow::Foreground(row) = &mut second else {
+            panic!("foreground")
+        };
+        edit_foreground(row, CaptureLevel::Full, |content| {
+            content.title = Some(case.second.into());
+            content.title_id = Some(TitleId(2));
+            content.window_instance = Some(WindowInstanceId(1));
+            std::sync::Arc::make_mut(content.app.as_mut().expect("app")).id =
+                ApplicationId(case.second_app);
+        });
+        let derived = derive_classified(
+            vec![clock(1, 0, 0, 20), first, second],
+            QueryRange { start: 0, end: 20 },
+            classifier(&[]),
+        );
+        let mut projection = TimelineProjection::default();
+        for segment in &derived.segments {
+            projection.push(segment, &derived.facts, TimelineDetail::App, 100);
+        }
+        assert_eq!(
+            projection.into_segments().len(),
+            case.expected,
+            "{} followed by {}",
+            case.first,
+            case.second
+        );
+    }
+}
+
+#[test]
+fn document_merges_keep_category_source_idle_gap_and_utc_boundaries() {
+    use quartz_protocol::{AnnotationKind, TimelineDetail};
+    for boundary in [
+        InputRow::Availability {
+            span: span(2, 10, 20),
+            state: Availability::Idle,
+        },
+        InputRow::Gap {
+            span: span(2, 10, 20),
+            reason: quartz_domain::capture::GapReason::EventOverload,
+        },
+        annotation(1, AnnotationKind::CategoryOverride, 10, 20, Some(1)),
+        annotation(1, AnnotationKind::CategoryOverride, 10, 20, Some(2)),
+    ] {
+        let derived = derive_classified(
+            vec![
+                clock(1, 0, 0, 30),
+                classified_window(1, 0, 30, "code.exe"),
+                boundary,
+            ],
+            QueryRange { start: 0, end: 30 },
+            classifier(&[]),
+        );
+        for detail in [TimelineDetail::App, TimelineDetail::Raw] {
+            let mut projection = TimelineProjection::default();
+            for segment in &derived.segments {
+                projection.push(segment, &derived.facts, detail, 100);
+            }
+            assert_eq!(
+                projection.into_segments().len(),
+                3,
+                "boundary survives {detail:?}"
+            );
+        }
+    }
+    let mut derived = derive(
+        vec![
+            clock(1, 0, 0, 30),
+            window(1, 0, 30),
+            InputRow::Availability {
+                span: span(2, 10, 20),
+                state: Availability::Idle,
+            },
+        ],
+        QueryRange { start: 0, end: 30 },
+    );
+    derived.segments[1].activity = pipeline::Activity::Active;
+    derived.segments[1].span.start_utc_ms += 1;
+    let mut projection = TimelineProjection::default();
+    for segment in &derived.segments {
+        projection.push(segment, &derived.facts, TimelineDetail::App, 1);
+    }
+    assert_eq!(
+        projection.into_segments().len(),
+        2,
+        "UTC gap survives document merge"
+    );
+}

@@ -93,6 +93,7 @@ mod tests {
             segment
         );
         let response = QuerySegmentDetailResponse {
+            reference_range: None,
             intervals: Vec::new(),
             versions: QueryVersions("segment".into()),
             next_cursor: None,

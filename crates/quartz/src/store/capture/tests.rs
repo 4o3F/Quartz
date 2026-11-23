@@ -1701,13 +1701,23 @@ fn clock_confirmation_invalidates_query_versions_before_first_foreground_fact() 
     let after = fixture.store.version_state().expect("confirmed versions");
     let before = crate::query::versions::VersionState::from_stored(
         before,
-        quartz_domain::rules::ContentHash::of("classification-test"),
+        quartz_domain::rules::registry::SnapshotHashes {
+            classification: quartz_domain::rules::ContentHash::of("classification-test"),
+            extraction: quartz_domain::rules::ContentHash::of("extraction-test"),
+            privacy: quartz_domain::rules::ContentHash::of("privacy-test"),
+        },
     )
+    .expect("version state")
     .digest(range);
     let after = crate::query::versions::VersionState::from_stored(
         after,
-        quartz_domain::rules::ContentHash::of("classification-test"),
+        quartz_domain::rules::registry::SnapshotHashes {
+            classification: quartz_domain::rules::ContentHash::of("classification-test"),
+            extraction: quartz_domain::rules::ContentHash::of("extraction-test"),
+            privacy: quartz_domain::rules::ContentHash::of("privacy-test"),
+        },
     )
+    .expect("version state")
     .digest(range);
     assert_ne!(
         before, after,

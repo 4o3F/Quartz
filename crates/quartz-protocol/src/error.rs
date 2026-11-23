@@ -36,6 +36,8 @@ pub enum ErrorKind {
     InvalidRange,
     /// Query inputs changed; pagination must restart.
     StaleCursor,
+    /// Document reference inputs changed; refresh the originating query.
+    StaleDocumentRef,
     /// The submitted base version differs from the current rule-set version.
     RuleSetStale {
         /// Current version to read before resubmitting a change.
@@ -66,6 +68,7 @@ impl ErrorKind {
             Self::Forbidden => "forbidden",
             Self::InvalidRange => "invalid_range",
             Self::StaleCursor => "stale_cursor",
+            Self::StaleDocumentRef => "stale_document_ref",
             Self::RuleSetStale { .. } => "rule_set_stale",
             Self::CoreOffline => "core_offline",
             Self::Internal => "internal",

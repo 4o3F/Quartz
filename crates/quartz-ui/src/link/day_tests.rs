@@ -126,6 +126,7 @@ impl DayHarness {
                 .ok(
                     query,
                     serde_json::to_value(QueryTimelineResponse {
+                        reference_range: None,
                         segments: Vec::new(),
                         versions: version.clone(),
                         next_cursor: cursor.clone(),
@@ -145,6 +146,7 @@ impl DayHarness {
                     .ok(
                         next,
                         serde_json::to_value(QueryTimelineResponse {
+                            reference_range: None,
                             segments: Vec::new(),
                             versions: version.clone(),
                             next_cursor: None,

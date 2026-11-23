@@ -3,6 +3,7 @@
 use super::{
     calendar::DayCalendar,
     classification::{ClassificationId, Classifier, ExtractedTitle, QueryCategoryRef},
+    documents::DocumentIdentity,
     input::{
         Availability, CaptureLevel, ClockSegment, FactId, ForegroundKind, InputRow,
         QueryAnnotation, QueryRange,
@@ -128,6 +129,30 @@ impl SegmentFacts {
     }
     pub(super) fn category(&self, segment: &DerivedSegment) -> &CategoryRef {
         &self.classifier.result(segment.classification).category
+    }
+    fn extraction(&self, segment: &DerivedSegment) -> quartz_protocol::TitleExtraction {
+        let Some(index) = segment.foreground else {
+            return Default::default();
+        };
+        let Some(extracted) = &self.rows[index.0].extraction else {
+            return Default::default();
+        };
+        use quartz_domain::rules::ExtractionStatus;
+        let fields = &extracted.fields;
+        quartz_protocol::TitleExtraction {
+            document: fields.document.clone(),
+            project: fields.project.clone(),
+            profile: fields.profile.clone(),
+            dirty: Some(fields.dirty),
+            normalized_title: fields.normalized_title.clone(),
+            extractor_rule: extracted.extractor_rule.clone(),
+            status: Some(match fields.status {
+                ExtractionStatus::Extracted => quartz_protocol::ExtractionStatus::Extracted,
+                ExtractionStatus::Fallback => quartz_protocol::ExtractionStatus::Fallback,
+                ExtractionStatus::Empty => quartz_protocol::ExtractionStatus::Empty,
+                ExtractionStatus::Unknown => quartz_protocol::ExtractionStatus::Unknown,
+            }),
+        }
     }
     fn app(&self, segment: &DerivedSegment) -> Option<&quartz_domain::facts::ApplicationRef> {
         self.foreground(segment)
@@ -770,6 +795,8 @@ impl DayAccumulator {
 #[derive(Debug, Default)]
 pub(crate) struct TimelineProjection {
     segments: Vec<TimelineSegment>,
+    last_identity: Option<DocumentIdentity>,
+    last_title: Option<String>,
 }
 impl TimelineProjection {
     pub(crate) fn project(
@@ -778,6 +805,8 @@ impl TimelineProjection {
         detail: TimelineDetail,
     ) -> TimelineSegment {
         TimelineSegment {
+            extraction: (detail != TimelineDetail::Category).then(|| facts.extraction(segment)),
+            document_ref: None,
             start_utc_ms: segment.span.start_utc_ms,
             end_utc_ms: segment.span.end_utc_ms,
             duration_ms: segment.span.duration_ms,
@@ -875,6 +904,14 @@ impl TimelineProjection {
         pixel_ms: u64,
     ) {
         let current = Self::project(segment, facts, detail);
+        let identity = DocumentIdentity::from_segment(&current);
+        let raw_title = facts
+            .foreground(segment)
+            .and_then(Foreground::visible_title);
+        let same_identity = self.last_identity == identity;
+        let same_title = self.last_title.as_deref() == raw_title;
+        self.last_identity = identity;
+        self.last_title = raw_title.map(str::to_owned);
         if let Some(last) = self.segments.last_mut()
             && last.end_utc_ms == current.start_utc_ms
             && last.clock_segment_id == current.clock_segment_id
@@ -892,13 +929,20 @@ impl TimelineProjection {
                     )))
             && last.app == current.app
             && last.window_instance == current.window_instance
-            && last.title == current.title
-            && u64::try_from(current.end_utc_ms - last.start_utc_ms)
-                .is_ok_and(|width| width < pixel_ms)
+            && (detail == TimelineDetail::Category || same_identity)
+            && (detail != TimelineDetail::Raw
+                || (same_title && last.extraction == current.extraction))
+            && (detail != TimelineDetail::App || self.last_identity.is_some() || same_title)
+            && ((detail == TimelineDetail::App
+                && current.window_instance.is_some()
+                && self.last_identity.is_some())
+                || u64::try_from(current.end_utc_ms - last.start_utc_ms)
+                    .is_ok_and(|width| width < pixel_ms))
         {
             if last.category_source != current.category_source {
                 last.category_source = quartz_protocol::CategorySource::Mixed;
             }
+            last.extraction = current.extraction;
             last.end_utc_ms = current.end_utc_ms;
             last.duration_ms = last
                 .duration_ms
