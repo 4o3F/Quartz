@@ -1,0 +1,2486 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Quartz — Explanations, situation text &amp; Today entry points (M4 V5)</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mockup.css">
+<!--
+  Explanations, situation text, context menus, and Today classification/privacy entry points (M4 V5: H10 / H15).
+  Query parameters:
+    ?state=explain | explain-fragments | explain-long | situation |
+           context-menu-ranking | context-menu-timeline |
+           classify-from-today | privacy-from-today
+    &theme=light | dark
+    &lang=zh-CN | en | en-XA
+    &size=min          (optional: 640x480 minimum window per 07 §2.3; default 1280x800)
+-->
+<style>
+/* Minimum window 640x480 (Compact breakpoint per 07 §2.1 & §2.3) */
+html[data-size="min"],
+html[data-size="min"] body,
+html[data-size="min"] .window{width:640px;height:480px}
+
+.wrap{position:relative;overflow:hidden}
+.main-wrap{position:relative;flex:1;min-width:0;display:flex}
+.main{position:relative;padding:var(--space-xxl) var(--space-xxl) var(--space-l);gap:var(--space-s);overflow-y:auto;overflow-x:hidden}
+html[data-has-panel="true"] .main{padding:var(--space-l) var(--space-l) var(--space-l)}
+html[data-size="min"] .main{padding:var(--space-m) var(--space-m) var(--space-l)}
+
+/* Follow 07 §10 decision: chart plot areas sit directly on bg.base in both light and dark */
+.plot{background:var(--bg-base);border-radius:var(--radius-control)}
+
+/* Fluent 2 overlay scrollbar indicator (11 §9.2) */
+.scroll-track{
+  display:none;
+  position:absolute;top:var(--space-xs);right:var(--space-xs);bottom:var(--space-xs);
+  width:6px;pointer-events:none;z-index:8;
+}
+.scrollable > .scroll-track{display:block}
+.scroll-thumb{
+  position:absolute;left:1px;right:1px;top:0;
+  border-radius:var(--radius-control);
+  background:var(--text-tertiary);
+}
+
+/* Nav text stays single-line with ellipsis in en-XA */
+.nav-item span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Flexible buttons & badges safe for en-XA */
+.badge{max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;gap:3px}
+.badge .btxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn{min-height:var(--h-control-standard);height:auto;padding:4px 12px}
+.btn.compact{min-height:var(--h-control-compact);height:auto;padding:2px 10px}
+.btn.icon{width:var(--h-control-standard);height:var(--h-control-standard);padding:0}
+.btn.compact.icon{width:var(--h-control-compact);height:var(--h-control-compact);padding:0}
+
+/* Today layout responsiveness (07 §2.1 & §2.3) */
+.datebar{flex-wrap:wrap;height:auto;min-height:var(--h-control-standard)}
+.datebar .date{min-width:186px}
+.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr))}
+.stat{padding:0 10px;border-left:1px solid var(--stroke-divider);min-width:0}
+.stat:first-child{padding-left:0;border-left:none}
+.stat .v{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stat .l{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.legend{flex-wrap:wrap;gap:var(--space-xs) var(--space-l)}
+.tl-head{gap:6px;row-gap:4px;flex-wrap:wrap}
+.tl-head .h-sub{flex:1 0 auto;min-width:0;white-space:nowrap}
+
+html[data-has-panel="true"] .stats{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:var(--space-s)}
+html[data-has-panel="true"] .stat:nth-child(3n+1){padding-left:0;border-left:none}
+html[data-has-panel="true"] .tl{--gut:98px}
+html[data-has-panel="true"] .two-col{flex-direction:column}
+
+html[data-size="min"] .datebar .date{min-width:154px}
+html[data-size="min"] .stats{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:var(--space-s)}
+html[data-size="min"] .stat:nth-child(3n+1){padding-left:0;border-left:none}
+html[data-size="min"] .two-col{flex-direction:column}
+html[data-size="min"] .tl{--gut:84px}
+html[data-size="min"] .legend{gap:var(--space-xs) var(--space-m)}
+
+/* Timeline clock-change marker */
+.dst-marker{
+  position:absolute;top:-2px;bottom:-2px;width:2px;
+  background:repeating-linear-gradient(180deg,var(--status-caution) 0 4px,transparent 4px 7px);
+  z-index:4;pointer-events:none;
+}
+.dst-pill{
+  position:absolute;top:-19px;transform:translateX(-50%);
+  height:16px;padding:0 5px;border-radius:var(--radius-control);
+  background:var(--status-caution-bg);color:var(--status-caution);
+  border:1px solid color-mix(in srgb,var(--status-caution) 28%,transparent);
+  font:var(--type-caption);font-size:10.5px;line-height:14px;
+  white-space:nowrap;display:inline-flex;align-items:center;gap:3px;
+}
+
+/* Selected block ring for timeline context menu */
+.blk.ctx-target{
+  box-shadow:0 0 0 2px var(--bg-base),0 0 0 3.5px var(--accent-fill);
+  z-index:5;
+}
+
+/* Ranking row refinements + inline overflow "..." button */
+.rank{position:relative}
+.rank .nm{width:152px}
+.rank .du{width:76px}
+.rank-more{
+  width:24px;height:24px;flex:none;
+  display:grid;place-items:center;
+  border-radius:var(--radius-control);
+  color:var(--text-tertiary);
+}
+.rank.sel .rank-more{
+  background:var(--fill-control);
+  border:1px solid var(--stroke-control-strong);
+  color:var(--text-primary);
+}
+html[data-has-panel="true"] .rank .nm{width:136px}
+html[data-size="min"] .rank .nm{width:128px}
+
+/* Fluent 2 Context Menu Flyout + Disabled Tooltip */
+.ctx-menu{
+  position:absolute;
+  width:228px;
+  padding:4px;
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-overlay);
+  box-shadow:var(--shadow-28);
+  z-index:35;
+  display:flex;flex-direction:column;gap:2px;
+}
+.ctx-item{
+  min-height:32px;
+  padding:4px 10px;
+  border-radius:var(--radius-control);
+  display:flex;align-items:center;gap:10px;
+  font:var(--type-body);color:var(--text-primary);
+  position:relative;
+}
+.ctx-item.hov{background:var(--fill-subtle-hover)}
+.ctx-item .ctx-ic{flex:none;color:var(--text-secondary)}
+.ctx-item .ctx-lbl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ctx-item .ctx-sub{font:var(--type-caption);color:var(--text-tertiary);white-space:nowrap;flex:none}
+.ctx-item.disabled{color:var(--text-disabled)}
+.ctx-item.disabled .ctx-ic{color:var(--text-disabled)}
+.ctx-sep{height:1px;margin:3px 6px;background:var(--stroke-divider)}
+
+.ctx-tooltip{
+  position:absolute;
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-control);
+  box-shadow:var(--shadow-16);
+  padding:5px 9px;
+  font:var(--type-caption);color:var(--text-secondary);
+  white-space:normal;max-width:216px;overflow-wrap:anywhere;align-items:flex-start !important;
+  z-index:38;
+  display:inline-flex;align-items:center;gap:5px;
+}
+.ctx-tooltip svg{color:var(--text-tertiary);flex:none}
+
+/* ===========================
+   Right-hand 360px Panel (shared V1/V2/V3/V5 architecture)
+   =========================== */
+.panel-scrim{
+  display:none;
+  position:absolute;inset:0;
+  background:color-mix(in srgb,var(--fill-smoke) 42%,transparent);
+  z-index:15;
+}
+.details{
+  width:var(--w-details);flex:none;
+  border-left:1px solid var(--stroke-divider);
+  padding:0;gap:0;
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  background:transparent;
+}
+html[data-size="min"][data-panel-open="true"] .panel-scrim{display:block}
+html[data-size="min"] .details{
+  position:absolute;top:0;right:0;bottom:0;
+  width:360px;max-width:calc(100% - 16px);
+  background:linear-gradient(var(--fill-layer),var(--fill-layer)),var(--bg-base);
+  border-left:1px solid var(--stroke-divider);
+  box-shadow:var(--shadow-28);
+  z-index:20;
+}
+
+.ed-head{
+  flex:none;
+  padding:10px var(--space-l);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+}
+.ed-head-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.ed-head-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+
+.ed-body-wrap{position:relative;flex:1;min-height:0;display:flex}
+.ed-body{
+  flex:1;min-height:0;
+  overflow-y:auto;overflow-x:hidden;
+  padding:8px var(--space-l);
+  display:flex;flex-direction:column;gap:6px;
+}
+
+/* Strictly single-row pinned panel footer (V2/V3 rule — NEVER wraps) */
+.ed-foot{
+  flex:none;
+  padding:8px var(--space-l);
+  border-top:1px solid var(--stroke-divider);
+  display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+}
+.ed-foot-main{
+  flex:1;min-width:0;
+  display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+}
+.ed-foot-main .btn{
+  padding:4px 9px;
+  min-width:0;max-width:100%;
+  overflow:hidden;
+}
+.ed-foot-main .btn.primary-slot{flex:0 1 auto}
+.ed-foot-main .btn:not(.primary-slot){flex:0 0 auto}
+.ed-foot-main .btn.flex-shrink{flex:0 1 auto}
+.ed-foot-main .btn.icon{flex:0 0 auto;padding:0}
+.ed-foot-main .btn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-foot-right{flex:0 0 auto;margin-left:auto;display:flex;align-items:center;gap:6px}
+
+/* ===========================
+   Explain Sidebar Components
+   =========================== */
+.res-card{
+  padding:7px 10px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:4px;
+}
+.res-top{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+.res-cat-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.res-time{font:var(--type-body-strong);color:var(--text-primary);white-space:nowrap}
+.res-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font:var(--type-caption);color:var(--text-secondary)}
+
+/* Annotation precedence callout */
+.anno-callout{
+  padding:5px 8px;
+  border-radius:var(--radius-control);
+  border:1px solid color-mix(in srgb,var(--accent-fill) 32%,transparent);
+  background:color-mix(in srgb,var(--accent-fill) 8%,var(--fill-card));
+  display:flex;flex-direction:column;gap:2px;
+}
+.anno-callout-top{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.anno-callout-top svg{color:var(--accent-text);flex:none}
+.anno-callout-desc{font:var(--type-caption);font-size:11.5px;line-height:15px;color:var(--text-secondary);overflow-wrap:anywhere}
+
+/* Historical privacy attribution box */
+.priv-attr{
+  padding:5px 8px;
+  border-radius:var(--radius-control);
+  border:1px solid color-mix(in srgb,var(--status-caution) 30%,transparent);
+  background:var(--status-caution-bg);
+  display:flex;align-items:flex-start;gap:6px;
+  font:var(--type-caption);font-size:11.5px;line-height:15px;color:var(--text-primary);
+}
+.priv-attr.neutral{
+  border-color:var(--stroke-card);
+  background:var(--fill-card-secondary);
+  color:var(--text-secondary);
+}
+.priv-attr svg{flex:none;margin-top:1px;color:var(--status-caution)}
+.priv-attr.neutral svg{color:var(--text-tertiary)}
+.priv-attr-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;overflow-wrap:anywhere}
+
+/* Extraction provenance card */
+.stage-card{
+  padding:6px 9px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:4px;
+}
+.stage-hdr{
+  display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;
+}
+.stage-hdr-l{display:flex;align-items:center;gap:6px;min-width:0}
+.stage-num{
+  width:18px;height:18px;border-radius:50%;flex:none;
+  background:var(--fill-subtle-hover);
+  font:var(--type-caption);font-weight:600;color:var(--text-secondary);
+  display:grid;place-items:center;
+}
+.kv-chips{display:flex;flex-wrap:wrap;gap:4px}
+.kv-chip{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:2px 6px;max-width:100%;
+  border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  font-family:var(--font-mono);font-size:11px;line-height:15px;
+  color:var(--text-primary);
+  overflow-wrap:anywhere;
+}
+.kv-chip .k{color:var(--text-tertiary)}
+.kv-chip.missing{color:var(--text-tertiary);border-style:dashed;background:transparent}
+.kv-chip.hidden{color:var(--status-caution);background:var(--status-caution-bg);border-color:color-mix(in srgb,var(--status-caution) 28%,transparent)}
+
+/* Explain tree controls & nodes */
+.tree-controls{
+  display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;
+  padding:4px 0;
+}
+.tree-controls-btns{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+
+.set-group{
+  display:flex;flex-direction:column;gap:3px;
+}
+.set-hdr{
+  display:flex;align-items:center;gap:5px;min-width:0;
+  padding:2px 4px;border-radius:var(--radius-control);
+}
+.set-hdr .set-name{font:var(--type-caption);font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.set-hdr .set-key{font-family:var(--font-mono);font-size:11px;line-height:14px;color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.rule-node{
+  margin-left:8px;
+  padding:5px 7px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:3px;
+  position:relative;
+}
+.rule-node.winner{
+  background:var(--fill-card);
+  border-color:color-mix(in srgb,var(--status-success) 38%,transparent);
+  border-left:3px solid var(--status-success);
+  padding-left:6px;
+}
+.rule-node.winner-overridden{
+  background:var(--fill-card);
+  border-color:color-mix(in srgb,var(--accent-fill) 36%,transparent);
+  border-left:3px solid var(--accent-fill);
+  padding-left:6px;
+}
+.rule-node.collapsed{
+  padding:3px 6px;
+  background:transparent;
+  border:1px solid var(--stroke-divider);
+}
+.rule-hdr{display:flex;align-items:flex-start;gap:4px;min-width:0}
+.rule-hdr .r-ico{flex:none;margin-top:1px}
+.rule-hdr-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:0}
+.rule-title-line{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}
+.rule-title-line .r-name{font:var(--type-caption);font-weight:600;color:var(--text-primary);overflow-wrap:anywhere}
+.rule-reason{font:var(--type-caption);font-size:11px;line-height:14px;color:var(--text-tertiary);overflow-wrap:anywhere}
+
+.cond-tree{
+  border-left:1px solid var(--stroke-divider);
+  margin-left:6px;padding-left:8px;
+  display:flex;flex-direction:column;gap:2px;
+}
+.cond-item{display:flex;flex-direction:column;gap:0;min-width:0}
+.cond-expr{
+  display:flex;align-items:flex-start;gap:4px;
+  font-family:var(--font-mono);font-size:11px;line-height:14px;
+  color:var(--text-primary);overflow-wrap:anywhere;
+}
+.cond-mark{flex:none;font-weight:700;width:11px;text-align:center}
+.cond-mark.ok{color:var(--status-success)}
+.cond-mark.no{color:var(--text-tertiary)}
+.cond-actual{
+  padding-left:15px;
+  font:var(--type-caption);font-size:11px;line-height:14px;
+  color:var(--text-secondary);overflow-wrap:anywhere;
+}
+.cond-actual .val-missing{
+  display:inline-flex;align-items:center;padding:0 4px;border-radius:3px;
+  background:var(--fill-subtle-hover);color:var(--text-secondary);
+  font-family:var(--font-small);
+}
+.cond-actual .val-hidden{
+  display:inline-flex;align-items:center;padding:0 4px;border-radius:3px;
+  background:var(--status-caution-bg);color:var(--status-caution);
+  font-family:var(--font-small);font-weight:600;
+}
+
+/* Fragment list (explain-fragments) */
+.frag-list{display:flex;flex-direction:column;gap:5px}
+.frag-card{
+  border-radius:var(--radius-overlay);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card);
+  overflow:hidden;
+}
+.frag-card.expanded{
+  border-color:color-mix(in srgb,var(--accent-fill) 42%,transparent);
+}
+.frag-hdr{
+  padding:5px 8px;
+  display:flex;align-items:flex-start;gap:5px;
+  background:var(--fill-card-secondary);
+}
+.frag-card.expanded .frag-hdr{
+  border-bottom:1px solid var(--stroke-divider);
+  background:color-mix(in srgb,var(--accent-fill) 7%,var(--fill-card-secondary));
+}
+.frag-hdr-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.frag-time-row{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.frag-time{font-family:var(--font-mono);font-size:11.5px;line-height:15px;font-weight:600;color:var(--text-primary)}
+.frag-utc{
+  display:inline-flex;align-items:center;height:16px;padding:0 5px;
+  border-radius:var(--radius-control);
+  background:var(--status-caution-bg);color:var(--status-caution);
+  font-family:var(--font-mono);font-size:10.5px;line-height:14px;font-weight:600;
+}
+.frag-meta-row{display:flex;align-items:center;gap:5px;flex-wrap:wrap;font:var(--type-caption);color:var(--text-secondary)}
+.frag-body{
+  padding:6px 8px;
+  display:flex;flex-direction:column;gap:5px;
+}
+
+/* Paging footer inside explain-long */
+.pager-box{
+  padding:6px 9px;
+  border-radius:var(--radius-control);
+  border:1px dashed var(--stroke-control-strong);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;align-items:center;gap:5px;
+  text-align:center;
+}
+
+/* ===========================
+   InfoBars & Modals (Situation Dialog)
+   =========================== */
+.infobar{
+  flex:none;
+  padding:6px 10px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;word-break:break-word;
+}
+.infobar .ib-ic{flex:none;margin-top:1px;color:var(--text-secondary)}
+.infobar .ib-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow-wrap:anywhere}
+.infobar .ib-title{font:var(--type-body-strong);color:var(--text-primary);font-size:13px;line-height:18px;overflow-wrap:anywhere}
+.infobar.caution{
+  background:var(--status-caution-bg);
+  border-color:color-mix(in srgb,var(--status-caution) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.caution .ib-ic{color:var(--status-caution)}
+.infobar.accent-info{
+  background:color-mix(in srgb,var(--accent-fill) 8%,var(--fill-card));
+  border-color:color-mix(in srgb,var(--accent-fill) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.accent-info .ib-ic{color:var(--accent-text)}
+
+.modal-scrim{
+  position:absolute;inset:0;
+  background:var(--fill-smoke);
+  z-index:40;
+  display:flex;align-items:center;justify-content:center;
+  padding:var(--space-l);
+}
+.modal-dlg{
+  width:624px;max-width:100%;max-height:100%;
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-overlay);
+  box-shadow:var(--shadow-64);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.modal-head{
+  flex:none;
+  padding:12px var(--space-xl);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:center;gap:var(--space-s);
+}
+.modal-head-txt{flex:1;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.modal-body-wrap{position:relative;flex:1;min-height:0;display:flex}
+.modal-body{
+  flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
+  padding:12px var(--space-xl);
+  display:flex;flex-direction:column;gap:10px;
+}
+.modal-foot{
+  flex:none;
+  padding:10px var(--space-xl);
+  border-top:1px solid var(--stroke-divider);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:center;flex-wrap:nowrap;gap:var(--space-s);
+}
+.modal-foot-l{flex:1;min-width:0;display:flex;align-items:center;gap:8px;overflow:hidden}
+.modal-foot-r{flex:0 0 auto;display:flex;align-items:center;gap:var(--space-s);margin-left:auto}
+
+html[data-size="min"] .modal-scrim{padding:var(--space-s)}
+html[data-size="min"] .modal-head{padding:10px 14px}
+html[data-size="min"] .modal-body{padding:10px 14px;gap:8px}
+html[data-size="min"] .modal-foot{padding:8px 14px}
+html[data-size="min"] .modal-foot-l .sit-meta-hide{display:none}
+
+/* Editable situation text box */
+.sit-editor{
+  padding:8px 11px;
+  border-radius:var(--radius-control);
+  background:var(--bg-base);
+  border:1px solid var(--stroke-control-strong);
+  border-bottom:2px solid var(--accent-fill);
+  font-family:var(--font-mono);font-size:11.5px;line-height:16px;
+  color:var(--text-primary);
+  display:flex;flex-direction:column;gap:1px;
+  overflow-wrap:anywhere;
+}
+.sit-line{white-space:pre-wrap;overflow-wrap:anywhere}
+.sit-line.sec{color:var(--text-secondary)}
+.sit-line.gap-top{margin-top:6px}
+.sit-line.link{color:var(--accent-text)}
+.sit-line.req{
+  margin-top:6px;padding:3px 6px;margin-left:-6px;margin-right:-6px;
+  border-radius:var(--radius-control);
+  background:color-mix(in srgb,var(--accent-fill) 10%,transparent);
+  font-weight:600;
+}
+.sit-ph{color:var(--text-tertiary);font-weight:400;font-family:var(--font-text);font-size:11.5px}
+.caret{
+  display:inline-block;width:1.5px;height:14px;
+  background:var(--accent-fill);vertical-align:text-bottom;margin:0 2px 0 1px;
+}
+
+/* ===========================
+   Reused V2 Scope Chooser Styles (classify-from-today)
+   =========================== */
+.field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.field>label{font:var(--type-caption);color:var(--text-secondary);display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}
+.input{min-width:0}
+.input.focused{border-color:var(--stroke-control);border-bottom:2px solid var(--accent-fill)}
+.field-hint{font:var(--type-caption);color:var(--text-tertiary);overflow-wrap:anywhere}
+
+.radio-stack{display:flex;flex-direction:column;gap:6px}
+.radio-card{
+  padding:7px 9px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-control);
+  background:var(--fill-control);
+  display:flex;flex-direction:column;gap:5px;
+}
+.radio-card.sel{border-color:var(--accent-fill);background:var(--fill-card)}
+.radio-hdr{display:flex;align-items:flex-start;gap:8px}
+.radio-dot{
+  width:16px;height:16px;border-radius:50%;flex:none;margin-top:2px;
+  border:1.5px solid var(--text-secondary);
+  display:grid;place-items:center;
+}
+.radio-card.sel .radio-dot{border-color:var(--accent-fill);background:var(--accent-fill)}
+.radio-card.sel .radio-dot::after{content:"";width:7px;height:7px;border-radius:50%;background:var(--text-on-accent)}
+.radio-title-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.radio-fields{padding-left:24px;display:flex;flex-direction:column;gap:4px}
+.sample-select-pill{
+  margin-top:2px;display:inline-flex;align-items:center;gap:6px;
+  padding:2px 8px;min-height:24px;max-width:100%;
+  border-radius:var(--radius-control);
+  background:var(--fill-subtle-hover);border:1px solid var(--stroke-control);
+  font:var(--type-caption);color:var(--text-primary);
+}
+
+.prev-card{
+  padding:8px 10px;
+  border-radius:var(--radius-overlay);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;flex-direction:column;gap:6px;
+}
+.prev-head{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}
+.prev-head .prev-dest{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.prev-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.prev-metric{
+  padding:5px 7px;border-radius:var(--radius-control);
+  background:var(--fill-card);border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:1px;min-width:0;
+}
+.prev-metric .pm-lbl{display:flex;align-items:center;gap:5px;font:var(--type-caption);color:var(--text-secondary)}
+.prev-metric .pm-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--status-neutral)}
+.prev-metric.eff .pm-dot{background:var(--status-success)}
+.prev-metric .pm-val{font:var(--type-body-strong);color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prev-metric .pm-sub{font:var(--type-caption);color:var(--text-tertiary);overflow-wrap:anywhere}
+
+/* ===========================
+   Reused V3 Privacy Tab & Editor Styles (privacy-from-today)
+   =========================== */
+.page-head{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-s);min-height:40px}
+.page-head .h-title{flex:1;min-width:140px}
+.page-head-acts{display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap}
+.pivot{height:auto;min-height:32px;gap:var(--space-l);row-gap:var(--space-xs);flex-wrap:wrap}
+.pivot div{height:32px;white-space:nowrap}
+
+.rules-grid{flex:1;min-height:0;display:flex;align-items:stretch;gap:var(--space-s);margin-top:var(--space-xs)}
+.tree-card{width:228px;flex:none;padding:var(--space-m);display:flex;flex-direction:column;gap:var(--space-xs);align-self:flex-start}
+.list-card{flex:1;min-width:0;padding:var(--space-m) var(--space-m) var(--space-s);display:flex;flex-direction:column;gap:var(--space-xs);align-self:flex-start}
+html[data-size="min"] .rules-grid{flex-direction:column;flex:none}
+html[data-size="min"] .tree-card,html[data-size="min"] .list-card{width:100%}
+
+.tree-head{display:flex;align-items:center;gap:var(--space-s);padding:0 var(--space-xs) var(--space-xs)}
+.tnode{min-height:48px;padding:6px 8px;gap:6px}
+.tnode.ind1{margin-left:14px}
+.tnode .badges{display:flex;flex-wrap:wrap;gap:4px;margin-top:1px}
+.tnode .lock-ic{width:12px;height:12px;color:var(--text-tertiary);flex:none}
+.tree-foot-note{
+  margin-top:4px;padding:6px 8px;border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);border:1px solid var(--stroke-card);
+  font:var(--type-caption);color:var(--text-secondary);overflow-wrap:anywhere;
+}
+
+.list-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-s);padding:0 var(--space-xs) var(--space-xs)}
+.list-toolbar-right{margin-left:auto;display:flex;align-items:center;gap:var(--space-s);flex-wrap:wrap}
+.list-meta{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-s);padding:0 var(--space-xs) var(--space-xs);font:var(--type-caption);color:var(--text-secondary)}
+
+.rtbl-h,.rtbl-r{display:flex;align-items:center;gap:var(--space-s);min-height:36px;padding:5px var(--space-s);border-radius:var(--radius-control)}
+.rtbl-h{min-height:var(--h-row-compact);padding:4px var(--space-s);font:var(--type-caption);color:var(--text-secondary);border-bottom:1px solid var(--stroke-divider);border-radius:0}
+.rtbl-r{position:relative}
+.rtbl-r.sel{background:var(--fill-subtle-hover)}
+.rtbl-r.sel::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:2px;background:var(--accent-fill)}
+.rtbl-r.draft-row{border:1px dashed color-mix(in srgb,var(--accent-fill) 45%,transparent);background:color-mix(in srgb,var(--accent-fill) 6%,var(--fill-card))}
+.col-rule{flex:1;min-width:110px;display:flex;flex-direction:column;gap:1px;overflow:hidden}
+.col-rule-top{display:flex;align-items:center;gap:5px;min-width:0}
+.col-rule-top .lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.col-rule-sub{font:var(--type-caption);color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.col-cond{flex:0 0 132px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:11.5px;line-height:16px;color:var(--text-secondary)}
+.col-act{flex:0 0 96px;min-width:0;display:flex;align-items:center;gap:4px}
+
+.cond-list{display:flex;flex-direction:column;gap:5px}
+.cond-row{padding:5px 7px;border-radius:var(--radius-control);border:1px solid var(--stroke-card);background:var(--fill-card-secondary);display:flex;flex-direction:column;gap:4px}
+.cond-line{display:flex;align-items:center;gap:4px;min-width:0}
+.neg-btn{height:var(--h-control-compact);padding:0 7px;flex:none;display:inline-flex;align-items:center;justify-content:center;border-radius:var(--radius-control);border:1px solid var(--stroke-control);background:var(--fill-control);font:var(--type-caption);color:var(--text-secondary);white-space:nowrap}
+.full-seg{width:100%;display:flex;height:auto;min-height:var(--h-control-compact)}
+.full-seg div{flex:1 1 0;min-width:0;padding:1px 6px;display:block;text-align:center;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.act-grid{border-radius:var(--radius-control);border:1px solid var(--stroke-card);background:var(--fill-card-secondary);overflow:hidden}
+.act-row{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:4px 8px;border-top:1px solid var(--stroke-divider)}
+.act-row:first-child{border-top:none}
+.act-field{display:flex;align-items:baseline;gap:5px;min-width:0}
+.act-field .af-lbl{font:var(--type-caption);color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.act-field .af-key{font-family:var(--font-mono);font-size:11px;line-height:14px;color:var(--text-tertiary);flex:none}
+.act-seg{flex:none}
+.act-seg div{padding:0 8px}
+
+.prev-summary-line{padding:4px 7px;border-radius:var(--radius-control);background:var(--fill-card);border:1px solid var(--stroke-card);font:var(--type-caption);color:var(--text-primary);overflow-wrap:anywhere}
+.prev-samples-hdr{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;padding-top:3px;border-top:1px solid var(--stroke-divider);font:var(--type-caption);color:var(--text-secondary)}
+.psample-row{display:flex;align-items:center;gap:5px;min-height:21px;padding:1px 3px;border-radius:var(--radius-control);font:var(--type-caption)}
+.psample-time{flex:none;color:var(--text-tertiary);white-space:nowrap}
+.psample-app{flex:1;min-width:56px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.psample-row .badge{max-width:118px;flex:0 1 auto}
+.psample-dur{flex:none;color:var(--text-secondary);white-space:nowrap}
+.history-box{padding:6px 8px;border-radius:var(--radius-control);border:1px solid var(--stroke-card);background:var(--fill-card-secondary);display:flex;flex-direction:column;gap:4px}
+.history-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.seed-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.field-tag{
+  display:inline-flex;align-items:center;height:18px;padding:0 5px;
+  border-radius:var(--radius-control);
+  background:var(--fill-subtle-hover);border:1px solid var(--stroke-card);
+  font-family:var(--font-mono);font-size:11px;line-height:14px;
+  color:var(--text-primary);white-space:nowrap;
+}
+</style>
+<script>
+const __p = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = __p.get('theme') || 'light';
+if (__p.get('size') === 'min') document.documentElement.dataset.size = 'min';
+</script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.4" fill="currentColor"/></symbol>
+  <symbol id="today-f" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5" fill="currentColor" stroke="none"/><path d="M4 9.5h16" stroke="var(--cut)"/><path d="M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.6" fill="var(--cut)" stroke="none"/></symbol>
+  <symbol id="week" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3M8 13h8M8 16.5h5"/></symbol>
+  <symbol id="tag" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z"/><circle cx="8.3" cy="8.3" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="tag-f" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z" fill="currentColor"/><circle cx="8.3" cy="8.3" r="1.3" fill="var(--cut)" stroke="none"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><path d="M10.29 4.59L10.47 2.32L13.53 2.32L13.71 4.59L16.03 5.55L17.76 4.07L19.93 6.24L18.45 7.97L19.41 10.29L21.68 10.47L21.68 13.53L19.41 13.71L18.45 16.03L19.93 17.76L17.76 19.93L16.03 18.45L13.71 19.41L13.53 21.68L10.47 21.68L10.29 19.41L7.97 18.45L6.24 19.93L4.07 17.76L5.55 16.03L4.59 13.71L2.32 13.53L2.32 10.47L4.59 10.29L5.55 7.97L4.07 6.24L6.24 4.07L7.97 5.55Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="chev-l" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+  <symbol id="chev-r" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+  <symbol id="chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
+  <symbol id="arrow-l" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+  <symbol id="menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="code" viewBox="0 0 24 24"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></symbol>
+  <symbol id="doc" viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9.5 12h5M9.5 15.5h5"/></symbol>
+  <symbol id="mail" viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="M4 7l8 6 8-6"/></symbol>
+  <symbol id="terminal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M7.5 10l3 2.5-3 2.5M12.5 15h4"/></symbol>
+  <symbol id="book" viewBox="0 0 24 24"><path d="M5 4.5h9.5a2.5 2.5 0 0 1 2.5 2.5v12.5H7.5A2.5 2.5 0 0 0 5 21z"/><path d="M5 4.5v15A2.5 2.5 0 0 1 7.5 17H17"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.3" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><circle cx="12" cy="8" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="more" viewBox="0 0 24 24"><g fill="currentColor" stroke="none"><circle cx="5.5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18.5" cy="12" r="1.5"/></g></symbol>
+  <symbol id="import" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/></symbol>
+  <symbol id="export" viewBox="0 0 24 24"><path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 19.5h14"/></symbol>
+  <symbol id="copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="trash" viewBox="0 0 24 24"><path d="M5 7h14M9.5 7V4.5h5V7M7 7l.8 12.5h8.4L17 7"/></symbol>
+  <symbol id="shield" viewBox="0 0 24 24"><path d="M12 3.5l7 2.5v5.5c0 4-2.8 7.2-7 9-4.2-1.8-7-5-7-9V6z"/></symbol>
+  <symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="history" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.8V9h4.2"/><path d="M12 8v4.5l3 1.8"/></symbol>
+  <symbol id="edit" viewBox="0 0 24 24"><path d="M15.5 5.5l3 3L8.5 18.5l-4 1 1-4z"/></symbol>
+  <symbol id="tree" viewBox="0 0 24 24"><path d="M6 5v14M6 9h5M6 15h5"/><rect x="11" y="7" width="8" height="4" rx="1"/><rect x="11" y="13" width="8" height="4" rx="1"/></symbol>
+  <symbol id="collapse" viewBox="0 0 24 24"><path d="M7 9l5-4 5 4M7 15l5 4 5-4"/></symbol>
+  <symbol id="logo" viewBox="0 0 24 24"><path d="M12 2.5l8 4.5v10l-8 4.5-8-4.5V7z" fill="var(--accent-fill)" stroke="none"/><path d="M12 2.5v19M4 7l16 10M20 7L4 17" stroke="var(--text-on-accent)" stroke-width="1" opacity=".7"/></symbol>
+</defs></svg>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="app"><svg class="ic s16"><use href="#logo"/></svg><span>Quartz</span></div>
+    <div class="btns">
+      <div><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></div>
+    </div>
+  </div>
+  <div class="body">
+    <nav class="nav" id="nav"></nav>
+    <div class="wrap" id="wrap">
+      <div class="main-wrap" id="main-wrap">
+        <main class="main" id="main"></main>
+        <div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="main-thumb"></div></div>
+      </div>
+      <div class="panel-scrim" id="panel-scrim"></div>
+      <aside class="details" id="details" style="display:none"></aside>
+      <div class="modal-scrim" id="modal-scrim" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const rawLang = params.get('lang') || 'zh-CN';
+const lang = (rawLang === 'en' || rawLang === 'en-XA') ? rawLang : 'zh-CN';
+const stateKey = params.get('state') || 'explain';
+const isMin = params.get('size') === 'min';
+document.documentElement.lang = lang === 'en-XA' ? 'en' : lang;
+document.documentElement.dataset.lang = lang;
+
+const PANEL_STATES = new Set([
+  'explain',
+  'explain-fragments',
+  'explain-long',
+  'situation',
+  'classify-from-today',
+  'privacy-from-today',
+]);
+const isRulesPage = stateKey === 'privacy-from-today';
+const hasPanel = PANEL_STATES.has(stateKey);
+if (hasPanel) document.documentElement.dataset.panelOpen = 'true';
+if (hasPanel && !isMin) document.documentElement.dataset.hasPanel = 'true';
+
+/* Pseudo-locale generator matching quartz-i18n/src/pseudo.rs (~40% tilde padding + brackets) */
+const ACCENT_MAP = {
+  A:'À',B:'Ɓ',C:'Ç',D:'Ď',E:'É',F:'Ƒ',G:'Ĝ',H:'Ĥ',I:'Î',J:'Ĵ',K:'Ķ',L:'Ļ',M:'Ḿ',
+  N:'Ñ',O:'Ö',P:'Ƥ',Q:'Ǫ',R:'Ŕ',S:'Š',T:'Ţ',U:'Û',V:'Ṽ',W:'Ŵ',X:'Ẋ',Y:'Ý',Z:'Ž',
+  a:'à',b:'ƀ',c:'ç',d:'đ',e:'é',f:'ƒ',g:'ĝ',h:'ĥ',i:'î',j:'ĵ',k:'ķ',l:'ļ',m:'ɱ',
+  n:'ñ',o:'ö',p:'ƥ',q:'ǫ',r:'ŕ',s:'š',t:'ţ',u:'û',v:'ṽ',w:'ŵ',x:'ẋ',y:'ý',z:'ž',
+};
+function pseudoStr(s) {
+  if (!s || typeof s !== 'string') return s;
+  const accented = [...s].map(ch => ACCENT_MAP[ch] || ch).join('');
+  const pad = Math.ceil((s.length * 2) / 5);
+  return '[' + accented + '~'.repeat(pad) + ']';
+}
+function pseudoObj(val, skipKeys = new Set([
+  'c', 'ic', 'w', 'code', 'key', 'id', 'exe', 'app', 'doc', 'url', 'ver', 'expr',
+  'rawVal', 'utc', 'time', 'ruleRef', 'setKey', 'kwVal', 'kwHint', 'cond', 'preset',
+  'sub', 'src', 'windowClass', 'titleSample', 'fmtVer',
+])) {
+  if (typeof val === 'string') return pseudoStr(val);
+  if (Array.isArray(val)) return val.map(v => pseudoObj(v, skipKeys));
+  if (val && typeof val === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      out[k] = skipKeys.has(k) ? v : pseudoObj(v, skipKeys);
+    }
+    return out;
+  }
+  return val;
+}
+
+const COPY = {
+  'zh-CN': {
+    nav: { today: '今天', week: '本周', rules: '分类与规则', settings: '设置' },
+    today: {
+      dateNormal: '11月16日 周一',
+      dateDst: '11月1日 周日',
+      todayBtn: '今天',
+      stats: {
+        active: '活跃时长', focus: '专注占比', distraction: '分心占比',
+        unclassified: '未分类', longestFocus: '最长连续专注', switches: '每小时切换',
+        hUnit: '小时', mUnit: '分', swUnit: '次',
+      },
+      legend: [
+        { c: '--cat-8', text: '开发 4 小时 18 分' },
+        { c: '--cat-1', text: '学习 1 小时 2 分' },
+        { c: '--cat-3', text: '沟通 58 分' },
+        { c: '--cat-10', text: '系统与工具 29 分' },
+        { c: '--cat-neutral', text: '未分类 28 分' },
+      ],
+      tl: {
+        title: '时间轴',
+        rangeNormal: '08:33 – 18:45',
+        rangeDst: '00:45 – 04:00 (DST)',
+        cat: '分类',
+        appLanes: '应用泳道',
+        catOnly: '仅分类',
+        full24: '整 24 小时',
+        devLong: '开发 1 小时 42 分',
+        dev: '开发',
+        learn: '学习',
+        comm: '沟通',
+        excl: '已排除 45 分钟',
+        dstMarker: '时钟回拨 −1h',
+        apps: ['VS Code', 'Microsoft Word', 'Outlook', 'Windows Terminal', 'SumatraPDF'],
+      },
+      hourly: { title: '按小时', y0: '0 分', y30: '30 分', y60: '60 分' },
+      rank: {
+        title: '排行',
+        tabs: ['应用', '文档', '混排'],
+        rows: [
+          { c: '--cat-8', ic: 'code', name: 'Visual Studio Code', w: '100.0%', segs: [['--cat-8', 169], ['--cat-1', 35]], dur: '3 小时 24 分' },
+          { c: '--cat-1', ic: 'doc', name: 'Microsoft Word', w: '37.3%', segs: [['--cat-8', 49], ['--cat-1', 27]], dur: '1 小时 16 分' },
+          { c: '--cat-3', ic: 'mail', name: 'Microsoft Outlook', w: '28.4%', segs: [['--cat-3', 58]], dur: '58 分' },
+          { c: '--cat-10', ic: 'terminal', name: 'Windows Terminal', w: '26.5%', segs: [['--cat-8', 25], ['--cat-10', 29]], dur: '54 分' },
+          { c: '--cat-neutral', ic: 'book', name: 'SumatraPDF', w: '13.7%', segs: [['--cat-neutral', 28]], dur: '28 分' },
+        ],
+      },
+    },
+    cats: {
+      dev: '开发',
+      learn: '学习',
+      comm: '沟通',
+      sys: '系统与工具',
+      uncl: '未分类',
+    },
+    explain: {
+      title: '为什么是这个分类？',
+      subtitleSingle: 'Visual Studio Code · 16:35 – 17:10',
+      subtitleFrags: '选中范围 · 01:15 – 01:40 (跨时钟回拨)',
+      subtitleLong: 'Visual Studio Code · 10:15 – 11:02',
+      copySituationBtn: '复制情况说明',
+      copySituationShort: '情况说明',
+      finalLabel: '最终结果',
+      activeDur35: '35 分 活跃',
+      activeDur47: '47 分 活跃',
+      sourceAnnoBadge: '手动标注优先',
+      sourceRuleBadge: '规则分类',
+      annoTitle: '人工标注覆盖了规则结果',
+      annoDesc: '分类覆盖标注（category_override）“架构设计研读”将此段归为「学习」，优先于下方规则求值结果「开发」。',
+      annoEditLink: '编辑标注',
+      stage1Title: '文档提取',
+      stage1Rule: 'user.local.extraction/vscode-project@v2',
+      stage1Badge: '已提取',
+      stage1Missing: '缺失',
+      stage2Title: '分类规则求值',
+      stage2RuleResult: '规则结果：开发（已被标注覆盖）',
+      stage2RuleResultDirect: '最终采用：开发',
+      setLocalName: '本地分类',
+      setLocalKey: 'user.local.classification v4',
+      setDocsName: '项目文档细分',
+      setDocsKey: 'user.project-docs v2',
+      setBuiltinName: '内置分类规则',
+      setBuiltinKey: 'builtin.classification v2',
+      winnerBadgeOverridden: '规则胜出 · 被标注覆盖',
+      winnerBadge: '生效',
+      shadowedBadge: '被遮蔽',
+      overriddenBadge: '已覆盖',
+      disabledBadge: '已停用',
+      unmatchedBadge: '未命中',
+      ruleVscodeQuartz: 'VS Code Quartz 文档算开发',
+      prio80: '优先级 80 · 深度 1',
+      prio90: '优先级 90 · 深度 2',
+      prio75: '优先级 75 · 深度 1',
+      prio60: '优先级 60 · 深度 1',
+      prio50: '优先级 50 · 深度 0',
+      actualPrefix: '实际值：',
+      condTrue: '成立',
+      condNegTrue: '取反成立',
+      condFalse: '不成立',
+      missingPill: '缺失',
+      hiddenPill: '已隐藏（历史隐私规则）',
+      collapsedHdr: '已折叠的非生效规则（3）',
+      collapsedVscode: 'builtin.classification/vscode · 开发',
+      collapsedVscodeReason: '优先级 50 低于生效规则（80）',
+      collapsedWt: 'builtin.classification/windows-terminal · 开发',
+      collapsedWtReason: '已被 user.local.classification 覆盖，不再参与求值',
+      collapsedWechat: 'builtin.classification/wechat · 沟通',
+      collapsedWechatReason: '已被 user.local.classification 停用（工作群另行处理）',
+      privRetainedTitle: '历史隐私归因：采集时未隐藏字段',
+      privRetainedDesc: '该片段采集级别为 Full，应用与窗口标题均已保留；无历史隐私规则丢弃字段。',
+      /* explain-fragments */
+      dstBannerTitle: '选中范围跨越时钟回拨（3 个不同结果片段）',
+      dstBannerMsg: '本地时间 01:15 – 01:40 出现两次，已按 UTC 偏移与 clock_segment_id 区分。',
+      frag1Title: 'VS Code · 25 分',
+      frag1Src: '规则：vscode-quartz-docs',
+      frag1Seg: '时钟段 #1',
+      frag2Title: 'Microsoft Outlook · 18 分',
+      frag2Src: '规则：builtin.classification/outlook',
+      frag2Seg: '时钟段 #1',
+      frag3Title: 'Obsidian · 25 分',
+      frag3Src: '手动标注（category_override）',
+      frag3Seg: '时钟段 #2',
+      privHiddenTitle: '历史隐私归因：窗口标题在采集时已隐藏',
+      privHiddenDesc: '命中规则 user.local.privacy/outlook-hide-title（“隐藏 Outlook 邮件标题”），window_title 已丢弃；依赖标题或文档的条件按“已隐藏”求值。',
+      extSkippedTitle: '文档提取：未执行',
+      extSkippedDesc: '因窗口标题已隐藏，无法提取 doc.document / title.normalized。',
+      ruleOutlookQuartz: 'Outlook Quartz 邮件算开发',
+      ruleOutlookBuiltin: 'Microsoft Outlook 算沟通',
+      fragCollapsedMore: '2 条其他未命中或被遮蔽规则',
+      /* explain-long */
+      longCount: '已加载 12 / 38 条规则 · 3 个规则集',
+      btnCollapseAll: '全部折叠',
+      btnMatchedOnly: '仅看命中',
+      extCollapsedSummary: '文档提取：user.local.extraction/vscode-project · main.rs · Quartz',
+      ruleQuartzRust: 'Quartz Rust 源码算开发',
+      longCollapsed1: 'user.project-docs/quartz-design · 学习',
+      longCollapsed1Reason: '未命中 · doc.document 不匹配 *.fig',
+      longCollapsed2: 'user.project-docs/client-spec · 开发',
+      longCollapsed2Reason: '未命中 · doc.project 不等于 ClientA',
+      longCollapsed3: 'user.local.classification/vscode-notes · 学习',
+      longCollapsed3Reason: '未命中 · title.normalized 不含“笔记”',
+      longCollapsed4: 'user.local.classification/word-specs · 开发',
+      longCollapsed4Reason: '未命中 · app.exe_name 不等于 winword.exe',
+      longCollapsed5: 'builtin.classification/rustrover · 开发',
+      longCollapsed5Reason: '未命中 · app.exe_name 不等于 rustrover64.exe',
+      pagerMeta: '第 1 页 · 已显示 12 / 38 条规则（按规则集与条件顺序分页）',
+      loadMoreBtn: '加载更多（剩余 26 条）',
+      /* panel footer actions (07 §8) */
+      footClassify: '归类为…',
+      footPrivacy: '创建隐私规则',
+      footDeleteTitle: '删除相关数据（暂未提供）',
+      footMoreTitle: '更多操作（复制情况说明）',
+    },
+    situation: {
+      title: '复制情况说明',
+      localBadge: '本地生成 · 不发送数据',
+      privacyTitle: '已隐藏或被隐私规则丢弃的字段绝不包含在内',
+      privacyDesc: '以下文本仅包含当前片段经隐私求值后允许显示的字段与相关规则 ID。复制前可自由删改，粘贴给你选择的 AI 助手。',
+      docLinkLabel: '规则格式文档：',
+      fmtVerLabel: '格式版本：',
+      segHdr: '当前片段（仅含允许显示的字段）：',
+      segTime: '  时段：2026-11-16 16:35 – 17:10（35 分，活跃）',
+      segNote: '  隐私状态：保留应用与可见标题（已隐藏字段不会包含）',
+      expHdr: '解释摘要：',
+      expLine1: '  最终分类：学习（来源：手动标注 category_override，覆盖规则结果「开发」）',
+      expLine2: '  文档提取：user.local.extraction/vscode-project@v2',
+      expLine3: '  规则胜出：user.local.classification/vscode-quartz-docs@v4（优先级 80）',
+      expLine4: '  被遮蔽：builtin.classification/vscode@v2（优先级 50）',
+      relHdr: '相关规则 ID：',
+      reqPrefix: '我的需求：',
+      reqPh: '在这里写下希望调整的分类或提取规则，再复制发给 AI…',
+      charCount: '18 行 · 可编辑纯文本',
+      resetBtn: '重置',
+      cancelBtn: '取消',
+      copyBtn: '复制全文',
+    },
+    ctx: {
+      classify: '归类为…',
+      onlyThisSeg: '仅这一段',
+      onlyThisSegSub: '仅标注此段',
+      createPrivacy: '创建隐私规则…',
+      viewExplain: '查看解释',
+      deleteData: '删除相关数据',
+      deleteTip: '按范围删除数据的功能将在后续版本提供',
+    },
+    scope: {
+      title: '归类为…',
+      subtitleToday: 'SumatraPDF · 16:10 – 16:38（28 分）',
+      sourceBanner: '选中片段：Quartz-M4-Spec.pdf · 项目 Quartz · 当前未分类',
+      catLabel: '目标分类',
+      catSelected: '开发',
+      catArchivedNote: '已归档分类（2）不提供选择',
+      scopeLabel: '选择归类范围',
+      badgeRule: '新建规则',
+      badgeAnno: '仅标注 · 不建规则',
+      optAppTitle: '整个应用',
+      optAppDesc: 'SumatraPDF.exe 的全部活动',
+      optDocTitle: '这个文档',
+      optDocDesc: 'Quartz-M4-Spec.pdf · 项目 Quartz',
+      optKwTitle: '标题包含关键词',
+      optKwDesc: '已从选中片段标题预填，可按需修改关键词',
+      kwVal: 'Quartz-M4-Spec',
+      kwHint: 'title.normalized contains "Quartz-M4-Spec"',
+      optSegTitle: '仅这一段',
+      optSegDesc: '直接为此时间段创建分类标注（category_override），不新建规则',
+      segSample: '当前选中：11月16日 16:10 – 16:38 · 28 分',
+      prevDest: '写入 user.local.classification',
+      prevRange: '过去 7 天预览',
+      condMatchLabel: '条件命中',
+      condMatchVal: '1 小时 42 分',
+      condMatchSub: '8 段 · 含已分类/空闲',
+      effLabel: '有效贡献',
+      effVal: '1 小时 18 分',
+      effSub: '5 段 · 与今天页一致',
+      prevNote: '保存后写入本地分类集并立即刷新今天页；选“仅这一段”只写标注。',
+      submitRule: '创建规则并归类',
+      cancelBtn: '取消',
+      copyBtn: '复制情况说明',
+      moreBtnTitle: '更多操作（复制情况说明）',
+    },
+    privSeed: {
+      pageTitle: '分类与规则',
+      importBtn: '导入规则',
+      exportBtn: '导出规则',
+      tabs: { categories: '分类', rules: '规则', queue: '未分类队列', extraction: '文档提取规则', privacy: '隐私规则' },
+      treeHeading: '隐私规则集',
+      builtinName: '内置隐私规则',
+      builtinCount: '12 条',
+      localName: '本地隐私规则',
+      treeFoot: '隐私规则不分先后：所有命中规则按字段取最严格动作。',
+      segOwn: '本规则集条目',
+      segEff: '生效视图',
+      addRule: '新增规则',
+      ownMeta: 'user.local.privacy · v2 · 2 条用户规则 + 1 条未保存草稿',
+      colRule: '规则',
+      colCond: '条件',
+      colAct: '动作',
+      badgeDraft: '草稿',
+      badgeAdd: '+新增',
+      presetTitleHidden: '隐藏标题',
+      presetExcluded: '排除',
+      presetCustom: '自定义',
+      rows: [
+        { name: 'Outlook 薪酬邮件隐藏标题（草稿）', sub: '来自今天页 15:40 – 16:05 · 未保存', cond: 'outlook.exe + title.raw', preset: 'title_hidden', draft: true },
+        { name: 'KeePassXC 窗口排除', sub: 'user.local.privacy/keepassxc-exclude', cond: 'app.exe_name == "keepassxc.exe"', preset: 'excluded', diff: 'add' },
+        { name: '企业微信私聊隐藏标题', sub: 'user.local.privacy/wecom-dm', cond: 'app.exe_name == "wxwork.exe"', preset: 'title_hidden', diff: 'add' },
+      ],
+      edTitle: '新建隐私规则',
+      edSubtitle: '写入 user.local.privacy · 来自今天页',
+      seedBannerTitle: '已从今天页选中的「Microsoft Outlook」片段预填',
+      seedBannerDesc: '仅预填该片段允许显示的字段：应用、窗口类名与当前可见标题。若原片段标题已隐藏，则不会预填标题条件。',
+      seedChipTitleVis: 'title.raw (可见)',
+      edNameLabel: '规则名称',
+      edNameVal: 'Outlook 薪酬邮件隐藏标题',
+      condsLabel: '触发条件（已预填，可删改）',
+      matchAll: '全部成立',
+      matchAny: '任一成立',
+      negLabel: '非',
+      addCond: '添加条件',
+      condsHint: '仅可用 app.* / window.class / title.raw',
+      titleCondNote: '来自可见标题 · 删除此行可改为覆盖整个 Outlook',
+      titleSample: 'Q4 薪酬方案',
+      windowClass: 'rctrl_renwnd32',
+      actionsLabel: '隐私动作',
+      fieldAppLbl: '应用信息',
+      fieldTitleLbl: '窗口标题',
+      actKeep: '保留',
+      actDrop: '丢弃',
+      previewTitle: '过去 7 天影响预览',
+      receiptOk: '回执有效 · 4:48',
+      summaryMain: '现存事实中将进一步隐藏：6 段、6 个字段、48 分（含非活跃）',
+      summarySub: '仅统计当前仍保留标题的匹配事实 · 确认保存后生效于后续采集',
+      samplesHdr: '隐私安全样本（显示 2 / 6）',
+      samples: [
+        { time: '今天 15:40', app: 'Microsoft Outlook', trans: '全量 → 隐藏标题', dur: '25 分' },
+        { time: '昨天 11:12', app: 'Microsoft Outlook', trans: '全量 → 隐藏标题', dur: '14 分' },
+      ],
+      samplesOmitNote: '将隐藏的窗口标题不在样本中显示。',
+      futureNote: '保存仅影响今后的采集；历史记录保持不变。',
+      applyHistoryBtn: '应用到历史数据…',
+      historyDisabledHint: '请先保存此规则，再按需清理历史数据',
+      saveBtn: '保存',
+      cancelBtn: '取消',
+      copyBtn: '复制情况说明',
+      moreTitle: '更多操作（复制情况说明）',
+    },
+  },
+  en: {
+    nav: { today: 'Today', week: 'This week', rules: 'Categories & rules', settings: 'Settings' },
+    today: {
+      dateNormal: 'Mon, Nov 16',
+      dateDst: 'Sun, Nov 1',
+      todayBtn: 'Today',
+      stats: {
+        active: 'Active time', focus: 'Focus share', distraction: 'Distraction',
+        unclassified: 'Unclassified', longestFocus: 'Longest focus', switches: 'Switches / hr',
+        hUnit: 'h', mUnit: 'm', swUnit: '',
+      },
+      legend: [
+        { c: '--cat-8', text: 'Development 4h 18m' },
+        { c: '--cat-1', text: 'Learning 1h 2m' },
+        { c: '--cat-3', text: 'Communication 58m' },
+        { c: '--cat-10', text: 'System & tools 29m' },
+        { c: '--cat-neutral', text: 'Unclassified 28m' },
+      ],
+      tl: {
+        title: 'Timeline',
+        rangeNormal: '08:33 – 18:45',
+        rangeDst: '00:45 – 04:00 (DST)',
+        cat: 'Category',
+        appLanes: 'App lanes',
+        catOnly: 'Category only',
+        full24: 'Full 24 h',
+        devLong: 'Development 1h 42m',
+        dev: 'Dev',
+        learn: 'Learn',
+        comm: 'Comm',
+        excl: 'Excluded 45m',
+        dstMarker: 'Clock −1h',
+        apps: ['VS Code', 'Microsoft Word', 'Outlook', 'Windows Terminal', 'SumatraPDF'],
+      },
+      hourly: { title: 'By hour', y0: '0m', y30: '30m', y60: '60m' },
+      rank: {
+        title: 'Ranking',
+        tabs: ['Apps', 'Documents', 'Mixed'],
+        rows: [
+          { c: '--cat-8', ic: 'code', name: 'Visual Studio Code', w: '100.0%', segs: [['--cat-8', 169], ['--cat-1', 35]], dur: '3h 24m' },
+          { c: '--cat-1', ic: 'doc', name: 'Microsoft Word', w: '37.3%', segs: [['--cat-8', 49], ['--cat-1', 27]], dur: '1h 16m' },
+          { c: '--cat-3', ic: 'mail', name: 'Microsoft Outlook', w: '28.4%', segs: [['--cat-3', 58]], dur: '58m' },
+          { c: '--cat-10', ic: 'terminal', name: 'Windows Terminal', w: '26.5%', segs: [['--cat-8', 25], ['--cat-10', 29]], dur: '54m' },
+          { c: '--cat-neutral', ic: 'book', name: 'SumatraPDF', w: '13.7%', segs: [['--cat-neutral', 28]], dur: '28m' },
+        ],
+      },
+    },
+    cats: {
+      dev: 'Development',
+      learn: 'Learning',
+      comm: 'Communication',
+      sys: 'System & tools',
+      uncl: 'Unclassified',
+    },
+    explain: {
+      title: 'Why this category?',
+      subtitleSingle: 'Visual Studio Code · 16:35 – 17:10',
+      subtitleFrags: 'Selected range · 01:15 – 01:40 (clock change)',
+      subtitleLong: 'Visual Studio Code · 10:15 – 11:02',
+      copySituationBtn: 'Copy situation',
+      copySituationShort: 'Situation',
+      finalLabel: 'Final result',
+      activeDur35: '35m active',
+      activeDur47: '47m active',
+      sourceAnnoBadge: 'Manual annotation wins',
+      sourceRuleBadge: 'Classified by rule',
+      annoTitle: 'Manual annotation overrides rules',
+      annoDesc: 'Category override annotation “Architecture study” assigns Learning, taking precedence over rule result Development below.',
+      annoEditLink: 'Edit annotation',
+      stage1Title: 'Document extraction',
+      stage1Rule: 'user.local.extraction/vscode-project@v2',
+      stage1Badge: 'Extracted',
+      stage1Missing: 'Missing',
+      stage2Title: 'Classification rules',
+      stage2RuleResult: 'Rule result: Development (overridden by annotation)',
+      stage2RuleResultDirect: 'Winning result: Development',
+      setLocalName: 'Local classification',
+      setLocalKey: 'user.local.classification v4',
+      setDocsName: 'Project documents',
+      setDocsKey: 'user.project-docs v2',
+      setBuiltinName: 'Builtin classification',
+      setBuiltinKey: 'builtin.classification v2',
+      winnerBadgeOverridden: 'Rule winner · overridden',
+      winnerBadge: 'Effective',
+      shadowedBadge: 'Shadowed',
+      overriddenBadge: 'Overridden',
+      disabledBadge: 'Disabled',
+      unmatchedBadge: 'No match',
+      ruleVscodeQuartz: 'VS Code Quartz docs → Dev',
+      prio80: 'Priority 80 · depth 1',
+      prio90: 'Priority 90 · depth 2',
+      prio75: 'Priority 75 · depth 1',
+      prio60: 'Priority 60 · depth 1',
+      prio50: 'Priority 50 · depth 0',
+      actualPrefix: 'Actual: ',
+      condTrue: 'true',
+      condNegTrue: 'true (negated)',
+      condFalse: 'false',
+      missingPill: 'Missing',
+      hiddenPill: 'Hidden (historical privacy)',
+      collapsedHdr: 'Collapsed non-winning rules (3)',
+      collapsedVscode: 'builtin.classification/vscode · Dev',
+      collapsedVscodeReason: 'Priority 50 shadowed by winning rule (80)',
+      collapsedWt: 'builtin.classification/windows-terminal · Dev',
+      collapsedWtReason: 'Overridden by user.local.classification',
+      collapsedWechat: 'builtin.classification/wechat · Comm',
+      collapsedWechatReason: 'Disabled by user.local.classification (work chat split)',
+      privRetainedTitle: 'Historical privacy: no fields hidden',
+      privRetainedDesc: 'Captured at Full level with app and window title retained; no privacy rule dropped fields.',
+      /* explain-fragments */
+      dstBannerTitle: 'Range spans clock change (3 distinct fragments)',
+      dstBannerMsg: 'Local time 01:15 – 01:40 occurred twice; UTC offsets and clock_segment_id disambiguate each fragment.',
+      frag1Title: 'VS Code · 25m',
+      frag1Src: 'Rule: vscode-quartz-docs',
+      frag1Seg: 'Clock seg #1',
+      frag2Title: 'Microsoft Outlook · 18m',
+      frag2Src: 'Rule: builtin.classification/outlook',
+      frag2Seg: 'Clock seg #1',
+      frag3Title: 'Obsidian · 25m',
+      frag3Src: 'Manual annotation (category_override)',
+      frag3Seg: 'Clock seg #2',
+      privHiddenTitle: 'Historical privacy: window title hidden at capture',
+      privHiddenDesc: 'Matched user.local.privacy/outlook-hide-title (“Hide Outlook mail titles”); window_title was dropped, so title/doc conditions evaluate as Hidden.',
+      extSkippedTitle: 'Document extraction: skipped',
+      extSkippedDesc: 'Window title was hidden, so doc.document and title.normalized are unavailable.',
+      ruleOutlookQuartz: 'Outlook Quartz mail → Dev',
+      ruleOutlookBuiltin: 'Microsoft Outlook → Comm',
+      fragCollapsedMore: '2 other unmatched or shadowed rules',
+      /* explain-long */
+      longCount: 'Loaded 12 of 38 rules · 3 rule sets',
+      btnCollapseAll: 'Collapse all',
+      btnMatchedOnly: 'Matched only',
+      extCollapsedSummary: 'Extraction: user.local.extraction/vscode-project · main.rs · Quartz',
+      ruleQuartzRust: 'Quartz Rust source → Dev',
+      longCollapsed1: 'user.project-docs/quartz-design · Learning',
+      longCollapsed1Reason: 'No match · doc.document does not match *.fig',
+      longCollapsed2: 'user.project-docs/client-spec · Dev',
+      longCollapsed2Reason: 'No match · doc.project != ClientA',
+      longCollapsed3: 'user.local.classification/vscode-notes · Learning',
+      longCollapsed3Reason: 'No match · title.normalized does not contain "notes"',
+      longCollapsed4: 'user.local.classification/word-specs · Dev',
+      longCollapsed4Reason: 'No match · app.exe_name != winword.exe',
+      longCollapsed5: 'builtin.classification/rustrover · Dev',
+      longCollapsed5Reason: 'No match · app.exe_name != rustrover64.exe',
+      pagerMeta: 'Page 1 · showing 12 of 38 rules (paged in tree order)',
+      loadMoreBtn: 'Load more (26 remaining)',
+      /* panel footer */
+      footClassify: 'Classify as…',
+      footPrivacy: 'Privacy rule',
+      footDeleteTitle: 'Delete related data (not available yet)',
+      footMoreTitle: 'More actions (Copy situation)',
+    },
+    situation: {
+      title: 'Copy situation description',
+      localBadge: 'Local only · never sent',
+      privacyTitle: 'Hidden or dropped fields are never included',
+      privacyDesc: 'This text contains only privacy-permitted fields for the selected segment and related rule IDs. Edit freely before copying to your chosen AI assistant.',
+      docLinkLabel: 'Rule format doc: ',
+      fmtVerLabel: 'Format version: ',
+      segHdr: 'Selected segment (permitted fields only):',
+      segTime: '  Range: 2026-11-16 16:35 – 17:10 (35m active)',
+      segNote: '  Privacy: app & visible title retained (hidden fields never included)',
+      expHdr: 'Explanation summary:',
+      expLine1: '  Final category: Learning (manual category_override, overrides rule result Development)',
+      expLine2: '  Extraction: user.local.extraction/vscode-project@v2',
+      expLine3: '  Winning rule: user.local.classification/vscode-quartz-docs@v4 (priority 80)',
+      expLine4: '  Shadowed: builtin.classification/vscode@v2 (priority 50)',
+      relHdr: 'Related rule IDs:',
+      reqPrefix: 'My requirement: ',
+      reqPh: 'Describe the classification or extraction change you want before copying…',
+      charCount: '18 lines · editable plain text',
+      resetBtn: 'Reset',
+      cancelBtn: 'Cancel',
+      copyBtn: 'Copy text',
+    },
+    ctx: {
+      classify: 'Classify as…',
+      onlyThisSeg: 'Only this segment',
+      onlyThisSegSub: 'Annotation',
+      createPrivacy: 'Create privacy rule…',
+      viewExplain: 'View explanation',
+      deleteData: 'Delete related data',
+      deleteTip: 'Deleting data by range will arrive in a later version',
+    },
+    scope: {
+      title: 'Classify as…',
+      subtitleToday: 'SumatraPDF · 16:10 – 16:38 (28m)',
+      sourceBanner: 'Selected block: Quartz-M4-Spec.pdf · Project Quartz · Unclassified',
+      catLabel: 'Target category',
+      catSelected: 'Development',
+      catArchivedNote: 'Archived categories (2) are not offered',
+      scopeLabel: 'Classification scope',
+      badgeRule: 'Creates rule',
+      badgeAnno: 'Annotation · no rule',
+      optAppTitle: 'Entire app',
+      optAppDesc: 'All activity in SumatraPDF.exe',
+      optDocTitle: 'This document',
+      optDocDesc: 'Quartz-M4-Spec.pdf · Project Quartz',
+      optKwTitle: 'Title contains keyword',
+      optKwDesc: 'Prefilled from selected block title; edit as needed',
+      kwVal: 'Quartz-M4-Spec',
+      kwHint: 'title.normalized contains "Quartz-M4-Spec"',
+      optSegTitle: 'Only this segment',
+      optSegDesc: 'Creates a one-off category annotation for this block; no rule added',
+      segSample: 'Selected: Nov 16 16:10 – 16:38 · 28m',
+      prevDest: 'Writes to user.local.classification',
+      prevRange: 'Past 7 days preview',
+      condMatchLabel: 'Condition match',
+      condMatchVal: '1h 42m',
+      condMatchSub: '8 segs · incl. idle/other',
+      effLabel: 'Effective contribution',
+      effVal: '1h 18m',
+      effSub: '5 segs · matches Today',
+      prevNote: 'Appends a rule to your local set and refreshes Today; “Only this segment” writes an annotation.',
+      submitRule: 'Create rule & classify',
+      cancelBtn: 'Cancel',
+      copyBtn: 'Copy situation',
+      moreBtnTitle: 'More actions (Copy situation)',
+    },
+    privSeed: {
+      pageTitle: 'Categories & rules',
+      importBtn: 'Import rules',
+      exportBtn: 'Export rules',
+      tabs: { categories: 'Categories', rules: 'Rules', queue: 'Unclassified queue', extraction: 'Extraction rules', privacy: 'Privacy rules' },
+      treeHeading: 'Privacy rule sets',
+      builtinName: 'Builtin privacy',
+      builtinCount: '12 rules',
+      localName: 'Local privacy',
+      treeFoot: 'Order-independent: all matching privacy rules merge by strictest field action.',
+      segOwn: 'This rule set',
+      segEff: 'Effective view',
+      addRule: 'New rule',
+      ownMeta: 'user.local.privacy · v2 · 2 user rules + 1 unsaved draft',
+      colRule: 'Rule',
+      colCond: 'Condition',
+      colAct: 'Action',
+      badgeDraft: 'Draft',
+      badgeAdd: '+Added',
+      presetTitleHidden: 'Hide title',
+      presetExcluded: 'Exclude',
+      presetCustom: 'Custom',
+      rows: [
+        { name: 'Hide Outlook payroll titles (draft)', sub: 'Seeded from Today 15:40 – 16:05 · unsaved', cond: 'outlook.exe + title.raw', preset: 'title_hidden', draft: true },
+        { name: 'Exclude KeePassXC windows', sub: 'user.local.privacy/keepassxc-exclude', cond: 'app.exe_name == "keepassxc.exe"', preset: 'excluded', diff: 'add' },
+        { name: 'Hide WeCom DM titles', sub: 'user.local.privacy/wecom-dm', cond: 'app.exe_name == "wxwork.exe"', preset: 'title_hidden', diff: 'add' },
+      ],
+      edTitle: 'New privacy rule',
+      edSubtitle: 'Writes to user.local.privacy · from Today',
+      seedBannerTitle: 'Prefilled from Today’s “Microsoft Outlook” block',
+      seedBannerDesc: 'Seeded only with permitted fields: app, window class, and visible title. If a block’s title was hidden, no title condition is prefilled.',
+      seedChipTitleVis: 'title.raw (visible)',
+      edNameLabel: 'Rule label',
+      edNameVal: 'Hide Outlook payroll titles',
+      condsLabel: 'Conditions (prefilled, editable)',
+      matchAll: 'Match all',
+      matchAny: 'Match any',
+      negLabel: 'NOT',
+      addCond: 'Add condition',
+      condsHint: 'Desktop fields: app.* / window.class / title.raw',
+      titleCondNote: 'From visible title · remove this row to match all of Outlook',
+      titleSample: 'Q4 Payroll Plan',
+      windowClass: 'rctrl_renwnd32',
+      actionsLabel: 'Privacy actions',
+      fieldAppLbl: 'Application',
+      fieldTitleLbl: 'Window title',
+      actKeep: 'Keep',
+      actDrop: 'Drop',
+      previewTitle: 'Past 7 days impact preview',
+      receiptOk: 'Receipt valid · 4:48',
+      summaryMain: 'Further hidden in retained facts: 6 segments, 6 fields, 48m (incl. inactive)',
+      summarySub: 'Counts only facts whose titles are currently retained · applies to future capture on save',
+      samplesHdr: 'Privacy-safe samples (showing 2 of 6)',
+      samples: [
+        { time: 'Today 15:40', app: 'Microsoft Outlook', trans: 'Full → Title hidden', dur: '25m' },
+        { time: 'Yest 11:12', app: 'Microsoft Outlook', trans: 'Full → Title hidden', dur: '14m' },
+      ],
+      samplesOmitNote: 'Window titles to be hidden are omitted from samples.',
+      futureNote: 'Saving affects future capture only; existing history is unchanged.',
+      applyHistoryBtn: 'Apply to history…',
+      historyDisabledHint: 'Save this rule first to run historical cleanup',
+      saveBtn: 'Save',
+      cancelBtn: 'Cancel',
+      copyBtn: 'Copy situation',
+      moreTitle: 'More actions (Copy situation)',
+    },
+  },
+};
+
+COPY['en-XA'] = pseudoObj(COPY.en);
+COPY['en-XA'].today.tl.apps = COPY.en.today.tl.apps;
+COPY['en-XA'].today.rank.rows = COPY.en.today.rank.rows.map(r => ({ ...r, dur: pseudoStr(r.dur) }));
+COPY['en-XA'].explain.stage1Rule = COPY.en.explain.stage1Rule;
+COPY['en-XA'].explain.setLocalKey = COPY.en.explain.setLocalKey;
+COPY['en-XA'].explain.setDocsKey = COPY.en.explain.setDocsKey;
+COPY['en-XA'].explain.setBuiltinKey = COPY.en.explain.setBuiltinKey;
+COPY['en-XA'].scope.prevDest = pseudoStr('Writes to') + ' user.local.classification';
+COPY['en-XA'].privSeed.edSubtitle = pseudoStr('Writes to') + ' user.local.privacy · ' + pseudoStr('from Today');
+COPY['en-XA'].privSeed.seedChipTitleVis = 'title.raw (' + pseudoStr('visible') + ')';
+
+const T = COPY[lang];
+
+function catChip(colorVar, label) {
+  return `<span class="chip" style="--c:var(${colorVar})"><i></i><span class="ell">${label}</span></span>`;
+}
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  const isRail = isMin || hasPanel;
+  if (isRail) nav.classList.add('rail');
+  const menuRow = isMin
+    ? `<div style="height:4px;flex:none"></div>`
+    : `<div class="nav-item" style="margin-top:4px"><svg class="ic"><use href="#menu"/></svg></div>`;
+  nav.innerHTML =
+    menuRow +
+    `<div class="nav-item${!isRulesPage ? ' selected' : ''}"><i class="ind"></i><svg class="ic"><use href="#${!isRulesPage ? 'today-f' : 'today'}"/></svg><span>${T.nav.today}</span></div>` +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#week"/></svg><span>${T.nav.week}</span></div>` +
+    `<div class="nav-item${isRulesPage ? ' selected' : ''}"><i class="ind"></i><svg class="ic"><use href="#${isRulesPage ? 'tag-f' : 'tag'}"/></svg><span>${T.nav.rules}</span></div>` +
+    `<div class="spacer"></div>` +
+    `<div class="bottom"><div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#gear"/></svg><span>${T.nav.settings}</span></div></div>`;
+}
+
+/* ===========================
+   Today Page Background (Desktop-only)
+   =========================== */
+function renderTodayPage({
+  isDst = false,
+  selBand = null,
+  ctxTimelineBlock = false,
+  ctxRankingRow = -1,
+} = {}) {
+  const td = T.today;
+  const s = td.stats;
+  const tl = td.tl;
+  const h = td.hourly;
+  const r = td.rank;
+  const swUnit = s.swUnit ? `<small>${s.swUnit}</small>` : '';
+
+  const dateBarHtml =
+    `<div class="datebar">` +
+      `<button class="btn icon"><svg class="ic s16"><use href="#chev-l"/></svg></button>` +
+      `<div class="btn date"><svg class="ic s16"><use href="#today"/></svg><span class="strong ell">${isDst ? td.dateDst : td.dateNormal}</span><span class="grow"></span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+      `<button class="btn icon"><svg class="ic s16"><use href="#chev-r"/></svg></button>` +
+      `<button class="btn">${td.todayBtn}</button>` +
+    `</div>`;
+
+  const statusCardHtml =
+    `<div class="card" style="padding:12px 16px;flex:none">` +
+      `<div class="stats">` +
+        `<div class="stat"><div class="v big">7<small>${s.hUnit}</small>15<small>${s.mUnit}</small></div><div class="l">${s.active}</div></div>` +
+        `<div class="stat"><div class="v">74%</div><div class="l">${s.focus}</div></div>` +
+        `<div class="stat"><div class="v">0%</div><div class="l">${s.distraction}</div></div>` +
+        `<div class="stat"><div class="v">28<small>${s.mUnit}</small></div><div class="l">${s.unclassified} <svg class="ic s16" style="width:12px;height:12px"><use href="#chev-r"/></svg></div></div>` +
+        `<div class="stat"><div class="v">1<small>${s.hUnit}</small>42<small>${s.mUnit}</small></div><div class="l">${s.longestFocus}</div></div>` +
+        `<div class="stat"><div class="v">3${swUnit}</div><div class="l">${s.switches}</div></div>` +
+      `</div>` +
+      `<div class="catbar" style="margin-top:10px">` +
+        `<div style="--c:var(--cat-8);flex:258"></div>` +
+        `<div style="--c:var(--cat-1);flex:62"></div>` +
+        `<div style="--c:var(--cat-3);flex:58"></div>` +
+        `<div style="--c:var(--cat-10);flex:29"></div>` +
+        `<div style="--c:var(--cat-neutral);flex:28"></div>` +
+      `</div>` +
+      `<div class="legend" style="margin-top:6px">` +
+        td.legend.map(l => `<span style="--c:var(${l.c})"><i></i>${l.text}</span>`).join('') +
+      `</div>` +
+    `</div>`;
+
+  const gridLefts = isMin
+    ? [8, 28, 48, 68, 88]
+    : [4.4, 14.2, 24.0, 33.8, 43.6, 53.4, 63.2, 73.0, 82.8, 92.6];
+  const hours = isDst
+    ? (isMin ? ['01:00', '01:30', '01:00*', '02:00', '03:00'] : ['00:45','01:00','01:30','01:00*','01:30*','02:00','02:30','03:00','03:30','04:00'])
+    : (isMin ? ['09:00', '11:00', '13:00', '15:00', '17:00'] : ['09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00','18:00']);
+  const gridHtml = gridLefts.map(x => `<i style="left:${x}%"></i>`).join('');
+  const ticksHtml = gridLefts.map((x, i) => `<i class="tick" style="left:${x}%"></i><span class="tickl" style="left:${x}%">${hours[i]}</span>`).join('');
+
+  const laneIcons = ['code', 'doc', 'mail', 'terminal', 'book'];
+  const laneBlocks = [
+    /* VS Code */
+    [[5.0, 12.2, '--cat-8'], [19.4, 8.2, '--cat-8'], [29.8, 6.2, '--cat-8'], [53.2, 7.6, '--cat-8'], [78.8, 5.8, '--cat-1']],
+    /* Microsoft Word */
+    [[17.2, 2.2, '--cat-1'], [48.2, 5.0, '--cat-8', ctxTimelineBlock ? 'ctx-target' : ''], [60.8, 4.4, '--cat-1']],
+    /* Outlook */
+    [[2.4, 2.5, '--cat-3'], [44.2, 3.8, '--cat-3'], [67.8, 4.2, '--cat-3'], [94.8, 2.6, '--cat-3']],
+    /* Windows Terminal */
+    [[13.4, 2.0, '--cat-8'], [27.6, 2.1, '--cat-10'], [65.2, 2.4, '--cat-10']],
+    /* SumatraPDF (unclassified) */
+    [[74.0, 4.6, '--cat-neutral', 'none']],
+  ];
+  const lanesHtml = laneBlocks.map((blks, idx) =>
+    `<div class="trow lane">` +
+      `<div class="lab"><svg class="ic s16"><use href="#${laneIcons[idx]}"/></svg><span class="ell">${tl.apps[idx]}</span></div>` +
+      `<div class="trk">` +
+        blks.map(([l, w, c, extra]) => `<div class="blk ${extra || ''}" style="left:${l}%;width:calc(${w}% - 1px);--c:var(${c});--c-on:var(${c === '--cat-neutral' ? '--text-primary' : c + '-on'})"></div>`).join('') +
+      `</div>` +
+    `</div>`
+  ).join('');
+
+  const selBandHtml = selBand
+    ? `<div style="position:absolute;left:var(--gut);right:0;top:0;height:0">` +
+        `<div class="selband" style="left:${selBand.left}%;width:${selBand.width}%;top:-2px;height:154px"></div>` +
+        (isDst ? `<div class="dst-marker" style="left:33.8%;height:154px"><span class="dst-pill">${tl.dstMarker}</span></div>` : '') +
+      `</div>`
+    : '';
+
+  const timelineCtxMenuHtml = ctxTimelineBlock
+    ? `<div class="ctx-menu" style="left:calc(var(--gut) + 48.2% * (100% - var(--gut)) / 100% + 14px);top:80px">` +
+        `<div class="ctx-item hov"><svg class="ic s16 ctx-ic"><use href="#tag"/></svg><span class="ctx-lbl">${T.ctx.classify}</span></div>` +
+        `<div class="ctx-item"><svg class="ic s16 ctx-ic"><use href="#clock"/></svg><span class="ctx-lbl">${T.ctx.onlyThisSeg}</span><span class="ctx-sub">${T.ctx.onlyThisSegSub}</span></div>` +
+        `<div class="ctx-item"><svg class="ic s16 ctx-ic"><use href="#shield"/></svg><span class="ctx-lbl">${T.ctx.createPrivacy}</span></div>` +
+        `<div class="ctx-item"><svg class="ic s16 ctx-ic"><use href="#tree"/></svg><span class="ctx-lbl">${T.ctx.viewExplain}</span></div>` +
+        `<div class="ctx-sep"></div>` +
+        `<div class="ctx-item disabled"><svg class="ic s16 ctx-ic"><use href="#trash"/></svg><span class="ctx-lbl">${T.ctx.deleteData}</span></div>` +
+      `</div>` +
+      `<div class="ctx-tooltip" style="left:calc(var(--gut) + 48.2% * (100% - var(--gut)) / 100% + 248px);top:224px;transform:translateX(calc(-100% - 256px))">` +
+        `<svg class="ic s16" style="width:13px;height:13px"><use href="#info"/></svg><span>${T.ctx.deleteTip}</span>` +
+      `</div>`
+    : '';
+
+  const timelineCardHtml =
+    `<div class="card" style="flex:none;padding:12px 16px 8px;position:relative">` +
+      `<div class="row tl-head" style="margin-bottom:${isDst ? '18px' : '10px'}">` +
+        `<span class="h-sub">${tl.title}</span>` +
+        `<span class="cap sec">${isDst ? tl.rangeDst : tl.rangeNormal}</span>` +
+        `<div class="seg"><div class="on">${tl.appLanes}</div><div>${tl.catOnly}</div></div>` +
+        `<div class="row gap4" style="flex:none"><button class="btn compact icon"><svg class="ic s16"><use href="#minus"/></svg></button>` +
+        `<button class="btn compact icon"><svg class="ic s16"><use href="#add"/></svg></button>` +
+        `<button class="btn compact">${tl.full24}</button></div>` +
+      `</div>` +
+      `<div class="plot" style="padding:4px 0 2px"><div class="tl">` +
+        `<div class="grid" style="height:152px">${gridHtml}</div>` +
+        `<div class="trow mtrk"><div class="lab">${tl.cat}</div><div class="trk" style="position:relative">` +
+          `<div class="blk" style="left:2.4%;width:calc(2.5% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+          `<div class="blk" style="left:5.0%;width:calc(12.2% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${hasPanel || isMin ? tl.dev : tl.devLong}</div>` +
+          `<div class="blk" style="left:17.2%;width:calc(2.2% - 1px);--c:var(--cat-1);--c-on:var(--cat-1-on)"></div>` +
+          `<div class="blk" style="left:19.4%;width:calc(8.2% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.dev}</div>` +
+          `<div class="blk" style="left:27.6%;width:calc(2.1% - 1px);--c:var(--cat-10);--c-on:var(--cat-10-on)"></div>` +
+          `<div class="blk" style="left:29.8%;width:calc(6.2% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)"></div>` +
+          `<div class="blk lock" style="left:36.0%;width:calc(8.2% - 1px)"></div>` +
+          `<div class="blk" style="left:44.2%;width:calc(3.8% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+          `<div class="blk" style="left:48.2%;width:calc(12.6% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.dev}</div>` +
+          `<div class="blk" style="left:60.8%;width:calc(4.4% - 1px);--c:var(--cat-1);--c-on:var(--cat-1-on)"></div>` +
+          `<div class="blk" style="left:65.2%;width:calc(2.4% - 1px);--c:var(--cat-10);--c-on:var(--cat-10-on)"></div>` +
+          `<div class="blk" style="left:67.8%;width:calc(4.2% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+          `<div class="blk idle" style="left:72.0%;width:calc(2.0% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+          `<div class="blk none" style="left:74.0%;width:calc(4.6% - 1px);--c:var(--cat-neutral);--c-on:var(--text-primary)"></div>` +
+          `<div class="blk" style="left:78.8%;width:calc(5.8% - 1px);--c:var(--cat-1);--c-on:var(--cat-1-on)">${tl.learn}</div>` +
+          `<div class="blk excl" style="left:84.6%;width:calc(10.2% - 1px)">${hasPanel || isMin ? '' : tl.excl}</div>` +
+          `<div class="blk" style="left:94.8%;width:calc(2.6% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+        `</div></div>` +
+        `<div class="lanes">${lanesHtml}</div>` +
+        `<div class="trow ruler" style="margin-top:4px"><div class="lab"></div><div class="trk">${ticksHtml}</div></div>` +
+        selBandHtml +
+        timelineCtxMenuHtml +
+      `</div></div>` +
+    `</div>`;
+
+  const cols = [
+    [['--cat-3', 24]],
+    [['--cat-8', 110], ['--cat-1', 10]],
+    [['--cat-8', 88], ['--cat-1', 18], ['--cat-10', 14]],
+    [['--cat-8', 74], ['--cat-10', 16]],
+    [['--cat-8', 36]],
+    [['--cat-3', 38], ['--cat-8', 22]],
+    [['--cat-8', 96], ['--cat-1', 24]],
+    [['--cat-1', 28], ['--cat-10', 22], ['--cat-3', 34]],
+    [['--cat-neutral', 44], ['--cat-1', 50]],
+    [['--cat-1', 20]],
+    [['--cat-3', 26]],
+  ];
+  const colsHtml = cols.map(st =>
+    `<div class="col"><div class="stack">${st.map(([c, px]) => `<div style="--c:var(${c});height:${px}.0px"></div>`).join('')}</div></div>`
+  ).join('');
+  const hLabels = [8,9,10,11,12,13,14,15,16,17,18].map(n => `<span>${n}</span>`).join('');
+
+  const rankRowsHtml = r.rows.map((row, idx) => {
+    const isSel = idx === ctxRankingRow || (stateKey === 'explain' && idx === 0) || (stateKey === 'classify-from-today' && idx === 4);
+    return `<div class="rank${isSel ? ' sel' : ''}" style="--c:var(${row.c})">` +
+      `<i class="cb"></i>` +
+      `<div class="nm"><svg class="ic s16"><use href="#${row.ic}"/></svg><span class="ell">${row.name}</span></div>` +
+      `<div class="bar"><div class="fill" style="width:${row.w}">${row.segs.map(([c, f]) => `<div style="--c:var(${c});flex:${f}"></div>`).join('')}</div></div>` +
+      `<div class="du">${row.dur}</div>` +
+      `<span class="rank-more"><svg class="ic s16"><use href="#more"/></svg></span>` +
+    `</div>`;
+  }).join('');
+
+  const rankingCtxMenuHtml = ctxRankingRow >= 0
+    ? `<div class="ctx-menu" style="right:18px;top:92px">` +
+        `<div class="ctx-item hov"><svg class="ic s16 ctx-ic"><use href="#tag"/></svg><span class="ctx-lbl">${T.ctx.classify}</span></div>` +
+        `<div class="ctx-item"><svg class="ic s16 ctx-ic"><use href="#shield"/></svg><span class="ctx-lbl">${T.ctx.createPrivacy}</span></div>` +
+        `<div class="ctx-item"><svg class="ic s16 ctx-ic"><use href="#tree"/></svg><span class="ctx-lbl">${T.ctx.viewExplain}</span></div>` +
+        `<div class="ctx-sep"></div>` +
+        `<div class="ctx-item disabled"><svg class="ic s16 ctx-ic"><use href="#trash"/></svg><span class="ctx-lbl">${T.ctx.deleteData}</span></div>` +
+      `</div>` +
+      `<div class="ctx-tooltip" style="right:252px;top:211px">` +
+        `<svg class="ic s16" style="width:13px;height:13px"><use href="#info"/></svg><span>${T.ctx.deleteTip}</span>` +
+      `</div>`
+    : '';
+
+  const bottomRowHtml =
+    `<div class="row gap8 two-col" style="flex:none;align-items:stretch">` +
+      `<div class="card grow" style="padding:12px 16px;min-width:0">` +
+        `<div class="h-sub" style="margin-bottom:8px">${h.title}</div>` +
+        `<div class="plot" style="padding:4px 0 6px">` +
+          `<div class="hours">` +
+            `<div class="y"><span style="bottom:0px">${h.y0}</span><span style="bottom:60px">${h.y30}</span><span style="bottom:120px">${h.y60}</span></div>` +
+            `<div class="plotarea"><div class="gl" style="bottom:60px"></div><div class="gl" style="bottom:120px"></div>${colsHtml}</div>` +
+          `</div>` +
+          `<div class="hlabels">${hLabels}</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="card grow" style="padding:12px 16px;min-width:0;position:relative">` +
+        `<div class="row" style="margin-bottom:4px"><span class="h-sub grow">${r.title}</span><div class="seg">${r.tabs.map((t, i) => `<div${i === 0 ? ' class="on"' : ''}>${t}</div>`).join('')}</div></div>` +
+        rankRowsHtml +
+        rankingCtxMenuHtml +
+      `</div>` +
+    `</div>`;
+
+  return dateBarHtml + statusCardHtml + timelineCardHtml + bottomRowHtml;
+}
+
+/* ===========================
+   Shared Single-Row Panel Footer (V2/V3/V5)
+   =========================== */
+function renderExplainFooter() {
+  const e = T.explain;
+  /* Strictly single-row footer: Classify as…, Create privacy rule, disabled Delete (M6), and … overflow (Copy situation) */
+  return `<div class="ed-foot">` +
+    `<div class="ed-foot-main">` +
+      `<button class="btn primary-slot"><svg class="ic s16"><use href="#tag"/></svg><span>${e.footClassify}</span></button>` +
+      `<button class="btn flex-shrink"><svg class="ic s16"><use href="#shield"/></svg><span>${e.footPrivacy}</span></button>` +
+    `</div>` +
+    `<div class="ed-foot-right">` +
+      `<button class="btn icon disabled" title="${e.footDeleteTitle}" aria-label="${e.footDeleteTitle}"><svg class="ic s16"><use href="#trash"/></svg></button>` +
+      `<button class="btn icon" title="${e.footMoreTitle}" aria-label="${e.footMoreTitle}"><svg class="ic s16"><use href="#more"/></svg></button>` +
+    `</div>` +
+  `</div>`;
+}
+
+/* ===========================
+   State 1: explain (single timeline block)
+   =========================== */
+function renderExplainPanel() {
+  const e = T.explain;
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${e.title}</span></div>` +
+        `<div class="cap sec ell">${e.subtitleSingle}</div>` +
+      `</div>` +
+      `<button class="btn compact subtle" style="flex:none" title="${e.copySituationBtn}"><svg class="ic s16"><use href="#copy"/></svg><span>${e.copySituationShort}</span></button>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        /* Final result first */
+        `<div class="res-card">` +
+          `<div class="res-top">` +
+            `<span class="cap sec">${e.finalLabel}</span>` +
+            `<span class="res-time">${e.activeDur35}</span>` +
+          `</div>` +
+          `<div class="res-cat-row">` +
+            catChip('--cat-1', T.cats.learn) +
+            `<span class="badge ovr"><span class="btxt">${e.sourceAnnoBadge}</span></span>` +
+          `</div>` +
+          `<div class="anno-callout">` +
+            `<div class="anno-callout-top">` +
+              `<svg class="ic s16" style="width:14px;height:14px"><use href="#edit"/></svg>` +
+              `<span class="cap strong">${e.annoTitle}</span>` +
+              `<span class="cap" style="margin-left:auto;color:var(--accent-text);white-space:nowrap">${e.annoEditLink}</span>` +
+            `</div>` +
+            `<div class="anno-callout-desc">${e.annoDesc}</div>` +
+          `</div>` +
+        `</div>` +
+
+        /* Stage 1: Extraction provenance */
+        `<div class="stage-card">` +
+          `<div class="stage-hdr">` +
+            `<div class="stage-hdr-l"><span class="stage-num">1</span><span class="strong">${e.stage1Title}</span></div>` +
+            `<span class="badge ok"><span class="btxt">${e.stage1Badge}</span></span>` +
+          `</div>` +
+          `<div class="mono ter ell">${e.stage1Rule}</div>` +
+          `<div class="kv-chips">` +
+            `<span class="kv-chip"><span class="k">doc.document=</span>07-ui.md</span>` +
+            `<span class="kv-chip"><span class="k">doc.project=</span>Quartz</span>` +
+            `<span class="kv-chip"><span class="k">title.normalized=</span>07-ui.md - Quartz</span>` +
+            `<span class="kv-chip missing"><span class="k">doc.profile=</span>${e.stage1Missing}</span>` +
+          `</div>` +
+        `</div>` +
+
+        /* Stage 2: Classification rule sets -> rules -> conditions */
+        `<div class="stage-card">` +
+          `<div class="stage-hdr">` +
+            `<div class="stage-hdr-l"><span class="stage-num">2</span><span class="strong">${e.stage2Title}</span></div>` +
+            `<span class="cap sec">${e.stage2RuleResult}</span>` +
+          `</div>` +
+
+          `<div class="set-group">` +
+            `<div class="set-hdr">` +
+              `<svg class="ic s16" style="width:14px;height:14px;color:var(--text-secondary);flex:none"><use href="#chev-d"/></svg>` +
+              `<span class="set-name">${e.setLocalName}</span>` +
+              `<span class="set-key">${e.setLocalKey}</span>` +
+            `</div>` +
+            `<div class="rule-node winner-overridden">` +
+              `<div class="rule-hdr">` +
+                `<svg class="ic s16 r-ico ok-i"><use href="#check"/></svg>` +
+                `<div class="rule-hdr-txt">` +
+                  `<div class="rule-title-line"><span class="r-name">${e.ruleVscodeQuartz}</span><span class="badge ovr"><span class="btxt">${e.winnerBadgeOverridden}</span></span></div>` +
+                  `<div class="rule-reason">${e.prio80} · ${T.cats.dev}</div>` +
+                `</div>` +
+              `</div>` +
+              `<div class="cond-tree">` +
+                `<div class="cond-item">` +
+                  `<div class="cond-expr"><span class="cond-mark ok">✓</span><span>app.exe_name equals "code.exe"</span></div>` +
+                  `<div class="cond-actual">${e.actualPrefix}<span class="mono">code.exe</span> · ${e.condTrue}</div>` +
+                `</div>` +
+                `<div class="cond-item">` +
+                  `<div class="cond-expr"><span class="cond-mark ok">✓</span><span>doc.project equals "Quartz"</span></div>` +
+                  `<div class="cond-actual">${e.actualPrefix}<span class="mono">Quartz</span> · ${e.condTrue}</div>` +
+                `</div>` +
+                `<div class="cond-item">` +
+                  `<div class="cond-expr"><span class="cond-mark ok">✓</span><span>NOT doc.profile equals "work"</span></div>` +
+                  `<div class="cond-actual">${e.actualPrefix}<span class="val-missing">${e.missingPill}</span> · ${e.condNegTrue}</div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+          `</div>` +
+
+          /* Collapsed shadowed / overridden / disabled rules with explicit reasons */
+          `<div class="cap sec" style="padding-top:2px">${e.collapsedHdr}</div>` +
+          `<div class="set-group">` +
+            `<div class="rule-node collapsed">` +
+              `<div class="rule-hdr">` +
+                `<svg class="ic s16 r-ico" style="width:14px;height:14px;color:var(--text-tertiary)"><use href="#chev-r"/></svg>` +
+                `<div class="rule-hdr-txt">` +
+                  `<div class="rule-title-line"><span class="mono" style="font-size:11px;color:var(--text-secondary)">${e.collapsedVscode}</span><span class="badge"><span class="btxt">${e.shadowedBadge}</span></span></div>` +
+                  `<div class="rule-reason">${e.collapsedVscodeReason}</div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="rule-node collapsed">` +
+              `<div class="rule-hdr">` +
+                `<svg class="ic s16 r-ico" style="width:14px;height:14px;color:var(--text-tertiary)"><use href="#chev-r"/></svg>` +
+                `<div class="rule-hdr-txt">` +
+                  `<div class="rule-title-line"><span class="mono" style="font-size:11px;color:var(--text-secondary)">${e.collapsedWt}</span><span class="badge ovr"><span class="btxt">${e.overriddenBadge}</span></span></div>` +
+                  `<div class="rule-reason">${e.collapsedWtReason}</div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="rule-node collapsed">` +
+              `<div class="rule-hdr">` +
+                `<svg class="ic s16 r-ico" style="width:14px;height:14px;color:var(--text-tertiary)"><use href="#chev-r"/></svg>` +
+                `<div class="rule-hdr-txt">` +
+                  `<div class="rule-title-line"><span class="mono" style="font-size:11px;color:var(--text-secondary)">${e.collapsedWechat}</span><span class="badge dis"><span class="btxt">${e.disabledBadge}</span></span></div>` +
+                  `<div class="rule-reason">${e.collapsedWechatReason}</div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+
+        /* Historical privacy attribution (retained state on this block) */
+        `<div class="priv-attr neutral">` +
+          `<svg class="ic s16" style="width:15px;height:15px"><use href="#shield"/></svg>` +
+          `<div class="priv-attr-body">` +
+            `<span class="strong" style="color:var(--text-primary)">${e.privRetainedTitle}</span>` +
+            `<span>${e.privRetainedDesc}</span>` +
+          `</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    renderExplainFooter();
+}
+
+/* ===========================
+   State 2: explain-fragments (multi-result range + DST clock disambiguation + hidden-field privacy attribution)
+   =========================== */
+function renderExplainFragmentsPanel() {
+  const e = T.explain;
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${e.title}</span></div>` +
+        `<div class="cap sec ell">${e.subtitleFrags}</div>` +
+      `</div>` +
+      `<button class="btn compact subtle" style="flex:none" title="${e.copySituationBtn}"><svg class="ic s16"><use href="#copy"/></svg><span>${e.copySituationShort}</span></button>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        `<div class="infobar caution">` +
+          `<svg class="ic s16 ib-ic"><use href="#clock"/></svg>` +
+          `<div class="ib-body">` +
+            `<div class="ib-title">${e.dstBannerTitle}</div>` +
+            `<div>${e.dstBannerMsg}</div>` +
+          `</div>` +
+        `</div>` +
+
+        `<div class="frag-list">` +
+          /* Fragment 1: collapsed (01:15 – 01:40 UTC-07:00) */
+          `<div class="frag-card">` +
+            `<div class="frag-hdr">` +
+              `<svg class="ic s16" style="width:15px;height:15px;color:var(--text-secondary);margin-top:1px;flex:none"><use href="#chev-r"/></svg>` +
+              `<div class="frag-hdr-txt">` +
+                `<div class="frag-time-row">` +
+                  `<span class="frag-time">01:15 – 01:40</span>` +
+                  `<span class="frag-utc">UTC-07:00</span>` +
+                  `<span class="badge"><span class="btxt">${e.frag1Seg}</span></span>` +
+                `</div>` +
+                `<div class="frag-meta-row">` +
+                  catChip('--cat-8', T.cats.dev) +
+                  `<span class="ell">${e.frag1Title} · ${e.frag1Src}</span>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+          `</div>` +
+
+          /* Fragment 2: EXPANDED — shows historical privacy attribution + hidden field evaluation */
+          `<div class="frag-card expanded">` +
+            `<div class="frag-hdr">` +
+              `<svg class="ic s16" style="width:15px;height:15px;color:var(--accent-text);margin-top:1px;flex:none"><use href="#chev-d"/></svg>` +
+              `<div class="frag-hdr-txt">` +
+                `<div class="frag-time-row">` +
+                  `<span class="frag-time">01:40 – 01:58</span>` +
+                  `<span class="frag-utc">UTC-07:00</span>` +
+                  `<span class="badge"><span class="btxt">${e.frag2Seg}</span></span>` +
+                `</div>` +
+                `<div class="frag-meta-row">` +
+                  catChip('--cat-3', T.cats.comm) +
+                  `<span class="ell">${e.frag2Title} · ${e.frag2Src}</span>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="frag-body">` +
+              /* Active historical privacy attribution */
+              `<div class="priv-attr">` +
+                `<svg class="ic s16" style="width:15px;height:15px"><use href="#shield"/></svg>` +
+                `<div class="priv-attr-body">` +
+                  `<span class="strong">${e.privHiddenTitle}</span>` +
+                  `<span>${e.privHiddenDesc}</span>` +
+                `</div>` +
+              `</div>` +
+              /* Extraction skipped because title was hidden */
+              `<div class="kv-chips">` +
+                `<span class="kv-chip hidden"><span class="k">title.raw=</span>${e.hiddenPill}</span>` +
+                `<span class="kv-chip missing">${e.extSkippedTitle}</span>` +
+              `</div>` +
+              /* Rule tree inside Fragment 2 (compact so Fragment 3 is visible above the fold) */
+              `<div class="set-group">` +
+                `<div class="set-hdr">` +
+                  `<svg class="ic s16" style="width:14px;height:14px;color:var(--text-secondary);flex:none"><use href="#chev-d"/></svg>` +
+                  `<span class="set-name">${e.setLocalName}</span>` +
+                  `<span class="set-key">${e.setLocalKey}</span>` +
+                `</div>` +
+                `<div class="rule-node">` +
+                  `<div class="rule-hdr">` +
+                    `<svg class="ic s16 r-ico no-i"><use href="#minus"/></svg>` +
+                    `<div class="rule-hdr-txt">` +
+                      `<div class="rule-title-line"><span class="r-name">${e.ruleOutlookQuartz}</span><span class="badge dis"><span class="btxt">${e.unmatchedBadge}</span></span></div>` +
+                    `</div>` +
+                  `</div>` +
+                  `<div class="cond-tree">` +
+                    `<div class="cond-item">` +
+                      `<div class="cond-expr"><span class="cond-mark no">✕</span><span>title.normalized contains "Quartz"</span></div>` +
+                      `<div class="cond-actual">${e.actualPrefix}<span class="val-hidden">${e.hiddenPill}</span> · ${e.condFalse}</div>` +
+                    `</div>` +
+                  `</div>` +
+                `</div>` +
+              `</div>` +
+              `<div class="set-group">` +
+                `<div class="set-hdr">` +
+                  `<svg class="ic s16" style="width:14px;height:14px;color:var(--text-secondary);flex:none"><use href="#chev-d"/></svg>` +
+                  `<span class="set-name">${e.setBuiltinName}</span>` +
+                  `<span class="set-key">${e.setBuiltinKey}</span>` +
+                `</div>` +
+                `<div class="rule-node winner">` +
+                  `<div class="rule-hdr">` +
+                    `<svg class="ic s16 r-ico ok-i"><use href="#check"/></svg>` +
+                    `<div class="rule-hdr-txt">` +
+                      `<div class="rule-title-line"><span class="r-name">${e.ruleOutlookBuiltin}</span><span class="badge ok"><span class="btxt">${e.winnerBadge}</span></span></div>` +
+                    `</div>` +
+                  `</div>` +
+                  `<div class="cond-tree">` +
+                    `<div class="cond-item">` +
+                      `<div class="cond-expr"><span class="cond-mark ok">✓</span><span>app.exe_name equals "outlook.exe"</span></div>` +
+                      `<div class="cond-actual">${e.actualPrefix}<span class="mono">outlook.exe</span> · ${e.condTrue}</div>` +
+                    `</div>` +
+                  `</div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+          `</div>` +
+
+          /* Fragment 3: collapsed — SAME local time 01:15 – 01:40 but UTC-08:00 (Clock seg #2) */
+          `<div class="frag-card">` +
+            `<div class="frag-hdr">` +
+              `<svg class="ic s16" style="width:15px;height:15px;color:var(--text-secondary);margin-top:1px;flex:none"><use href="#chev-r"/></svg>` +
+              `<div class="frag-hdr-txt">` +
+                `<div class="frag-time-row">` +
+                  `<span class="frag-time">01:15 – 01:40</span>` +
+                  `<span class="frag-utc">UTC-08:00</span>` +
+                  `<span class="badge ovr"><span class="btxt">${e.frag3Seg}</span></span>` +
+                `</div>` +
+                `<div class="frag-meta-row">` +
+                  catChip('--cat-1', T.cats.learn) +
+                  `<span class="ell">${e.frag3Title} · ${e.frag3Src}</span>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    renderExplainFooter();
+}
+
+/* ===========================
+   State 3: explain-long (long/paged condition tree + collapse controls + Load more)
+   =========================== */
+function renderExplainLongPanel() {
+  const e = T.explain;
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${e.title}</span></div>` +
+        `<div class="cap sec ell">${e.subtitleLong}</div>` +
+      `</div>` +
+      `<button class="btn compact subtle" style="flex:none" title="${e.copySituationBtn}"><svg class="ic s16"><use href="#copy"/></svg><span>${e.copySituationShort}</span></button>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        /* Final result compact */
+        `<div class="res-card">` +
+          `<div class="res-top">` +
+            `<div class="res-cat-row">${catChip('--cat-8', T.cats.dev)}<span class="badge ok"><span class="btxt">${e.sourceRuleBadge}</span></span></div>` +
+            `<span class="res-time">${e.activeDur47}</span>` +
+          `</div>` +
+          `<div class="mono ter ell">user.project-docs/quartz-rust@v2</div>` +
+        `</div>` +
+
+        /* Collapsed extraction summary */
+        `<div class="rule-node collapsed" style="margin-left:0;background:var(--fill-card)">` +
+          `<div class="rule-hdr">` +
+            `<svg class="ic s16 r-ico" style="width:14px;height:14px;color:var(--text-secondary)"><use href="#chev-r"/></svg>` +
+            `<span class="cap ell" style="color:var(--text-primary)">${e.extCollapsedSummary}</span>` +
+          `</div>` +
+        `</div>` +
+
+        /* Tree collapse & filter controls */
+        `<div class="tree-controls">` +
+          `<span class="cap sec">${e.longCount}</span>` +
+          `<div class="tree-controls-btns">` +
+            `<button class="btn compact"><svg class="ic s16" style="width:13px;height:13px"><use href="#collapse"/></svg><span>${e.btnCollapseAll}</span></button>` +
+            `<button class="btn compact"><span>${e.btnMatchedOnly}</span></button>` +
+          `</div>` +
+        `</div>` +
+
+        /* Set 1: user.project-docs */
+        `<div class="set-group">` +
+          `<div class="set-hdr">` +
+            `<svg class="ic s16" style="width:14px;height:14px;color:var(--text-secondary);flex:none"><use href="#chev-d"/></svg>` +
+            `<span class="set-name">${e.setDocsName}</span>` +
+            `<span class="set-key">${e.setDocsKey}</span>` +
+          `</div>` +
+          `<div class="rule-node winner">` +
+            `<div class="rule-hdr">` +
+              `<svg class="ic s16 r-ico ok-i"><use href="#check"/></svg>` +
+              `<div class="rule-hdr-txt">` +
+                `<div class="rule-title-line"><span class="r-name">${e.ruleQuartzRust}</span><span class="badge ok"><span class="btxt">${e.winnerBadge}</span></span></div>` +
+                `<div class="rule-reason">${e.prio90} · ${T.cats.dev}</div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="cond-tree">` +
+              `<div class="cond-item">` +
+                `<div class="cond-expr"><span class="cond-mark ok">✓</span><span>app.exe_name equals "code.exe"</span></div>` +
+                `<div class="cond-actual">${e.actualPrefix}<span class="mono">code.exe</span> · ${e.condTrue}</div>` +
+              `</div>` +
+              `<div class="cond-item">` +
+                `<div class="cond-expr"><span class="cond-mark ok">✓</span><span>doc.project equals "Quartz"</span></div>` +
+                `<div class="cond-actual">${e.actualPrefix}<span class="mono">Quartz</span> · ${e.condTrue}</div>` +
+              `</div>` +
+              `<div class="cond-item">` +
+                `<div class="cond-expr"><span class="cond-mark ok">✓</span><span>doc.document ends_with ".rs"</span></div>` +
+                `<div class="cond-actual">${e.actualPrefix}<span class="mono">main.rs</span> · ${e.condTrue}</div>` +
+              `</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="rule-node collapsed">` +
+            `<div class="rule-hdr"><svg class="ic s16 r-ico" style="width:14px;height:14px;color:var(--text-tertiary)"><use href="#chev-r"/></svg>` +
+              `<div class="rule-hdr-txt"><div class="rule-title-line"><span class="mono" style="font-size:11px;color:var(--text-secondary)">${e.longCollapsed1}</span><span class="badge dis"><span class="btxt">${e.unmatchedBadge}</span></span></div></div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+
+        /* Set 2: user.local.classification */
+        `<div class="set-group">` +
+          `<div class="set-hdr">` +
+            `<svg class="ic s16" style="width:14px;height:14px;color:var(--text-secondary);flex:none"><use href="#chev-d"/></svg>` +
+            `<span class="set-name">${e.setLocalName}</span>` +
+            `<span class="set-key">${e.setLocalKey}</span>` +
+          `</div>` +
+          `<div class="rule-node collapsed">` +
+            `<div class="rule-hdr"><svg class="ic s16 r-ico" style="width:14px;height:14px;color:var(--text-tertiary)"><use href="#chev-r"/></svg>` +
+              `<div class="rule-hdr-txt"><div class="rule-title-line"><span class="r-name" style="font-weight:400;color:var(--text-secondary)">${e.ruleVscodeQuartz}</span><span class="badge"><span class="btxt">${e.shadowedBadge}</span></span></div></div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="rule-node collapsed">` +
+            `<div class="rule-hdr"><svg class="ic s16 r-ico" style="width:14px;height:14px;color:var(--text-tertiary)"><use href="#chev-r"/></svg>` +
+              `<div class="rule-hdr-txt"><div class="rule-title-line"><span class="mono" style="font-size:11px;color:var(--text-secondary)">${e.longCollapsed3}</span><span class="badge dis"><span class="btxt">${e.unmatchedBadge}</span></span></div></div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+
+        /* Set 3: builtin.classification */
+        `<div class="set-group">` +
+          `<div class="set-hdr">` +
+            `<svg class="ic s16" style="width:14px;height:14px;color:var(--text-secondary);flex:none"><use href="#chev-d"/></svg>` +
+            `<span class="set-name">${e.setBuiltinName}</span>` +
+            `<span class="set-key">${e.setBuiltinKey}</span>` +
+          `</div>` +
+          `<div class="rule-node collapsed">` +
+            `<div class="rule-hdr"><svg class="ic s16 r-ico" style="width:14px;height:14px;color:var(--text-tertiary)"><use href="#chev-r"/></svg>` +
+              `<div class="rule-hdr-txt"><div class="rule-title-line"><span class="mono" style="font-size:11px;color:var(--text-secondary)">${e.collapsedVscode}</span><span class="badge"><span class="btxt">${e.shadowedBadge}</span></span></div></div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="rule-node collapsed">` +
+            `<div class="rule-hdr"><svg class="ic s16 r-ico" style="width:14px;height:14px;color:var(--text-tertiary)"><use href="#chev-r"/></svg>` +
+              `<div class="rule-hdr-txt"><div class="rule-title-line"><span class="mono" style="font-size:11px;color:var(--text-secondary)">${e.collapsedWt}</span><span class="badge ovr"><span class="btxt">${e.overriddenBadge}</span></span></div></div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+
+        /* Paging control ("Load more") */
+        `<div class="pager-box">` +
+          `<span class="cap sec">${e.pagerMeta}</span>` +
+          `<button class="btn compact"><span>${e.loadMoreBtn}</span></button>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    renderExplainFooter();
+}
+
+/* ===========================
+   State 4: situation ("Copy situation description" dialog)
+   =========================== */
+function renderSituationModal() {
+  const s = T.situation;
+  const scrim = document.getElementById('modal-scrim');
+  scrim.style.display = 'flex';
+  scrim.innerHTML =
+    `<div class="modal-dlg" role="dialog" aria-modal="true">` +
+      `<div class="modal-head">` +
+        `<svg class="ic" style="color:var(--text-secondary);flex:none"><use href="#copy"/></svg>` +
+        `<div class="modal-head-txt">` +
+          `<span class="h-sub ell">${s.title}</span>` +
+          `<span class="badge ok"><span class="btxt">${s.localBadge}</span></span>` +
+        `</div>` +
+        `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+      `</div>` +
+      `<div class="modal-body-wrap" id="modal-body-wrap">` +
+        `<div class="modal-body" id="modal-body">` +
+          `<div class="infobar">` +
+            `<svg class="ic s16 ib-ic"><use href="#shield"/></svg>` +
+            `<div class="ib-body">` +
+              `<div class="ib-title">${s.privacyTitle}</div>` +
+              `<div>${s.privacyDesc}</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="sit-editor" role="textbox" aria-multiline="true">` +
+            `<div class="sit-line"><span class="sec">${s.docLinkLabel}</span><span class="link">https://github.com/4o3F/Quartz/blob/main/docs/rules/rule-format.md</span></div>` +
+            `<div class="sit-line"><span class="sec">${s.fmtVerLabel}</span>quartz-rules/1</div>` +
+            `<div class="sit-line sec gap-top">${s.segHdr}</div>` +
+            `<div class="sit-line">${s.segTime}</div>` +
+            `<div class="sit-line">  app.exe_name = "code.exe" · app.display_name = "Visual Studio Code"</div>` +
+            `<div class="sit-line">  window.class = "Chrome_WidgetWin_1" · title.normalized = "07-ui.md - Quartz"</div>` +
+            `<div class="sit-line">  doc.document = "07-ui.md" · doc.project = "Quartz"</div>` +
+            `<div class="sit-line sec">${s.segNote}</div>` +
+            `<div class="sit-line sec gap-top">${s.expHdr}</div>` +
+            `<div class="sit-line">${s.expLine1}</div>` +
+            `<div class="sit-line">${s.expLine2}</div>` +
+            `<div class="sit-line">${s.expLine3}</div>` +
+            `<div class="sit-line">${s.expLine4}</div>` +
+            `<div class="sit-line sec gap-top">${s.relHdr}</div>` +
+            `<div class="sit-line">  - user.local.classification/vscode-quartz-docs (v4)</div>` +
+            `<div class="sit-line">  - builtin.classification/vscode (v2)</div>` +
+            `<div class="sit-line">  - user.local.extraction/vscode-project (v2)</div>` +
+            `<div class="sit-line req">${s.reqPrefix}<span class="caret"></span><span class="sit-ph">${s.reqPh}</span></div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="modal-thumb"></div></div>` +
+      `</div>` +
+      `<div class="modal-foot">` +
+        `<div class="modal-foot-l">` +
+          `<button class="btn compact subtle"><span>${s.resetBtn}</span></button>` +
+          `<span class="cap ter ell sit-meta-hide">${s.charCount}</span>` +
+        `</div>` +
+        `<div class="modal-foot-r">` +
+          `<button class="btn"><span>${s.cancelBtn}</span></button>` +
+          `<button class="btn accent"><svg class="ic s16"><use href="#copy"/></svg><span>${s.copyBtn}</span></button>` +
+        `</div>` +
+      `</div>` +
+    `</div>`;
+}
+
+/* ===========================
+   State 7: classify-from-today (V2 scope chooser in Today's 360px details sidebar slot)
+   =========================== */
+function renderClassifyFromTodayPanel() {
+  const sc = T.scope;
+  const useOverflow = isMin || lang !== 'zh-CN';
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<button class="btn subtle icon compact" style="flex:none"><svg class="ic s16"><use href="#arrow-l"/></svg></button>` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${sc.title}</span></div>` +
+        `<div class="cap sec ell">${sc.subtitleToday}</div>` +
+      `</div>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        `<div class="infobar">` +
+          `<svg class="ic s16 ib-ic"><use href="#book"/></svg>` +
+          `<div class="ib-body"><span>${sc.sourceBanner}</span></div>` +
+        `</div>` +
+        `<div class="field">` +
+          `<label><span>${sc.catLabel}</span></label>` +
+          `<div class="input std">${catChip('--cat-8', sc.catSelected)}<span class="grow"></span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+          `<div class="field-hint">${sc.catArchivedNote}</div>` +
+        `</div>` +
+        `<div class="field">` +
+          `<label><span>${sc.scopeLabel}</span></label>` +
+          `<div class="radio-stack">` +
+            `<div class="radio-card">` +
+              `<div class="radio-hdr">` +
+                `<span class="radio-dot"></span>` +
+                `<div class="grow" style="min-width:0">` +
+                  `<div class="radio-title-row"><span class="strong">${sc.optAppTitle}</span><span class="badge"><span class="btxt">${sc.badgeRule}</span></span></div>` +
+                  `<div class="cap sec" style="overflow-wrap:anywhere">${sc.optAppDesc}</div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="radio-card">` +
+              `<div class="radio-hdr">` +
+                `<span class="radio-dot"></span>` +
+                `<div class="grow" style="min-width:0">` +
+                  `<div class="radio-title-row"><span class="strong">${sc.optDocTitle}</span><span class="badge"><span class="btxt">${sc.badgeRule}</span></span></div>` +
+                  `<div class="cap sec" style="overflow-wrap:anywhere">${sc.optDocDesc}</div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="radio-card sel">` +
+              `<div class="radio-hdr">` +
+                `<span class="radio-dot"></span>` +
+                `<div class="grow" style="min-width:0">` +
+                  `<div class="radio-title-row"><span class="strong">${sc.optKwTitle}</span><span class="badge add"><span class="btxt">${sc.badgeRule}</span></span></div>` +
+                  `<div class="cap sec" style="overflow-wrap:anywhere">${sc.optKwDesc}</div>` +
+                `</div>` +
+              `</div>` +
+              `<div class="radio-fields">` +
+                `<div class="input std focused"><span class="ell">${sc.kwVal}</span><span class="caret"></span></div>` +
+                `<div class="mono ter" style="overflow-wrap:anywhere">${sc.kwHint}</div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="radio-card">` +
+              `<div class="radio-hdr">` +
+                `<span class="radio-dot"></span>` +
+                `<div class="grow" style="min-width:0">` +
+                  `<div class="radio-title-row"><span class="strong">${sc.optSegTitle}</span><span class="badge ovr"><span class="btxt">${sc.badgeAnno}</span></span></div>` +
+                  `<div class="cap sec" style="overflow-wrap:anywhere">${sc.optSegDesc}</div>` +
+                  `<div class="sample-select-pill"><svg class="ic s16" style="width:13px;height:13px;color:var(--text-secondary);flex:none"><use href="#clock"/></svg><span class="ell">${sc.segSample}</span></div>` +
+                `</div>` +
+              `</div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="prev-card">` +
+          `<div class="prev-head">` +
+            `<span class="cap strong prev-dest" title="${sc.prevDest}">${sc.prevDest}</span>` +
+            `<span class="badge"><span class="btxt">${sc.prevRange}</span></span>` +
+          `</div>` +
+          `<div class="prev-metrics">` +
+            `<div class="prev-metric">` +
+              `<div class="pm-lbl"><i class="pm-dot"></i><span class="ell">${sc.condMatchLabel}</span></div>` +
+              `<div class="pm-val">${sc.condMatchVal}</div>` +
+              `<div class="pm-sub">${sc.condMatchSub}</div>` +
+            `</div>` +
+            `<div class="prev-metric eff">` +
+              `<div class="pm-lbl"><i class="pm-dot"></i><span class="ell">${sc.effLabel}</span></div>` +
+              `<div class="pm-val">${sc.effVal}</div>` +
+              `<div class="pm-sub">${sc.effSub}</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="cap ter" style="overflow-wrap:anywhere">${sc.prevNote}</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    `<div class="ed-foot">` +
+      `<div class="ed-foot-main">` +
+        `<button class="btn accent primary-slot"><span>${sc.submitRule}</span></button>` +
+        `<button class="btn"><span>${sc.cancelBtn}</span></button>` +
+      `</div>` +
+      `<div class="ed-foot-right">` +
+        (useOverflow
+          ? `<button class="btn icon" title="${sc.moreBtnTitle}" aria-label="${sc.moreBtnTitle}"><svg class="ic s16"><use href="#more"/></svg></button>`
+          : `<button class="btn compact"><svg class="ic s16"><use href="#copy"/></svg><span>${sc.copyBtn}</span></button>`) +
+      `</div>` +
+    `</div>`;
+}
+
+/* ===========================
+   State 8: privacy-from-today (Rules page Privacy tab + seeded V3 Privacy editor)
+   =========================== */
+function renderPrivacyTabMain() {
+  const p = T.privSeed;
+  const presetBadge = (kind) => kind === 'excluded'
+    ? `<span class="badge warn"><span class="btxt">${p.presetExcluded}</span></span>`
+    : `<span class="badge"><span class="btxt">${p.presetTitleHidden}</span></span>`;
+
+  return `<div class="page-head">` +
+    `<span class="h-title ell">${p.pageTitle}</span>` +
+    `<div class="page-head-acts">` +
+      `<button class="btn"><svg class="ic s16"><use href="#import"/></svg><span>${p.importBtn}</span></button>` +
+      `<button class="btn"><svg class="ic s16"><use href="#export"/></svg><span>${p.exportBtn}</span></button>` +
+    `</div>` +
+  `</div>` +
+  `<div class="pivot">` +
+    `<div>${p.tabs.categories}</div>` +
+    `<div>${p.tabs.rules}</div>` +
+    `<div>${p.tabs.queue}<span class="badge">7</span></div>` +
+    `<div>${p.tabs.extraction}</div>` +
+    `<div class="on">${p.tabs.privacy}</div>` +
+  `</div>` +
+  `<div class="rules-grid">` +
+    `<div class="card tree-card">` +
+      `<div class="tree-head"><span class="strong grow ell">${p.treeHeading}</span><button class="btn compact icon"><svg class="ic s16"><use href="#add"/></svg></button></div>` +
+      `<div class="tnode">` +
+        `<svg class="ic s16" style="color:var(--text-secondary);flex:none"><use href="#chev-d"/></svg>` +
+        `<div class="meta">` +
+          `<div class="row gap4"><span class="strong ell">${p.builtinName}</span><svg class="ic s16 lock-ic"><use href="#lock"/></svg></div>` +
+          `<div class="cap sec ell mono" style="font-size:11px">builtin.privacy · v1</div>` +
+          `<div class="badges"><span class="badge"><span class="btxt">${p.builtinCount}</span></span></div>` +
+        `</div>` +
+        `<div class="sw sm on"></div>` +
+      `</div>` +
+      `<div class="tnode ind1 sel">` +
+        `<span style="width:16px;flex:none"></span>` +
+        `<div class="meta">` +
+          `<div class="row gap4"><span class="strong ell">${p.localName}</span></div>` +
+          `<div class="cap sec ell mono" style="font-size:11px">user.local.privacy · v2</div>` +
+          `<div class="badges"><span class="badge add"><span class="btxt">+2</span></span><span class="badge ovr"><span class="btxt">${p.badgeDraft}</span></span></div>` +
+        `</div>` +
+        `<div class="sw sm on"></div>` +
+      `</div>` +
+      `<div class="tree-foot-note">${p.treeFoot}</div>` +
+    `</div>` +
+
+    `<div class="card list-card">` +
+      `<div class="list-toolbar">` +
+        `<div class="seg"><div class="on">${p.segOwn}</div><div>${p.segEff}</div></div>` +
+        `<div class="list-toolbar-right"><button class="btn compact"><svg class="ic s16"><use href="#add"/></svg><span>${p.addRule}</span></button></div>` +
+      `</div>` +
+      `<div class="list-meta"><span>${p.ownMeta}</span></div>` +
+      `<div class="rtbl-h">` +
+        `<span class="col-rule">${p.colRule}</span>` +
+        `<span class="col-cond" style="font-family:var(--font-small)">${p.colCond}</span>` +
+        `<span class="col-act">${p.colAct}</span>` +
+      `</div>` +
+      p.rows.map((r, i) =>
+        `<div class="rtbl-r${i === 0 ? ' sel draft-row' : ''}">` +
+          `<div class="col-rule">` +
+            `<div class="col-rule-top"><span class="lbl">${r.name}</span>${r.draft ? `<span class="badge ovr"><span class="btxt">${p.badgeDraft}</span></span>` : `<span class="badge add"><span class="btxt">${p.badgeAdd}</span></span>`}</div>` +
+            `<div class="col-rule-sub">${r.sub}</div>` +
+          `</div>` +
+          `<span class="col-cond">${r.cond}</span>` +
+          `<div class="col-act">${presetBadge(r.preset)}</div>` +
+        `</div>`
+      ).join('') +
+    `</div>` +
+  `</div>`;
+}
+
+function renderPrivacyFromTodayPanel() {
+  const p = T.privSeed;
+  const useOverflow = isMin || lang !== 'zh-CN';
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${p.edTitle}</span><span class="badge ovr"><span class="btxt">${p.badgeDraft}</span></span></div>` +
+        `<div class="cap sec ell">${p.edSubtitle}</div>` +
+      `</div>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        /* Prefill provenance note */
+        `<div class="infobar accent-info">` +
+          `<svg class="ic s16 ib-ic"><use href="#info"/></svg>` +
+          `<div class="ib-body">` +
+            `<div class="ib-title">${p.seedBannerTitle}</div>` +
+            `<div>${p.seedBannerDesc}</div>` +
+            `<div class="seed-chips">` +
+              `<span class="field-tag">app.exe_name</span>` +
+              `<span class="field-tag">window.class</span>` +
+              `<span class="field-tag">${p.seedChipTitleVis}</span>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+
+        `<div class="field"><label>${p.edNameLabel}</label><div class="input std"><span class="ell">${p.edNameVal}</span></div></div>` +
+
+        `<div class="field">` +
+          `<label><span>${p.condsLabel}</span><div class="seg"><div class="on">${p.matchAll}</div><div>${p.matchAny}</div></div></label>` +
+          `<div class="cond-list">` +
+            `<div class="cond-row">` +
+              `<div class="cond-line">` +
+                `<span class="neg-btn">${p.negLabel}</span>` +
+                `<div class="input grow"><span class="mono grow ell">app.exe_name</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+                `<button class="btn compact icon subtle"><svg class="ic s16"><use href="#close"/></svg></button>` +
+              `</div>` +
+              `<div class="cond-line">` +
+                `<div class="input" style="flex:0 0 110px"><span class="mono grow ell">equals</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+                `<div class="input grow"><span class="mono ell">outlook.exe</span></div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="cond-row">` +
+              `<div class="cond-line">` +
+                `<span class="neg-btn">${p.negLabel}</span>` +
+                `<div class="input grow"><span class="mono grow ell">window.class</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+                `<button class="btn compact icon subtle"><svg class="ic s16"><use href="#close"/></svg></button>` +
+              `</div>` +
+              `<div class="cond-line">` +
+                `<div class="input" style="flex:0 0 110px"><span class="mono grow ell">equals</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+                `<div class="input grow"><span class="mono ell">${p.windowClass}</span></div>` +
+              `</div>` +
+            `</div>` +
+            `<div class="cond-row">` +
+              `<div class="cond-line">` +
+                `<span class="neg-btn">${p.negLabel}</span>` +
+                `<div class="input grow"><span class="mono grow ell">title.raw</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+                `<button class="btn compact icon subtle"><svg class="ic s16"><use href="#close"/></svg></button>` +
+              `</div>` +
+              `<div class="cond-line">` +
+                `<div class="input" style="flex:0 0 110px"><span class="mono grow ell">contains</span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+                `<div class="input grow focused"><span class="ell">${p.titleSample}</span><span class="caret"></span></div>` +
+              `</div>` +
+              `<div class="field-hint">${p.titleCondNote}</div>` +
+            `</div>` +
+          `</div>` +
+          `<div class="row gap8" style="flex-wrap:wrap"><button class="btn compact"><svg class="ic s16"><use href="#add"/></svg><span>${p.addCond}</span></button><span class="cap ter ell" style="min-width:0;flex:1;text-align:right">${p.condsHint}</span></div>` +
+        `</div>` +
+
+        /* M4 desktop-only privacy preset & field actions (no web row per V3 Decision 3) */
+        `<div class="field">` +
+          `<label>${p.actionsLabel}</label>` +
+          `<div class="seg full-seg"><div class="on">${p.presetTitleHidden}</div><div>${p.presetExcluded}</div><div>${p.presetCustom}</div></div>` +
+          `<div class="act-grid">` +
+            `<div class="act-row">` +
+              `<div class="act-field"><span class="af-lbl">${p.fieldAppLbl}</span><span class="af-key">app</span></div>` +
+              `<div class="seg act-seg"><div class="on">${p.actKeep}</div><div>${p.actDrop}</div></div>` +
+            `</div>` +
+            `<div class="act-row">` +
+              `<div class="act-field"><span class="af-lbl">${p.fieldTitleLbl}</span><span class="af-key">window_title</span></div>` +
+              `<div class="seg act-seg"><div>${p.actKeep}</div><div class="on">${p.actDrop}</div></div>` +
+            `</div>` +
+          `</div>` +
+        `</div>` +
+
+        /* V3 7-day privacy preview with fresh receipt */
+        `<div class="prev-card">` +
+          `<div class="prev-head">` +
+            `<span class="strong">${p.previewTitle}</span>` +
+            `<span class="badge ok"><svg class="ic s16" style="width:11px;height:11px"><use href="#check"/></svg><span class="btxt">${p.receiptOk}</span></span>` +
+          `</div>` +
+          `<div class="prev-summary-line">` +
+            `<div style="font-weight:600">${p.summaryMain}</div>` +
+            `<div class="ter" style="margin-top:2px">${p.summarySub}</div>` +
+          `</div>` +
+          `<div class="prev-samples-hdr"><span>${p.samplesHdr}</span></div>` +
+          p.samples.map(s =>
+            `<div class="psample-row">` +
+              `<span class="psample-time">${s.time}</span>` +
+              `<span class="psample-app">${s.app}</span>` +
+              `<span class="badge warn"><span class="btxt">${s.trans}</span></span>` +
+              `<span class="psample-dur">${s.dur}</span>` +
+            `</div>`
+          ).join('') +
+          `<div class="cap ter" style="overflow-wrap:anywhere">${p.samplesOmitNote}</div>` +
+        `</div>` +
+
+        /* Future-only scope box (V3 Decision 5) */
+        `<div class="history-box">` +
+          `<div class="row gap4"><svg class="ic s16" style="width:14px;height:14px;color:var(--text-secondary);flex:none"><use href="#info"/></svg><span class="cap" style="color:var(--text-primary);overflow-wrap:anywhere">${p.futureNote}</span></div>` +
+          `<div class="history-row">` +
+            `<button class="btn compact disabled"><svg class="ic s16"><use href="#history"/></svg><span>${p.applyHistoryBtn}</span></button>` +
+            `<span class="cap ter" style="flex:1;min-width:120px;overflow-wrap:anywhere">${p.historyDisabledHint}</span>` +
+          `</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    `<div class="ed-foot">` +
+      `<div class="ed-foot-main">` +
+        `<button class="btn accent primary-slot"><span>${p.saveBtn}</span></button>` +
+        `<button class="btn"><span>${p.cancelBtn}</span></button>` +
+      `</div>` +
+      `<div class="ed-foot-right">` +
+        (useOverflow
+          ? `<button class="btn icon" title="${p.moreTitle}" aria-label="${p.moreTitle}"><svg class="ic s16"><use href="#more"/></svg></button>`
+          : `<button class="btn compact"><svg class="ic s16"><use href="#copy"/></svg><span>${p.copyBtn}</span></button>`) +
+      `</div>` +
+    `</div>`;
+}
+
+function renderMain() {
+  const main = document.getElementById('main');
+  switch (stateKey) {
+    case 'explain':
+      main.innerHTML = renderTodayPage({ selBand: { left: 78.8, width: 5.8 } });
+      renderExplainPanel();
+      break;
+    case 'explain-fragments':
+      main.innerHTML = renderTodayPage({ isDst: true, selBand: { left: 19.4, width: 28.6 } });
+      renderExplainFragmentsPanel();
+      break;
+    case 'explain-long':
+      main.innerHTML = renderTodayPage({ selBand: { left: 19.4, width: 8.2 } });
+      renderExplainLongPanel();
+      break;
+    case 'situation':
+      main.innerHTML = renderTodayPage({ selBand: { left: 78.8, width: 5.8 } });
+      renderExplainPanel();
+      renderSituationModal();
+      break;
+    case 'context-menu-ranking':
+      main.innerHTML = renderTodayPage({ ctxRankingRow: 1 });
+      break;
+    case 'context-menu-timeline':
+      main.innerHTML = renderTodayPage({ ctxTimelineBlock: true });
+      break;
+    case 'classify-from-today':
+      main.innerHTML = renderTodayPage({ selBand: { left: 74.0, width: 4.6 } });
+      renderClassifyFromTodayPanel();
+      break;
+    case 'privacy-from-today':
+      main.innerHTML = renderPrivacyTabMain();
+      renderPrivacyFromTodayPanel();
+      break;
+    default:
+      main.innerHTML = renderTodayPage({ selBand: { left: 78.8, width: 5.8 } });
+      renderExplainPanel();
+  }
+}
+
+function syncScroll(scrollEl, wrapEl, thumbEl) {
+  if (!scrollEl || !wrapEl || !thumbEl) return;
+  const overflow = scrollEl.scrollHeight > scrollEl.clientHeight + 1;
+  wrapEl.classList.toggle('scrollable', overflow);
+  if (!overflow) return;
+  const trackH = wrapEl.clientHeight - 8;
+  const ratio = scrollEl.clientHeight / scrollEl.scrollHeight;
+  const thumbH = Math.max(28, Math.round(trackH * ratio));
+  const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+  const top = maxScroll > 0 ? Math.round((scrollEl.scrollTop / maxScroll) * (trackH - thumbH)) : 0;
+  thumbEl.style.height = thumbH + 'px';
+  thumbEl.style.top = top + 'px';
+}
+
+renderNav();
+renderMain();
+
+const mainEl = document.getElementById('main');
+const mainWrapEl = document.getElementById('main-wrap');
+const mainThumbEl = document.getElementById('main-thumb');
+syncScroll(mainEl, mainWrapEl, mainThumbEl);
+mainEl.addEventListener('scroll', () => syncScroll(mainEl, mainWrapEl, mainThumbEl));
+
+const edBody = document.getElementById('ed-body');
+const edBodyWrap = document.getElementById('ed-body-wrap');
+const edThumb = document.getElementById('ed-thumb');
+if (edBody) {
+  syncScroll(edBody, edBodyWrap, edThumb);
+  edBody.addEventListener('scroll', () => syncScroll(edBody, edBodyWrap, edThumb));
+}
+
+const modalBody = document.getElementById('modal-body');
+const modalBodyWrap = document.getElementById('modal-body-wrap');
+const modalThumb = document.getElementById('modal-thumb');
+if (modalBody) {
+  if (stateKey === 'situation' && modalBody.scrollHeight > modalBody.clientHeight) {
+    modalBody.scrollTop = modalBody.scrollHeight;
+  }
+  syncScroll(modalBody, modalBodyWrap, modalThumb);
+  modalBody.addEventListener('scroll', () => syncScroll(modalBody, modalBodyWrap, modalThumb));
+}
+</script>
+</body>
+</html>
