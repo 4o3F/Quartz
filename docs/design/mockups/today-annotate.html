@@ -1,0 +1,2102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Quartz — Annotations &amp; Timeline Selection</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mockup.css">
+<!--
+  Annotations, Pan/Select timeline mode, range selection & batch annotation (M4 V6: H13 / H14).
+  Query parameters:
+    ?state=mode-pan | select-dragging | select-range | select-multi | select-dst |
+           annotate-dialog | pending-other | annotation-list | annotation-edit
+    &theme=light | dark
+    &lang=zh-CN | en | en-XA
+    &size=min          (optional: 640x480 minimum window per 07 §2.3; default 1280x800)
+-->
+<style>
+/* Minimum window 640x480 (Compact breakpoint per 07 §2.1 & §2.3) */
+html[data-size="min"],
+html[data-size="min"] body,
+html[data-size="min"] .window{width:640px;height:480px}
+
+.wrap{position:relative;overflow:hidden}
+.main-wrap{position:relative;flex:1;min-width:0;display:flex}
+.main{position:relative;padding:var(--space-xl) var(--space-xxl) var(--space-l);gap:var(--space-s);overflow-y:auto;overflow-x:hidden}
+html[data-has-panel="true"] .main{padding:var(--space-l) var(--space-l) var(--space-l)}
+html[data-size="min"] .main{padding:var(--space-m) var(--space-m) var(--space-l)}
+
+/* 07 §10: chart plot areas sit directly on bg.base in both light and dark */
+.plot{background:var(--bg-base);border-radius:var(--radius-control)}
+
+/* Fluent 2 overlay scrollbar indicator (11 §9.2) */
+.scroll-track{
+  display:none;
+  position:absolute;top:var(--space-xs);right:var(--space-xs);bottom:var(--space-xs);
+  width:6px;pointer-events:none;z-index:8;
+}
+.scrollable > .scroll-track{display:block}
+.scroll-thumb{
+  position:absolute;left:1px;right:1px;top:0;
+  border-radius:var(--radius-control);
+  background:var(--text-tertiary);
+}
+
+/* Nav & flexible text controls safe for en-XA */
+.nav-item span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;gap:3px}
+.badge .btxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip{max-width:100%;min-width:0}
+.btn{min-height:var(--h-control-standard);height:auto;padding:4px 12px;max-width:100%}
+.btn.compact{min-height:var(--h-control-compact);height:auto;padding:2px 9px;font:var(--type-caption)}
+.btn.icon{width:var(--h-control-standard);height:var(--h-control-standard);padding:0;flex:none}
+.btn.compact.icon{width:var(--h-control-compact);height:var(--h-control-compact);padding:0;flex:none}
+.btn.danger-solid{
+  background:var(--status-critical);border-color:var(--status-critical);
+  color:var(--text-on-accent);box-shadow:var(--shadow-2);
+}
+.btn.danger-active{
+  background:var(--status-critical-bg);
+  border-color:color-mix(in srgb,var(--status-critical) 55%,transparent);
+  color:var(--status-critical);
+}
+
+/* Today layout responsiveness */
+.datebar{flex-wrap:wrap;height:auto;min-height:var(--h-control-standard)}
+.datebar .date{min-width:186px}
+.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr))}
+.stat{padding:0 10px;border-left:1px solid var(--stroke-divider);min-width:0}
+.stat:first-child{padding-left:0;border-left:none}
+.stat .v,.stat .l{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.legend{flex-wrap:wrap;gap:var(--space-xs) var(--space-l)}
+
+html[data-has-panel="true"] .stats{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:var(--space-s)}
+html[data-has-panel="true"] .stat:nth-child(3n+1){padding-left:0;border-left:none}
+html[data-has-panel="true"] .tl{--gut:98px}
+html[data-has-panel="true"] .two-col{flex-direction:column}
+
+html[data-size="min"] .datebar .date{min-width:154px}
+html[data-size="min"] .stats{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:var(--space-s)}
+html[data-size="min"] .stat:nth-child(3n+1){padding-left:0;border-left:none}
+html[data-size="min"] .two-col{flex-direction:column}
+html[data-size="min"] .tl{--gut:84px}
+html[data-size="min"] .legend{gap:var(--space-xs) var(--space-m)}
+
+/* Timeline toolbar + Pan/Select segmented control */
+.tl-head{display:flex;align-items:center;gap:6px;row-gap:6px;flex-wrap:wrap}
+.tl-head-l{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto;flex-wrap:wrap}
+.tl-head-r{display:flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:100%}
+.tl-head .h-sub{white-space:nowrap}
+
+.seg.mode-seg{position:relative;gap:2px}
+.seg.mode-seg div{gap:5px;padding:0 9px;white-space:nowrap}
+.seg.mode-seg div svg{width:13px;height:13px;flex:none}
+.seg.mode-seg.kb-focus{
+  outline:2px solid var(--stroke-focus-outer);
+  outline-offset:2px;
+  box-shadow:0 0 0 1px var(--stroke-focus-inner);
+}
+
+/* Keyboard focus tooltip (mode-pan) */
+.kb-tip{
+  position:absolute;
+  top:calc(100% + 7px);left:0;
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-control);
+  box-shadow:var(--shadow-16);
+  padding:5px 9px;
+  font:var(--type-caption);color:var(--text-secondary);
+  white-space:nowrap;z-index:25;
+  display:inline-flex;align-items:center;gap:6px;
+}
+.kb-tip .kbd{
+  display:inline-flex;align-items:center;height:16px;padding:0 4px;
+  border-radius:3px;border:1px solid var(--stroke-control-strong);
+  background:var(--fill-card-secondary);
+  font-family:var(--font-mono);font-size:10.5px;line-height:14px;
+  color:var(--text-primary);
+}
+
+/* DST clock-change marker */
+.dst-marker{
+  position:absolute;top:-2px;bottom:0;width:2px;
+  background:repeating-linear-gradient(180deg,var(--status-caution) 0 4px,transparent 4px 7px);
+  z-index:4;pointer-events:none;
+}
+.dst-pill{
+  position:absolute;top:-19px;transform:translateX(-50%);
+  height:16px;padding:0 5px;border-radius:var(--radius-control);
+  background:var(--status-caution-bg);color:var(--status-caution);
+  border:1px solid color-mix(in srgb,var(--status-caution) 28%,transparent);
+  font:var(--type-caption);font-size:10.5px;line-height:14px;
+  white-space:nowrap;display:inline-flex;align-items:center;gap:3px;
+}
+
+/* Range selection overlay & draggable endpoint handles */
+.sel-layer{
+  position:absolute;left:var(--gut);right:0;top:0;height:152px;
+  pointer-events:none;z-index:5;
+}
+.range-band{
+  position:absolute;top:-2px;bottom:-2px;
+  background:color-mix(in srgb,var(--accent-fill) 18%,transparent);
+  border-left:2px solid var(--accent-fill);
+  border-right:2px solid var(--accent-fill);
+}
+.range-band.secondary{
+  background:color-mix(in srgb,var(--accent-fill) 11%,transparent);
+  border-left:1.5px solid color-mix(in srgb,var(--accent-fill) 72%,transparent);
+  border-right:1.5px solid color-mix(in srgb,var(--accent-fill) 72%,transparent);
+}
+.range-band.dragging{
+  background:color-mix(in srgb,var(--accent-fill) 22%,transparent);
+  border-right-style:dashed;
+}
+
+.ep-handle{
+  position:absolute;top:50%;transform:translateY(-50%);
+  width:10px;height:28px;border-radius:5px;
+  background:var(--bg-flyout);
+  border:2px solid var(--accent-fill);
+  box-shadow:var(--shadow-8);
+  display:flex;align-items:center;justify-content:center;gap:1.5px;
+}
+.ep-handle::before,.ep-handle::after{
+  content:"";width:1px;height:10px;border-radius:1px;background:var(--accent-fill);
+}
+.ep-handle.left{left:-6px}
+.ep-handle.right{right:-6px}
+.ep-handle.active{
+  background:var(--accent-fill);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--accent-fill) 25%,transparent),var(--shadow-8);
+}
+.ep-handle.active::before,.ep-handle.active::after{background:var(--text-on-accent)}
+
+.ep-tag{
+  position:absolute;top:-19px;
+  height:16px;padding:0 5px;border-radius:var(--radius-control);
+  background:var(--accent-fill);color:var(--text-on-accent);
+  font-family:var(--font-mono);font-size:10.5px;line-height:14px;font-weight:600;
+  white-space:nowrap;display:inline-flex;align-items:center;
+  box-shadow:var(--shadow-2);
+}
+.ep-tag.left{left:-2px;transform:translateX(-30%)}
+.ep-tag.right{right:-2px;transform:translateX(30%)}
+.range-band.dst-band .ep-tag.left{left:-5px;transform:translateX(-100%)}
+.range-band.dst-band .ep-tag.right{right:-5px;transform:translateX(100%)}
+
+.range-num{
+  position:absolute;top:-20px;left:50%;transform:translateX(-50%);
+  min-width:18px;height:18px;padding:0 5px;border-radius:9px;
+  background:var(--accent-fill);color:var(--text-on-accent);
+  font:var(--type-caption);font-size:11px;line-height:16px;font-weight:600;
+  display:inline-flex;align-items:center;justify-content:center;
+  box-shadow:var(--shadow-2);
+}
+.range-band.secondary .range-num{
+  background:var(--bg-flyout);color:var(--accent-text);
+  border:1.5px solid var(--accent-fill);
+}
+
+/* Live drag tooltip inside plot */
+.drag-tt{
+  position:absolute;top:14px;
+  width:236px;max-width:calc(100% - 16px);
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-overlay);
+  box-shadow:var(--shadow-16);
+  padding:8px 10px;
+  z-index:20;
+  display:flex;flex-direction:column;gap:3px;
+}
+.drag-tt-time{
+  display:flex;align-items:center;justify-content:space-between;gap:6px;
+  font:var(--type-body-strong);color:var(--text-primary);
+}
+.drag-tt-sub{font:var(--type-caption);color:var(--text-secondary);overflow-wrap:anywhere}
+.drag-tt-hint{font:var(--type-caption);color:var(--text-tertiary);overflow-wrap:anywhere}
+
+.drag-cursor{
+  position:absolute;right:-11px;top:66%;
+  width:20px;height:20px;color:var(--text-primary);
+  filter:drop-shadow(0 1px 2px rgba(0,0,0,.35));
+}
+
+/* Docked Selection Summary Card (below timeline plot) */
+.sel-panel{
+  margin-top:8px;
+  padding:10px 12px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card-secondary);
+  border:1px solid color-mix(in srgb,var(--accent-fill) 32%,var(--stroke-card));
+  display:flex;flex-direction:column;gap:8px;
+}
+.sel-top{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:8px;row-gap:6px;flex-wrap:wrap;
+}
+.sel-endpoints{
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;
+}
+.sel-actions{
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto;
+}
+.time-in{
+  display:inline-flex;align-items:center;gap:5px;
+  height:26px;padding:0 7px;
+  background:var(--fill-control);
+  border:1px solid var(--stroke-control);
+  border-bottom-color:var(--stroke-control-strong);
+  border-radius:var(--radius-control);
+  font-family:var(--font-mono);font-size:12px;line-height:16px;
+  color:var(--text-primary);white-space:nowrap;
+}
+.time-in.focused{
+  border-color:var(--stroke-control);
+  border-bottom:2px solid var(--accent-fill);
+  outline:2px solid var(--stroke-focus-outer);
+  outline-offset:1px;
+}
+.time-in svg{width:13px;height:13px;color:var(--text-secondary);flex:none}
+.utc-pill{
+  display:inline-flex;align-items:center;gap:2px;
+  height:20px;padding:0 5px;border-radius:3px;
+  background:var(--status-caution-bg);color:var(--status-caution);
+  font-family:var(--font-mono);font-size:11px;line-height:14px;font-weight:600;
+  white-space:nowrap;
+}
+.utc-pill svg{width:11px;height:11px;color:var(--status-caution)}
+
+.sel-summary-grid{
+  display:grid;
+  grid-template-columns:minmax(180px,1fr) minmax(200px,1.25fr) minmax(200px,1.25fr);
+  gap:8px;
+}
+html[data-size="min"] .sel-summary-grid{grid-template-columns:1fr}
+.sel-box{
+  padding:7px 9px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:4px;min-width:0;
+}
+.sel-box-lbl{font:var(--type-caption);color:var(--text-secondary);overflow-wrap:anywhere}
+.sel-chips{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.split-bar{
+  display:flex;height:6px;gap:1px;border-radius:3px;overflow:hidden;
+  background:var(--fill-subtle-hover);margin-top:2px;
+}
+.split-bar .act{background:var(--accent-fill)}
+.split-bar .idl{
+  background:repeating-linear-gradient(45deg,transparent 0 2px,var(--stroke-control-strong) 2px 3px),
+             color-mix(in srgb,var(--status-neutral) 35%,transparent);
+}
+
+/* Multi-range list (select-multi) */
+.multi-list{display:flex;flex-direction:column;gap:5px}
+.multi-row{
+  position:relative;
+  padding:6px 8px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+}
+.multi-row.active-range{
+  border-color:color-mix(in srgb,var(--accent-fill) 48%,transparent);
+  background:color-mix(in srgb,var(--accent-fill) 5%,var(--fill-card));
+}
+.m-num{
+  width:20px;height:20px;border-radius:50%;flex:none;
+  background:var(--accent-fill);color:var(--text-on-accent);
+  font:var(--type-caption);font-weight:600;
+  display:grid;place-items:center;
+}
+.multi-row:not(.active-range) .m-num{
+  background:var(--fill-subtle-hover);color:var(--text-primary);
+  border:1px solid var(--stroke-control-strong);
+}
+.m-time{font-family:var(--font-mono);font-size:12px;line-height:16px;font-weight:600;color:var(--text-primary);white-space:nowrap}
+.m-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1;min-width:160px}
+.m-rm-wrap{position:relative;margin-left:auto;flex:none}
+.m-rm-btn.hov{
+  background:var(--status-critical-bg);
+  border-color:color-mix(in srgb,var(--status-critical) 40%,transparent);
+  color:var(--status-critical);
+}
+.rm-tip{
+  position:absolute;right:calc(100% + 6px);top:50%;transform:translateY(-50%);
+  background:var(--bg-flyout);border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-control);box-shadow:var(--shadow-16);
+  padding:3px 8px;font:var(--type-caption);color:var(--text-primary);
+  white-space:nowrap;z-index:20;
+}
+
+/* Pending-away bar highlight (pending-other) */
+.pending{display:flex;align-items:center;gap:10px;padding:8px 14px;flex-wrap:wrap}
+.pending.highlight-card{
+  border-color:color-mix(in srgb,var(--accent-fill) 45%,transparent);
+  background:color-mix(in srgb,var(--accent-fill) 6%,var(--fill-card));
+}
+.pending .btn.other-active{
+  background:var(--accent-fill);border-color:var(--accent-fill);color:var(--text-on-accent);
+}
+
+/* InfoBar */
+.infobar{
+  flex:none;padding:7px 10px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;word-break:break-word;
+}
+.infobar .ib-ic{flex:none;margin-top:1px;color:var(--text-secondary)}
+.infobar .ib-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow-wrap:anywhere}
+.infobar .ib-title{font:var(--type-body-strong);font-size:13px;line-height:18px;color:var(--text-primary);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.infobar.caution{
+  background:var(--status-caution-bg);
+  border-color:color-mix(in srgb,var(--status-caution) 30%,transparent);
+  color:var(--text-primary);
+}
+.infobar.caution .ib-ic{color:var(--status-caution)}
+.infobar.critical{
+  background:var(--status-critical-bg);
+  border-color:color-mix(in srgb,var(--status-critical) 34%,transparent);
+  color:var(--text-primary);
+}
+.infobar.critical .ib-ic{color:var(--status-critical)}
+.infobar.accent-info{
+  background:color-mix(in srgb,var(--accent-fill) 8%,var(--fill-card));
+  border-color:color-mix(in srgb,var(--accent-fill) 30%,transparent);
+  color:var(--text-primary);
+}
+.infobar.accent-info .ib-ic{color:var(--accent-text)}
+
+/* ===========================
+   Modal Dialog (annotate-dialog, pending-other)
+   =========================== */
+.modal-scrim{
+  position:absolute;inset:0;
+  background:var(--fill-smoke);
+  z-index:40;
+  display:flex;align-items:center;justify-content:center;
+  padding:var(--space-l);
+}
+html[data-size="min"] .modal-scrim{padding:var(--space-s)}
+.modal-dlg{
+  width:576px;max-width:100%;max-height:100%;
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-overlay);
+  box-shadow:var(--shadow-64);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.modal-head{
+  flex:none;padding:12px var(--space-xl);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:center;gap:var(--space-s);
+}
+.modal-head-txt{flex:1;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.modal-body-wrap{position:relative;flex:1;min-height:0;display:flex}
+.modal-body{
+  flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
+  padding:12px var(--space-xl);
+  display:flex;flex-direction:column;gap:10px;
+}
+.modal-foot{
+  flex:none;padding:10px var(--space-xl);
+  border-top:1px solid var(--stroke-divider);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:center;flex-wrap:nowrap;gap:var(--space-s);
+}
+.modal-foot-l{flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow:hidden}
+.modal-foot-r{flex:0 0 auto;display:flex;align-items:center;gap:var(--space-s);margin-left:auto}
+.modal-foot-r .btn{min-width:0;max-width:210px}
+.modal-foot-r .btn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+html[data-size="min"] .modal-head{padding:9px 14px}
+html[data-size="min"] .modal-body{padding:10px 14px;gap:8px}
+html[data-size="min"] .modal-foot{padding:8px 14px}
+html[data-size="min"] .modal-foot-l{display:none}
+html[data-size="min"] .modal-foot-r{width:100%;justify-content:flex-end}
+
+/* Form controls inside dialog & edit sidebar */
+.field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.field > label{
+  font:var(--type-caption);color:var(--text-secondary);
+  display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;
+}
+.input{min-width:0}
+.input.focused{border-color:var(--stroke-control);border-bottom:2px solid var(--accent-fill)}
+.textarea{
+  min-height:54px;padding:6px 9px;
+  background:var(--fill-control);
+  border:1px solid var(--stroke-control);
+  border-bottom-color:var(--stroke-control-strong);
+  border-radius:var(--radius-control);
+  font:var(--type-body);color:var(--text-primary);
+  overflow-wrap:anywhere;word-break:break-word;
+}
+.field-hint{font:var(--type-caption);color:var(--text-tertiary);overflow-wrap:anywhere}
+.caret{
+  display:inline-block;width:1.5px;height:14px;
+  background:var(--accent-fill);vertical-align:text-bottom;margin-left:1px;
+}
+
+/* Kind segmented bar */
+.full-seg{width:100%;display:flex;height:auto;min-height:28px;padding:2px;gap:2px}
+.full-seg div{
+  flex:1 1 0;min-width:0;padding:2px 6px;
+  display:flex;align-items:center;justify-content:center;gap:4px;
+  text-align:center;overflow:hidden;
+}
+.full-seg div span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Active-only category picker tray (no archived) */
+.cat-tray{
+  padding:6px;
+  border-radius:var(--radius-control);
+  background:var(--bg-base);
+  border:1px solid var(--stroke-control);
+  display:flex;flex-wrap:wrap;gap:5px;
+}
+.cat-opt{
+  display:inline-flex;align-items:center;gap:6px;
+  height:26px;padding:0 9px;
+  border-radius:var(--radius-control);
+  background:var(--fill-control);
+  border:1px solid var(--stroke-control);
+  font:var(--type-caption);color:var(--text-primary);
+  max-width:100%;
+}
+.cat-opt .sw-dot{width:10px;height:10px;border-radius:3px;background:var(--c);flex:none}
+.cat-opt.sel{
+  border-color:var(--accent-fill);
+  background:color-mix(in srgb,var(--accent-fill) 12%,var(--fill-card));
+  font-weight:600;
+}
+.cat-opt .chk{width:12px;height:12px;color:var(--accent-text);flex:none}
+
+/* Target ranges strip inside dialog */
+.ranges-strip{
+  padding:7px 9px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:5px;
+}
+.ranges-pills{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.r-pill{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:2px 7px;min-height:22px;max-width:100%;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);border:1px solid var(--stroke-control);
+  font-family:var(--font-mono);font-size:11.5px;line-height:15px;color:var(--text-primary);
+}
+.r-pill .rn{
+  width:15px;height:15px;border-radius:50%;flex:none;
+  background:var(--accent-fill);color:var(--text-on-accent);
+  font-family:var(--font-small);font-size:10px;font-weight:600;
+  display:grid;place-items:center;
+}
+
+/* Effect preview box ("这些时间将计为…") */
+.effect-box{
+  padding:8px 10px;
+  border-radius:var(--radius-overlay);
+  background:color-mix(in srgb,var(--accent-fill) 7%,var(--fill-card-secondary));
+  border:1px solid color-mix(in srgb,var(--accent-fill) 28%,var(--stroke-card));
+  display:flex;flex-direction:column;gap:4px;
+}
+.effect-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.effect-desc{font:var(--type-caption);color:var(--text-secondary);overflow-wrap:anywhere}
+
+/* ===========================
+   Right-hand 360px Panel (annotation-list, annotation-edit)
+   =========================== */
+.panel-scrim{
+  display:none;
+  position:absolute;inset:0;
+  background:color-mix(in srgb,var(--fill-smoke) 42%,transparent);
+  z-index:15;
+}
+.details{
+  width:var(--w-details);flex:none;
+  border-left:1px solid var(--stroke-divider);
+  padding:0;gap:0;
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  background:transparent;
+}
+html[data-size="min"][data-panel-open="true"] .panel-scrim{display:block}
+html[data-size="min"] .details{
+  position:absolute;top:0;right:0;bottom:0;
+  width:360px;max-width:calc(100% - 16px);
+  background:linear-gradient(var(--fill-layer),var(--fill-layer)),var(--bg-base);
+  border-left:1px solid var(--stroke-divider);
+  box-shadow:var(--shadow-28);
+  z-index:20;
+}
+
+.ed-head{
+  flex:none;padding:10px var(--space-l);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+}
+.ed-head-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.ed-head-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+
+.ed-body-wrap{position:relative;flex:1;min-height:0;display:flex}
+.ed-body{
+  flex:1;min-height:0;
+  overflow-y:auto;overflow-x:hidden;
+  padding:8px var(--space-l);
+  display:flex;flex-direction:column;gap:7px;
+}
+
+/* Strictly single-row pinned panel footer */
+.ed-foot{
+  flex:none;padding:8px var(--space-l);
+  border-top:1px solid var(--stroke-divider);
+  display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+}
+.ed-foot-main{
+  flex:1;min-width:0;display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+}
+.ed-foot-main .btn{padding:4px 9px;min-width:0;max-width:100%;overflow:hidden}
+.ed-foot-main .btn.primary-slot{flex:0 1 auto}
+.ed-foot-main .btn:not(.primary-slot){flex:0 0 auto}
+.ed-foot-main .btn.flex-shrink{flex:0 1 auto}
+.ed-foot-main .btn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-foot-right{flex:0 0 auto;margin-left:auto;display:flex;align-items:center;gap:6px}
+
+/* Saved annotation cards (annotation-list) */
+.res-card{
+  padding:7px 10px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:4px;
+}
+.anno-list{display:flex;flex-direction:column;gap:6px}
+.anno-card{
+  padding:7px 9px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:4px;
+}
+.anno-card.dismissed{
+  background:var(--fill-card-secondary);
+  border-style:dashed;
+  border-color:var(--stroke-control-strong);
+}
+.anno-card-top{display:flex;align-items:center;gap:5px;flex-wrap:wrap;min-width:0}
+.anno-range{font-family:var(--font-mono);font-size:11.5px;line-height:15px;color:var(--text-primary);font-weight:600;white-space:nowrap}
+.anno-val{font:var(--type-body);font-size:13px;line-height:18px;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
+.anno-note{font:var(--type-caption);color:var(--text-secondary);overflow-wrap:anywhere;word-break:break-word}
+.anno-card-foot{
+  display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;
+  padding-top:4px;border-top:1px solid var(--stroke-divider);margin-top:2px;
+}
+.anno-ts{font:var(--type-caption);font-size:11px;line-height:14px;color:var(--text-tertiary);overflow-wrap:anywhere}
+.anno-acts{display:flex;align-items:center;gap:4px;flex:none;margin-left:auto}
+.overlap-divider{
+  display:flex;align-items:center;gap:6px;
+  font:var(--type-caption);font-size:11px;line-height:14px;color:var(--text-tertiary);
+}
+.overlap-divider::before,.overlap-divider::after{content:"";flex:1;height:1px;background:var(--stroke-divider)}
+
+/* Fixed kind box (annotation-edit) */
+.kind-locked{
+  padding:7px 9px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:3px;
+}
+.kind-locked-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.kind-locked-top svg{width:14px;height:14px;color:var(--text-secondary);flex:none}
+.kind-locked-why{font:var(--type-caption);font-size:11.5px;line-height:15px;color:var(--text-secondary);overflow-wrap:anywhere}
+
+/* Delete confirmation flyout anchored beside sidebar footer (annotation-edit) */
+.del-flyout{
+  position:absolute;
+  right:372px;bottom:14px;
+  width:324px;max-width:calc(100% - 24px);
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-overlay);
+  box-shadow:var(--shadow-28);
+  padding:12px 14px;
+  z-index:36;
+  display:flex;flex-direction:column;gap:8px;
+}
+html[data-size="min"] .del-flyout{right:12px;bottom:56px;width:300px}
+.del-flyout-head{display:flex;align-items:flex-start;gap:8px}
+.del-flyout-head svg{color:var(--status-critical);flex:none;margin-top:2px}
+.del-flyout-acts{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:2px}
+
+/* Ranking subtle refinements */
+.rank .nm{width:152px}
+.rank .du{width:76px}
+html[data-has-panel="true"] .rank .nm{width:136px}
+html[data-size="min"] .rank .nm{width:128px}
+</style>
+<script>
+const __p = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = __p.get('theme') || 'light';
+if (__p.get('size') === 'min') document.documentElement.dataset.size = 'min';
+</script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.4" fill="currentColor"/></symbol>
+  <symbol id="today-f" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5" fill="currentColor" stroke="none"/><path d="M4 9.5h16" stroke="var(--cut)"/><path d="M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.6" fill="var(--cut)" stroke="none"/></symbol>
+  <symbol id="week" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3M8 13h8M8 16.5h5"/></symbol>
+  <symbol id="tag" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z"/><circle cx="8.3" cy="8.3" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><path d="M10.29 4.59L10.47 2.32L13.53 2.32L13.71 4.59L16.03 5.55L17.76 4.07L19.93 6.24L18.45 7.97L19.41 10.29L21.68 10.47L21.68 13.53L19.41 13.71L18.45 16.03L19.93 17.76L17.76 19.93L16.03 18.45L13.71 19.41L13.53 21.68L10.47 21.68L10.29 19.41L7.97 18.45L6.24 19.93L4.07 17.76L5.55 16.03L4.59 13.71L2.32 13.53L2.32 10.47L4.59 10.29L5.55 7.97L4.07 6.24L6.24 4.07L7.97 5.55Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="chev-l" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+  <symbol id="chev-r" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+  <symbol id="chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
+  <symbol id="arrow-l" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+  <symbol id="menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="code" viewBox="0 0 24 24"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></symbol>
+  <symbol id="doc" viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9.5 12h5M9.5 15.5h5"/></symbol>
+  <symbol id="mail" viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="M4 7l8 6 8-6"/></symbol>
+  <symbol id="terminal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M7.5 10l3 2.5-3 2.5M12.5 15h4"/></symbol>
+  <symbol id="book" viewBox="0 0 24 24"><path d="M5 4.5h9.5a2.5 2.5 0 0 1 2.5 2.5v12.5H7.5A2.5 2.5 0 0 0 5 21z"/><path d="M5 4.5v15A2.5 2.5 0 0 1 7.5 17H17"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.3" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="err-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></symbol>
+  <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><circle cx="12" cy="8" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="more" viewBox="0 0 24 24"><g fill="currentColor" stroke="none"><circle cx="5.5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18.5" cy="12" r="1.5"/></g></symbol>
+  <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="trash" viewBox="0 0 24 24"><path d="M5 7h14M9.5 7V4.5h5V7M7 7l.8 12.5h8.4L17 7"/></symbol>
+  <symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="edit" viewBox="0 0 24 24"><path d="M15.5 5.5l3 3L8.5 18.5l-4 1 1-4z"/></symbol>
+  <symbol id="note" viewBox="0 0 24 24"><path d="M6 4h12a1.5 1.5 0 0 1 1.5 1.5V15l-4.5 4.5H6A1.5 1.5 0 0 1 4.5 18V5.5A1.5 1.5 0 0 1 6 4z"/><path d="M15 19.5V15h4.5M8.5 9h7M8.5 12.5h4.5"/></symbol>
+  <symbol id="tree" viewBox="0 0 24 24"><path d="M6 5v14M6 9h5M6 15h5"/><rect x="11" y="7" width="8" height="4" rx="1"/><rect x="11" y="13" width="8" height="4" rx="1"/></symbol>
+  <symbol id="hand" viewBox="0 0 24 24"><path d="M8 12V6.5a1.2 1.2 0 0 1 2.4 0V11M10.4 10.5V5a1.2 1.2 0 0 1 2.4 0v5.5M12.8 10.5V6a1.2 1.2 0 0 1 2.4 0v5M15.2 11.5V8.5a1.2 1.2 0 0 1 2.4 0v6c0 3-2.1 5.5-5.2 5.5h-1.6c-2.2 0-3.8-1.4-4.6-3.4l-1.5-3.6a1.2 1.2 0 0 1 2.1-1.1L8 13.5"/></symbol>
+  <symbol id="range-sel" viewBox="0 0 24 24"><path d="M5 4v16M19 4v16M8 12h8M10.5 9.5L8 12l2.5 2.5M13.5 9.5L16 12l-2.5 2.5"/></symbol>
+  <symbol id="undo" viewBox="0 0 24 24"><path d="M5.5 9.5H14a4.5 4.5 0 1 1 0 9H9"/><path d="M9 6L5.5 9.5 9 13"/></symbol>
+  <symbol id="refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3L19.5 9"/><path d="M19.5 4.8V9h-4.2"/></symbol>
+  <symbol id="crosshair" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18" stroke-width="2"/></symbol>
+  <symbol id="logo" viewBox="0 0 24 24"><path d="M12 2.5l8 4.5v10l-8 4.5-8-4.5V7z" fill="var(--accent-fill)" stroke="none"/><path d="M12 2.5v19M4 7l16 10M20 7L4 17" stroke="var(--text-on-accent)" stroke-width="1" opacity=".7"/></symbol>
+</defs></svg>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="app"><svg class="ic s16"><use href="#logo"/></svg><span>Quartz</span></div>
+    <div class="btns">
+      <div><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></div>
+    </div>
+  </div>
+  <div class="body">
+    <nav class="nav" id="nav"></nav>
+    <div class="wrap" id="wrap">
+      <div class="main-wrap" id="main-wrap">
+        <main class="main" id="main"></main>
+        <div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="main-thumb"></div></div>
+      </div>
+      <div class="panel-scrim" id="panel-scrim"></div>
+      <aside class="details" id="details" style="display:none"></aside>
+      <div id="overlay-layer"></div>
+      <div class="modal-scrim" id="modal-scrim" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const rawLang = params.get('lang') || 'zh-CN';
+const lang = (rawLang === 'en' || rawLang === 'en-XA') ? rawLang : 'zh-CN';
+const stateKey = params.get('state') || 'mode-pan';
+const isMin = params.get('size') === 'min';
+document.documentElement.lang = lang === 'en-XA' ? 'en' : lang;
+document.documentElement.dataset.lang = lang;
+
+const PANEL_STATES = new Set(['annotation-list', 'annotation-edit']);
+const hasPanel = PANEL_STATES.has(stateKey);
+if (hasPanel) document.documentElement.dataset.panelOpen = 'true';
+if (hasPanel && !isMin) document.documentElement.dataset.hasPanel = 'true';
+
+/* Pseudo-locale generator matching quartz-i18n/src/pseudo.rs (~40% tilde padding + brackets) */
+const ACCENT_MAP = {
+  A:'À',B:'Ɓ',C:'Ç',D:'Ď',E:'É',F:'Ƒ',G:'Ĝ',H:'Ĥ',I:'Î',J:'Ĵ',K:'Ķ',L:'Ļ',M:'Ḿ',
+  N:'Ñ',O:'Ö',P:'Ƥ',Q:'Ǫ',R:'Ŕ',S:'Š',T:'Ţ',U:'Û',V:'Ṽ',W:'Ŵ',X:'Ẋ',Y:'Ý',Z:'Ž',
+  a:'à',b:'ƀ',c:'ç',d:'đ',e:'é',f:'ƒ',g:'ĝ',h:'ĥ',i:'î',j:'ĵ',k:'ķ',l:'ļ',m:'ɱ',
+  n:'ñ',o:'ö',p:'ƥ',q:'ǫ',r:'ŕ',s:'š',t:'ţ',u:'û',v:'ṽ',w:'ŵ',x:'ẋ',y:'ý',z:'ž',
+};
+function pseudoStr(s) {
+  if (!s || typeof s !== 'string') return s;
+  const accented = [...s].map(ch => ACCENT_MAP[ch] || ch).join('');
+  const pad = Math.ceil((s.length * 2) / 5);
+  return '[' + accented + '~'.repeat(pad) + ']';
+}
+function pseudoObj(val, skipKeys = new Set([
+  'c', 'ic', 'w', 'code', 'key', 'id', 'kind', 'catVar', 'failCode', 'rangeNormal',
+  'exe', 'app', 'time', 'utc', 'utcStart', 'utcEnd', 'start', 'end', 'uuidShort',
+  'rangeMono', 'utcSpan', 'subtitle',
+])) {
+  if (typeof val === 'string') return pseudoStr(val);
+  if (Array.isArray(val)) return val.map(v => pseudoObj(v, skipKeys));
+  if (val && typeof val === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      out[k] = skipKeys.has(k) ? v : pseudoObj(v, skipKeys);
+    }
+    return out;
+  }
+  return val;
+}
+
+const COPY = {
+  'zh-CN': {
+    nav: { today: '今天', week: '本周', rules: '分类与规则', settings: '设置' },
+    cats: {
+      dev: '开发',
+      learn: '学习',
+      comm: '沟通',
+      ent: '娱乐',
+      sys: '系统与工具',
+      unclassified: '未分类',
+    },
+    today: {
+      dateNormal: '11月16日 周一',
+      dateDst: '11月1日 周日',
+      dstDayBadge: '25 小时 · 夏令时结束',
+      todayBtn: '今天',
+      stats: {
+        active: '活跃时长', focus: '专注占比', distraction: '分心占比',
+        unclassified: '未分类', longestFocus: '最长连续专注', switches: '每小时切换',
+        hUnit: '小时', mUnit: '分', swUnit: '次',
+      },
+      legend: [
+        { c: '--cat-8', text: '开发 4 小时 18 分' },
+        { c: '--cat-1', text: '学习 1 小时 2 分' },
+        { c: '--cat-3', text: '沟通 58 分' },
+        { c: '--cat-10', text: '系统与工具 29 分' },
+        { c: '--cat-neutral', text: '未分类 28 分' },
+      ],
+      tl: {
+        title: '时间轴',
+        rangeNormal: '08:33 – 18:45',
+        rangeDst: '00:45 – 04:10（含重复 01:00）',
+        modePan: '平移',
+        modeSelect: '选择',
+        kbTipKeys: '← / →',
+        kbTipSwitch: '切换模式',
+        kbTipConfirmKey: 'Space / Enter',
+        kbTipConfirm: '确认',
+        kbTipWheel: '滚轮随时缩放',
+        appLanes: '应用泳道',
+        catOnly: '仅分类',
+        full24: '整 24 小时',
+        cat: '分类',
+        dev: '开发',
+        devLong: '开发 1 小时 42 分',
+        learn: '学习',
+        excl: '已排除 55 分钟',
+        dstMarker: '时钟回拨 −1h (UTC-07 → UTC-08)',
+        apps: ['VS Code', 'Microsoft Word', 'Microsoft Outlook', 'Windows Terminal', 'SumatraPDF'],
+      },
+      hourly: { title: '按小时', y0: '0 分', y30: '30 分', y60: '60 分' },
+      rank: {
+        title: '排行',
+        tabs: ['应用', '文档'],
+        rows: [
+          { c: '--cat-8', ic: 'code', name: 'Visual Studio Code', w: '100%', segs: [['--cat-8', 228], ['--cat-1', 30]], dur: '4 小时 18 分' },
+          { c: '--cat-1', ic: 'doc', name: 'Microsoft Word', w: '28%', segs: [['--cat-1', 42], ['--cat-8', 20]], dur: '1 小时 2 分' },
+          { c: '--cat-3', ic: 'mail', name: 'Microsoft Outlook', w: '24%', segs: [['--cat-3', 58]], dur: '58 分' },
+          { c: '--cat-10', ic: 'terminal', name: 'Windows Terminal', w: '16%', segs: [['--cat-10', 29], ['--cat-8', 12]], dur: '41 分' },
+          { c: '--cat-neutral', ic: 'book', name: 'SumatraPDF', w: '11%', segs: [['--cat-neutral', 28]], dur: '28 分' },
+        ],
+      },
+      pending: {
+        title: '待标注的离开',
+        range: '15:12 – 15:32 · 20 分',
+        rest: '休息',
+        meeting: '会议',
+        reading: '阅读思考',
+        ignore: '忽略',
+        other: '其他…',
+      },
+    },
+    drag: {
+      range: '13:45 – 15:15',
+      dur: '1 小时 30 分',
+      split: '活跃 1 小时 18 分 · 空闲 12 分',
+      hint: '拖动调整终点 · 松开完成 · Esc 取消',
+      startTag: '13:45',
+      endTag: '15:15',
+    },
+    selRange: {
+      badge: '已选范围',
+      startLbl: '开始',
+      endLbl: '结束',
+      start: '14:00',
+      end: '15:30',
+      halfOpenHint: '左闭右开 [14:00, 15:30) · Esc 取消（保留选择模式）',
+      btnAnnotate: '标注…',
+      btnAddRange: '添加范围',
+      btnCancel: '取消',
+      durLabel: '时长与活跃拆分',
+      durVal: '1 小时 30 分',
+      activeSplit: '活跃 1 小时 12 分',
+      idleSplit: '空闲 18 分',
+      catsLabel: '所含分类',
+      catItems: [
+        { c: '--cat-8', text: '开发 52 分' },
+        { c: '--cat-3', text: '沟通 20 分' },
+        { c: '--cat-neutral', text: '空闲 18 分' },
+      ],
+      appsLabel: '所含应用',
+      appItems: [
+        { ic: 'code', text: 'VS Code 44 分' },
+        { ic: 'doc', text: 'Word 8 分' },
+        { ic: 'mail', text: 'Outlook 20 分' },
+      ],
+    },
+    selMulti: {
+      title: '已选 3 个不相交范围',
+      totalBadge: '总计 2 小时 10 分 · 活跃 1 小时 58 分 · 空闲 12 分',
+      atomicBadge: '单次请求原子提交 · 3 条标注',
+      btnAnnotate: '标注 3 个范围…',
+      btnAddRange: '添加范围',
+      btnCancel: '取消',
+      removeTip: '移除范围 #2',
+      rows: [
+        {
+          num: 1, rangeMono: '09:30 – 10:15', dur: '45 分', split: '活跃 45 分',
+          cats: [{ c: '--cat-8', text: '开发 38 分' }, { c: '--cat-10', text: '系统 7 分' }],
+          apps: 'VS Code · Windows Terminal',
+        },
+        {
+          num: 2, rangeMono: '13:30 – 14:10', dur: '40 分', split: '活跃 28 分 · 空闲 12 分',
+          cats: [{ c: '--cat-3', text: '沟通 28 分' }],
+          apps: 'Outlook · Word',
+          hoverRemove: true,
+        },
+        {
+          num: 3, start: '15:40', end: '16:25', dur: '45 分', split: '活跃 45 分',
+          cats: [{ c: '--cat-neutral', text: '未分类 28 分' }, { c: '--cat-1', text: '学习 17 分' }],
+          apps: 'SumatraPDF · VS Code',
+          active: true,
+        },
+      ],
+    },
+    selDst: {
+      bannerTitle: '夏令时重复时刻（01:00 – 02:00）',
+      bannerDesc: '起止时间已附加 UTC 偏移以区分回拨前后；确认标注时将提交真实 UTC 端点。',
+      start: '01:20',
+      utcStart: 'UTC-07:00',
+      end: '01:45',
+      utcEnd: 'UTC-08:00',
+      realDur: '真实时长 1 小时 25 分',
+      utcSpan: 'UTC 08:20 – 09:45',
+      activeSplit: '活跃 1 小时 10 分',
+      idleSplit: '空闲 15 分',
+      catItems: [
+        { c: '--cat-8', text: '开发 35 分' },
+        { c: '--cat-3', text: '沟通 18 分' },
+        { c: '--cat-1', text: '学习 17 分' },
+      ],
+      appItems: [
+        { ic: 'code', text: 'VS Code 35 分' },
+        { ic: 'mail', text: 'Outlook 18 分' },
+        { ic: 'book', text: 'SumatraPDF 17 分' },
+      ],
+      tagStart: '01:20 -07',
+      tagEnd: '01:45 -08',
+    },
+    dialog: {
+      titleBatch: '标注所选范围',
+      badgeBatch: '2 个范围 · 1 小时 25 分',
+      rangesTitle: '目标时间范围（每段创建 1 条标注，单次请求原子提交）',
+      ranges: [
+        { num: 1, rangeMono: '09:30 – 10:15', dur: '45 分' },
+        { num: 2, rangeMono: '13:30 – 14:10', dur: '40 分' },
+      ],
+      failTitle: '写入失败 · 核心暂时繁忙',
+      failCode: 'busy',
+      failDesc: '本次批量写入已回滚，未改动任何记录；你填写的分类、标签和备注已保留。重试将复用原 UUID，不会重复创建。',
+      kindLabel: '标注类型',
+      kindsBatch: [
+        { id: 'cat', label: '分类覆盖', active: true },
+        { id: 'label', label: '标签' },
+        { id: 'note', label: '备注' },
+      ],
+      kindHintCat: '替换所选范围内活跃活动的分类；不影响空闲时段。保存后若与同类型标注重叠将自动裁剪旧标注。',
+      catLabel: '目标分类',
+      catArchivedNote: '已归档分类（2）不提供选择',
+      labelField: '标签（可选）',
+      labelVal: '架构设计评审',
+      noteField: '备注（可选）',
+      noteVal: '结合 07-ui.md 核对时间轴选择与批量标注原子提交边界。',
+      effectPrefix: '这些时间将计为',
+      effectDescBatch: '2 个范围共 1 小时 25 分：其中 1 小时 13 分活跃时间将计为「学习」，12 分空闲不受分类覆盖影响；确认后一次性原子创建 2 条标注。',
+      footAtomicNote: 'UUID 幂等重试 · 原子提交',
+      cancelBtn: '取消',
+      retryBtn: '重试保存（2 条）',
+      /* pending-other overrides */
+      titleAway: '标注离开时段',
+      badgeAway: '待标注离开 · 20 分',
+      awaySourceTitle: '已自动填入待标注的离开范围',
+      awaySourceSub: '15:12 – 15:32（20 分空闲）· 确认后将从待标注离开中移除',
+      kindsAway: [
+        { id: 'offline', label: '离线活动', active: true },
+        { id: 'cat', label: '分类覆盖' },
+        { id: 'label', label: '标签' },
+        { id: 'note', label: '备注' },
+      ],
+      kindHintAway: '将此空闲时段补入所选分类的活跃时长（不列入应用排行）；若只需记录休息，可改选「标签」或「备注」。',
+      awayLabelVal: '白板讨论架构',
+      awayNoteVal: '与团队在会议室讨论时间轴区间标注与重叠裁剪逻辑。',
+      effectDescAway: '15:12 – 15:32 的 20 分钟离开将作为离线活动计入「学习」的活跃时长，同时从待标注离开列表移除。',
+      saveBtn: '保存标注',
+    },
+    annoList: {
+      title: '已保存标注',
+      subtitle: 'Visual Studio Code · 14:40 – 15:40',
+      addBtn: '新建',
+      blockSummary: '40 分活跃 · 20 分空闲 · 4 条相关标注',
+      sourceBadge: '手动标注优先',
+      overlapNote: '备注允许重叠，保存时互不裁剪',
+      editBtn: '编辑',
+      deleteBtn: '删除',
+      undoIgnoreBtn: '撤销忽略',
+      kindCat: '分类覆盖',
+      kindNote: '备注',
+      kindDismissed: '已忽略离开',
+      overlapBadge: '重叠',
+      items: [
+        {
+          kind: 'cat',
+          rangeMono: '14:40 – 15:12',
+          dur: '32 分',
+          catVar: '--cat-1',
+          catName: '学习',
+          label: '架构设计评审',
+          note: '结合 07-ui.md 核对时间轴交互与标注裁剪边界。',
+          ts: '创建于 15:20 · 更新于 15:24',
+        },
+        {
+          kind: 'note',
+          overlap: true,
+          rangeMono: '14:45 – 15:10',
+          dur: '25 分',
+          label: '阶段一',
+          note: '核对半开区间 [start, end) 语义与端点拖动反馈。',
+          ts: '创建于 15:18',
+        },
+        {
+          kind: 'note',
+          overlap: true,
+          rangeMono: '14:55 – 15:20',
+          dur: '25 分',
+          label: '',
+          note: '待补充：确认夏令时回拨后重复时刻的 UTC 偏移显示与长备注完整拼接编辑值。',
+          ts: '创建于 15:25',
+        },
+        {
+          kind: 'dismissed',
+          rangeMono: '15:12 – 15:32',
+          dur: '20 分',
+          note: '已忽略此离开时段，不再在今天页底部提示；撤销后将恢复提示。',
+          ts: '创建于 15:35',
+        },
+      ],
+      footAdd: '添加标注…',
+      footExplain: '查看解释',
+      footDeleteTitle: '删除相关数据（暂不可用，将于后续版本开放）',
+      footMoreTitle: '更多操作',
+    },
+    annoEdit: {
+      title: '编辑标注',
+      subtitle: '14:40 – 15:25 · 45 分',
+      kindPrefix: '标注类型：',
+      kindFixedBadge: '创建后固定',
+      kindFixedWhy: '标注类型在创建后不可修改，以保持同类型裁剪历史与统计语义一致；如需改为其他类型，请删除本条后新建。',
+      rangeLabel: '时间范围（左闭右开）',
+      start: '14:40',
+      end: '15:25',
+      clipTitle: '保存后将裁剪 1 条同类型标注',
+      clipDesc: '同类型「分类覆盖」按后写入覆盖先写入：已有标注「开发 · 15:15 – 15:40」将被自动裁剪为 15:25 – 15:40（删除本条不会恢复已裁剪范围）。',
+      metaTs: '创建于 15:20 · 上次更新 15:24',
+      uuidShort: 'UUID 8f2a…4c1e',
+      saveBtn: '保存变更',
+      cancelBtn: '取消',
+      deleteBtn: '删除',
+      delConfirmTitle: '确认删除这条标注？',
+      delConfirmDesc: '将移除「分类覆盖 · 学习（14:40 – 15:12）」。此前因重叠覆盖而被裁剪的其他标注不会被恢复。',
+      delConfirmBtn: '确认删除',
+    },
+  },
+  en: {
+    nav: { today: 'Today', week: 'This week', rules: 'Categories & rules', settings: 'Settings' },
+    cats: {
+      dev: 'Development',
+      learn: 'Learning',
+      comm: 'Communication',
+      ent: 'Entertainment',
+      sys: 'System & tools',
+      unclassified: 'Unclassified',
+    },
+    today: {
+      dateNormal: 'Mon, Nov 16',
+      dateDst: 'Sun, Nov 1',
+      dstDayBadge: '25h · DST ends',
+      todayBtn: 'Today',
+      stats: {
+        active: 'Active time', focus: 'Focus share', distraction: 'Distraction',
+        unclassified: 'Unclassified', longestFocus: 'Longest focus', switches: 'Switches / hr',
+        hUnit: 'h', mUnit: 'm', swUnit: '',
+      },
+      legend: [
+        { c: '--cat-8', text: 'Development 4h 18m' },
+        { c: '--cat-1', text: 'Learning 1h 2m' },
+        { c: '--cat-3', text: 'Communication 58m' },
+        { c: '--cat-10', text: 'System & tools 29m' },
+        { c: '--cat-neutral', text: 'Unclassified 28m' },
+      ],
+      tl: {
+        title: 'Timeline',
+        rangeNormal: '08:33 – 18:45',
+        rangeDst: '00:45 – 04:10 (repeated 01:00)',
+        modePan: 'Pan',
+        modeSelect: 'Select',
+        kbTipKeys: '← / →',
+        kbTipSwitch: 'switch mode',
+        kbTipConfirmKey: 'Space / Enter',
+        kbTipConfirm: 'confirm',
+        kbTipWheel: 'Wheel zooms in both modes',
+        appLanes: 'App lanes',
+        catOnly: 'Category only',
+        full24: 'Full 24h',
+        cat: 'Category',
+        dev: 'Development',
+        devLong: 'Development 1h 42m',
+        learn: 'Learning',
+        excl: 'Excluded 55m',
+        dstMarker: 'Clock −1h (UTC-07 → UTC-08)',
+        apps: ['VS Code', 'Microsoft Word', 'Microsoft Outlook', 'Windows Terminal', 'SumatraPDF'],
+      },
+      hourly: { title: 'Hourly', y0: '0m', y30: '30m', y60: '60m' },
+      rank: {
+        title: 'Ranking',
+        tabs: ['Apps', 'Documents'],
+        rows: [
+          { c: '--cat-8', ic: 'code', name: 'Visual Studio Code', w: '100%', segs: [['--cat-8', 228], ['--cat-1', 30]], dur: '4h 18m' },
+          { c: '--cat-1', ic: 'doc', name: 'Microsoft Word', w: '28%', segs: [['--cat-1', 42], ['--cat-8', 20]], dur: '1h 2m' },
+          { c: '--cat-3', ic: 'mail', name: 'Microsoft Outlook', w: '24%', segs: [['--cat-3', 58]], dur: '58m' },
+          { c: '--cat-10', ic: 'terminal', name: 'Windows Terminal', w: '16%', segs: [['--cat-10', 29], ['--cat-8', 12]], dur: '41m' },
+          { c: '--cat-neutral', ic: 'book', name: 'SumatraPDF', w: '11%', segs: [['--cat-neutral', 28]], dur: '28m' },
+        ],
+      },
+      pending: {
+        title: 'Pending away',
+        range: '15:12 – 15:32 · 20m',
+        rest: 'Rest',
+        meeting: 'Meeting',
+        reading: 'Reading',
+        ignore: 'Ignore',
+        other: 'Other…',
+      },
+    },
+    drag: {
+      range: '13:45 – 15:15',
+      dur: '1h 30m',
+      split: 'Active 1h 18m · Idle 12m',
+      hint: 'Drag to adjust end · Release to finish · Esc to cancel',
+      startTag: '13:45',
+      endTag: '15:15',
+    },
+    selRange: {
+      badge: 'Selected range',
+      startLbl: 'Start',
+      endLbl: 'End',
+      start: '14:00',
+      end: '15:30',
+      halfOpenHint: 'Half-open [14:00, 15:30) · Esc clears selection (keeps Select mode)',
+      btnAnnotate: 'Annotate…',
+      btnAddRange: 'Add range',
+      btnCancel: 'Cancel',
+      durLabel: 'Duration & active split',
+      durVal: '1h 30m',
+      activeSplit: 'Active 1h 12m',
+      idleSplit: 'Idle 18m',
+      catsLabel: 'Categories',
+      catItems: [
+        { c: '--cat-8', text: 'Development 52m' },
+        { c: '--cat-3', text: 'Communication 20m' },
+        { c: '--cat-neutral', text: 'Idle 18m' },
+      ],
+      appsLabel: 'Applications',
+      appItems: [
+        { ic: 'code', text: 'VS Code 44m' },
+        { ic: 'doc', text: 'Word 8m' },
+        { ic: 'mail', text: 'Outlook 20m' },
+      ],
+    },
+    selMulti: {
+      title: '3 disjoint ranges selected',
+      totalBadge: 'Total 2h 10m · Active 1h 58m · Idle 12m',
+      atomicBadge: 'Single atomic request · 3 annotations',
+      btnAnnotate: 'Annotate 3 ranges…',
+      btnAddRange: 'Add range',
+      btnCancel: 'Cancel',
+      removeTip: 'Remove range #2',
+      rows: [
+        {
+          num: 1, rangeMono: '09:30 – 10:15', dur: '45m', split: 'Active 45m',
+          cats: [{ c: '--cat-8', text: 'Development 38m' }, { c: '--cat-10', text: 'System 7m' }],
+          apps: 'VS Code · Windows Terminal',
+        },
+        {
+          num: 2, rangeMono: '13:30 – 14:10', dur: '40m', split: 'Active 28m · Idle 12m',
+          cats: [{ c: '--cat-3', text: 'Communication 28m' }],
+          apps: 'Outlook · Word',
+          hoverRemove: true,
+        },
+        {
+          num: 3, start: '15:40', end: '16:25', dur: '45m', split: 'Active 45m',
+          cats: [{ c: '--cat-neutral', text: 'Unclassified 28m' }, { c: '--cat-1', text: 'Learning 17m' }],
+          apps: 'SumatraPDF · VS Code',
+          active: true,
+        },
+      ],
+    },
+    selDst: {
+      bannerTitle: 'DST repeated hour (01:00 – 02:00)',
+      bannerDesc: 'Start and end inputs include UTC offsets to disambiguate the repeated local hour; submitting uses exact UTC bounds.',
+      start: '01:20',
+      utcStart: 'UTC-07:00',
+      end: '01:45',
+      utcEnd: 'UTC-08:00',
+      realDur: 'Actual span 1h 25m',
+      utcSpan: 'UTC 08:20 – 09:45',
+      activeSplit: 'Active 1h 10m',
+      idleSplit: 'Idle 15m',
+      catItems: [
+        { c: '--cat-8', text: 'Development 35m' },
+        { c: '--cat-3', text: 'Communication 18m' },
+        { c: '--cat-1', text: 'Learning 17m' },
+      ],
+      appItems: [
+        { ic: 'code', text: 'VS Code 35m' },
+        { ic: 'mail', text: 'Outlook 18m' },
+        { ic: 'book', text: 'SumatraPDF 17m' },
+      ],
+      tagStart: '01:20 -07',
+      tagEnd: '01:45 -08',
+    },
+    dialog: {
+      titleBatch: 'Annotate selected ranges',
+      badgeBatch: '2 ranges · 1h 25m',
+      rangesTitle: 'Target ranges (1 annotation per range, submitted atomically)',
+      ranges: [
+        { num: 1, rangeMono: '09:30 – 10:15', dur: '45m' },
+        { num: 2, rangeMono: '13:30 – 14:10', dur: '40m' },
+      ],
+      failTitle: 'Save failed · Core is busy',
+      failCode: 'busy',
+      failDesc: 'The batch transaction was rolled back and nothing was written. Your category, label, and note remain intact; retry reuses the same UUIDs safely.',
+      kindLabel: 'Annotation kind',
+      kindsBatch: [
+        { id: 'cat', label: 'Category override', active: true },
+        { id: 'label', label: 'Label' },
+        { id: 'note', label: 'Note' },
+      ],
+      kindHintCat: 'Replaces the category of active time in the selected ranges without changing idle time. Overlapping same-kind annotations are trimmed.',
+      catLabel: 'Target category',
+      catArchivedNote: 'Archived categories (2) are not available',
+      labelField: 'Label (optional)',
+      labelVal: 'Architecture review',
+      noteField: 'Note (optional)',
+      noteVal: 'Verified timeline selection bounds and atomic batch annotation semantics against 07-ui.md.',
+      effectPrefix: 'This time will count as',
+      effectDescBatch: 'Across 2 ranges (1h 25m): 1h 13m of active time will count as "Learning"; 12m idle stays unchanged. Creates 2 annotations in one atomic request.',
+      footAtomicNote: 'UUID idempotent retry · Atomic batch',
+      cancelBtn: 'Cancel',
+      retryBtn: 'Retry save (2)',
+      /* pending-other overrides */
+      titleAway: 'Annotate away time',
+      badgeAway: 'Pending away · 20m',
+      awaySourceTitle: 'Prefilled from Pending away',
+      awaySourceSub: '15:12 – 15:32 (20m idle) · Saving removes this range from Pending away',
+      kindsAway: [
+        { id: 'offline', label: 'Offline activity', active: true },
+        { id: 'cat', label: 'Category override' },
+        { id: 'label', label: 'Label' },
+        { id: 'note', label: 'Note' },
+      ],
+      kindHintAway: 'Adds this idle gap to active time under the chosen category (excluded from app rankings). Switch to Label or Note to log a break without adding active time.',
+      awayLabelVal: 'Whiteboard architecture session',
+      awayNoteVal: 'Reviewed range-selection UX and same-kind clipping behavior with the team.',
+      effectDescAway: '20m away (15:12 – 15:32) will count as offline active time under "Learning" and clear from Pending away.',
+      saveBtn: 'Save annotation',
+    },
+    annoList: {
+      title: 'Saved annotations',
+      subtitle: 'Visual Studio Code · 14:40 – 15:40',
+      addBtn: 'New',
+      blockSummary: '40m active · 20m idle · 4 saved annotations',
+      sourceBadge: 'Manual override active',
+      overlapNote: 'Notes may overlap without trimming each other',
+      editBtn: 'Edit',
+      deleteBtn: 'Delete',
+      undoIgnoreBtn: 'Undo ignore',
+      kindCat: 'Category override',
+      kindNote: 'Note',
+      kindDismissed: 'Ignored away',
+      overlapBadge: 'Overlapping',
+      items: [
+        {
+          kind: 'cat',
+          rangeMono: '14:40 – 15:12',
+          dur: '32m',
+          catVar: '--cat-1',
+          catName: 'Learning',
+          label: 'Architecture review',
+          note: 'Checked timeline interaction bounds and same-kind clipping behavior.',
+          ts: 'Created 15:20 · Updated 15:24',
+        },
+        {
+          kind: 'note',
+          overlap: true,
+          rangeMono: '14:45 – 15:10',
+          dur: '25m',
+          label: 'Phase 1',
+          note: 'Verified half-open [start, end) semantics and endpoint dragging.',
+          ts: 'Created 15:18',
+        },
+        {
+          kind: 'note',
+          overlap: true,
+          rangeMono: '14:55 – 15:20',
+          dur: '25m',
+          label: '',
+          note: 'Follow-up: confirm DST repeated-hour UTC offsets and chunked long-note assembly.',
+          ts: 'Created 15:25',
+        },
+        {
+          kind: 'dismissed',
+          rangeMono: '15:12 – 15:32',
+          dur: '20m',
+          note: 'Away range ignored; hidden from Pending away until undone.',
+          ts: 'Created 15:35',
+        },
+      ],
+      footAdd: 'Add annotation…',
+      footExplain: 'Explain',
+      footDeleteTitle: 'Delete related data (not available yet; coming in a later release)',
+      footMoreTitle: 'More actions',
+    },
+    annoEdit: {
+      title: 'Edit annotation',
+      subtitle: '14:40 – 15:25 · 45m',
+      kindPrefix: 'Kind: ',
+      kindFixedBadge: 'Fixed after creation',
+      kindFixedWhy: 'Annotation kind cannot change after creation so clipping history and duration rules stay consistent. Delete and create a new annotation to use another kind.',
+      rangeLabel: 'Time range (half-open)',
+      start: '14:40',
+      end: '15:25',
+      clipTitle: 'Saving will trim 1 same-kind annotation',
+      clipDesc: 'Later writes replace earlier same-kind overrides: "Development · 15:15 – 15:40" will be trimmed to 15:25 – 15:40 (deleting this later will not restore trimmed parts).',
+      metaTs: 'Created 15:20 · Updated 15:24',
+      uuidShort: 'UUID 8f2a…4c1e',
+      saveBtn: 'Save changes',
+      cancelBtn: 'Cancel',
+      deleteBtn: 'Delete',
+      delConfirmTitle: 'Delete this annotation?',
+      delConfirmDesc: 'Removes "Category override · Learning (14:40 – 15:12)". Previously trimmed parts of other annotations will not be restored.',
+      delConfirmBtn: 'Delete annotation',
+    },
+  },
+};
+
+COPY['en-XA'] = pseudoObj(COPY.en);
+COPY['en-XA'].today.tl.apps = COPY.en.today.tl.apps;
+COPY['en-XA'].today.rank.rows = COPY.en.today.rank.rows.map(r => ({ ...r, dur: pseudoStr(r.dur) }));
+COPY['en-XA'].today.tl.kbTipKeys = COPY.en.today.tl.kbTipKeys;
+COPY['en-XA'].today.tl.kbTipConfirmKey = COPY.en.today.tl.kbTipConfirmKey;
+COPY['en-XA'].drag.startTag = COPY.en.drag.startTag;
+COPY['en-XA'].drag.endTag = COPY.en.drag.endTag;
+COPY['en-XA'].selDst.tagStart = COPY.en.selDst.tagStart;
+COPY['en-XA'].selDst.tagEnd = COPY.en.selDst.tagEnd;
+
+const T = COPY[lang];
+
+const ACTIVE_CATS = [
+  { id: 'dev', c: '--cat-8', name: T.cats.dev },
+  { id: 'learn', c: '--cat-1', name: T.cats.learn },
+  { id: 'comm', c: '--cat-3', name: T.cats.comm },
+  { id: 'ent', c: '--cat-13', name: T.cats.ent },
+  { id: 'sys', c: '--cat-10', name: T.cats.sys },
+];
+
+function catChip(colorVar, label) {
+  return `<span class="chip" style="--c:var(${colorVar})"><i></i><span class="ell">${label}</span></span>`;
+}
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  const isRail = isMin || hasPanel;
+  if (isRail) nav.classList.add('rail');
+  const menuRow = isMin
+    ? `<div style="height:4px;flex:none"></div>`
+    : `<div class="nav-item" style="margin-top:4px"><svg class="ic"><use href="#menu"/></svg></div>`;
+  nav.innerHTML =
+    menuRow +
+    `<div class="nav-item selected"><i class="ind"></i><svg class="ic"><use href="#today-f"/></svg><span>${T.nav.today}</span></div>` +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#week"/></svg><span>${T.nav.week}</span></div>` +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#tag"/></svg><span>${T.nav.rules}</span></div>` +
+    `<div class="spacer"></div>` +
+    `<div class="bottom"><div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#gear"/></svg><span>${T.nav.settings}</span></div></div>`;
+}
+
+/* ===========================
+   Today Page + Timeline Mode / Selection Overlay / Summary Dock
+   =========================== */
+function renderSelectionOverlay() {
+  const tl = T.today.tl;
+  if (stateKey === 'select-dragging') {
+    const d = T.drag;
+    return `<div class="sel-layer">` +
+      `<div class="range-band dragging" style="left:50.5%;width:15.2%">` +
+        `<span class="ep-tag left">${d.startTag}</span>` +
+        `<span class="ep-tag right">${d.endTag}</span>` +
+        `<div class="ep-handle left"></div>` +
+        `<div class="ep-handle right active"></div>` +
+        `<svg class="ic drag-cursor"><use href="#crosshair"/></svg>` +
+      `</div>` +
+      `<div class="drag-tt" style="left:calc(65.7% + 12px)">` +
+        `<div class="drag-tt-time"><span class="mono">${d.range}</span><span>${d.dur}</span></div>` +
+        `<div class="drag-tt-sub">${d.split}</div>` +
+        `<div class="drag-tt-hint">${d.hint}</div>` +
+      `</div>` +
+    `</div>`;
+  }
+  if (stateKey === 'select-range') {
+    const sr = T.selRange;
+    return `<div class="sel-layer">` +
+      `<div class="range-band" style="left:53.4%;width:14.7%">` +
+        `<span class="ep-tag left">${sr.start}</span>` +
+        `<span class="ep-tag right">${sr.end}</span>` +
+        `<div class="ep-handle left"></div>` +
+        `<div class="ep-handle right"></div>` +
+      `</div>` +
+    `</div>`;
+  }
+  if (stateKey === 'select-multi' || stateKey === 'annotate-dialog') {
+    return `<div class="sel-layer">` +
+      `<div class="range-band secondary" style="left:9.3%;width:7.4%">` +
+        `<span class="range-num">1</span>` +
+      `</div>` +
+      `<div class="range-band secondary" style="left:48.5%;width:6.6%">` +
+        `<span class="range-num">2</span>` +
+      `</div>` +
+      (stateKey === 'select-multi'
+        ? `<div class="range-band" style="left:69.8%;width:7.4%">` +
+            `<span class="range-num">3</span>` +
+            `<div class="ep-handle left"></div>` +
+            `<div class="ep-handle right"></div>` +
+          `</div>`
+        : '') +
+    `</div>`;
+  }
+  if (stateKey === 'select-dst') {
+    const sd = T.selDst;
+    return `<div class="sel-layer">` +
+      `<div class="dst-marker" style="left:33.8%"><span class="dst-pill">${tl.dstMarker}</span></div>` +
+      `<div class="range-band dst-band" style="left:20.8%;width:27.8%">` +
+        `<span class="ep-tag left">${sd.tagStart}</span>` +
+        `<span class="ep-tag right">${sd.tagEnd}</span>` +
+        `<div class="ep-handle left"></div>` +
+        `<div class="ep-handle right"></div>` +
+      `</div>` +
+    `</div>`;
+  }
+  if (stateKey === 'annotation-list' || stateKey === 'annotation-edit') {
+    return `<div class="sel-layer">` +
+      `<div class="range-band" style="left:59.8%;width:9.8%"></div>` +
+    `</div>`;
+  }
+  return '';
+}
+
+function renderSelectionDock() {
+  if (stateKey === 'select-range') {
+    const s = T.selRange;
+    return `<div class="sel-panel">` +
+      `<div class="sel-top">` +
+        `<div class="sel-endpoints">` +
+          `<span class="badge ovr"><span class="btxt">${s.badge}</span></span>` +
+          `<span class="cap sec">${s.startLbl}</span>` +
+          `<div class="time-in focused"><svg class="ic s16"><use href="#clock"/></svg><span>${s.start}</span><span class="caret"></span></div>` +
+          `<span class="cap ter">–</span>` +
+          `<span class="cap sec">${s.endLbl}</span>` +
+          `<div class="time-in"><svg class="ic s16"><use href="#clock"/></svg><span>${s.end}</span></div>` +
+        `</div>` +
+        `<div class="sel-actions">` +
+          `<button class="btn compact accent"><svg class="ic s16"><use href="#edit"/></svg><span>${s.btnAnnotate}</span></button>` +
+          `<button class="btn compact"><svg class="ic s16"><use href="#add"/></svg><span>${s.btnAddRange}</span></button>` +
+          `<button class="btn compact subtle"><span>${s.btnCancel}</span></button>` +
+        `</div>` +
+      `</div>` +
+      `<div class="cap ter" style="overflow-wrap:anywhere">${s.halfOpenHint}</div>` +
+      `<div class="sel-summary-grid">` +
+        `<div class="sel-box">` +
+          `<div class="sel-box-lbl">${s.durLabel}</div>` +
+          `<div class="row gap8" style="flex-wrap:wrap"><span class="strong">${s.durVal}</span><span class="cap sec">${s.activeSplit} · ${s.idleSplit}</span></div>` +
+          `<div class="split-bar"><div class="act" style="flex:72"></div><div class="idl" style="flex:18"></div></div>` +
+        `</div>` +
+        `<div class="sel-box">` +
+          `<div class="sel-box-lbl">${s.catsLabel}</div>` +
+          `<div class="sel-chips">${s.catItems.map(ci => catChip(ci.c, ci.text)).join('')}</div>` +
+        `</div>` +
+        `<div class="sel-box">` +
+          `<div class="sel-box-lbl">${s.appsLabel}</div>` +
+          `<div class="sel-chips">${s.appItems.map(ai => `<span class="chip"><svg class="ic s16" style="width:12px;height:12px;color:var(--text-secondary)"><use href="#${ai.ic}"/></svg><span class="ell">${ai.text}</span></span>`).join('')}</div>` +
+        `</div>` +
+      `</div>` +
+    `</div>`;
+  }
+
+  if (stateKey === 'select-multi') {
+    const m = T.selMulti;
+    return `<div class="sel-panel">` +
+      `<div class="sel-top">` +
+        `<div class="sel-endpoints">` +
+          `<span class="strong">${m.title}</span>` +
+          `<span class="badge"><span class="btxt">${m.totalBadge}</span></span>` +
+          `<span class="badge ovr"><span class="btxt">${m.atomicBadge}</span></span>` +
+        `</div>` +
+        `<div class="sel-actions">` +
+          `<button class="btn compact accent"><svg class="ic s16"><use href="#edit"/></svg><span>${m.btnAnnotate}</span></button>` +
+          `<button class="btn compact"><svg class="ic s16"><use href="#add"/></svg><span>${m.btnAddRange}</span></button>` +
+          `<button class="btn compact subtle"><span>${m.btnCancel}</span></button>` +
+        `</div>` +
+      `</div>` +
+      `<div class="multi-list">` +
+        m.rows.map(row =>
+          `<div class="multi-row${row.active ? ' active-range' : ''}">` +
+            `<span class="m-num">${row.num}</span>` +
+            (row.active
+              ? `<div class="row gap4"><div class="time-in focused"><span class="mono">${row.start}</span></div><span class="cap ter">–</span><div class="time-in"><span class="mono">${row.end}</span></div></div>`
+              : `<span class="m-time">${row.rangeMono}</span>`) +
+            `<span class="strong cap">${row.dur}</span>` +
+            `<span class="cap sec">${row.split}</span>` +
+            `<div class="m-meta">` +
+              row.cats.map(ci => catChip(ci.c, ci.text)).join('') +
+              `<span class="cap ter ell">${row.apps}</span>` +
+            `</div>` +
+            `<div class="m-rm-wrap">` +
+              (row.hoverRemove ? `<div class="rm-tip">${m.removeTip}</div>` : '') +
+              `<button class="btn compact icon subtle m-rm-btn${row.hoverRemove ? ' hov' : ''}" aria-label="${m.removeTip}"><svg class="ic s16"><use href="#close"/></svg></button>` +
+            `</div>` +
+          `</div>`
+        ).join('') +
+      `</div>` +
+    `</div>`;
+  }
+
+  if (stateKey === 'select-dst') {
+    const d = T.selDst;
+    const s = T.selRange;
+    return `<div class="sel-panel">` +
+      `<div class="infobar caution">` +
+        `<svg class="ic s16 ib-ic"><use href="#clock"/></svg>` +
+        `<div class="ib-body">` +
+          `<div class="ib-title">${d.bannerTitle}</div>` +
+          `<div>${d.bannerDesc}</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="sel-top">` +
+        `<div class="sel-endpoints">` +
+          `<span class="cap sec">${s.startLbl}</span>` +
+          `<div class="time-in focused"><svg class="ic s16"><use href="#clock"/></svg><span>${d.start}</span><span class="utc-pill">${d.utcStart}<svg class="ic s16"><use href="#chev-d"/></svg></span></div>` +
+          `<span class="cap ter">–</span>` +
+          `<span class="cap sec">${s.endLbl}</span>` +
+          `<div class="time-in"><svg class="ic s16"><use href="#clock"/></svg><span>${d.end}</span><span class="utc-pill">${d.utcEnd}<svg class="ic s16"><use href="#chev-d"/></svg></span></div>` +
+          `<span class="badge ok"><span class="btxt">${d.realDur}</span></span>` +
+          `<span class="mono ter">${d.utcSpan}</span>` +
+        `</div>` +
+        `<div class="sel-actions">` +
+          `<button class="btn compact accent"><svg class="ic s16"><use href="#edit"/></svg><span>${s.btnAnnotate}</span></button>` +
+          `<button class="btn compact"><svg class="ic s16"><use href="#add"/></svg><span>${s.btnAddRange}</span></button>` +
+          `<button class="btn compact subtle"><span>${s.btnCancel}</span></button>` +
+        `</div>` +
+      `</div>` +
+      `<div class="sel-summary-grid">` +
+        `<div class="sel-box">` +
+          `<div class="sel-box-lbl">${s.durLabel}</div>` +
+          `<div class="row gap8" style="flex-wrap:wrap"><span class="strong">${d.realDur}</span><span class="cap sec">${d.activeSplit} · ${d.idleSplit}</span></div>` +
+          `<div class="split-bar"><div class="act" style="flex:70"></div><div class="idl" style="flex:15"></div></div>` +
+        `</div>` +
+        `<div class="sel-box">` +
+          `<div class="sel-box-lbl">${s.catsLabel}</div>` +
+          `<div class="sel-chips">${d.catItems.map(ci => catChip(ci.c, ci.text)).join('')}</div>` +
+        `</div>` +
+        `<div class="sel-box">` +
+          `<div class="sel-box-lbl">${s.appsLabel}</div>` +
+          `<div class="sel-chips">${d.appItems.map(ai => `<span class="chip"><svg class="ic s16" style="width:12px;height:12px;color:var(--text-secondary)"><use href="#${ai.ic}"/></svg><span class="ell">${ai.text}</span></span>`).join('')}</div>` +
+        `</div>` +
+      `</div>` +
+    `</div>`;
+  }
+
+  return '';
+}
+
+function renderTodayPage() {
+  const td = T.today;
+  const s = td.stats;
+  const tl = td.tl;
+  const h = td.hourly;
+  const r = td.rank;
+  const isDst = stateKey === 'select-dst';
+  const isSelectMode = ['select-dragging', 'select-range', 'select-multi', 'select-dst', 'annotate-dialog'].includes(stateKey);
+  const showKbFocus = stateKey === 'mode-pan';
+  const swUnit = s.swUnit ? `<small>${s.swUnit}</small>` : '';
+
+  const dateBarHtml =
+    `<div class="datebar">` +
+      `<button class="btn icon"><svg class="ic s16"><use href="#chev-l"/></svg></button>` +
+      `<div class="btn date"><svg class="ic s16"><use href="#today"/></svg><span class="strong ell">${isDst ? td.dateDst : td.dateNormal}</span><span class="grow"></span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+      `<button class="btn icon"><svg class="ic s16"><use href="#chev-r"/></svg></button>` +
+      `<button class="btn">${td.todayBtn}</button>` +
+      (isDst ? `<span class="badge warn"><svg class="ic s16" style="width:11px;height:11px"><use href="#clock"/></svg><span class="btxt">${td.dstDayBadge}</span></span>` : '') +
+    `</div>`;
+
+  const statusCardHtml =
+    `<div class="card" style="padding:10px 16px;flex:none">` +
+      `<div class="stats">` +
+        `<div class="stat"><div class="v big">7<small>${s.hUnit}</small>15<small>${s.mUnit}</small></div><div class="l">${s.active}</div></div>` +
+        `<div class="stat"><div class="v">74%</div><div class="l">${s.focus}</div></div>` +
+        `<div class="stat"><div class="v">0%</div><div class="l">${s.distraction}</div></div>` +
+        `<div class="stat"><div class="v">28<small>${s.mUnit}</small></div><div class="l">${s.unclassified} <svg class="ic s16" style="width:12px;height:12px"><use href="#chev-r"/></svg></div></div>` +
+        `<div class="stat"><div class="v">1<small>${s.hUnit}</small>42<small>${s.mUnit}</small></div><div class="l">${s.longestFocus}</div></div>` +
+        `<div class="stat"><div class="v">3${swUnit}</div><div class="l">${s.switches}</div></div>` +
+      `</div>` +
+      `<div class="catbar" style="margin-top:8px">` +
+        `<div style="--c:var(--cat-8);flex:258"></div>` +
+        `<div style="--c:var(--cat-1);flex:62"></div>` +
+        `<div style="--c:var(--cat-3);flex:58"></div>` +
+        `<div style="--c:var(--cat-10);flex:29"></div>` +
+        `<div style="--c:var(--cat-neutral);flex:28"></div>` +
+      `</div>` +
+      `<div class="legend" style="margin-top:6px">` +
+        td.legend.map(l => `<span style="--c:var(${l.c})"><i></i>${l.text}</span>`).join('') +
+      `</div>` +
+    `</div>`;
+
+  const gridLefts = isMin
+    ? [8, 28, 48, 68, 88]
+    : [4.4, 14.2, 24.0, 33.8, 43.6, 53.4, 63.2, 73.0, 82.8, 92.6];
+  const hours = isDst
+    ? (isMin ? ['01:00', '01:30', '01:00*', '02:00', '03:00'] : ['00:45','01:00','01:30','01:00*','01:30*','02:00','02:30','03:00','03:30','04:00'])
+    : (isMin ? ['09:00', '11:00', '13:00', '15:00', '17:00'] : ['09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00','18:00']);
+  const gridHtml = gridLefts.map(x => `<i style="left:${x}%"></i>`).join('');
+  const ticksHtml = gridLefts.map((x, i) => `<i class="tick" style="left:${x}%"></i><span class="tickl" style="left:${x}%">${hours[i]}</span>`).join('');
+
+  const laneIcons = ['code', 'doc', 'mail', 'terminal', 'book'];
+  const laneBlocks = [
+    [[5.0, 12.2, '--cat-8'], [19.4, 8.2, '--cat-8'], [29.8, 6.2, '--cat-8'], [53.2, 7.6, '--cat-8'], [78.8, 5.8, '--cat-1']],
+    [[17.2, 2.2, '--cat-1'], [48.2, 5.0, '--cat-8'], [60.8, 4.4, '--cat-1']],
+    [[2.4, 2.5, '--cat-3'], [44.2, 3.8, '--cat-3'], [67.8, 4.2, '--cat-3'], [94.8, 2.6, '--cat-3']],
+    [[13.4, 2.0, '--cat-8'], [27.6, 2.1, '--cat-10'], [65.2, 2.4, '--cat-10']],
+    [[74.0, 4.6, '--cat-neutral', 'none']],
+  ];
+  const lanesHtml = laneBlocks.map((blks, idx) =>
+    `<div class="trow lane">` +
+      `<div class="lab"><svg class="ic s16"><use href="#${laneIcons[idx]}"/></svg><span class="ell">${tl.apps[idx]}</span></div>` +
+      `<div class="trk">` +
+        blks.map(([l, w, c, extra]) => `<div class="blk ${extra || ''}" style="left:${l}%;width:calc(${w}% - 1px);--c:var(${c});--c-on:var(${c === '--cat-neutral' ? '--text-primary' : c + '-on'})"></div>`).join('') +
+      `</div>` +
+    `</div>`
+  ).join('');
+
+  const kbTipHtml = showKbFocus
+    ? `<div class="kb-tip">` +
+        `<span class="kbd">${tl.kbTipKeys}</span><span>${tl.kbTipSwitch}</span>` +
+        `<span class="ter">·</span>` +
+        `<span class="kbd">${tl.kbTipConfirmKey}</span><span>${tl.kbTipConfirm}</span>` +
+        `<span class="ter">·</span>` +
+        `<span>${tl.kbTipWheel}</span>` +
+      `</div>`
+    : '';
+
+  const needsTopHeadroom = ['select-dragging', 'select-range', 'select-multi', 'select-dst'].includes(stateKey);
+  const tlMarginBottom = showKbFocus ? '34px' : (needsTopHeadroom ? '22px' : '10px');
+
+  const timelineCardHtml =
+    `<div class="card" id="timeline-card" style="flex:none;padding:12px 16px 10px;position:relative">` +
+      `<div class="tl-head" style="margin-bottom:${tlMarginBottom}">` +
+        `<div class="tl-head-l">` +
+          `<span class="h-sub">${tl.title}</span>` +
+          `<span class="cap sec">${isDst ? tl.rangeDst : tl.rangeNormal}</span>` +
+        `</div>` +
+        `<div class="tl-head-r">` +
+          `<div class="seg mode-seg${showKbFocus ? ' kb-focus' : ''}" role="radiogroup" aria-label="Timeline mode">` +
+            `<div class="${!isSelectMode ? 'on' : ''}"><svg class="ic s16"><use href="#hand"/></svg><span>${tl.modePan}</span></div>` +
+            `<div class="${isSelectMode ? 'on' : ''}"><svg class="ic s16"><use href="#range-sel"/></svg><span>${tl.modeSelect}</span></div>` +
+            kbTipHtml +
+          `</div>` +
+          `<div class="seg"><div class="on">${tl.appLanes}</div><div>${tl.catOnly}</div></div>` +
+          `<div class="row gap4" style="flex:none">` +
+            `<button class="btn compact icon"><svg class="ic s16"><use href="#minus"/></svg></button>` +
+            `<button class="btn compact icon"><svg class="ic s16"><use href="#add"/></svg></button>` +
+            `<button class="btn compact">${tl.full24}</button>` +
+          `</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="plot" style="padding:4px 0 2px"><div class="tl">` +
+        `<div class="grid" style="height:152px">${gridHtml}</div>` +
+        `<div class="trow mtrk"><div class="lab">${tl.cat}</div><div class="trk" style="position:relative">` +
+          `<div class="blk" style="left:2.4%;width:calc(2.5% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+          `<div class="blk" style="left:5.0%;width:calc(12.2% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${hasPanel || isMin ? tl.dev : tl.devLong}</div>` +
+          `<div class="blk" style="left:17.2%;width:calc(2.2% - 1px);--c:var(--cat-1);--c-on:var(--cat-1-on)"></div>` +
+          `<div class="blk" style="left:19.4%;width:calc(8.2% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.dev}</div>` +
+          `<div class="blk" style="left:27.6%;width:calc(2.1% - 1px);--c:var(--cat-10);--c-on:var(--cat-10-on)"></div>` +
+          `<div class="blk" style="left:29.8%;width:calc(6.2% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)"></div>` +
+          `<div class="blk lock" style="left:36.0%;width:calc(8.2% - 1px)"></div>` +
+          `<div class="blk" style="left:44.2%;width:calc(3.8% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+          `<div class="blk" style="left:48.2%;width:calc(12.6% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.dev}</div>` +
+          `<div class="blk" style="left:60.8%;width:calc(4.4% - 1px);--c:var(--cat-1);--c-on:var(--cat-1-on)"></div>` +
+          `<div class="blk" style="left:65.2%;width:calc(2.4% - 1px);--c:var(--cat-10);--c-on:var(--cat-10-on)"></div>` +
+          `<div class="blk" style="left:67.8%;width:calc(4.2% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+          `<div class="blk idle" style="left:72.0%;width:calc(2.0% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+          `<div class="blk none" style="left:74.0%;width:calc(4.6% - 1px);--c:var(--cat-neutral);--c-on:var(--text-primary)"></div>` +
+          `<div class="blk" style="left:78.8%;width:calc(5.8% - 1px);--c:var(--cat-1);--c-on:var(--cat-1-on)">${tl.learn}</div>` +
+          `<div class="blk excl" style="left:84.6%;width:calc(10.2% - 1px)">${hasPanel || isMin ? '' : tl.excl}</div>` +
+          `<div class="blk" style="left:94.8%;width:calc(2.6% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+        `</div></div>` +
+        `<div class="lanes">${lanesHtml}</div>` +
+        `<div class="trow ruler" style="margin-top:4px"><div class="lab"></div><div class="trk">${ticksHtml}</div></div>` +
+        renderSelectionOverlay() +
+      `</div></div>` +
+      renderSelectionDock() +
+    `</div>`;
+
+  const cols = [
+    [['--cat-3', 24]],
+    [['--cat-8', 110], ['--cat-1', 10]],
+    [['--cat-8', 88], ['--cat-1', 18], ['--cat-10', 14]],
+    [['--cat-8', 74], ['--cat-10', 16]],
+    [['--cat-8', 36]],
+    [['--cat-3', 38], ['--cat-8', 22]],
+    [['--cat-8', 96], ['--cat-1', 24]],
+    [['--cat-1', 28], ['--cat-10', 22], ['--cat-3', 34]],
+    [['--cat-neutral', 44], ['--cat-1', 50]],
+    [['--cat-1', 20]],
+    [['--cat-3', 26]],
+  ];
+  const colsHtml = cols.map(st =>
+    `<div class="col"><div class="stack">${st.map(([c, px]) => `<div style="--c:var(${c});height:${px}.0px"></div>`).join('')}</div></div>`
+  ).join('');
+  const hLabels = [8,9,10,11,12,13,14,15,16,17,18].map(n => `<span>${n}</span>`).join('');
+
+  const rankRowsHtml = r.rows.map((row, idx) =>
+    `<div class="rank${idx === 0 && hasPanel ? ' sel' : ''}" style="--c:var(${row.c})">` +
+      `<i class="cb"></i>` +
+      `<div class="nm"><svg class="ic s16"><use href="#${row.ic}"/></svg><span class="ell">${row.name}</span></div>` +
+      `<div class="bar"><div class="fill" style="width:${row.w}">${row.segs.map(([c, f]) => `<div style="--c:var(${c});flex:${f}"></div>`).join('')}</div></div>` +
+      `<div class="du">${row.dur}</div>` +
+    `</div>`
+  ).join('');
+
+  const bottomRowHtml =
+    `<div class="row gap8 two-col" style="flex:none;align-items:stretch">` +
+      `<div class="card grow" style="padding:12px 16px;min-width:0">` +
+        `<div class="h-sub" style="margin-bottom:8px">${h.title}</div>` +
+        `<div class="plot" style="padding:4px 0 6px">` +
+          `<div class="hours">` +
+            `<div class="y"><span style="bottom:0px">${h.y0}</span><span style="bottom:60px">${h.y30}</span><span style="bottom:120px">${h.y60}</span></div>` +
+            `<div class="plotarea"><div class="gl" style="bottom:60px"></div><div class="gl" style="bottom:120px"></div>${colsHtml}</div>` +
+          `</div>` +
+          `<div class="hlabels">${hLabels}</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="card grow" style="padding:12px 16px;min-width:0">` +
+        `<div class="row" style="margin-bottom:4px"><span class="h-sub grow">${r.title}</span><div class="seg">${r.tabs.map((t, i) => `<div${i === 0 ? ' class="on"' : ''}>${t}</div>`).join('')}</div></div>` +
+        rankRowsHtml +
+      `</div>` +
+    `</div>`;
+
+  const p = td.pending;
+  const isPendingOther = stateKey === 'pending-other';
+  const pendingRowHtml =
+    `<div class="card pending${isPendingOther ? ' highlight-card' : ''}" style="flex:none">` +
+      `<svg class="ic s16" style="color:var(--text-secondary)"><use href="#clock"/></svg>` +
+      `<span class="strong">${p.title}</span>` +
+      `<span class="sec cap">${p.range}</span>` +
+      `<span class="grow"></span>` +
+      `<div class="row gap4" style="flex-wrap:wrap">` +
+        `<button class="btn compact">${p.rest}</button>` +
+        `<button class="btn compact">${p.meeting}</button>` +
+        `<button class="btn compact">${p.reading}</button>` +
+        `<button class="btn compact">${p.ignore}</button>` +
+        `<button class="btn compact${isPendingOther ? ' other-active' : ''}">${p.other}</button>` +
+      `</div>` +
+    `</div>`;
+
+  return dateBarHtml + statusCardHtml + timelineCardHtml + bottomRowHtml + pendingRowHtml;
+}
+
+/* ===========================
+   Annotation Editor Modal (annotate-dialog & pending-other)
+   =========================== */
+function renderCatPicker(selectedId) {
+  return `<div class="cat-tray" role="radiogroup">` +
+    ACTIVE_CATS.map(c =>
+      `<div class="cat-opt${c.id === selectedId ? ' sel' : ''}">` +
+        `<i class="sw-dot" style="--c:var(${c.c})"></i>` +
+        `<span class="ell">${c.name}</span>` +
+        (c.id === selectedId ? `<svg class="ic s16 chk"><use href="#check"/></svg>` : '') +
+      `</div>`
+    ).join('') +
+  `</div>`;
+}
+
+function renderAnnotateModal(isAway) {
+  const d = T.dialog;
+  const scrim = document.getElementById('modal-scrim');
+  scrim.style.display = 'flex';
+
+  const rangesSection = isAway
+    ? `<div class="infobar accent-info">` +
+        `<svg class="ic s16 ib-ic"><use href="#clock"/></svg>` +
+        `<div class="ib-body">` +
+          `<div class="ib-title">${d.awaySourceTitle}</div>` +
+          `<div>${d.awaySourceSub}</div>` +
+        `</div>` +
+      `</div>`
+    : `<div class="ranges-strip">` +
+        `<span class="cap sec">${d.rangesTitle}</span>` +
+        `<div class="ranges-pills">` +
+          d.ranges.map(rg => `<span class="r-pill"><span class="rn">${rg.num}</span><span>${rg.rangeMono}</span><span class="ter">· ${rg.dur}</span></span>`).join('') +
+        `</div>` +
+      `</div>`;
+
+  const failBanner = !isAway
+    ? `<div class="infobar critical">` +
+        `<svg class="ic s16 ib-ic"><use href="#err-circle"/></svg>` +
+        `<div class="ib-body">` +
+          `<div class="ib-title"><span>${d.failTitle}</span><span class="badge crit mono">${d.failCode}</span></div>` +
+          `<div>${d.failDesc}</div>` +
+        `</div>` +
+      `</div>`
+    : '';
+
+  const kinds = isAway ? d.kindsAway : d.kindsBatch;
+
+  scrim.innerHTML =
+    `<div class="modal-dlg" role="dialog" aria-modal="true">` +
+      `<div class="modal-head">` +
+        `<svg class="ic" style="color:var(--accent-text);flex:none"><use href="#edit"/></svg>` +
+        `<div class="modal-head-txt">` +
+          `<span class="h-sub ell">${isAway ? d.titleAway : d.titleBatch}</span>` +
+          `<span class="badge ovr"><span class="btxt">${isAway ? d.badgeAway : d.badgeBatch}</span></span>` +
+        `</div>` +
+        `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+      `</div>` +
+      `<div class="modal-body-wrap" id="modal-body-wrap">` +
+        `<div class="modal-body" id="modal-body">` +
+          failBanner +
+          rangesSection +
+          `<div class="field">` +
+            `<label><span>${d.kindLabel}</span></label>` +
+            `<div class="seg full-seg">` +
+              kinds.map(k => `<div class="${k.active ? 'on' : ''}"><span>${k.label}</span></div>`).join('') +
+            `</div>` +
+            `<div class="field-hint">${isAway ? d.kindHintAway : d.kindHintCat}</div>` +
+          `</div>` +
+          `<div class="field">` +
+            `<label><span>${d.catLabel}</span><span class="cap ter">${d.catArchivedNote}</span></label>` +
+            renderCatPicker('learn') +
+          `</div>` +
+          `<div class="field">` +
+            `<label><span>${d.labelField}</span></label>` +
+            `<div class="input std focused"><span class="ell">${isAway ? d.awayLabelVal : d.labelVal}</span><span class="caret"></span></div>` +
+          `</div>` +
+          `<div class="field">` +
+            `<label><span>${d.noteField}</span></label>` +
+            `<div class="textarea">${isAway ? d.awayNoteVal : d.noteVal}</div>` +
+          `</div>` +
+          `<div class="effect-box">` +
+            `<div class="effect-head">` +
+              `<span class="strong cap">${d.effectPrefix}</span>` +
+              catChip('--cat-1', T.cats.learn) +
+            `</div>` +
+            `<div class="effect-desc">${isAway ? d.effectDescAway : d.effectDescBatch}</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="modal-thumb"></div></div>` +
+      `</div>` +
+      `<div class="modal-foot">` +
+        `<div class="modal-foot-l"><span class="cap ter ell">${d.footAtomicNote}</span></div>` +
+        `<div class="modal-foot-r">` +
+          `<button class="btn"><span>${d.cancelBtn}</span></button>` +
+          (isAway
+            ? `<button class="btn accent"><span>${d.saveBtn}</span></button>`
+            : `<button class="btn accent"><svg class="ic s16"><use href="#refresh"/></svg><span>${d.retryBtn}</span></button>`) +
+        `</div>` +
+      `</div>` +
+    `</div>`;
+}
+
+/* ===========================
+   Details Sidebar: annotation-list
+   =========================== */
+function renderAnnotationListPanel() {
+  const al = T.annoList;
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+
+  const cardsHtml = al.items.map((it, idx) => {
+    const overlapSep = idx === 1
+      ? `<div class="overlap-divider"><span>${al.overlapNote}</span></div>`
+      : '';
+    if (it.kind === 'dismissed') {
+      return overlapSep +
+        `<div class="anno-card dismissed">` +
+          `<div class="anno-card-top">` +
+            `<span class="badge dis"><span class="btxt">${al.kindDismissed}</span></span>` +
+            `<span class="anno-range">${it.rangeMono}</span>` +
+            `<span class="cap ter">${it.dur}</span>` +
+          `</div>` +
+          `<div class="anno-note">${it.note}</div>` +
+          `<div class="anno-card-foot">` +
+            `<span class="anno-ts">${it.ts}</span>` +
+            `<div class="anno-acts">` +
+              `<button class="btn compact"><svg class="ic s16" style="width:13px;height:13px"><use href="#undo"/></svg><span>${al.undoIgnoreBtn}</span></button>` +
+            `</div>` +
+          `</div>` +
+        `</div>`;
+    }
+    const kindBadge = it.kind === 'cat'
+      ? `<span class="badge ovr"><span class="btxt">${al.kindCat}</span></span>`
+      : `<span class="badge"><span class="btxt">${al.kindNote}</span></span>`;
+    const overlapBadge = it.overlap
+      ? `<span class="badge warn"><span class="btxt">${al.overlapBadge}</span></span>`
+      : '';
+    return overlapSep +
+      `<div class="anno-card">` +
+        `<div class="anno-card-top">` +
+          kindBadge +
+          overlapBadge +
+          `<span class="anno-range">${it.rangeMono}</span>` +
+          `<span class="cap ter">${it.dur}</span>` +
+        `</div>` +
+        (it.catName ? `<div class="row gap8" style="flex-wrap:wrap">${catChip(it.catVar, it.catName)}${it.label ? `<span class="strong cap">${it.label}</span>` : ''}</div>` : (it.label ? `<div class="anno-val strong">${it.label}</div>` : '')) +
+        `<div class="anno-note">${it.note}</div>` +
+        `<div class="anno-card-foot">` +
+          `<span class="anno-ts">${it.ts}</span>` +
+          `<div class="anno-acts">` +
+            `<button class="btn compact subtle"><svg class="ic s16" style="width:13px;height:13px"><use href="#edit"/></svg><span>${al.editBtn}</span></button>` +
+            `<button class="btn compact icon subtle danger" title="${al.deleteBtn}" aria-label="${al.deleteBtn}"><svg class="ic s16" style="width:13px;height:13px"><use href="#trash"/></svg></button>` +
+          `</div>` +
+        `</div>` +
+      `</div>`;
+  }).join('');
+
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<svg class="ic" style="color:var(--text-secondary);flex:none;margin-top:2px"><use href="#code"/></svg>` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${al.title}</span><span class="badge">4</span></div>` +
+        `<div class="cap sec ell">${al.subtitle}</div>` +
+      `</div>` +
+      `<button class="btn compact"><svg class="ic s16" style="width:13px;height:13px"><use href="#add"/></svg><span>${al.addBtn}</span></button>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        `<div class="res-card">` +
+          `<div class="row gap8" style="flex-wrap:wrap">${catChip('--cat-1', T.cats.learn)}<span class="badge ovr"><span class="btxt">${al.sourceBadge}</span></span></div>` +
+          `<div class="cap sec">${al.blockSummary}</div>` +
+        `</div>` +
+        `<div class="anno-list">${cardsHtml}</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    `<div class="ed-foot">` +
+      `<div class="ed-foot-main">` +
+        `<button class="btn primary-slot"><svg class="ic s16"><use href="#edit"/></svg><span>${al.footAdd}</span></button>` +
+        `<button class="btn flex-shrink"><svg class="ic s16"><use href="#tree"/></svg><span>${al.footExplain}</span></button>` +
+      `</div>` +
+      `<div class="ed-foot-right">` +
+        `<button class="btn icon disabled" title="${al.footDeleteTitle}" aria-label="${al.footDeleteTitle}"><svg class="ic s16"><use href="#trash"/></svg></button>` +
+        `<button class="btn icon" title="${al.footMoreTitle}" aria-label="${al.footMoreTitle}"><svg class="ic s16"><use href="#more"/></svg></button>` +
+      `</div>` +
+    `</div>`;
+}
+
+/* ===========================
+   Details Sidebar: annotation-edit (+ delete confirmation flyout)
+   =========================== */
+function renderAnnotationEditPanel() {
+  const ae = T.annoEdit;
+  const d = T.dialog;
+  const al = T.annoList;
+  const panel = document.getElementById('details');
+  panel.style.display = 'flex';
+
+  panel.innerHTML =
+    `<div class="ed-head">` +
+      `<button class="btn subtle icon compact" style="flex:none"><svg class="ic s16"><use href="#arrow-l"/></svg></button>` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title"><span class="strong">${ae.title}</span></div>` +
+        `<div class="cap sec ell">${ae.subtitle}</div>` +
+      `</div>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        /* Fixed kind box with explicit explanation of why */
+        `<div class="kind-locked">` +
+          `<div class="kind-locked-top">` +
+            `<svg class="ic s16"><use href="#lock"/></svg>` +
+            `<span class="cap strong">${ae.kindPrefix}${al.kindCat}</span>` +
+            `<span class="badge"><span class="btxt">${ae.kindFixedBadge}</span></span>` +
+          `</div>` +
+          `<div class="kind-locked-why">${ae.kindFixedWhy}</div>` +
+        `</div>` +
+
+        /* Editable range inputs */
+        `<div class="field">` +
+          `<label><span>${ae.rangeLabel}</span></label>` +
+          `<div class="row gap8">` +
+            `<div class="time-in grow"><svg class="ic s16"><use href="#clock"/></svg><span>${ae.start}</span></div>` +
+            `<span class="cap ter">–</span>` +
+            `<div class="time-in grow focused"><svg class="ic s16"><use href="#clock"/></svg><span>${ae.end}</span><span class="caret"></span></div>` +
+          `</div>` +
+        `</div>` +
+
+        /* Clipping notice when overlapping same-kind annotations get trimmed */
+        `<div class="infobar caution">` +
+          `<svg class="ic s16 ib-ic"><use href="#warn"/></svg>` +
+          `<div class="ib-body">` +
+            `<div class="ib-title">${ae.clipTitle}</div>` +
+            `<div>${ae.clipDesc}</div>` +
+          `</div>` +
+        `</div>` +
+
+        /* Active-only category picker */
+        `<div class="field">` +
+          `<label><span>${d.catLabel}</span><span class="cap ter">${d.catArchivedNote}</span></label>` +
+          renderCatPicker('learn') +
+        `</div>` +
+
+        `<div class="field">` +
+          `<label><span>${d.labelField}</span></label>` +
+          `<div class="input std"><span class="ell">${d.labelVal}</span></div>` +
+        `</div>` +
+
+        `<div class="field">` +
+          `<label><span>${d.noteField}</span></label>` +
+          `<div class="textarea">${d.noteVal}</div>` +
+        `</div>` +
+
+        `<div class="row gap8" style="flex-wrap:wrap;justify-content:space-between">` +
+          `<span class="cap ter">${ae.metaTs}</span>` +
+          `<span class="mono ter">${ae.uuidShort}</span>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    `<div class="ed-foot">` +
+      `<div class="ed-foot-main">` +
+        `<button class="btn accent primary-slot"><span>${ae.saveBtn}</span></button>` +
+        `<button class="btn"><span>${ae.cancelBtn}</span></button>` +
+      `</div>` +
+      `<div class="ed-foot-right">` +
+        `<button class="btn danger-active"><svg class="ic s16"><use href="#trash"/></svg><span>${ae.deleteBtn}</span></button>` +
+      `</div>` +
+    `</div>`;
+
+  /* Anchored delete confirmation flyout beside the sidebar footer */
+  document.getElementById('overlay-layer').innerHTML =
+    `<div class="del-flyout" role="alertdialog" aria-modal="true">` +
+      `<div class="del-flyout-head">` +
+        `<svg class="ic"><use href="#warn"/></svg>` +
+        `<div class="grow" style="min-width:0;display:flex;flex-direction:column;gap:3px">` +
+          `<span class="strong">${ae.delConfirmTitle}</span>` +
+          `<span class="cap sec" style="overflow-wrap:anywhere">${ae.delConfirmDesc}</span>` +
+        `</div>` +
+      `</div>` +
+      `<div class="del-flyout-acts">` +
+        `<button class="btn compact"><span>${ae.cancelBtn}</span></button>` +
+        `<button class="btn compact danger-solid"><span>${ae.delConfirmBtn}</span></button>` +
+      `</div>` +
+    `</div>`;
+}
+
+function renderMain() {
+  const main = document.getElementById('main');
+  main.innerHTML = renderTodayPage();
+  if (stateKey === 'annotate-dialog') renderAnnotateModal(false);
+  else if (stateKey === 'pending-other') renderAnnotateModal(true);
+  else if (stateKey === 'annotation-list') renderAnnotationListPanel();
+  else if (stateKey === 'annotation-edit') renderAnnotationEditPanel();
+}
+
+function syncScroll(scrollEl, wrapEl, thumbEl) {
+  if (!scrollEl || !wrapEl || !thumbEl) return;
+  const overflow = scrollEl.scrollHeight > scrollEl.clientHeight + 1;
+  wrapEl.classList.toggle('scrollable', overflow);
+  if (!overflow) return;
+  const trackH = wrapEl.clientHeight - 8;
+  const ratio = scrollEl.clientHeight / scrollEl.scrollHeight;
+  const thumbH = Math.max(28, Math.round(trackH * ratio));
+  const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+  const top = maxScroll > 0 ? Math.round((scrollEl.scrollTop / maxScroll) * (trackH - thumbH)) : 0;
+  thumbEl.style.height = thumbH + 'px';
+  thumbEl.style.top = top + 'px';
+}
+
+renderNav();
+renderMain();
+
+const mainEl = document.getElementById('main');
+const mainWrapEl = document.getElementById('main-wrap');
+const mainThumbEl = document.getElementById('main-thumb');
+if (stateKey === 'pending-other' && mainEl.scrollHeight > mainEl.clientHeight) {
+  mainEl.scrollTop = mainEl.scrollHeight;
+} else if (isMin && stateKey === 'select-range') {
+  const tlCard = document.getElementById('timeline-card');
+  if (tlCard) mainEl.scrollTop = Math.max(0, tlCard.offsetTop - 8);
+}
+syncScroll(mainEl, mainWrapEl, mainThumbEl);
+mainEl.addEventListener('scroll', () => syncScroll(mainEl, mainWrapEl, mainThumbEl));
+
+const edBody = document.getElementById('ed-body');
+const edBodyWrap = document.getElementById('ed-body-wrap');
+const edThumb = document.getElementById('ed-thumb');
+if (edBody) {
+  syncScroll(edBody, edBodyWrap, edThumb);
+  edBody.addEventListener('scroll', () => syncScroll(edBody, edBodyWrap, edThumb));
+}
+
+const modalBody = document.getElementById('modal-body');
+const modalBodyWrap = document.getElementById('modal-body-wrap');
+const modalThumb = document.getElementById('modal-thumb');
+if (modalBody) {
+  syncScroll(modalBody, modalBodyWrap, modalThumb);
+  modalBody.addEventListener('scroll', () => syncScroll(modalBody, modalBodyWrap, modalThumb));
+}
+</script>
+</body>
+</html>
