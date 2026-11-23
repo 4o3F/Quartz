@@ -1,7 +1,11 @@
 //! Windows appearance events marshalled to the GPUI foreground thread (11 sections 2 and 3.2).
 //!
 //! Transparency: https://learn.microsoft.com/uwp/api/windows.ui.viewmanagement.uisettings.advancedeffectsenabled
-//! Contrast notifications: https://learn.microsoft.com/uwp/api/windows.ui.viewmanagement.accessibilitysettings.highcontrastchanged
+//! Contrast broadcasts: https://learn.microsoft.com/windows/win32/winmsg/wm-settingchange
+
+mod notification_window;
+
+use notification_window::NotificationWindow;
 
 use super::{
     runtime::ThemeBundle,
@@ -23,7 +27,7 @@ use std::{
 use windows::{
     Foundation::{EventHandler, TypedEventHandler},
     System::Power::{EnergySaverStatus, PowerManager},
-    UI::ViewManagement::{AccessibilitySettings, UIColorType, UISettings},
+    UI::ViewManagement::{UIColorType, UISettings},
     Wdk::System::SystemServices::RtlGetVersion,
     Win32::{
         Foundation::HWND,
@@ -224,9 +228,31 @@ impl AccentColors {
     }
 }
 
+/// Sources share one foreground refresh, which re-reads the current Windows settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThemeChange {
+    Settings,
+    SystemColors,
+    AccentColors,
+    Transparency,
+    EnergySaver,
+}
+
+impl ThemeChange {
+    fn refresh(self, cx: &mut App) {
+        match self {
+            Self::Settings
+            | Self::SystemColors
+            | Self::AccentColors
+            | Self::Transparency
+            | Self::EnergySaver => SystemTheme::refresh(cx),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct EventState {
-    pending: bool,
+    pending: Option<ThemeChange>,
     waker: Option<Waker>,
 }
 
@@ -235,10 +261,10 @@ struct EventState {
 struct ThemeEvents(Arc<Mutex<EventState>>);
 
 impl ThemeEvents {
-    fn signal(&self) {
+    fn signal(&self, change: ThemeChange) {
         let waker = {
             let mut state = self.0.lock().expect("theme event lock poisoned");
-            state.pending = true;
+            state.pending = Some(change);
             state.waker.take()
         };
         if let Some(waker) = waker {
@@ -246,18 +272,17 @@ impl ThemeEvents {
         }
     }
 
-    async fn next(&self) {
+    async fn next(&self) -> ThemeChange {
         poll_fn(|cx| {
             let mut state = self.0.lock().expect("theme event lock poisoned");
-            if state.pending {
-                state.pending = false;
-                Poll::Ready(())
+            if let Some(change) = state.pending.take() {
+                Poll::Ready(change)
             } else {
                 state.waker = Some(cx.waker().clone());
                 Poll::Pending
             }
         })
-        .await;
+        .await
     }
 }
 
@@ -265,10 +290,8 @@ impl ThemeEvents {
 #[derive(Debug, Default)]
 struct SettingsEvents {
     ui: Option<UISettings>,
-    accessibility: Option<AccessibilitySettings>,
     colors: Option<i64>,
     effects: Option<i64>,
-    contrast: Option<i64>,
     energy: Option<i64>,
     #[cfg(test)]
     drop_probe: Option<tests::DropProbe>,
@@ -282,7 +305,7 @@ impl SettingsEvents {
                 let signal = events.clone();
                 subscriptions.colors = Self::registration(
                     ui.ColorValuesChanged(&TypedEventHandler::new(move |_, _| {
-                        signal.signal();
+                        signal.signal(ThemeChange::AccentColors);
                         Ok(())
                     })),
                     "ColorValuesChanged",
@@ -290,7 +313,7 @@ impl SettingsEvents {
                 let signal = events.clone();
                 subscriptions.effects = Self::registration(
                     ui.AdvancedEffectsEnabledChanged(&TypedEventHandler::new(move |_, _| {
-                        signal.signal();
+                        signal.signal(ThemeChange::Transparency);
                         Ok(())
                     })),
                     "AdvancedEffectsEnabledChanged",
@@ -301,26 +324,10 @@ impl SettingsEvents {
                 tracing::warn!(%error, "could not create UISettings; using embedded accent and solid background")
             }
         }
-        match AccessibilitySettings::new() {
-            Ok(settings) => {
-                let signal = events.clone();
-                subscriptions.contrast = Self::registration(
-                    settings.HighContrastChanged(&TypedEventHandler::new(move |_, _| {
-                        signal.signal();
-                        Ok(())
-                    })),
-                    "HighContrastChanged",
-                );
-                subscriptions.accessibility = Some(settings);
-            }
-            Err(error) => {
-                tracing::warn!(%error, "could not observe high contrast changes; refreshing on window activation")
-            }
-        }
         let signal = events.clone();
         subscriptions.energy = Self::registration(
             PowerManager::EnergySaverStatusChanged(&EventHandler::new(move |_, _| {
-                signal.signal();
+                signal.signal(ThemeChange::EnergySaver);
                 Ok(())
             })),
             "EnergySaverStatusChanged",
@@ -352,14 +359,6 @@ impl Drop for SettingsEvents {
                 );
             }
         }
-        if let Some(settings) = &self.accessibility
-            && let Some(token) = self.contrast
-        {
-            Self::removed(
-                settings.RemoveHighContrastChanged(token),
-                "HighContrastChanged",
-            );
-        }
         if let Some(token) = self.energy {
             Self::removed(
                 PowerManager::RemoveEnergySaverStatusChanged(token),
@@ -388,6 +387,7 @@ pub(crate) struct SystemTheme {
     material: Material,
     support: BackdropSupport,
     subscriptions: Option<SettingsEvents>,
+    notifications: Option<NotificationWindow>,
     listener: Option<Task<()>>,
     #[cfg(feature = "preview")]
     preview_colors: SystemColors,
@@ -397,6 +397,13 @@ impl SystemTheme {
     pub(crate) fn install(theme: ThemeBundle, cx: &mut App) {
         let events = ThemeEvents::default();
         let subscriptions = SettingsEvents::register(&events);
+        let notifications = match NotificationWindow::create(&events) {
+            Ok(window) => Some(window),
+            Err(error) => {
+                tracing::warn!(%error, "could not observe desktop appearance broadcasts; refreshing on window activation");
+                None
+            }
+        };
         let support = match NativeBackdrop::support() {
             Ok(support) => support,
             Err(error) => {
@@ -418,6 +425,7 @@ impl SystemTheme {
             material: Material::Solid,
             support,
             subscriptions: Some(subscriptions),
+            notifications,
             listener: None,
             #[cfg(feature = "preview")]
             preview_colors: PreviewTheme::load_colors(),
@@ -430,8 +438,8 @@ impl SystemTheme {
         Self::refresh(cx);
         let listener = cx.spawn(async move |cx| {
             loop {
-                events.next().await;
-                cx.update(Self::refresh);
+                let change = events.next().await;
+                cx.update(|cx| change.refresh(cx));
             }
         });
         cx.global_mut::<Self>().listener = Some(listener);
@@ -440,6 +448,7 @@ impl SystemTheme {
         // GPUI drops its Windows platform (and uninitializes OLE) before app globals.
         // Its quit observers run earlier, so revoke events and release WinRT objects here.
         drop(self.listener.take());
+        drop(self.notifications.take());
         drop(self.subscriptions.take());
     }
     pub(crate) fn tokens(cx: &App) -> Rc<Tokens> {
@@ -676,7 +685,7 @@ impl PreviewDiagnostics {
 mod tests {
     use super::*;
     use std::{
-        cell::Cell,
+        cell::{Cell, RefCell},
         future::Future as _,
         sync::atomic::{AtomicUsize, Ordering},
         task::{Context, Wake},
@@ -704,13 +713,12 @@ mod tests {
     fn quit_releases_subscriptions_before_platform_teardown_and_global_drop() {
         let apartment = Rc::new(Cell::new(ApartmentState::Initialized));
         let drops = Rc::new(Cell::new(0));
+        let released = Rc::new(RefCell::new(Vec::new()));
         let theme = ThemeBundle::embedded().expect("embedded typed theme");
         let subscriptions = SettingsEvents {
             ui: None,
-            accessibility: None,
             colors: None,
             effects: None,
-            contrast: None,
             energy: None,
             drop_probe: Some(DropProbe {
                 apartment: Rc::clone(&apartment),
@@ -724,6 +732,7 @@ mod tests {
             material: Material::Solid,
             support: BackdropSupport::Supported,
             subscriptions: Some(subscriptions),
+            notifications: Some(NotificationWindow::for_shutdown_test(Rc::clone(&released))),
             listener: Some(Task::ready(())),
             #[cfg(feature = "preview")]
             preview_colors: PreviewTheme::load_colors(),
@@ -731,6 +740,12 @@ mod tests {
 
         state.shutdown();
         assert!(state.subscriptions.is_none());
+        assert!(state.notifications.is_none());
+        use notification_window::tests::ReleasedResource;
+        assert_eq!(
+            *released.borrow(),
+            [ReleasedResource::Window, ReleasedResource::Class]
+        );
         assert!(state.listener.is_none());
         assert_eq!(drops.get(), 1);
 
@@ -738,6 +753,10 @@ mod tests {
         state.shutdown();
         drop(state);
         assert_eq!(drops.get(), 1, "global drop must not release WinRT again");
+        assert_eq!(
+            *released.borrow(),
+            [ReleasedResource::Window, ReleasedResource::Class]
+        );
     }
 
     #[derive(Debug, Default)]
@@ -756,14 +775,20 @@ mod tests {
         let mut context = Context::from_waker(&waker);
         let mut next = std::pin::pin!(events.next());
         assert!(next.as_mut().poll(&mut context).is_pending());
-        events.signal();
-        events.signal();
+        events.signal(ThemeChange::Settings);
+        events.signal(ThemeChange::SystemColors);
         assert_eq!(counter.0.load(Ordering::SeqCst), 1);
-        assert!(next.as_mut().poll(&mut context).is_ready());
+        assert_eq!(
+            next.as_mut().poll(&mut context),
+            Poll::Ready(ThemeChange::SystemColors)
+        );
         let mut next = std::pin::pin!(events.next());
         assert!(next.as_mut().poll(&mut context).is_pending());
-        events.signal();
-        assert!(next.as_mut().poll(&mut context).is_ready());
+        events.signal(ThemeChange::Settings);
+        assert_eq!(
+            next.as_mut().poll(&mut context),
+            Poll::Ready(ThemeChange::Settings)
+        );
     }
 
     #[test]

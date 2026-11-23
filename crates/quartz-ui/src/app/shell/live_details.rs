@@ -404,27 +404,26 @@ impl AppShell {
                             .bg(color),
                     )
                 }));
-            let labels = div().flex().children(entity.daily.iter().map(|day| {
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .ramp(ui, Ramp::Caption)
-                    .text_color(ui.palette.text_secondary)
-                    .child(
-                        if self
-                            .live
-                            .as_ref()
-                            .is_some_and(|live| day.date == live.snapshot.logical_date)
-                        {
-                            self.formatter.text(Msg::DetailsToday)
-                        } else {
-                            self.formatter.weekday(day.date.weekday())
-                        },
-                    )
-            }));
+            let labels = div()
+                .flex()
+                .px(ui.metrics.space.s)
+                .children(entity.daily.iter().map(|day| {
+                    let label = if self
+                        .live
+                        .as_ref()
+                        .is_some_and(|live| day.date == live.snapshot.logical_date)
+                    {
+                        self.formatter.text(Msg::DetailsToday)
+                    } else {
+                        self.formatter.weekday(day.date.weekday())
+                    };
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .px(ui.metrics.space.xxs)
+                        .child(ui.axis_label(label, ui.palette.text_secondary))
+                }));
             body = body.child(
                 self.section(
                     ui,

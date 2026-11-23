@@ -23,7 +23,7 @@ snafu.workspace = true
 tracing.workspace = true
 # WinRT observes appearance, transparency and energy saver; Win32 supplies system colors,
 # high contrast and DWM backdrop support (11 sections 2 and 3.2).
-windows = { workspace = true, features = ["Foundation", "UI_ViewManagement", "System_Power", "Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Accessibility", "Win32_UI_Controls", "Wdk_System_SystemServices", "Win32_System_SystemInformation", "Win32_UI_WindowsAndMessaging"] }
+windows = { workspace = true, features = ["Foundation", "UI_ViewManagement", "System_Power", "Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Accessibility", "Win32_UI_Controls", "Wdk_System_SystemServices", "Win32_System_SystemInformation", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 # Mock data and the off-screen preview window, for screenshots and tests; never in release builds.

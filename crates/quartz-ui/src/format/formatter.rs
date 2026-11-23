@@ -284,6 +284,11 @@ impl Formatter {
         )
     }
 
+    /// The hour number on the compact chart axis; the axis omits minutes and the day period.
+    pub(crate) fn hour_tick(self, hour: u32) -> String {
+        hour.to_string()
+    }
+
     /// Weekday name.
     #[must_use]
     pub(crate) fn weekday(self, weekday: Weekday) -> String {

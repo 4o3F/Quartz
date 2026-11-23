@@ -251,6 +251,19 @@ impl<'a> Widgets<'a> {
         FontFeatures(Arc::new(vec![(TABULAR_FIGURES.to_owned(), 1)]))
     }
 
+    /// A single chart tick, ellipsized within the definite width supplied by its slot.
+    pub(crate) fn axis_label(&self, text: String, color: Hsla) -> Div {
+        div()
+            .w_full()
+            .min_w(px(0.))
+            .truncate()
+            .text_center()
+            .ramp(self, Ramp::Caption)
+            .tabular_figures()
+            .text_color(color)
+            .child(text)
+    }
+
     /// A themed icon sized for `density` (11 section 7).
     pub(crate) fn icon(&self, name: IconName, density: Density, color: Hsla) -> Icon {
         self.variant_icon(name, density, color, IconVariant::Regular)

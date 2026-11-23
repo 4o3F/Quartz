@@ -334,32 +334,27 @@ impl AppShell {
                         ),
                     )
             }));
-        let labels =
-            div()
-                .flex()
-                .flex_row()
-                .pt(ui.metrics.space.xs)
-                .children(details.week.iter().map(|day| {
-                    let (name, text_color) = match day.day {
-                        BarDay::Earlier(weekday) => {
-                            (self.formatter.weekday(weekday), palette.text_secondary)
-                        }
-                        BarDay::Today => {
-                            (self.formatter.text(Msg::DetailsToday), palette.text_primary)
-                        }
-                    };
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .justify_center()
-                        .ramp(ui, Ramp::Caption)
-                        .text_color(text_color)
-                        .child(name)
-                }));
+        let labels = div()
+            .flex()
+            .flex_row()
+            .px(ui.metrics.space.s)
+            .pt(ui.metrics.space.xs)
+            .children(details.week.iter().map(|day| {
+                let name = match day.day {
+                    BarDay::Earlier(weekday) => self.formatter.weekday(weekday),
+                    BarDay::Today => self.formatter.text(Msg::DetailsToday),
+                };
+                let text_color = match day.day {
+                    BarDay::Earlier(_) => palette.text_secondary,
+                    BarDay::Today => palette.text_primary,
+                };
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .px(ui.metrics.space.xxs)
+                    .child(ui.axis_label(name, text_color))
+            }));
         div()
             .flex()
             .flex_col()

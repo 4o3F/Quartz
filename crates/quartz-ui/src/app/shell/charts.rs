@@ -49,9 +49,29 @@ impl HourStride {
         Self(stride)
     }
 
-    /// Whether the bar of `hour` is labeled.
-    fn labels(self, hour: u32) -> bool {
-        hour.is_multiple_of(u32::from(self.0))
+    /// Whether the bar at `index` is labeled, including repeated hours at a clock change.
+    fn labels(self, index: usize) -> bool {
+        index.is_multiple_of(usize::from(self.0))
+    }
+}
+
+/// A tick's nonoverlapping text region, clipped to the plot at both ends.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TickLabelBounds {
+    left: f32,
+    width: f32,
+}
+
+impl TickLabelBounds {
+    fn centered(center: f32, spacing: f32, plot_width: f32) -> Self {
+        let left = (center - spacing / 2.).max(0.);
+        let right = (center + spacing / 2.).min(plot_width);
+        let extent = (right - left).max(0.);
+        let padding = (HOUR_LABEL_GAP / 2.).min(extent / 2.);
+        Self {
+            left: left + padding,
+            width: extent - padding * 2.,
+        }
     }
 }
 
@@ -215,24 +235,39 @@ impl AppShell {
                 / f32::from(
                     u8::try_from(bars.len()).expect("a logical day has at most 25 hourly bars"),
                 );
-            let stride = HourStride::fit(slot, measure.width("00", Ramp::Caption));
+            let labels: Vec<String> = bars
+                .iter()
+                .map(|bar| self.formatter.hour_tick(bar.hour))
+                .collect();
+            let widest = measure
+                .widths(labels.iter().map(String::as_str), Ramp::Caption)
+                .fold(0., f32::max);
+            let stride = HourStride::fit(slot, widest);
+            let plot_width = f32::from(layer.bounds.size.width);
             div()
-                .flex()
-                .flex_row()
+                .relative()
                 .size_full()
-                .children(bars.iter().map(|bar| {
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .justify_center()
-                        .ramp(ui, Ramp::Caption)
-                        .tabular_figures()
-                        .whitespace_nowrap()
-                        .text_color(ui.palette.text_tertiary)
-                        .when(stride.labels(bar.hour), |slot| {
-                            slot.child(bar.hour.to_string())
-                        })
+                .overflow_hidden()
+                .children(labels.into_iter().enumerate().filter_map(|(index, label)| {
+                    if !stride.labels(index) {
+                        return None;
+                    }
+                    let index = f32::from(
+                        u8::try_from(index).expect("a logical day has at most 25 hourly bars"),
+                    );
+                    let bounds = TickLabelBounds::centered(
+                        (index + 0.5) * slot,
+                        f32::from(stride.0) * slot,
+                        plot_width,
+                    );
+                    Some(
+                        div()
+                            .absolute()
+                            .left(px(bounds.left))
+                            .w(px(bounds.width))
+                            .overflow_hidden()
+                            .child(ui.axis_label(label, ui.palette.text_tertiary)),
+                    )
                 }))
                 .into_any_element()
         })
@@ -328,7 +363,37 @@ mod tests {
         assert_eq!(HourStride::fit(7., label), HourStride(3));
         assert_eq!(HourStride::fit(1., label), HourStride(COARSEST_HOUR_STRIDE));
         let every_third = HourStride(3);
-        let labeled: Vec<u32> = (0..24).filter(|hour| every_third.labels(*hour)).collect();
+        let labeled: Vec<usize> = (0..24).filter(|hour| every_third.labels(*hour)).collect();
         assert_eq!(labeled, [0, 3, 6, 9, 12, 15, 18, 21]);
+    }
+
+    #[test]
+    fn hourly_label_regions_stay_inside_the_plot_and_never_overlap() {
+        for bar_count in [23_u8, 24, 25] {
+            for plot_width in [0., 1., 12., 120., 640., 2560.] {
+                for label_width in [14., 32., 80.] {
+                    let slot = plot_width / f32::from(bar_count);
+                    let stride = HourStride::fit(slot, label_width);
+                    let mut previous_right = 0.;
+                    for index in 0..bar_count {
+                        if !stride.labels(usize::from(index)) {
+                            continue;
+                        }
+                        let bounds = TickLabelBounds::centered(
+                            (f32::from(index) + 0.5) * slot,
+                            f32::from(stride.0) * slot,
+                            plot_width,
+                        );
+                        assert!(
+                            bounds.left >= previous_right,
+                            "{bounds:?} after {previous_right}"
+                        );
+                        assert!(bounds.width >= 0.);
+                        assert!(bounds.left + bounds.width <= plot_width);
+                        previous_right = bounds.left + bounds.width;
+                    }
+                }
+            }
+        }
     }
 }
