@@ -3,7 +3,7 @@
 use super::{
     calendar::DayCalendar,
     classification::{ClassificationId, Classifier, ExtractedTitle, QueryCategoryRef},
-    documents::DocumentIdentity,
+    documents::{DocumentDuration, DocumentIdentity},
     input::{
         Availability, CaptureLevel, ClockSegment, FactId, ForegroundKind, InputRow,
         QueryAnnotation, QueryRange,
@@ -157,6 +157,12 @@ impl SegmentFacts {
     fn app(&self, segment: &DerivedSegment) -> Option<&quartz_domain::facts::ApplicationRef> {
         self.foreground(segment)
             .and_then(|row| row.visible_app().map(std::convert::AsRef::as_ref))
+    }
+    fn document_identity(&self, segment: &DerivedSegment) -> Option<DocumentIdentity> {
+        DocumentIdentity::new(
+            ApplicationId(self.app(segment)?.id.0),
+            &self.extraction(segment),
+        )
     }
     fn project_app(app: &quartz_domain::facts::ApplicationRef) -> quartz_protocol::ApplicationRef {
         quartz_protocol::ApplicationRef {
@@ -622,6 +628,7 @@ pub(crate) struct DayAggregation {
     pub metrics: DayMetrics,
     pub calendar: DayCalendar,
     pub ranking: Vec<ApplicationRank>,
+    pub(super) documents: Vec<DocumentDuration>,
 }
 #[cfg(test)]
 impl DayAggregation {
@@ -650,6 +657,7 @@ pub(crate) struct DayAccumulator {
     active_ms: i64,
     switches: u32,
     ranking: BTreeMap<ApplicationId, ApplicationRank>,
+    documents: BTreeMap<DocumentIdentity, DocumentDuration>,
     previous: Option<PreviousActive>,
     focus_ms: i64,
     distract_ms: i64,
@@ -664,6 +672,7 @@ impl DayAccumulator {
             active_ms: 0,
             switches: 0,
             ranking: BTreeMap::new(),
+            documents: BTreeMap::new(),
             previous: None,
             focus_ms: 0,
             distract_ms: 0,
@@ -711,6 +720,15 @@ impl DayAccumulator {
                 .entry(id)
                 .or_insert_with(|| ApplicationRank {
                     app: SegmentFacts::project_app(app),
+                    active_ms: 0,
+                })
+                .active_ms += current.duration_ms;
+        }
+        if let Some(identity) = facts.document_identity(segment) {
+            self.documents
+                .entry(identity.clone())
+                .or_insert(DocumentDuration {
+                    identity,
                     active_ms: 0,
                 })
                 .active_ms += current.duration_ms;
@@ -771,7 +789,15 @@ impl DayAccumulator {
                 .cmp(&left.active_ms)
                 .then(left.app.id.cmp(&right.app.id))
         });
+        let mut documents: Vec<_> = self.documents.into_values().collect();
+        documents.sort_by(|left, right| {
+            right
+                .active_ms
+                .cmp(&left.active_ms)
+                .then(left.identity.cmp(&right.identity))
+        });
         DayAggregation {
+            documents,
             metrics: DayMetrics {
                 active_ms: self.active_ms,
                 focus_ratio,

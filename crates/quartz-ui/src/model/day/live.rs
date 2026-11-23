@@ -434,6 +434,8 @@ mod tests {
             aumid: None,
         };
         let page = wire::QueryDayResponse {
+            reference_range: None,
+            documents: Vec::new(),
             metrics: Some(wire::DayMetrics {
                 active_ms: 4000,
                 focus_ratio: 0.5,

@@ -118,6 +118,7 @@ impl DetailHarness {
             .ok(
                 first,
                 serde_json::to_value(QueryEntityDetailResponse {
+                    extraction: Vec::new(),
                     daily: Some(daily),
                     titles: Some(Vec::new()),
                     rules: vec![Self::rule()],
@@ -145,6 +146,7 @@ impl DetailHarness {
                 .ok(
                     next,
                     serde_json::to_value(QueryEntityDetailResponse {
+                        extraction: Vec::new(),
                         daily: None,
                         titles: None,
                         rules: vec![rule],

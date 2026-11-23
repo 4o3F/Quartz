@@ -220,7 +220,7 @@ impl ConnectionSession {
                         proto,
                         instance_id: status.instance_id.clone(),
                         core_version: status.core_version.clone(),
-                        capabilities: Vec::new(),
+                        capabilities: vec![quartz_protocol::Capability::QueryDocumentsV1],
                     },
                 )
             }
@@ -413,6 +413,14 @@ mod tests {
                     ..
                 }
             ));
+            let document = session.receive(request(4, Op::QueryEntityDetail, serde_json::json!({"entity":{"kind":"document","document_ref":"doc:opaque"},"local_date":"2026-11-21","reference_range":{"start_utc_ms":0,"end_utc_ms":604800000}})), &receiver.borrow().status);
+            assert!(matches!(
+                document,
+                Action::Query {
+                    request: crate::query::QueryRequest::EntityDetail(_),
+                    ..
+                }
+            ));
             for kind in ["document", "domain"] {
                 let response = session.receive(request(4, Op::QueryEntityDetail, serde_json::json!({"entity":{"kind":kind,"id":1},"local_date":"2026-11-21"})), &receiver.borrow().status);
                 assert_eq!(
@@ -449,10 +457,14 @@ mod tests {
             serde_json::json!({"proto":{"min":1,"max":1},"role":"cli","client_version":"test"});
         let response = session.receive(request(1, Op::Hello, hello), &status.status);
         assert!(!session.closing());
-        assert!(matches!(
-            response.reply().outcome,
-            ResponseOutcome::Ok { .. }
-        ));
+        let ResponseOutcome::Ok { body } = response.reply().outcome else {
+            panic!("hello response")
+        };
+        let hello: HelloResponse = serde_json::from_value(body).expect("hello body");
+        assert_eq!(
+            hello.capabilities,
+            vec![quartz_protocol::Capability::QueryDocumentsV1]
+        );
         assert!(matches!(
             session.receive(
                 request(2, Op::UiOpen, serde_json::json!({})),

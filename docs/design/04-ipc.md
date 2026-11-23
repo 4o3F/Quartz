@@ -117,7 +117,7 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 协议只传键、编码、数字与原始数据，不传翻译后的句子（10 第 3 节）。UI 完成握手后订阅 `state`，从首个快照的 `logical_date` 取得核心当前逻辑日期，字段见第 7 节。
 
-B3 的提取字段、文档引用与引用范围为增量字段，握手协议版本保持 1，旧客户端忽略未知字段；新客户端允许这些字段缺失。`query.documents.v1` 在 B4 完成文档排行与文档实体详情后声明。
+提取字段、文档引用、文档排行与引用范围为增量字段，握手协议版本保持 1，旧客户端忽略未知字段；新客户端允许这些字段缺失。核心声明 `query.documents.v1`，覆盖文档排行、时间轴与原始详情的提取和引用字段，以及文档实体详情。
 
 协议版本和数据库 schema 版本分开演进。协议版本范围没有交集时，核心返回 `proto_mismatch`，并在响应里附上自己的版本，让界面能提示"核心与界面版本不一致，请重启 Quartz"。
 
@@ -186,7 +186,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 | `query.timeline` | UTC 毫秒范围 `start_utc_ms` / `end_utc_ms`、`detail`（`category` / `app` / `raw`）、正整数 `ms_per_pixel`、可选 `cursor` | 时间轴片段；小于一个像素对应时长的相邻片段由核心合并，界面传入"每像素毫秒数" |
 | `query.range` | `start_date`、`end_date`（不含）、`bucket`、`dimensions`、可选 `cursor` | 按天或按周的完整分组聚合，见第 6.2.1 节 |
 | `query.segment_detail` | `start_utc_ms`、`end_utc_ms`，可选 `app`（ApplicationId）、`window_instance`、`cursor` | 裁剪后的未合并区间 `intervals`、`versions`、`next_cursor` |
-| `query.entity_detail` | `entity: {kind:"app", id: ApplicationId}` 或 M4 的 `{kind:"document", document_ref}`、`local_date`，可选 `cursor` | `daily`、`titles`、`rules`、`versions`、`next_cursor` |
+| `query.entity_detail` | `entity: {kind:"app", id: ApplicationId}` 或 `{kind:"document", document_ref}`、`local_date`；document 另附 `reference_range`，可选 `cursor` | `daily`、`titles`、`rules`、document 的 `extraction`、`versions`、`next_cursor` |
 | `query.unclassified` | `start_date`、`end_date`（不含）、`group_by`、可选 `search`、`cursor` | 未分类活跃时长、样本范围与实体引用，见第 6.2.1 节 |
 | `query.annotations` | `start_utc_ms`、`end_utc_ms`、可选 `cursor` | 已保存标注的完整编辑值，见第 6.2.1 节 |
 | `query.pending_away` | `local_date`、可选 `cursor`，与 `query.day` 使用相同的时区和日起点设置 | 未标注且至少 15 分钟的连续 idle 片段 |
@@ -221,17 +221,19 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 新增列表沿用 `{versions, next_cursor}` 和 200 KiB 页上限。日期范围为 `[start_date, end_date)` 的 1–366 个逻辑日，按核心当前系统时区及日起点分别换算 UTC；响应带 `time_zone` 和 `day_start_offset_min`。M4 不接受客户端指定另一时区。
 
-- `query.day` 增加分页 `documents: [{document_ref, app, document, project, profile, active_ms}]`，应用与文档列表分别完整分页；第一页还带 `reference_range:{start_utc_ms,end_utc_ms}`（覆盖截至所选日的 7 个逻辑日），分页摘要也覆盖此引用范围。文档按 `active_ms` 降序，同值按 03 第 5.2 节身份分量排序（null 在空串之前，文本按 Unicode 标量序）；没有身份的事实不进入文档排行。
+- `query.day` 增加分页 `documents: [{document_ref, app, document, project, profile, active_ms}]`，应用与文档列表分别完整分页，共用 `next_cursor`：先返回应用页，再返回文档页，每页只填充其中一个列表，另一个为空数组；第一页还带 `reference_range:{start_utc_ms,end_utc_ms}`（覆盖截至所选日的 7 个逻辑日），分页摘要也覆盖此引用范围。文档按 `active_ms` 降序，同值按 03 第 5.2 节身份分量排序（null 在空串之前，文本按 Unicode 标量序）；没有身份的事实不进入文档排行。
 - 时间轴的 `app` / `raw` 与原始详情增加 `extraction: {document, project, profile, dirty, normalized_title, extractor_rule, status}` 和可空的 `document_ref`。隐藏字段为 null，`extractor_rule` 在回退时为 null。`query.timeline` 和 `query.segment_detail` 的引用覆盖本次 UTC 范围，并在第一页返回该 `reference_range`。
 - B3 的引用编码为 `quartz.document.v1:<sha256>:<JSON>`，JSON 仅含可见身份、引用 UTC 范围和输入版本摘要。校验和为 SHA-256（固定前缀与原样 JSON 字节），用于检测传输或存储损坏；读取引用仍须校验当前范围与输入版本，并按当前隐私投影重算身份。编码无密钥、无服务端引用表，同范围、同版本和同身份产生相同字符串；引用内容不承担访问授权。
-- `document_ref` 为不透明字符串，绑定身份及 `reference_range` 内全部查询输入版本；客户端只保存、比较和回传。`query.entity_detail` 的 document 请求附原样 `reference_range`，该范围必须包含详情所需的 7 日；核心校验引用覆盖范围与版本后按身份重算各日，`daily` 与文档排行一致，其余分页、标题和最终分类来源沿用 app 详情。引用覆盖范围不足或格式无效返回 `bad_request`，依赖变化返回 `stale_document_ref`。相同 reference_range 和输入版本内，相同身份使用相同引用。
+- `document_ref` 为不透明字符串，绑定身份及 `reference_range` 内全部查询输入版本；客户端只保存、比较和回传。`query.entity_detail` 的 document 请求附原样 `reference_range`，该范围必须包含详情所需的 7 日；核心校验引用覆盖范围与版本后按身份重算各日，`daily` 与文档排行一致，标题和最终分类规则沿用 app 详情。document 详情增加 `extraction: [{extractor_rule,status}]`，完整列出该身份在这 7 日活跃事实中实际观察到的提取规则与状态组合，回退规则为 null；按规则引用（null 在前、文本按 Unicode 标量序）、状态（extracted、fallback、empty、unknown）排序去重。共用 `next_cursor` 先返回 `rules` 页，再返回 `extraction` 页，另一列表为空；`daily` 和 `titles` 仅在第一页返回。`extraction` 为空时省略该字段。document 请求缺少范围、引用覆盖范围不足或格式无效返回 `bad_request`；引用范围为正时长且最多 366 天，app 请求不得附加该范围，违反时返回 `bad_request`，依赖变化返回 `stale_document_ref`。相同 reference_range 和输入版本内，相同身份使用相同引用。document 详情的游标保留原样 `reference_range`，分页版本摘要覆盖整个引用范围；`query.day` 的版本摘要与日期订阅同样覆盖其 7 日引用范围。客户端加载今天页时，时间轴与待补记按各自范围校验分页版本，全部读取后再查询 `query.day` 首页并比较七日摘要，以检查跨查询期间的输入变化。
 - `query.range` 的 `bucket` 为 `day | week`；`dimensions` 为非空且无重复的 `category | app | document` 数组。响应 `buckets: [{start_date, end_date, active_ms, groups: [{dimension, entity, active_ms}]}]`；每个 dimension 独立聚合，分母为同一活跃时长。按桶日期、请求维度顺序、时长降序和实体身份排序。周桶按有效每周首日切分，首尾桶裁剪到请求范围；完整桶总时长仅在该桶首次出现时返回，分组可续页。category entity 为 `{kind:"category",category}`（沿用分类引用），app entity 为 `{kind:"app",id,exe_name,display_name}`；document entity 为 `{kind:"document", document_ref, app, document, project, profile}`，其中 app 为 ApplicationId，引用覆盖整个请求范围，响应第一页返回其 UTC `reference_range`。
 - `query.unclassified` 的 `group_by` 为 `app | document`。只累计最终分类为空的活跃切片（人工覆盖已应用），返回 `items: [{entity, active_ms, sample_ranges}]`，entity 沿用 query.range 的 app/document 形状；每组按时序取最多 5 个 `{start_utc_ms,end_utc_ms,clock_segment_id}`，供片段归类。缺少所选实体的事实不成组，因此分组总计可以小于全日未分类时长。排序同排行；`search` 最多 256 个 Unicode 标量，对可见名称、文档、项目、profile 做 NFKC 与大小写折叠后包含匹配，过滤和分页均在核心完成。document 引用覆盖请求范围，第一页返回其 UTC `reference_range`。
 - `query.annotations` 的 UTC 范围为正时长且最多 366 天，按开始 UTC、结束 UTC、UUID 排序返回相交的 `entities`；每项包含写入响应的全部字段及创建、更新时间，保留存储端点，不裁剪。包括重叠 note 和 `dismissed_away`，不按最终活动片段过滤；归档分类仍返回 UUID 引用。UI、CLI 均可读，写入权限保持 UI-only。单实体文本超过页预算时，label/note 改用 `{text,offset_utf8,complete}` 分块值，同 UUID 可跨页重复，其他字段保持一致；客户端按字段的 UTF-8 字节偏移拼接，收齐后再显示完整编辑值，字符串与 null 仍为普通完整值。
 
 ```jsonc
-// query.day 第一页的文档字段摘录；versions 和引用均按不透明值处理
-{"documents":[{"document_ref":"doc:opaque","app":7,"document":"main.rs","project":"Quartz","profile":null,"active_ms":60000}],"reference_range":{"start_utc_ms":1794816000000,"end_utc_ms":1795420800000},"versions":"opaque","next_cursor":null}
+// query.day 第一页的引用范围摘录；versions 和引用均按不透明值处理
+{"reference_range":{"start_utc_ms":1794816000000,"end_utc_ms":1795420800000},"documents":[],"versions":"opaque"}
+// query.day 文档页摘录
+{"applications":[],"documents":[{"document_ref":"doc:opaque","app":7,"document":"main.rs","project":"Quartz","profile":null,"active_ms":60000}],"versions":"opaque","next_cursor":null}
 // document 详情请求
 {"entity":{"kind":"document","document_ref":"doc:opaque"},"local_date":"2026-11-22","reference_range":{"start_utc_ms":1794816000000,"end_utc_ms":1795420800000}}
 // query.annotations 长备注实体的文本字段摘录，续页 offset_utf8 接前一块末尾

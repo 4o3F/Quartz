@@ -71,6 +71,7 @@ mod tests {
             })).await.expect("segment dispatcher response");
             assert!(matches!(response, QueryResponse::SegmentDetail(page) if page.intervals.len() == 4));
             let response = database.port.call(QueryRequest::EntityDetail(quartz_protocol::QueryEntityDetailRequest {
+                reference_range: None,
                 entity: quartz_protocol::DetailEntity::App { id: quartz_protocol::ApplicationId(1) },
                 local_date: crate::store::query::test_support::FIXTURE_DATE.parse().expect("date"), cursor: None,
             })).await.expect("entity dispatcher response");

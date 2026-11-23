@@ -17,6 +17,10 @@ enum Paging {
     Single,
     Multiple,
 }
+enum DayVersionScope {
+    Day,
+    Documents { verified: QueryVersions },
+}
 impl DayHarness {
     async fn start() -> Self {
         let listener = TestPipeServer::bind().expect("isolated pipe");
@@ -48,7 +52,24 @@ impl DayHarness {
         self.core.request(Op::QueryDay).await
     }
     async fn finish(&mut self, first: Request, paging: Paging) {
-        let version = QueryVersions("day-v1".into());
+        self.finish_scope(first, paging, DayVersionScope::Day).await;
+    }
+    async fn finish_scope(&mut self, first: Request, paging: Paging, scope: DayVersionScope) {
+        let reference_range = match &scope {
+            DayVersionScope::Day => None,
+            DayVersionScope::Documents { .. } => Some(quartz_protocol::ReferenceRange {
+                start_utc_ms: -6 * 86_400_000,
+                end_utc_ms: 86_400_000,
+            }),
+        };
+        let version = QueryVersions(
+            if reference_range.is_some() {
+                "ranking-v1"
+            } else {
+                "day-v1"
+            }
+            .into(),
+        );
         let cursor = matches!(paging, Paging::Multiple).then(|| {
             QueryCursor::new(
                 version.clone(),
@@ -71,6 +92,8 @@ impl DayHarness {
             .ok(
                 first,
                 serde_json::to_value(QueryDayResponse {
+                    reference_range,
+                    documents: Vec::new(),
                     metrics: Some(DayMetrics {
                         active_ms: 2000,
                         focus_ratio: 0.,
@@ -104,6 +127,8 @@ impl DayHarness {
                 .ok(
                     next,
                     serde_json::to_value(QueryDayResponse {
+                        reference_range: None,
+                        documents: Vec::new(),
                         metrics: None,
                         hours: None,
                         applications: vec![app(2)],
@@ -114,6 +139,7 @@ impl DayHarness {
                 )
                 .await;
         }
+        let version = QueryVersions("day-v1".into());
         for detail in [TimelineDetail::Category, TimelineDetail::Raw] {
             let query = self.core.request(Op::QueryTimeline).await;
             let parameters: QueryTimelineRequest =
@@ -206,6 +232,13 @@ impl DayHarness {
                     .expect("next away JSON"),
                 )
                 .await;
+        }
+        if let DayVersionScope::Documents { verified } = scope {
+            let query = self.core.request(Op::QueryDay).await;
+            let decoded: quartz_protocol::QueryDayRequest =
+                serde_json::from_value(query.body.clone()).expect("final version check");
+            assert!(decoded.cursor.is_none());
+            self.core.ok(query, serde_json::json!({"reference_range": reference_range, "applications":[],"documents":[],"versions":verified,"next_cursor":null})).await;
         }
     }
     async fn loaded(&mut self) -> Result<DayData, DayFailure> {
@@ -488,5 +521,49 @@ async fn zoom_settle_debounce_uses_paused_time() {
     let query = harness.core.request(Op::QueryDay).await;
     harness.finish(query, Paging::Single).await;
     harness.loaded().await.expect("settled view");
+    harness.ui.stop().await;
+}
+
+#[tokio::test]
+async fn seven_day_ranking_scope_loads_with_single_day_timeline_and_pending_versions() {
+    let mut harness = DayHarness::start().await;
+    let first = harness.start_load(DayGeneration::default().next()).await;
+    harness
+        .finish_scope(
+            first,
+            Paging::Multiple,
+            DayVersionScope::Documents {
+                verified: QueryVersions("ranking-v1".into()),
+            },
+        )
+        .await;
+    let data = harness.loaded().await.expect("day with document scope");
+    assert_eq!(data.applications.len(), 2);
+    harness.ui.stop().await;
+}
+#[tokio::test]
+async fn changed_seven_day_inputs_restart_the_whole_day_load() {
+    let mut harness = DayHarness::start().await;
+    let first = harness.start_load(DayGeneration::default().next()).await;
+    harness
+        .finish_scope(
+            first,
+            Paging::Single,
+            DayVersionScope::Documents {
+                verified: QueryVersions("ranking-v2".into()),
+            },
+        )
+        .await;
+    let retry = harness.core.request(Op::QueryDay).await;
+    harness
+        .finish_scope(
+            retry,
+            Paging::Single,
+            DayVersionScope::Documents {
+                verified: QueryVersions("ranking-v1".into()),
+            },
+        )
+        .await;
+    harness.loaded().await.expect("fresh ranking scope");
     harness.ui.stop().await;
 }

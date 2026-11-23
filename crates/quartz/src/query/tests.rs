@@ -1369,7 +1369,7 @@ fn entity_details_use_seven_offset_days_across_dst_and_rank_titles() {
     }
     let derived = derive(rows, range);
     let mut accumulator = details::EntityDetailAccumulator::new(
-        quartz_protocol::DetailEntity::App {
+        details::EntitySelection::App {
             id: quartz_protocol::ApplicationId(1),
         },
         calendar,
@@ -1424,7 +1424,7 @@ fn entity_daily_duration_matches_day_queries_at_integer_clipping_boundaries() {
     ];
     let derived = derive(rows.clone(), range);
     let mut accumulator = details::EntityDetailAccumulator::new(
-        quartz_protocol::DetailEntity::App {
+        details::EntitySelection::App {
             id: quartz_protocol::ApplicationId(1),
         },
         calendar,

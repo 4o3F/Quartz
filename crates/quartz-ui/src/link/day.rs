@@ -192,6 +192,7 @@ impl Link {
             cursor: None,
         };
         let first = self.request(query.clone()).await?;
+        let reference_range = first.reference_range;
         let metrics = first.metrics.ok_or(DayFailure::InvalidData)?;
         let hours = first.hours.ok_or(DayFailure::InvalidData)?;
         let bounds = UtcRange {
@@ -226,9 +227,7 @@ impl Link {
         let raw = self
             .timeline_pages(visible, TimelineDetail::Raw, resolution)
             .await?;
-        if categories.versions != raw.versions
-            || (visible == bounds && categories.versions != version)
-        {
+        if categories.versions != raw.versions {
             return Err(Self::stale_day());
         }
         let mut pending = Vec::new();
@@ -245,7 +244,9 @@ impl Link {
             {
                 return Err(Self::stale_day());
             }
-            if page.versions != version {
+            if (reference_range.is_none() && page.versions != version)
+                || (visible == bounds && page.versions != categories.versions)
+            {
                 return Err(Self::stale_day());
             }
             versions = Some(page.versions);
@@ -257,6 +258,17 @@ impl Link {
                 return Err(DayFailure::InvalidData);
             }
             query.cursor = page.next_cursor;
+        }
+        if reference_range.is_some() {
+            let latest = self
+                .request(QueryDayRequest {
+                    local_date: request.date,
+                    cursor: None,
+                })
+                .await?;
+            if latest.versions != version {
+                return Err(Self::stale_day());
+            }
         }
         Ok(DayData {
             date: request.date,

@@ -40,5 +40,6 @@
     }
   ],
   "versions": "version-token",
-  "next_cursor": null
+  "next_cursor": null,
+  "documents": []
 }

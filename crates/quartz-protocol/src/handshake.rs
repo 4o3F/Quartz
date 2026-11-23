@@ -285,6 +285,9 @@ pub enum Capability {
     /// Annotation operations version 1.
     #[serde(rename = "annotations.v1")]
     AnnotationsV1,
+    /// Visible document rankings, extraction, references and details version 1.
+    #[serde(rename = "query.documents.v1")]
+    QueryDocumentsV1,
     /// A feature not understood by this client.
     #[serde(other, skip_serializing)]
     Unknown,

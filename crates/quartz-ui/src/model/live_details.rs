@@ -275,6 +275,7 @@ mod tests {
             let date: wire::LocalDate = "2026-11-21".parse().expect("date");
             let rule: ClassificationRuleId = "user.classification/editor@2".parse().expect("rule");
             let first = wire::QueryEntityDetailResponse {
+                extraction: Vec::new(),
                 daily: Some(
                     (0..wire::ENTITY_DETAIL_DAYS)
                         .map(|index| wire::EntityDailyDuration {

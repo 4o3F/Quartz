@@ -33,7 +33,7 @@ pub struct ReferenceRange {
     pub end_utc_ms: i64,
 }
 /// Extraction outcome, independent of display language.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtractionStatus {
     Extracted,
@@ -102,6 +102,8 @@ pub enum CursorQuery {
     EntityDetail {
         entity: DetailEntity,
         local_date: LocalDate,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference_range: Option<ReferenceRange>,
     },
     /// A UTC range and its display projection.
     Timeline {
@@ -180,16 +182,19 @@ pub struct QuerySegmentDetailResponse {
     pub versions: QueryVersions,
     pub next_cursor: Option<QueryCursor>,
 }
-/// Entity identities supported by M3 details.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Entity identities supported by application and document details.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DetailEntity {
     App { id: ApplicationId },
+    Document { document_ref: DocumentRef },
 }
 /// Seven logical days ending at the requested date, inclusive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryEntityDetailRequest {
     pub entity: DetailEntity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_range: Option<ReferenceRange>,
     pub local_date: LocalDate,
     #[serde(default)]
     pub cursor: Option<QueryCursor>,
@@ -197,8 +202,9 @@ pub struct QueryEntityDetailRequest {
 impl From<&QueryEntityDetailRequest> for CursorQuery {
     fn from(request: &QueryEntityDetailRequest) -> Self {
         Self::EntityDetail {
-            entity: request.entity,
+            entity: request.entity.clone(),
             local_date: request.local_date,
+            reference_range: request.reference_range,
         }
     }
 }
@@ -222,7 +228,13 @@ pub struct EntityClassificationRule {
     pub label_key: Option<String>,
     pub category: CategoryRef,
 }
-/// First-page daily totals and top titles; rules continue with the cursor.
+/// One extraction rule and status observed on active, visible document facts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct EntityExtractionProvenance {
+    pub extractor_rule: Option<String>,
+    pub status: ExtractionStatus,
+}
+/// First-page daily totals and top titles; rules and extraction continue with the cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryEntityDetailResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,6 +242,8 @@ pub struct QueryEntityDetailResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub titles: Option<Vec<EntityTitleDuration>>,
     pub rules: Vec<EntityClassificationRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extraction: Vec<EntityExtractionProvenance>,
     pub versions: QueryVersions,
     pub next_cursor: Option<QueryCursor>,
 }
@@ -477,9 +491,23 @@ pub struct ApplicationRank {
     pub app: ApplicationRef,
     pub active_ms: i64,
 }
-/// First-page metrics and hours; application ranking continues across pages.
+/// One complete document ranking entry, using its visible normalized identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentRank {
+    pub document_ref: DocumentRef,
+    pub app: ApplicationId,
+    pub document: String,
+    pub project: Option<String>,
+    pub profile: Option<String>,
+    pub active_ms: i64,
+}
+/// First-page metrics, hours and reference range; each ranking continues separately.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryDayResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_range: Option<ReferenceRange>,
+    #[serde(default)]
+    pub documents: Vec<DocumentRank>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<DayMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -663,6 +691,8 @@ mod tests {
     #[test]
     fn day_response_matches_golden_json() {
         let response = QueryDayResponse {
+            reference_range: None,
+            documents: Vec::new(),
             metrics: Some(DayMetrics {
                 active_ms: 1000,
                 focus_ratio: 1.0,
@@ -962,6 +992,54 @@ mod tests {
                 serde_json::json!({"kind":"rule","rule":"vscode"})
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn document_wire_snapshots_preserve_identity_range_provenance_and_continuations() {
+        let wire: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/document-day.json"))
+                .expect("document day snapshot");
+        let day: QueryDayResponse = serde_json::from_value(wire.clone()).expect("document ranking");
+        assert_eq!(day.documents[0].app, ApplicationId(3));
+        assert_eq!(day.documents[0].project.as_deref(), Some("Quartz"));
+        assert_eq!(serde_json::to_value(day).expect("day wire"), wire);
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/document-entity-request.json"
+        ))
+        .expect("document request snapshot");
+        let request: QueryEntityDetailRequest =
+            serde_json::from_value(wire.clone()).expect("document request");
+        assert!(matches!(request.entity, DetailEntity::Document { .. }));
+        assert_eq!(serde_json::to_value(&request).expect("request wire"), wire);
+        let cursor = QueryCursor::new(
+            QueryVersions("version-token".into()),
+            CursorQuery::from(&request),
+            1,
+        );
+        let value = serde_json::to_value(&cursor).expect("cursor wire");
+        assert_eq!(value["query"]["reference_range"], wire["reference_range"]);
+        assert_eq!(value["query"]["entity"], wire["entity"]);
+        assert_eq!(
+            serde_json::from_value::<QueryCursor>(value).expect("cursor"),
+            cursor
+        );
+        for snapshot in [
+            include_str!("../tests/fixtures/document-entity.json"),
+            include_str!("../tests/fixtures/document-entity-continuation.json"),
+        ] {
+            let wire: serde_json::Value =
+                serde_json::from_str(snapshot).expect("document detail snapshot");
+            let detail: QueryEntityDetailResponse =
+                serde_json::from_value(wire.clone()).expect("document detail");
+            assert!(!detail.extraction.is_empty());
+            assert_eq!(serde_json::to_value(detail).expect("detail wire"), wire);
+        }
+        let legacy = serde_json::json!({"applications":[],"versions":"legacy","next_cursor":null});
+        let decoded: QueryDayResponse = serde_json::from_value(legacy).expect("legacy day");
+        assert!(decoded.documents.is_empty() && decoded.reference_range.is_none());
+        assert_eq!(
+            serde_json::to_value(crate::Capability::QueryDocumentsV1).expect("capability"),
+            "query.documents.v1"
         );
     }
 }

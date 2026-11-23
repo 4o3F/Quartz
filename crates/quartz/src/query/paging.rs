@@ -52,20 +52,39 @@ impl PageBudget {
                 .ok_or(RunQueryError::PageTooLarge)?,
         })
     }
+    pub(crate) fn with_cursor(mut self, cursor: &QueryCursor) -> Result<Self, RunQueryError> {
+        self.remaining = self
+            .remaining
+            .checked_sub(serde_json::to_vec(cursor)?.len())
+            .ok_or(RunQueryError::PageTooLarge)?;
+        Ok(self)
+    }
     pub(crate) fn page<T: Serialize>(
         self,
         items: Vec<T>,
         position: PagePosition,
     ) -> Result<PageItems<T>, RunQueryError> {
-        self.page_with(items, position, |_| Ok(()))
+        self.page_mapped(items, position, Ok)
     }
     /// Prepares only candidate page items before measuring their complete wire size.
     pub(crate) fn page_with<T: Serialize>(
-        mut self,
+        self,
         items: Vec<T>,
         position: PagePosition,
         mut prepare: impl FnMut(&mut T) -> Result<(), RunQueryError>,
     ) -> Result<PageItems<T>, RunQueryError> {
+        self.page_mapped(items, position, |mut item| {
+            prepare(&mut item)?;
+            Ok(item)
+        })
+    }
+    /// Encodes references only for items considered for the returned page.
+    pub(crate) fn page_mapped<T, U: Serialize>(
+        mut self,
+        items: Vec<T>,
+        position: PagePosition,
+        mut project: impl FnMut(T) -> Result<U, RunQueryError>,
+    ) -> Result<PageItems<U>, RunQueryError> {
         let start = position.index();
         if matches!(position, PagePosition::Cursor(_)) && start >= items.len() {
             return Err(RunQueryError::InvalidCursor);
@@ -74,8 +93,8 @@ impl PageBudget {
             items: Vec::new(),
             next: None,
         };
-        for mut item in items.into_iter().skip(start) {
-            prepare(&mut item)?;
+        for item in items.into_iter().skip(start) {
+            let item = project(item)?;
             if !self.admit(&item)? {
                 if page.items.is_empty() {
                     return Err(RunQueryError::PageTooLarge);
@@ -86,6 +105,46 @@ impl PageBudget {
             page.items.push(item);
         }
         Ok(page)
+    }
+    /// Pages the first list to completion before starting the second list.
+    pub(crate) fn lists<T: Serialize, U: Serialize>(
+        self,
+        first: Vec<T>,
+        second: Vec<U>,
+        position: PagePosition,
+    ) -> Result<PageLists<T, U>, RunQueryError> {
+        self.lists_mapped(first, second, position, Ok)
+    }
+    pub(crate) fn lists_mapped<T: Serialize, U, V: Serialize>(
+        self,
+        first: Vec<T>,
+        second: Vec<U>,
+        position: PagePosition,
+        project: impl FnMut(U) -> Result<V, RunQueryError>,
+    ) -> Result<PageLists<T, V>, RunQueryError> {
+        let first_len = first.len();
+        let index = position.index();
+        if index < first_len {
+            let page = self.page(first, position)?;
+            Ok(PageLists {
+                first: page.items,
+                second: Vec::new(),
+                next: page
+                    .next
+                    .or_else(|| (!second.is_empty()).then_some(first_len)),
+            })
+        } else {
+            let second_position = match position {
+                PagePosition::First => PagePosition::First,
+                PagePosition::Cursor(_) => PagePosition::Cursor(index - first_len),
+            };
+            let page = self.page_mapped(second, second_position, project)?;
+            Ok(PageLists {
+                first: Vec::new(),
+                second: page.items,
+                next: page.next.map(|next| first_len + next),
+            })
+        }
     }
     pub(crate) fn admit(&mut self, item: &impl Serialize) -> Result<bool, RunQueryError> {
         let bytes = serde_json::to_vec(item)?.len() + 1;
@@ -103,6 +162,13 @@ impl PageBudget {
 #[derive(Debug)]
 pub(crate) struct PageItems<T> {
     pub items: Vec<T>,
+    pub next: Option<usize>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PageLists<T, U> {
+    pub first: Vec<T>,
+    pub second: Vec<U>,
     pub next: Option<usize>,
 }
 
@@ -142,5 +208,46 @@ mod tests {
             })
             .expect("continuation");
         assert_eq!(continuation.items[0], format!("{next}{payload}"));
+    }
+    #[test]
+    fn separate_lists_finish_in_order_and_only_encode_candidate_documents() {
+        const DOCUMENT_COUNT: usize = 1000;
+        const DOCUMENT_BYTES: usize = QUERY_PAGE_BYTES / 8;
+        let mut encodings = 0;
+        let first = PageBudget::new(&())
+            .expect("budget")
+            .lists_mapped(
+                vec!["app"],
+                vec![(); DOCUMENT_COUNT],
+                PagePosition::First,
+                |()| {
+                    encodings += 1;
+                    Ok("x".repeat(DOCUMENT_BYTES))
+                },
+            )
+            .expect("application page");
+        assert_eq!(first.first, vec!["app"]);
+        assert!(first.second.is_empty());
+        assert_eq!(encodings, 0);
+        let next = first.next.expect("document continuation");
+        let second = PageBudget::new(&())
+            .expect("budget")
+            .lists_mapped(
+                vec!["app"],
+                vec![(); DOCUMENT_COUNT],
+                PagePosition::Cursor(next),
+                |()| {
+                    encodings += 1;
+                    Ok("x".repeat(DOCUMENT_BYTES))
+                },
+            )
+            .expect("document page");
+        assert!(second.first.is_empty());
+        assert!(!second.second.is_empty());
+        assert!(encodings < DOCUMENT_COUNT);
+        assert_eq!(
+            second.next.expect("more documents"),
+            next + second.second.len()
+        );
     }
 }

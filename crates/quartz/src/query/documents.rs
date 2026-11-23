@@ -3,8 +3,8 @@
 use super::RunQueryError;
 use quartz_domain::text::{NfcText, encode_hex};
 use quartz_protocol::{
-    ApplicationId, DocumentRef, ExtractionStatus, QueryVersions, ReferenceRange, TimelineSegment,
-    TitleExtraction,
+    ApplicationId, DocumentRank, DocumentRef, ExtractionStatus, QueryVersions, ReferenceRange,
+    TimelineSegment, TitleExtraction,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,7 +27,7 @@ impl DocumentIdentity {
     pub(super) fn from_segment(segment: &TimelineSegment) -> Option<Self> {
         Self::new(segment.app.as_ref()?.id, segment.extraction.as_ref()?)
     }
-    fn new(app: ApplicationId, extraction: &TitleExtraction) -> Option<Self> {
+    pub(super) fn new(app: ApplicationId, extraction: &TitleExtraction) -> Option<Self> {
         if !matches!(
             extraction.status?,
             ExtractionStatus::Extracted | ExtractionStatus::Fallback
@@ -65,6 +65,36 @@ impl DocumentIdentity {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct DocumentDuration {
+    pub(super) identity: DocumentIdentity,
+    pub(super) active_ms: i64,
+}
+impl DocumentDuration {
+    pub(super) fn into_rank(
+        self,
+        range: super::input::QueryRange,
+        versions: &QueryVersions,
+    ) -> Result<DocumentRank, RunQueryError> {
+        let reference = DocumentReference::issue(
+            self.identity.clone(),
+            ReferenceRange {
+                start_utc_ms: range.start,
+                end_utc_ms: range.end,
+            },
+            versions.clone(),
+        )?;
+        Ok(DocumentRank {
+            document_ref: reference,
+            app: self.identity.app,
+            document: self.identity.document,
+            project: self.identity.project,
+            profile: self.identity.profile,
+            active_ms: self.active_ms,
+        })
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DocumentReference {
@@ -94,11 +124,6 @@ impl DocumentReference {
         digest.update(payload.as_bytes());
         encode_hex(&digest.finalize())
     }
-    /// B4 resolves this validated identity against the current privacy-projected snapshot.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "document entity requests are introduced in M4-B4")
-    )]
     pub(super) fn validate(
         reference: &DocumentRef,
         range: ReferenceRange,

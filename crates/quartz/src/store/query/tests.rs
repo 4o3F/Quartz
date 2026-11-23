@@ -1132,6 +1132,7 @@ fn segment_page(
 }
 fn entity_request(id: i64) -> quartz_protocol::QueryEntityDetailRequest {
     quartz_protocol::QueryEntityDetailRequest {
+        reference_range: None,
         entity: quartz_protocol::DetailEntity::App {
             id: quartz_protocol::ApplicationId(id),
         },
@@ -1400,6 +1401,51 @@ fn entity_detail_pages_rule_metadata_and_invalidates_versions() {
             },
         )
         .expect("classification rules");
+    fixture.install_document_rules(
+        r"format='quartz-rules/1'
+[set]
+key='user.document-tests'
+kind='extraction'
+name='Shared detail identity'
+[[rule]]
+id='document'
+label='Shared identity'
+app=[{field='app.exe_name',op='regex',value='.*'}]
+pattern='\A(?P<document>detail)-title-[0-9]+\z'
+"
+        .into(),
+    );
+    let ranking = fixture.document_ranking();
+    assert_eq!(ranking.documents.len(), 1);
+    let document_request = ranking.detail_request(0);
+    let document_first = entity_page(&mut fixture, document_request.clone());
+    assert!(document_first.next_cursor.is_some());
+    let detail = fixture.document_detail(document_request.clone());
+    assert_eq!(detail.rules.len(), 24);
+    assert_eq!(detail.extraction.len(), 1);
+    assert_eq!(
+        detail
+            .daily
+            .expect("document days")
+            .last()
+            .expect("selected day")
+            .active_ms,
+        24_000
+    );
+    let mut changed_range = document_request.clone();
+    changed_range
+        .reference_range
+        .as_mut()
+        .expect("range")
+        .start_utc_ms -= 1;
+    changed_range.cursor = document_first.next_cursor.clone();
+    assert_eq!(
+        fixture
+            .run(QueryRequest::EntityDetail(changed_range))
+            .expect_err("changed reference range")
+            .kind(),
+        ErrorKind::BadRequest
+    );
     let mut request = entity_request(1);
     let first = entity_page(&mut fixture, request.clone());
     assert_eq!(
@@ -1442,6 +1488,16 @@ fn entity_detail_pages_rule_metadata_and_invalidates_versions() {
     assert!(rules.windows(2).all(|pair| pair[0].rule < pair[1].rule));
     request.cursor = first.next_cursor;
     fixture.bump_metadata();
+    let mut document_continuation = document_request;
+    document_continuation.cursor = document_first.next_cursor;
+    assert_eq!(
+        fixture
+            .run(QueryRequest::EntityDetail(document_continuation))
+            .expect_err("stale document continuation")
+            .kind(),
+        ErrorKind::StaleDocumentRef
+    );
+
     assert_eq!(
         fixture
             .run(QueryRequest::EntityDetail(request.clone()))
@@ -1554,4 +1610,667 @@ fn stored_window_class_classifies_closed_and_open_facts_with_hidden_titles() {
             2000
         );
     }
+}
+
+#[derive(Debug)]
+struct DocumentRanking {
+    applications: Vec<quartz_protocol::ApplicationRank>,
+    documents: Vec<quartz_protocol::DocumentRank>,
+    reference_range: quartz_protocol::ReferenceRange,
+    versions: quartz_protocol::QueryVersions,
+}
+impl QueryFixture {
+    fn document_ranking(&mut self) -> DocumentRanking {
+        let QueryRequest::Day(mut request) = self.request_day() else {
+            panic!("day")
+        };
+        let mut applications = Vec::new();
+        let mut documents = Vec::new();
+        let mut reference_range = None;
+        let mut versions = None;
+        loop {
+            let QueryResponse::Day(page) = self
+                .run(QueryRequest::Day(request.clone()))
+                .expect("ranking page")
+            else {
+                panic!("day")
+            };
+            assert!(serde_json::to_vec(&page).expect("page JSON").len() <= QUERY_PAGE_BYTES);
+            assert_eq!(page.reference_range.is_some(), request.cursor.is_none());
+            assert!(page.applications.is_empty() || page.documents.is_empty());
+            if request.cursor.is_none() {
+                reference_range = page.reference_range;
+                versions = Some(page.versions.clone());
+            }
+            assert_eq!(Some(&page.versions), versions.as_ref());
+            applications.extend(page.applications);
+            documents.extend(page.documents);
+            let Some(cursor) = page.next_cursor else {
+                break;
+            };
+            request.cursor = Some(cursor);
+        }
+        DocumentRanking {
+            applications,
+            documents,
+            reference_range: reference_range.expect("first page range"),
+            versions: versions.expect("versions"),
+        }
+    }
+    fn document_detail(
+        &mut self,
+        mut request: quartz_protocol::QueryEntityDetailRequest,
+    ) -> quartz_protocol::QueryEntityDetailResponse {
+        let mut result = entity_page(self, request.clone());
+        let mut next = result.next_cursor.clone();
+        while let Some(cursor) = next {
+            request.cursor = Some(cursor);
+            let page = entity_page(self, request.clone());
+            assert!(serde_json::to_vec(&page).expect("detail JSON").len() <= QUERY_PAGE_BYTES);
+            assert!(page.daily.is_none() && page.titles.is_none());
+            assert_eq!(page.versions, result.versions);
+            assert_ne!(page.next_cursor, request.cursor);
+            result.rules.extend(page.rules);
+            result.extraction.extend(page.extraction);
+            next = page.next_cursor;
+        }
+        result.next_cursor = None;
+        result
+    }
+    fn replace_document_title(&mut self, fact: i64, title: &str) {
+        diesel::insert_into(titles::table)
+            .values(titles::text.eq(title))
+            .on_conflict_do_nothing()
+            .execute(&mut self.store.writer)
+            .expect("title");
+        let title_id = titles::table
+            .filter(titles::text.eq(title))
+            .select(titles::id.assume_not_null())
+            .first::<i64>(&mut self.store.writer)
+            .expect("title id");
+        diesel::update(intervals::table.filter(intervals::id.eq(Some(fact))))
+            .set(intervals::title_id.eq(Some(title_id)))
+            .execute(&mut self.store.writer)
+            .expect("title reference");
+    }
+    fn install_document_rules(&mut self, text: String) {
+        let now = quartz_domain::capture::UtcInstant::try_from(0).expect("UTC");
+        let mut shell =
+            crate::rules::registry::RegistryShell::open(&mut self.store, now).expect("registry");
+        shell
+            .run(
+                &mut self.store,
+                now,
+                quartz_domain::rules::registry::RegistryCommand::Apply {
+                    key: "user.document-tests".parse().expect("key"),
+                    file: "document-tests.toml".into(),
+                    text,
+                    base_version: 0,
+                },
+            )
+            .expect("document rules");
+    }
+    fn use_document_app(&mut self) {
+        diesel::update(intervals::table)
+            .set(intervals::app_id.eq(Some(1_i64)))
+            .execute(&mut self.store.writer)
+            .expect("one app");
+        diesel::update(applications::table.filter(applications::id.eq(Some(1_i64))))
+            .set(applications::exe_name.eq("code.exe"))
+            .execute(&mut self.store.writer)
+            .expect("editor");
+    }
+}
+impl DocumentRanking {
+    fn detail_request(&self, index: usize) -> quartz_protocol::QueryEntityDetailRequest {
+        quartz_protocol::QueryEntityDetailRequest {
+            entity: quartz_protocol::DetailEntity::Document {
+                document_ref: self.documents[index].document_ref.clone(),
+            },
+            local_date: FIXTURE_DATE.parse().expect("date"),
+            reference_range: Some(self.reference_range),
+            cursor: None,
+        }
+    }
+}
+
+#[test]
+fn document_ranking_agrees_with_raw_timeline_and_daily_details_and_keeps_identity_components() {
+    let mut fixture = QueryFixture::new(9);
+    fixture.use_document_app();
+    fixture.install_document_rules(
+        r"format='quartz-rules/1'
+[set]
+key='user.document-tests'
+kind='extraction'
+name='Document identities'
+[[rule]]
+id='parts'
+label='Document parts'
+app=[{field='app.exe_name',op='regex',value='.*'}]
+pattern='\A(?P<document>[^|]+)(?:\|(?P<project>[^|]*))?(?:\|(?P<profile>[^|]*))?\z'
+"
+        .into(),
+    );
+    let titles = [
+        "main.rs",
+        "main.rs|",
+        "main.rs||",
+        "main.rs||Work",
+        "main.rs|Quartz",
+        "main.rs|Other",
+        "Main.rs",
+        "café.rs",
+        "cafe\u{301}.rs",
+    ];
+    for (index, title) in titles.iter().enumerate() {
+        fixture.replace_document_title(i64::try_from(index).expect("index") + 1, title);
+    }
+    fixture.mask_idle(250, 500);
+    // Same visible text in another application remains a separate identity.
+    diesel::update(intervals::table.filter(intervals::id.eq(Some(7_i64))))
+        .set(intervals::app_id.eq(Some(2_i64)))
+        .execute(&mut fixture.store.writer)
+        .expect("second app");
+    let ranking = fixture.document_ranking();
+    assert_eq!(
+        ranking.documents.len(),
+        8,
+        "canonical-equivalent Unicode titles share an identity"
+    );
+    assert!(
+        ranking
+            .documents
+            .iter()
+            .map(|row| row.active_ms)
+            .sum::<i64>()
+            <= ranking
+                .applications
+                .iter()
+                .map(|row| row.active_ms)
+                .sum::<i64>()
+    );
+    let request = fixture.request_timeline();
+    let timeline = collect_timeline(&mut fixture, request);
+    for (index, row) in ranking.documents.iter().enumerate() {
+        let duration: i64 = timeline
+            .iter()
+            .filter(|segment| {
+                matches!(
+                    segment.activity,
+                    Activity::Active | Activity::ActiveOverride { .. }
+                ) && segment.app.as_ref().is_some_and(|app| app.id == row.app)
+                    && segment.extraction.as_ref().is_some_and(|fields| {
+                        fields
+                            .document
+                            .as_deref()
+                            .map(quartz_domain::text::NfcText::new)
+                            .is_some_and(|name| name.as_str() == row.document)
+                            && fields.project == row.project
+                            && fields.profile == row.profile
+                    })
+            })
+            .map(|segment| segment.duration_ms)
+            .sum();
+        assert_eq!(duration, row.active_ms, "timeline identity {index}");
+        let detail = fixture.document_detail(ranking.detail_request(index));
+        assert_eq!(
+            detail
+                .daily
+                .expect("daily")
+                .last()
+                .expect("selected day")
+                .active_ms,
+            row.active_ms
+        );
+        assert!(!detail.extraction.is_empty());
+    }
+    let same_name: Vec<_> = ranking
+        .documents
+        .iter()
+        .filter(|row| row.document == "main.rs" && row.active_ms == 1000)
+        .collect();
+    assert_eq!(
+        same_name
+            .iter()
+            .map(|row| row.project.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some(""), Some(""), Some(""), Some("Other"), Some("Quartz")]
+    );
+    assert_eq!(
+        same_name[..3]
+            .iter()
+            .map(|row| row.profile.as_deref())
+            .collect::<Vec<_>>(),
+        vec![None, Some(""), Some("Work")]
+    );
+    let date: quartz_protocol::LocalDate = FIXTURE_DATE.parse().expect("date");
+    let first = date
+        .checked_sub(
+            jiff::Span::new()
+                .days(i64::try_from(quartz_protocol::ENTITY_DETAIL_DAYS - 1).expect("days")),
+        )
+        .expect("first day");
+    let start = crate::query::calendar::DayCalendar::new(
+        first,
+        crate::query::calendar::DayStartOffset::MIDNIGHT,
+    )
+    .expect("first calendar")
+    .range
+    .start;
+    assert_eq!(ranking.reference_range.start_utc_ms, start);
+    assert_eq!(
+        ranking.reference_range.end_utc_ms,
+        fixture.start + UTC_DAY_MS
+    );
+    assert!(!ranking.versions.0.is_empty());
+}
+
+#[test]
+fn document_ranking_null_precedes_empty_and_text_keeps_scalar_order() {
+    let mut fixture = QueryFixture::new(7);
+    fixture.use_document_app();
+    fixture.install_document_rules(
+        r"format='quartz-rules/1'
+[set]
+key='user.document-tests'
+kind='extraction'
+name='Ordering'
+[[rule]]
+id='parts'
+label='Document parts'
+app=[{field='app.exe_name',op='regex',value='.*'}]
+pattern='\A(?P<document>[^|]+)(?:\|(?P<project>[^|]*))?(?:\|(?P<profile>.*))?\z'
+"
+        .into(),
+    );
+    for (index, title) in [
+        "main.rs|",
+        "main.rs",
+        "main.rs||",
+        "main.rs|é",
+        "main.rs|Z",
+        "main.rs|a",
+        "main.rs||Work",
+    ]
+    .iter()
+    .enumerate()
+    {
+        fixture.replace_document_title(i64::try_from(index).expect("index") + 1, title);
+    }
+    let ranking = fixture.document_ranking();
+    assert_eq!(
+        ranking
+            .documents
+            .iter()
+            .map(|row| row.project.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            None,
+            Some(""),
+            Some(""),
+            Some(""),
+            Some("Z"),
+            Some("a"),
+            Some("é")
+        ]
+    );
+    assert_eq!(
+        ranking.documents[1..4]
+            .iter()
+            .map(|row| row.profile.as_deref())
+            .collect::<Vec<_>>(),
+        vec![None, Some(""), Some("Work")]
+    );
+}
+
+#[test]
+fn document_reference_rejects_tampering_missing_or_short_ranges_and_changed_inputs() {
+    let mut fixture = QueryFixture::new(1);
+    let ranking = fixture.document_ranking();
+    let request = ranking.detail_request(0);
+    for reference_range in [
+        None,
+        Some(quartz_protocol::ReferenceRange {
+            start_utc_ms: fixture.start,
+            end_utc_ms: ranking.reference_range.end_utc_ms,
+        }),
+        Some(quartz_protocol::ReferenceRange {
+            start_utc_ms: ranking.reference_range.start_utc_ms - 1,
+            ..ranking.reference_range
+        }),
+    ] {
+        let mut invalid = request.clone();
+        invalid.reference_range = reference_range;
+        assert_eq!(
+            fixture
+                .run(QueryRequest::EntityDetail(invalid))
+                .expect_err("invalid reference range")
+                .kind(),
+            ErrorKind::BadRequest
+        );
+    }
+    let mut tampered = request.clone();
+    let quartz_protocol::DetailEntity::Document { document_ref } = &mut tampered.entity else {
+        panic!("document")
+    };
+    *document_ref = quartz_protocol::DocumentRef::from_encoded(
+        document_ref
+            .as_str()
+            .replace("private title fixture", "changed title"),
+    );
+    assert_eq!(
+        fixture
+            .run(QueryRequest::EntityDetail(tampered))
+            .expect_err("checksum")
+            .kind(),
+        ErrorKind::BadRequest
+    );
+    fixture.bump_fact_version();
+    assert_eq!(
+        fixture
+            .run(QueryRequest::EntityDetail(request))
+            .expect_err("stale reference")
+            .kind(),
+        ErrorKind::StaleDocumentRef
+    );
+    let refreshed = fixture.document_ranking();
+    let request = refreshed.detail_request(0);
+    fixture.bump_metadata();
+    assert_eq!(
+        fixture
+            .run(QueryRequest::EntityDetail(request))
+            .expect_err("stale metadata")
+            .kind(),
+        ErrorKind::StaleDocumentRef
+    );
+}
+
+#[test]
+fn document_ranking_pages_are_complete_and_previous_day_changes_stale_the_cursor() {
+    let mut fixture = QueryFixture::new(900);
+    let QueryRequest::Day(mut request) = fixture.request_day() else {
+        panic!("day")
+    };
+    let mut documents = Vec::new();
+    let mut document_pages = 0;
+    let mut continuation = None;
+    loop {
+        let QueryResponse::Day(page) = fixture
+            .run(QueryRequest::Day(request.clone()))
+            .expect("day")
+        else {
+            panic!("day")
+        };
+        assert!(serde_json::to_vec(&page).expect("JSON").len() <= QUERY_PAGE_BYTES);
+        if !page.documents.is_empty() {
+            document_pages += 1;
+            if continuation.is_none() {
+                continuation = page.next_cursor.clone();
+            }
+        }
+        documents.extend(page.documents);
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        request.cursor = Some(cursor);
+    }
+    assert!(document_pages > 1);
+    assert_eq!(documents.len(), 900);
+    assert!(documents.windows(2).all(|pair| pair[0].app < pair[1].app));
+    request.cursor = continuation;
+    assert!(request.cursor.is_some());
+    diesel::insert_into(crate::store::schema::data_day_versions::table)
+        .values(crate::store::rows::DataDayVersionsRow {
+            source: enums::DataSource::Intervals,
+            utc_date: (fixture.start - 3 * UTC_DAY_MS).div_euclid(UTC_DAY_MS),
+            version: 1,
+        })
+        .execute(&mut fixture.store.writer)
+        .expect("previous day version");
+    assert_eq!(
+        fixture
+            .run(QueryRequest::Day(request))
+            .expect_err("stale seven-day scope")
+            .kind(),
+        ErrorKind::StaleCursor
+    );
+}
+
+#[test]
+fn title_hidden_and_excluded_facts_never_produce_document_rankings() {
+    let mut fixture = QueryFixture::new(3);
+    let ranking = fixture.document_ranking();
+    let request = ranking.detail_request(0);
+    for level in [
+        enums::CaptureLevel::TitleHidden,
+        enums::CaptureLevel::Excluded,
+    ] {
+        fixture.redact_titles(level);
+        fixture.bump_fact_version();
+        let ranking = fixture.document_ranking();
+        assert!(ranking.documents.is_empty());
+        assert_eq!(
+            ranking.applications.is_empty(),
+            level == enums::CaptureLevel::Excluded
+        );
+        let QueryRequest::Timeline(timeline) = fixture.request_timeline() else {
+            panic!("timeline")
+        };
+        let page = collect_timeline(&mut fixture, QueryRequest::Timeline(timeline));
+        assert!(page.iter().all(|segment| segment.document_ref.is_none()));
+        assert_eq!(
+            fixture
+                .run(QueryRequest::EntityDetail(request.clone()))
+                .expect_err("old visible reference")
+                .kind(),
+            ErrorKind::StaleDocumentRef
+        );
+    }
+}
+
+#[test]
+fn document_detail_collects_clean_dirty_and_fallback_titles_and_final_rules() {
+    let mut fixture = QueryFixture::new(3);
+    fixture.use_document_app();
+    for (index, title) in [
+        "main.rs - Visual Studio Code",
+        "● main.rs - Visual Studio Code",
+        "main.rs - Application 1",
+    ]
+    .iter()
+    .enumerate()
+    {
+        fixture.replace_document_title(i64::try_from(index).expect("index") + 1, title);
+    }
+    fixture.mask_idle(1000, 2000);
+    fixture.annotate(
+        1,
+        quartz_protocol::AnnotationKind::ActiveOverride,
+        1000,
+        2000,
+        None,
+    );
+    let ranking = fixture.document_ranking();
+    assert_eq!(ranking.documents.len(), 1);
+    assert_eq!(ranking.documents[0].active_ms, 3000);
+    let detail = fixture.document_detail(ranking.detail_request(0));
+    let titles = detail.titles.expect("titles");
+    assert_eq!(titles.len(), 3);
+    assert_eq!(
+        titles.iter().map(|title| title.duration_ms).sum::<i64>(),
+        3000
+    );
+    assert_eq!(
+        detail.extraction,
+        vec![
+            quartz_protocol::EntityExtractionProvenance {
+                extractor_rule: None,
+                status: quartz_protocol::ExtractionStatus::Fallback
+            },
+            quartz_protocol::EntityExtractionProvenance {
+                extractor_rule: Some("builtin.extraction/vscode-document@1".into()),
+                status: quartz_protocol::ExtractionStatus::Extracted
+            }
+        ]
+    );
+    assert_eq!(detail.rules.len(), 1);
+    assert_eq!(
+        detail.rules[0].rule.as_str(),
+        "builtin.classification/vscode@2"
+    );
+    fixture.annotate(
+        2,
+        quartz_protocol::AnnotationKind::CategoryOverride,
+        0,
+        3000,
+        Some(quartz_protocol::BuiltinCategory::Learning),
+    );
+    let ranking = fixture.document_ranking();
+    assert!(
+        fixture
+            .document_detail(ranking.detail_request(0))
+            .rules
+            .is_empty(),
+        "overridden classification rules supplied no final classification"
+    );
+}
+
+#[test]
+fn document_entity_each_day_matches_that_days_ranking() {
+    let mut fixture = QueryFixture::new(2);
+    fixture.use_document_app();
+    const DAYS_BEFORE: i64 = 3;
+    let origin = fixture.start - DAYS_BEFORE * UTC_DAY_MS;
+    diesel::update(capture_runs::table)
+        .set(capture_runs::started_utc_ms.eq(origin))
+        .execute(&mut fixture.store.writer)
+        .expect("run origin");
+    let mut clock = clock_segments::table
+        .select(crate::store::rows::ClockSegmentsRow::as_select())
+        .first::<crate::store::rows::ClockSegmentsRow>(&mut fixture.store.writer)
+        .expect("clock");
+    clock.start_utc_ms = origin;
+    clock.end_mono_ms = Some((DAYS_BEFORE + 1) * UTC_DAY_MS);
+    diesel::update(clock_segments::table)
+        .set(&clock)
+        .execute(&mut fixture.store.writer)
+        .expect("clock origin");
+    for id in 1..=2_i64 {
+        let mut row = intervals::table
+            .filter(intervals::id.eq(Some(id)))
+            .select(crate::store::rows::IntervalsRow::as_select())
+            .first::<crate::store::rows::IntervalsRow>(&mut fixture.store.writer)
+            .expect("fact");
+        if id == 1 {
+            row.start_mono_ms = DAYS_BEFORE * UTC_DAY_MS;
+            row.end_mono_ms = Some(row.start_mono_ms + 1000);
+        } else {
+            row.start_utc_ms = origin;
+            row.end_utc_ms = Some(origin + 2000);
+            row.start_mono_ms = 0;
+            row.end_mono_ms = Some(2000);
+        }
+        diesel::update(intervals::table.filter(intervals::id.eq(Some(id))))
+            .set(&row)
+            .execute(&mut fixture.store.writer)
+            .expect("fact boundaries");
+    }
+    let ranking = fixture.document_ranking();
+    let detail = fixture.document_detail(ranking.detail_request(0));
+    let daily = detail.daily.expect("seven days");
+    assert_eq!(daily.iter().map(|day| day.active_ms).sum::<i64>(), 3000);
+    for day in daily {
+        let mut request = quartz_protocol::QueryDayRequest {
+            local_date: day.local_date,
+            cursor: None,
+        };
+        let mut active_ms = 0;
+        loop {
+            let QueryResponse::Day(page) = fixture
+                .run(QueryRequest::Day(request.clone()))
+                .expect("day")
+            else {
+                panic!("day")
+            };
+            active_ms += page
+                .documents
+                .iter()
+                .map(|document| document.active_ms)
+                .sum::<i64>();
+            let Some(cursor) = page.next_cursor else {
+                break;
+            };
+            request.cursor = Some(cursor);
+        }
+        assert_eq!(day.active_ms, active_ms, "date {}", day.local_date);
+    }
+}
+
+#[test]
+fn document_details_validate_versions_in_the_entire_original_timeline_range() {
+    let mut fixture = QueryFixture::new(1);
+    let QueryRequest::Timeline(mut timeline) = fixture.request_timeline() else {
+        panic!("timeline")
+    };
+    timeline.start_utc_ms = fixture.start - 7 * UTC_DAY_MS;
+    timeline.end_utc_ms = fixture.start + UTC_DAY_MS;
+    let QueryResponse::Timeline(page) = fixture
+        .run(QueryRequest::Timeline(timeline))
+        .expect("eight-day timeline")
+    else {
+        panic!("timeline")
+    };
+    let document_ref = page
+        .segments
+        .iter()
+        .find_map(|segment| segment.document_ref.clone())
+        .expect("visible document");
+    let request = quartz_protocol::QueryEntityDetailRequest {
+        entity: quartz_protocol::DetailEntity::Document { document_ref },
+        local_date: FIXTURE_DATE.parse().expect("date"),
+        reference_range: page.reference_range,
+        cursor: None,
+    };
+    let detail = fixture.document_detail(request.clone());
+    assert_eq!(
+        detail
+            .daily
+            .expect("daily")
+            .last()
+            .expect("selected day")
+            .active_ms,
+        1000
+    );
+    diesel::insert_into(crate::store::schema::data_day_versions::table)
+        .values(crate::store::rows::DataDayVersionsRow {
+            source: enums::DataSource::Intervals,
+            utc_date: (fixture.start - 7 * UTC_DAY_MS).div_euclid(UTC_DAY_MS),
+            version: 1,
+        })
+        .execute(&mut fixture.store.writer)
+        .expect("version outside detail within reference");
+    assert_eq!(
+        fixture
+            .run(QueryRequest::EntityDetail(request))
+            .expect_err("original reference inputs changed")
+            .kind(),
+        ErrorKind::StaleDocumentRef
+    );
+}
+
+#[test]
+fn empty_unknown_and_workspace_only_extractions_are_excluded_from_rankings() {
+    let mut fixture = QueryFixture::new(4);
+    fixture.use_document_app();
+    fixture.replace_document_title(1, "");
+    fixture.replace_document_title(2, "Quartz (Workspace) - Visual Studio Code");
+    diesel::update(intervals::table.filter(intervals::id.eq(Some(3_i64))))
+        .set(intervals::title_id.eq(None::<i64>))
+        .execute(&mut fixture.store.writer)
+        .expect("unavailable title");
+    let ranking = fixture.document_ranking();
+    assert_eq!(ranking.applications[0].active_ms, 4000);
+    assert_eq!(ranking.documents.len(), 1);
+    assert_eq!(ranking.documents[0].active_ms, 1000);
 }

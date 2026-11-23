@@ -1,0 +1,66 @@
+{
+  "daily": [
+    {
+      "local_date": "1970-01-01",
+      "active_ms": 0
+    },
+    {
+      "local_date": "1970-01-02",
+      "active_ms": 0
+    },
+    {
+      "local_date": "1970-01-03",
+      "active_ms": 0
+    },
+    {
+      "local_date": "1970-01-04",
+      "active_ms": 0
+    },
+    {
+      "local_date": "1970-01-05",
+      "active_ms": 0
+    },
+    {
+      "local_date": "1970-01-06",
+      "active_ms": 0
+    },
+    {
+      "local_date": "1970-01-07",
+      "active_ms": 1000
+    }
+  ],
+  "titles": [
+    {
+      "title": "main.rs - Visual Studio Code",
+      "duration_ms": 1000
+    }
+  ],
+  "rules": [
+    {
+      "rule": "builtin.classification/vscode@2",
+      "label": "VS Code",
+      "label_key": null,
+      "category": {
+        "kind": "classified",
+        "id": 7,
+        "uuid": "71f5a800-423a-4000-8000-000000000001",
+        "builtin_key": "development",
+        "name": null,
+        "color": "cat.8",
+        "tendency": "focus"
+      }
+    }
+  ],
+  "extraction": [
+    {
+      "extractor_rule": null,
+      "status": "fallback"
+    },
+    {
+      "extractor_rule": "builtin.extraction/vscode-document@1",
+      "status": "extracted"
+    }
+  ],
+  "versions": "version-token",
+  "next_cursor": null
+}

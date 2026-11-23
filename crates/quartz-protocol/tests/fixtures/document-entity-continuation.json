@@ -1,0 +1,11 @@
+{
+  "extraction": [
+    {
+      "extractor_rule": "user.extraction/custom@2",
+      "status": "extracted"
+    }
+  ],
+  "rules": [],
+  "versions": "version-token",
+  "next_cursor": null
+}

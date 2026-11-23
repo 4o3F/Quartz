@@ -52,14 +52,15 @@ pub use query::{
     Activity, ApplicationId, ApplicationRank, ApplicationRef, BuiltinCategory, Category,
     CategoryDuration, CategoryId, CategoryRef, CategorySource, CategoryTendency, CategoryUuid,
     ClassificationRuleId, ClockSegmentId, CursorQuery, DayChanged, DayMetrics, DetailEntity,
-    DocumentRef, ENTITY_DETAIL_DAYS, ENTITY_DETAIL_TOP_TITLES, EntityClassificationRule,
-    EntityDailyDuration, EntityTitleDuration, ExtractionStatus, HourStack, MillisecondsPerPixel,
-    ParseClassificationRuleIdError, PendingAway, QUERY_PAGE_BYTES, QueryCursor, QueryDayRequest,
-    QueryDayResponse, QueryEntityDetailRequest, QueryEntityDetailResponse, QueryFactsRequest,
-    QueryFactsResponse, QueryGapReason, QueryPendingAwayRequest, QueryPendingAwayResponse,
-    QuerySegmentDetailRequest, QuerySegmentDetailResponse, QueryStopReason, QueryTimelineRequest,
-    QueryTimelineResponse, QueryVersions, ReferenceRange, SEGMENT_DETAIL_MAX_SPAN_MS,
-    TimelineDetail, TimelineSegment, TitleExtraction, WindowInstanceRef,
+    DocumentRank, DocumentRef, ENTITY_DETAIL_DAYS, ENTITY_DETAIL_TOP_TITLES,
+    EntityClassificationRule, EntityDailyDuration, EntityExtractionProvenance, EntityTitleDuration,
+    ExtractionStatus, HourStack, MillisecondsPerPixel, ParseClassificationRuleIdError, PendingAway,
+    QUERY_PAGE_BYTES, QueryCursor, QueryDayRequest, QueryDayResponse, QueryEntityDetailRequest,
+    QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse, QueryGapReason,
+    QueryPendingAwayRequest, QueryPendingAwayResponse, QuerySegmentDetailRequest,
+    QuerySegmentDetailResponse, QueryStopReason, QueryTimelineRequest, QueryTimelineResponse,
+    QueryVersions, ReferenceRange, SEGMENT_DETAIL_MAX_SPAN_MS, TimelineDetail, TimelineSegment,
+    TitleExtraction, WindowInstanceRef,
 };
 
 pub use annotations::{

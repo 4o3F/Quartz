@@ -3,17 +3,18 @@
 use super::{
     RunQueryError,
     calendar::{DayCalendar, DayStartOffset},
+    documents::DocumentIdentity,
     input::QueryRange,
     paging::PagePosition,
     pipeline::{DerivedSegment, SegmentFacts, TimelineProjection},
 };
 use quartz_protocol::{
-    Activity, ApplicationId, ClassificationRuleId, DetailEntity, ENTITY_DETAIL_DAYS,
-    ENTITY_DETAIL_TOP_TITLES, EntityClassificationRule, EntityDailyDuration, EntityTitleDuration,
-    LocalDate, QueryEntityDetailResponse, QuerySegmentDetailRequest, QueryVersions, TimelineDetail,
+    Activity, ApplicationId, ClassificationRuleId, ENTITY_DETAIL_DAYS, ENTITY_DETAIL_TOP_TITLES,
+    EntityClassificationRule, EntityDailyDuration, EntityTitleDuration, LocalDate,
+    QueryEntityDetailResponse, QuerySegmentDetailRequest, QueryVersions, TimelineDetail,
     TimelineSegment,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
 struct EntityDay {
@@ -87,18 +88,34 @@ impl SegmentDetailProjection {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(super) enum EntitySelection {
+    App { id: ApplicationId },
+    Document { identity: DocumentIdentity },
+}
+impl EntitySelection {
+    fn matches(&self, interval: &TimelineSegment) -> bool {
+        match self {
+            Self::App { id } => interval.app.as_ref().is_some_and(|app| app.id == *id),
+            Self::Document { identity } => {
+                DocumentIdentity::from_segment(interval).as_ref() == Some(identity)
+            }
+        }
+    }
+}
 #[derive(Debug)]
 pub(super) struct EntityDetailAccumulator {
-    app: ApplicationId,
+    entity: EntitySelection,
+    extraction: BTreeSet<quartz_protocol::EntityExtractionProvenance>,
     calendar: EntityCalendar,
     titles: BTreeMap<String, EntityTitleDuration>,
     rules: BTreeMap<ClassificationRuleId, EntityClassificationRule>,
 }
 impl EntityDetailAccumulator {
-    pub(super) fn new(entity: DetailEntity, calendar: EntityCalendar) -> Self {
-        let DetailEntity::App { id: app } = entity;
+    pub(super) fn new(entity: EntitySelection, calendar: EntityCalendar) -> Self {
         Self {
-            app,
+            entity,
+            extraction: BTreeSet::new(),
             calendar,
             titles: BTreeMap::new(),
             rules: BTreeMap::new(),
@@ -109,7 +126,7 @@ impl EntityDetailAccumulator {
         if !matches!(
             interval.activity,
             Activity::Active | Activity::ActiveOverride { .. }
-        ) || interval.app.as_ref().is_none_or(|app| app.id != self.app)
+        ) || !self.entity.matches(&interval)
         {
             return;
         }
@@ -121,6 +138,16 @@ impl EntityDetailAccumulator {
             if range.start < range.end {
                 day.daily.active_ms += facts.captured_duration_within(segment, range);
             }
+        }
+        if matches!(self.entity, EntitySelection::Document { .. })
+            && let Some(extraction) = &interval.extraction
+            && let Some(status) = extraction.status
+        {
+            self.extraction
+                .insert(quartz_protocol::EntityExtractionProvenance {
+                    extractor_rule: extraction.extractor_rule.clone(),
+                    status,
+                });
         }
         if let Some(title) = interval.title {
             self.titles
@@ -158,6 +185,7 @@ impl EntityDetailAccumulator {
             }),
             titles: position.is_first().then_some(titles),
             rules: self.rules.into_values().collect(),
+            extraction: self.extraction.into_iter().collect(),
             versions,
             next_cursor: None,
         }

@@ -1,0 +1,19 @@
+{
+  "reference_range": {
+    "start_utc_ms": 0,
+    "end_utc_ms": 604800000
+  },
+  "applications": [],
+  "documents": [
+    {
+      "document_ref": "doc:opaque",
+      "app": 3,
+      "document": "main.rs",
+      "project": "Quartz",
+      "profile": null,
+      "active_ms": 1000
+    }
+  ],
+  "versions": "version-token",
+  "next_cursor": null
+}

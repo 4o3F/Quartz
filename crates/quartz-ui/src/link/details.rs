@@ -60,6 +60,7 @@ impl Link {
         date: LocalDate,
     ) -> Result<EntityData, DayFailure> {
         let mut query = QueryEntityDetailRequest {
+            reference_range: None,
             entity: DetailEntity::App { id: app },
             local_date: date,
             cursor: None,

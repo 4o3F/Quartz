@@ -19,7 +19,7 @@ pub(crate) mod versions;
 
 use crate::store::{ReadOnlyStore, query::ReadSnapshot, query_error::ReadQueryError};
 use calendar::DayCalendar;
-use details::{EntityCalendar, EntityDetailAccumulator, SegmentDetailProjection};
+use details::{EntityCalendar, EntityDetailAccumulator, EntitySelection, SegmentDetailProjection};
 use input::QueryRange;
 use paging::{PageBudget, PagePosition};
 use pipeline::{DayAccumulator, DerivedSegment, Pipeline, QUERY_BATCH_ROWS, TimelineProjection};
@@ -34,7 +34,7 @@ use serde::Serialize;
 use timing::{QueryStage, QueryTimer, QueryTimings};
 
 /// Increment whenever matching, slicing, duration, aggregation, or projection semantics change.
-pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 5;
+pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 6;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
 const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
 
@@ -187,6 +187,8 @@ pub(crate) struct QueryJob {
     snapshot: ReadSnapshot,
     request: QueryRequest,
     range: QueryRange,
+    reference_range: QueryRange,
+    entity: Option<EntitySelection>,
     versions: QueryVersions,
     parameters: CursorQuery,
     position: PagePosition,
@@ -208,6 +210,8 @@ impl QueryJob {
             Ok(prepared) => Ok(Self {
                 snapshot,
                 range: prepared.range,
+                reference_range: prepared.reference_range,
+                entity: prepared.entity,
                 versions: prepared.versions,
                 parameters: prepared.parameters,
                 position: prepared.position,
@@ -309,9 +313,46 @@ impl QueryJob {
         }
         jiff::Timestamp::from_millisecond(range.start)?;
         jiff::Timestamp::from_millisecond(range.end)?;
+        let reference_range = match request {
+            QueryRequest::Day(day) => {
+                EntityCalendar::new(day.local_date, settings.day_start_offset)?.range
+            }
+            QueryRequest::EntityDetail(detail) => match &detail.entity {
+                quartz_protocol::DetailEntity::App { .. } => {
+                    if detail.reference_range.is_some() {
+                        return Err(RunQueryError::InvalidDocumentRef);
+                    }
+                    range
+                }
+                quartz_protocol::DetailEntity::Document { .. } => {
+                    let supplied = detail
+                        .reference_range
+                        .ok_or(RunQueryError::InvalidDocumentRef)?;
+                    let reference = QueryRange {
+                        start: supplied.start_utc_ms,
+                        end: supplied.end_utc_ms,
+                    };
+                    if reference.start > range.start
+                        || reference.end < range.end
+                        || reference
+                            .end
+                            .checked_sub(reference.start)
+                            .is_none_or(|duration| !(1..=MAX_QUERY_RANGE_MS).contains(&duration))
+                    {
+                        return Err(RunQueryError::InvalidDocumentRef);
+                    }
+                    jiff::Timestamp::from_millisecond(reference.start)
+                        .map_err(|_| RunQueryError::InvalidDocumentRef)?;
+                    jiff::Timestamp::from_millisecond(reference.end)
+                        .map_err(|_| RunQueryError::InvalidDocumentRef)?;
+                    reference
+                }
+            },
+            _ => range,
+        };
         let versions = versions::VersionState {
             days: snapshot
-                .versions(range)?
+                .versions(reference_range)?
                 .into_iter()
                 .map(|fact| (fact.key, fact.version))
                 .collect(),
@@ -319,7 +360,26 @@ impl QueryJob {
             rule_hashes: rule_hashes.clone(),
             time_zone: jiff::tz::TimeZone::try_system()?,
         }
-        .digest(range);
+        .digest(reference_range);
+        let entity = match request {
+            QueryRequest::EntityDetail(detail) => Some(match &detail.entity {
+                quartz_protocol::DetailEntity::App { id } => EntitySelection::App { id: *id },
+                quartz_protocol::DetailEntity::Document { document_ref } => {
+                    EntitySelection::Document {
+                        identity: documents::DocumentReference::validate(
+                            document_ref,
+                            quartz_protocol::ReferenceRange {
+                                start_utc_ms: reference_range.start,
+                                end_utc_ms: reference_range.end,
+                            },
+                            &versions,
+                        )?
+                        .identity,
+                    }
+                }
+            }),
+            _ => None,
+        };
         let parameters = request.parameters();
         let cursor = match request {
             QueryRequest::Facts(facts) => facts.cursor.as_ref(),
@@ -339,6 +399,8 @@ impl QueryJob {
         Ok(PreparedQuery {
             categories,
             range,
+            reference_range,
+            entity,
             versions,
             parameters,
             position,
@@ -440,9 +502,9 @@ impl QueryJob {
                     QueryRequest::SegmentDetail(_) => {
                         Aggregation::SegmentDetail(SegmentDetailProjection::default())
                     }
-                    QueryRequest::EntityDetail(detail) => {
+                    QueryRequest::EntityDetail(_) => {
                         Aggregation::EntityDetail(EntityDetailAccumulator::new(
-                            detail.entity,
+                            self.entity.take().expect("validated entity retained"),
                             self.entity_calendar
                                 .take()
                                 .expect("entity calendar retained"),
@@ -500,7 +562,7 @@ impl QueryJob {
                     return Ok(None);
                 }
                 let response =
-                    timer.measure(QueryStage::Aggregate, || self.finish_aggregation(output));
+                    timer.measure(QueryStage::Aggregate, || self.finish_aggregation(output))?;
                 timer
                     .measure(QueryStage::PageEncode, || self.page_response(response))
                     .map(Some)
@@ -508,18 +570,32 @@ impl QueryJob {
             Stage::Complete => Ok(None),
         }
     }
-    fn finish_aggregation(&self, output: Aggregation) -> QueryResponse {
-        match output {
+    fn finish_aggregation(&self, output: Aggregation) -> Result<QueryResponse, RunQueryError> {
+        Ok(match output {
             Aggregation::Day(day) => {
                 let aggregate = day.finish();
                 let first = self.position.is_first();
-                QueryResponse::Day(QueryDayResponse {
+                let mut response = QueryDayResponse {
+                    reference_range: self.reference_range(),
+                    documents: Vec::new(),
                     metrics: first.then_some(aggregate.metrics),
                     hours: first.then_some(aggregate.calendar.hours),
-                    applications: aggregate.ranking,
+                    applications: Vec::new(),
                     versions: self.versions.clone(),
                     next_cursor: None,
-                })
+                };
+                let page = self.page_budget(&response)?.lists_mapped(
+                    aggregate.ranking,
+                    aggregate.documents,
+                    self.position,
+                    |entry| entry.into_rank(self.reference_range, &self.versions),
+                )?;
+                response.applications = page.first;
+                response.documents = page.second;
+                response.next_cursor = page.next.map(|position| {
+                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
+                });
+                QueryResponse::Day(response)
             }
             Aggregation::PendingAway(away) => {
                 QueryResponse::PendingAway(QueryPendingAwayResponse {
@@ -545,38 +621,38 @@ impl QueryJob {
                 versions: self.versions.clone(),
                 next_cursor: None,
             }),
-        }
+        })
     }
     fn reference_range(&self) -> Option<quartz_protocol::ReferenceRange> {
         self.position
             .is_first()
             .then_some(quartz_protocol::ReferenceRange {
-                start_utc_ms: self.range.start,
-                end_utc_ms: self.range.end,
+                start_utc_ms: self.reference_range.start,
+                end_utc_ms: self.reference_range.end,
             })
+    }
+    fn page_budget(&self, response: &impl Serialize) -> Result<PageBudget, RunQueryError> {
+        PageBudget::new(response)?.with_cursor(&QueryCursor::new(
+            self.versions.clone(),
+            self.parameters.clone(),
+            usize::MAX,
+        ))
     }
     fn page_response(&self, mut response: QueryResponse) -> Result<QueryResponse, RunQueryError> {
         match &mut response {
             QueryResponse::Facts(facts) => {
                 let items = std::mem::take(&mut facts.facts);
-                let page = PageBudget::new(facts)?.page(items, self.position)?;
+                let page = self.page_budget(facts)?.page(items, self.position)?;
                 facts.facts = page.items;
                 facts.next_cursor = page.next.map(|position| {
                     QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
                 });
             }
 
-            QueryResponse::Day(day) => {
-                let items = std::mem::take(&mut day.applications);
-                let page = PageBudget::new(day)?.page(items, self.position)?;
-                day.applications = page.items;
-                day.next_cursor = page.next.map(|position| {
-                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
-                });
-            }
+            QueryResponse::Day(_) => {}
             QueryResponse::PendingAway(away) => {
                 let items = std::mem::take(&mut away.ranges);
-                let page = PageBudget::new(away)?.page(items, self.position)?;
+                let page = self.page_budget(away)?.page(items, self.position)?;
                 away.ranges = page.items;
                 away.next_cursor = page.next.map(|position| {
                     QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
@@ -591,8 +667,9 @@ impl QueryJob {
                     },
                     &self.versions,
                 );
-                let page = PageBudget::new(detail)?
-                    .page_with(items, self.position, |segment| references.attach(segment))?;
+                let page =
+                    self.page_budget(detail)?
+                        .page_with(items, self.position, |segment| references.attach(segment))?;
                 detail.intervals = page.items;
                 detail.next_cursor = page.next.map(|position| {
                     QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
@@ -600,8 +677,12 @@ impl QueryJob {
             }
             QueryResponse::EntityDetail(detail) => {
                 let items = std::mem::take(&mut detail.rules);
-                let page = PageBudget::new(detail)?.page(items, self.position)?;
-                detail.rules = page.items;
+                let extraction = std::mem::take(&mut detail.extraction);
+                let page = self
+                    .page_budget(detail)?
+                    .lists(items, extraction, self.position)?;
+                detail.rules = page.first;
+                detail.extraction = page.second;
                 detail.next_cursor = page.next.map(|position| {
                     QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
                 });
@@ -616,7 +697,7 @@ impl QueryJob {
                     &self.versions,
                 );
                 let page =
-                    PageBudget::new(timeline)?
+                    self.page_budget(timeline)?
                         .page_with(items, self.position, |segment| references.attach(segment))?;
                 timeline.segments = page.items;
                 timeline.next_cursor = page.next.map(|position| {
@@ -655,6 +736,8 @@ pub(crate) struct CompletedQuery {
 struct PreparedQuery {
     categories: Vec<quartz_domain::categories::Category>,
     range: QueryRange,
+    reference_range: QueryRange,
+    entity: Option<EntitySelection>,
     versions: QueryVersions,
     parameters: CursorQuery,
     position: PagePosition,

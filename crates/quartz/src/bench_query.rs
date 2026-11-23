@@ -65,6 +65,8 @@ pub(crate) enum BenchQueryError {
     },
     #[snafu(display("prepared database has no builtin classification set"))]
     MissingClassification,
+    #[snafu(display("benchmark day has no visible document identity"))]
+    MissingDocument,
     #[snafu(display("runs must be positive"))]
     Runs,
     #[cfg(windows)]
@@ -245,7 +247,7 @@ impl<'path> BenchQuery<'path> {
         idle: memory::PrivateBytes,
         output: &mut impl Write,
     ) -> Result<ReadOnlyStore, BenchQueryError> {
-        use crate::query::{QueryJob, QueryRequest};
+        use crate::query::QueryRequest;
         use quartz_protocol::{
             MillisecondsPerPixel, QueryDayRequest, QueryPendingAwayRequest, QueryTimelineRequest,
             TimelineDetail,
@@ -333,56 +335,162 @@ impl<'path> BenchQuery<'path> {
             requests: days,
         });
         for workload in workloads {
-            let name = workload.name;
-            let mut samples = Vec::new();
-            let mut encoded_bytes = 0;
-            let mut stages = StageSamples::default();
-            let mut memory = memory::MemoryPeaks::new(idle);
-            for _ in 0..self.runs {
-                memory.observe(memory::PrivateBytes::sample()?);
-                let started = Instant::now();
-                let mut combined = crate::query::timing::QueryTimings::default();
-                encoded_bytes = 0;
-                for query in &workload.requests {
-                    let mut snapshot_reader = Some(reader);
-                    let prepare_started = Instant::now();
-                    let job = QueryJob::start(&mut snapshot_reader, query.clone(), rules.clone())
-                        .context(QuerySnafu)?;
-                    let prepare = prepare_started.elapsed();
-                    let mut completed = job.run_measured().context(QuerySnafu)?;
-                    completed.timings.read += prepare;
-                    let encode = Instant::now();
-                    encoded_bytes += serde_json::to_vec(&completed.response)
-                        .map_err(crate::query::RunQueryError::from)
-                        .context(QuerySnafu)?
-                        .len();
-                    completed.timings.page_encode += encode.elapsed();
-                    hint::black_box(&completed.response);
-                    combined.accumulate(completed.timings);
-                    reader = completed.reader;
-                }
-                samples.push(started.elapsed());
-                stages.push(combined);
-                memory.observe(memory::PrivateBytes::sample()?);
-            }
-            samples.sort_unstable();
-            let percentile = |percent: usize| {
-                samples[(samples.len() * percent).div_ceil(PERCENTILE_BASE) - 1].as_secs_f64()
-                    * MILLISECONDS_PER_SECOND
-            };
-            writeln!(
-                output,
-                "{name} first_page_bytes={encoded_bytes} p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
-                percentile(MEDIAN_PERCENT),
-                percentile(TAIL_PERCENT),
-                samples[samples.len() - 1].as_secs_f64() * MILLISECONDS_PER_SECOND
-            )
-            .context(OutputSnafu)?;
-            stages.write(name, output).context(OutputSnafu)?;
-            memory.write(name, output).context(OutputSnafu)?;
+            reader = self.measure_workload(reader, workload, rules.clone(), idle, output)?;
         }
+        let extent = reader
+            .extent()
+            .context(ReadSnafu)?
+            .ok_or(BenchQueryError::Empty)?;
+        let last_capture_date = jiff::Timestamp::from_millisecond(extent.to_utc_ms - 1)
+            .map_err(crate::query::RunQueryError::from)
+            .context(QuerySnafu)?
+            .to_zoned_datetime(jiff::tz::TimeZone::system())
+            .date();
+        let document_date = date
+            .yesterday()
+            .map_err(crate::query::RunQueryError::from)
+            .context(QuerySnafu)?
+            .min(last_capture_date);
+        let prepared = self.document_workload(reader, document_date, rules.clone(), output)?;
+        reader = prepared.reader;
+        self.measure_workload(
+            reader,
+            PipelineWorkload {
+                name: "pipeline.entity.document",
+                requests: vec![crate::query::QueryRequest::EntityDetail(prepared.request)],
+            },
+            rules,
+            idle,
+            output,
+        )
+    }
+    fn measure_workload(
+        &self,
+        mut reader: ReadOnlyStore,
+        workload: PipelineWorkload,
+        rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
+        idle: memory::PrivateBytes,
+        output: &mut impl Write,
+    ) -> Result<ReadOnlyStore, BenchQueryError> {
+        use crate::query::QueryJob;
+        let name = workload.name;
+        let mut samples = Vec::new();
+        let mut encoded_bytes = 0;
+        let mut stages = StageSamples::default();
+        let mut memory = memory::MemoryPeaks::new(idle);
+        for _ in 0..self.runs {
+            memory.observe(memory::PrivateBytes::sample()?);
+            let started = Instant::now();
+            let mut combined = crate::query::timing::QueryTimings::default();
+            encoded_bytes = 0;
+            for query in &workload.requests {
+                let mut snapshot_reader = Some(reader);
+                let prepare_started = Instant::now();
+                let job = QueryJob::start(&mut snapshot_reader, query.clone(), rules.clone())
+                    .context(QuerySnafu)?;
+                let prepare = prepare_started.elapsed();
+                let mut completed = job.run_measured().context(QuerySnafu)?;
+                completed.timings.read += prepare;
+                let encode = Instant::now();
+                encoded_bytes += serde_json::to_vec(&completed.response)
+                    .map_err(crate::query::RunQueryError::from)
+                    .context(QuerySnafu)?
+                    .len();
+                completed.timings.page_encode += encode.elapsed();
+                hint::black_box(&completed.response);
+                combined.accumulate(completed.timings);
+                reader = completed.reader;
+            }
+            samples.push(started.elapsed());
+            stages.push(combined);
+            memory.observe(memory::PrivateBytes::sample()?);
+        }
+        samples.sort_unstable();
+        let percentile = |percent: usize| {
+            samples[(samples.len() * percent).div_ceil(PERCENTILE_BASE) - 1].as_secs_f64()
+                * MILLISECONDS_PER_SECOND
+        };
+        writeln!(
+            output,
+            "{name} first_page_bytes={encoded_bytes} p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
+            percentile(MEDIAN_PERCENT),
+            percentile(TAIL_PERCENT),
+            samples[samples.len() - 1].as_secs_f64() * MILLISECONDS_PER_SECOND
+        )
+        .context(OutputSnafu)?;
+        stages.write(name, output).context(OutputSnafu)?;
+        memory.write(name, output).context(OutputSnafu)?;
         Ok(reader)
     }
+    fn document_workload(
+        &self,
+        mut reader: ReadOnlyStore,
+        local_date: quartz_protocol::LocalDate,
+        rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
+        output: &mut impl Write,
+    ) -> Result<DocumentWorkload, BenchQueryError> {
+        use crate::query::{QueryJob, QueryRequest, QueryResponse};
+        use quartz_protocol::{DetailEntity, QueryDayRequest, QueryEntityDetailRequest};
+        let mut query = QueryDayRequest {
+            local_date,
+            cursor: None,
+        };
+        let mut reference_range = None;
+        loop {
+            let mut slot = Some(reader);
+            let completed =
+                QueryJob::start(&mut slot, QueryRequest::Day(query.clone()), rules.clone())
+                    .context(QuerySnafu)?
+                    .run_measured()
+                    .context(QuerySnafu)?;
+            reader = completed.reader;
+            let QueryResponse::Day(page) = completed.response else {
+                unreachable!("day workload")
+            };
+            if query.cursor.is_none() {
+                reference_range = page.reference_range;
+            }
+            if let Some(document) = page.documents.into_iter().next() {
+                let request = QueryEntityDetailRequest {
+                    entity: DetailEntity::Document {
+                        document_ref: document.document_ref,
+                    },
+                    reference_range,
+                    local_date,
+                    cursor: None,
+                };
+                let mut slot = Some(reader);
+                let completed = QueryJob::start(
+                    &mut slot,
+                    QueryRequest::EntityDetail(request.clone()),
+                    rules,
+                )
+                .context(QuerySnafu)?
+                .run_measured()
+                .context(QuerySnafu)?;
+                let QueryResponse::EntityDetail(detail) = completed.response else {
+                    unreachable!("document workload")
+                };
+                let active_ms: i64 = detail
+                    .daily
+                    .expect("first-page daily totals")
+                    .iter()
+                    .map(|day| day.active_ms)
+                    .sum();
+                writeln!(output, "document workload: busiest document on local_date={local_date} day_active_ms={} seven_day_active_ms={active_ms}", document.active_ms).context(OutputSnafu)?;
+                return Ok(DocumentWorkload {
+                    reader: completed.reader,
+                    request,
+                });
+            }
+            query.cursor = Some(page.next_cursor.ok_or(BenchQueryError::MissingDocument)?);
+        }
+    }
+}
+#[derive(Debug)]
+struct DocumentWorkload {
+    reader: ReadOnlyStore,
+    request: quartz_protocol::QueryEntityDetailRequest,
 }
 /// The weekly fold uses seven day queries until query.range is supplied by M4-B6.
 #[derive(Debug)]

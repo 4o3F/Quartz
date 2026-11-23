@@ -106,6 +106,7 @@ mod tests {
             response
         );
         let entity = QueryEntityDetailRequest {
+            reference_range: None,
             entity: DetailEntity::App {
                 id: crate::ApplicationId(3),
             },
@@ -121,6 +122,7 @@ mod tests {
             entity
         );
         let response = QueryEntityDetailResponse {
+            extraction: Vec::new(),
             daily: Some(
                 (0..crate::ENTITY_DETAIL_DAYS)
                     .map(|index| crate::EntityDailyDuration {
