@@ -1,0 +1,1748 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Quartz — Document-aware Today &amp; Details</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="mockup.css">
+<!--
+  Document-aware Today page and details (M4 V7).
+  Query parameters:
+    ?state=ranking-documents | document-detail | lane-merged |
+           segment-extraction | document-stale | ranking-documents-empty
+    &theme=light | dark
+    &lang=zh-CN | en | en-XA
+    &size=min          (optional: 640x480 minimum window per 07 §2.3; default 1280x800)
+-->
+<style>
+/* Minimum window 640x480 (Compact breakpoint per 07 §2.1 & §2.3) */
+html[data-size="min"],
+html[data-size="min"] body,
+html[data-size="min"] .window{width:640px;height:480px}
+
+.wrap{position:relative;overflow:hidden}
+.main-wrap{position:relative;flex:1;min-width:0;display:flex}
+.main{position:relative;padding:var(--space-xl) var(--space-xxl) var(--space-l);gap:var(--space-s);overflow-y:auto;overflow-x:hidden}
+html[data-has-panel="true"] .main{padding:var(--space-l) var(--space-l) var(--space-l)}
+html[data-size="min"] .main{padding:var(--space-m) var(--space-m) var(--space-l)}
+
+/* 07 §10: chart plot areas sit directly on bg.base in both light and dark */
+.plot{background:var(--bg-base);border-radius:var(--radius-control)}
+
+/* Fluent 2 overlay scrollbar indicator (11 §9.2) */
+.scroll-track{
+  display:none;
+  position:absolute;top:var(--space-xs);right:var(--space-xs);bottom:var(--space-xs);
+  width:6px;pointer-events:none;z-index:8;
+}
+.scrollable > .scroll-track{display:block}
+.scroll-thumb{
+  position:absolute;left:1px;right:1px;top:0;
+  border-radius:var(--radius-control);
+  background:var(--text-tertiary);
+}
+
+/* Nav & flexible text controls safe for en-XA */
+.nav-item span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;gap:3px}
+.badge .btxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip{max-width:100%;min-width:0}
+.btn{min-height:var(--h-control-standard);height:auto;padding:4px 12px;max-width:100%}
+.btn.compact{min-height:var(--h-control-compact);height:auto;padding:2px 9px;font:var(--type-caption)}
+.btn.icon{width:var(--h-control-standard);height:var(--h-control-standard);padding:0;flex:none}
+.btn.compact.icon{width:var(--h-control-compact);height:var(--h-control-compact);padding:0;flex:none}
+
+/* Today layout responsiveness */
+.datebar{flex-wrap:wrap;height:auto;min-height:var(--h-control-standard)}
+.datebar .date{min-width:186px}
+.refresh-ind{
+  margin-left:auto;
+  display:inline-flex;align-items:center;gap:6px;
+  font:var(--type-caption);color:var(--text-tertiary);
+  white-space:nowrap;
+}
+.ring-xs{width:14px;height:14px;display:block;flex:none}
+
+.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr))}
+.stat{padding:0 10px;border-left:1px solid var(--stroke-divider);min-width:0}
+.stat:first-child{padding-left:0;border-left:none}
+.stat .v,.stat .l{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.legend{flex-wrap:wrap;gap:var(--space-xs) var(--space-l)}
+
+html[data-has-panel="true"] .stats{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:var(--space-xs)}
+html[data-has-panel="true"] .stat:nth-child(3n+1){padding-left:0;border-left:none}
+html[data-has-panel="true"] .tl{--gut:98px}
+html[data-has-panel="true"] .two-col{flex-direction:row}
+html[data-has-panel="true"] .two-col .hourly-card{flex:0.82;min-width:0}
+html[data-has-panel="true"] .two-col .ranking-card{flex:1.18;min-width:0}
+
+html[data-size="min"] .datebar .date{min-width:154px}
+html[data-size="min"] .stats{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:var(--space-s)}
+html[data-size="min"] .stat:nth-child(3n+1){padding-left:0;border-left:none}
+html[data-size="min"] .two-col{flex-direction:column}
+html[data-size="min"] .tl{--gut:84px}
+html[data-size="min"] .legend{gap:var(--space-xs) var(--space-m)}
+
+/* Prevent y-axis label clipping in expanded pseudo-locale */
+html[data-lang="en-XA"] .hours .y{width:50px}
+html[data-lang="en-XA"] .hlabels{margin-left:50px}
+.d7{height:52px;gap:6px}
+.d7l{gap:4px;padding:2px 2px 0}
+.d7l span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Timeline toolbar + V6 Pan/Select segmented control */
+.tl-head{display:flex;align-items:center;gap:6px;row-gap:6px;flex-wrap:wrap}
+.tl-head-l{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto;flex-wrap:wrap}
+.tl-head-r{display:flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:100%}
+.tl-head .h-sub{white-space:nowrap}
+.seg.mode-seg{position:relative;gap:2px}
+.seg.mode-seg div{gap:5px;padding:0 9px;white-space:nowrap}
+.seg.mode-seg div svg{width:13px;height:13px;flex:none}
+
+/* Timeline merged block highlight & tooltip */
+.blk.ctx-target{
+  box-shadow:0 0 0 2px var(--bg-base),0 0 0 3.5px var(--accent-fill);
+  z-index:5;
+}
+.blk.excl{justify-content:flex-start}
+.blk-label{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:14px}
+.blk.excl .blk-label{margin:0 auto}
+.sel-layer{
+  position:absolute;left:var(--gut);right:0;top:0;height:152px;
+  pointer-events:none;z-index:4;
+}
+.range-band{
+  position:absolute;top:-2px;bottom:-2px;
+  background:color-mix(in srgb,var(--accent-fill) 14%,transparent);
+  border-left:1.5px solid var(--accent-fill);
+  border-right:1.5px solid var(--accent-fill);
+}
+
+.merge-tt{
+  position:absolute;
+  width:274px;max-width:calc(100% - 16px);
+  background:var(--bg-flyout);
+  border:1px solid var(--stroke-surface);
+  border-radius:var(--radius-overlay);
+  box-shadow:var(--shadow-16);
+  padding:9px 11px;
+  z-index:18;
+  display:flex;flex-direction:column;gap:4px;
+}
+.merge-tt-row{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}
+.merge-tt-badge{
+  margin-top:2px;
+  padding:4px 7px;
+  border-radius:var(--radius-control);
+  background:color-mix(in srgb,var(--accent-fill) 10%,var(--fill-card-secondary));
+  border:1px solid color-mix(in srgb,var(--accent-fill) 28%,transparent);
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  font:var(--type-caption);color:var(--text-primary);
+}
+.merge-tt-badge svg{width:13px;height:13px;color:var(--accent-text);flex:none}
+
+/* ===========================
+   Document Ranking Rows (ranking-documents)
+   =========================== */
+.rank-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.rank-head-r{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.rank-list{display:flex;flex-direction:column;gap:2px}
+.doc-rank{
+  display:flex;align-items:center;gap:8px;
+  min-height:38px;padding:3px 6px;
+  border-radius:var(--radius-control);
+  position:relative;
+}
+.doc-rank:hover,.doc-rank.sel{background:var(--fill-subtle-hover)}
+.doc-rank.sel::before{
+  content:"";position:absolute;left:0;top:10px;bottom:10px;
+  width:3px;border-radius:2px;background:var(--accent-fill);
+}
+.doc-rank .cb{width:3px;height:22px;border-radius:2px;background:var(--c);flex:none}
+.doc-rank .app-ic{color:var(--text-secondary);flex:none}
+.doc-rank .doc-nm{
+  flex:1.45;min-width:0;
+  display:flex;flex-direction:column;gap:1px;
+}
+.doc-nm-top{display:flex;align-items:center;gap:5px;min-width:0;flex-wrap:wrap}
+.doc-title{
+  font:var(--type-body);font-weight:600;color:var(--text-primary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;
+}
+.doc-nm-sub{
+  display:flex;align-items:center;gap:5px;min-width:0;flex-wrap:wrap;
+  font:var(--type-caption);color:var(--text-secondary);
+}
+.doc-nm-sub .app-lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.id-pill{
+  display:inline-flex;align-items:center;gap:3px;
+  height:17px;padding:0 5px;max-width:100%;
+  border-radius:var(--radius-control);
+  font:var(--type-caption);font-size:11px;line-height:15px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;
+}
+.id-pill svg{width:11px;height:11px;flex:none}
+.id-pill.proj{
+  background:var(--fill-control);
+  border:1px solid var(--stroke-control-strong);
+  color:var(--text-primary);
+}
+.id-pill.proj svg{color:var(--accent-text)}
+.id-pill.prof{
+  background:color-mix(in srgb,var(--cat-1) 12%,var(--fill-card));
+  border:1px solid color-mix(in srgb,var(--cat-1) 30%,transparent);
+  color:var(--text-primary);
+}
+.id-pill.prof svg{color:var(--cat-1)}
+.id-pill .ptxt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.doc-rank .bar{
+  flex:0.62;min-width:48px;max-width:120px;
+  height:6px;border-radius:3px;
+  background:var(--fill-subtle-hover);position:relative;
+}
+.doc-rank .bar .fill{
+  position:absolute;left:0;top:0;bottom:0;
+  border-radius:3px;background:var(--c);
+}
+.doc-rank .doc-du{
+  width:auto;min-width:74px;max-width:112px;flex:none;text-align:right;
+  display:flex;flex-direction:column;gap:0;
+}
+.doc-du .du-main{font:var(--type-caption);color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.doc-du .du-share{font:var(--type-caption);font-size:11px;line-height:14px;color:var(--text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.rank-foot-note{
+  margin-top:5px;padding-top:5px;
+  border-top:1px solid var(--stroke-divider);
+  font:var(--type-caption);color:var(--text-tertiary);
+  overflow-wrap:anywhere;
+}
+
+/* Compact adjustments for ranking-documents at 640x480 */
+html[data-size="min"] .doc-rank .doc-du{min-width:72px;max-width:116px}
+html[data-size="min"] .doc-rank .bar{flex:0.48;min-width:48px}
+html[data-has-panel="true"] .doc-rank .bar{flex:0.45;min-width:48px}
+html[data-has-panel="true"] .doc-rank .doc-du{min-width:68px}
+
+/* Document ranking empty state (ranking-documents-empty) */
+.rank-empty{
+  padding:16px 12px 12px;
+  display:flex;flex-direction:column;align-items:center;
+  text-align:center;gap:8px;
+}
+.rank-empty-tile{
+  width:40px;height:40px;border-radius:var(--radius-overlay);
+  background:var(--fill-subtle-hover);border:1px solid var(--stroke-card);
+  color:var(--text-secondary);display:grid;place-items:center;
+}
+.rank-empty-tile svg{width:20px;height:20px}
+.rank-empty-title{font:var(--type-body-strong);color:var(--text-primary)}
+.rank-empty-desc{
+  max-width:340px;font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;
+}
+
+/* Pending away bar */
+.pending{display:flex;align-items:center;gap:10px;padding:8px 14px;flex-wrap:wrap}
+
+/* ===========================
+   Right-hand 360px Details Panel (shared V1–V6 architecture)
+   =========================== */
+.panel-scrim{
+  display:none;
+  position:absolute;inset:0;
+  background:color-mix(in srgb,var(--fill-smoke) 42%,transparent);
+  z-index:15;
+}
+.details{
+  width:var(--w-details);flex:none;
+  border-left:1px solid var(--stroke-divider);
+  padding:0;gap:0;
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  background:transparent;
+}
+html[data-size="min"][data-panel-open="true"] .panel-scrim{display:block}
+html[data-size="min"] .details{
+  position:absolute;top:0;right:0;bottom:0;
+  width:360px;max-width:calc(100% - 16px);
+  background:linear-gradient(var(--fill-layer),var(--fill-layer)),var(--bg-base);
+  border-left:1px solid var(--stroke-divider);
+  box-shadow:var(--shadow-28);
+  z-index:20;
+}
+
+.ed-head{
+  flex:none;padding:10px var(--space-l);
+  border-bottom:1px solid var(--stroke-divider);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+}
+.ed-app-tile{
+  width:28px;height:28px;flex:none;margin-top:1px;
+  border-radius:var(--radius-control);
+  background:var(--fill-subtle-hover);border:1px solid var(--stroke-card);
+  color:var(--text-primary);display:grid;place-items:center;
+}
+.ed-head-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.ed-head-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.ed-head-name{font:var(--type-body-strong);color:var(--text-primary);overflow-wrap:anywhere}
+
+.ed-body-wrap{position:relative;flex:1;min-height:0;display:flex}
+.ed-body{
+  flex:1;min-height:0;
+  overflow-y:auto;overflow-x:hidden;
+  padding:8px var(--space-l);
+  display:flex;flex-direction:column;gap:8px;
+}
+
+/* Strictly single-row pinned panel footer (V2/V3/V5/V6 rule — NEVER wraps) */
+.ed-foot{
+  flex:none;padding:8px var(--space-l);
+  border-top:1px solid var(--stroke-divider);
+  display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+}
+.ed-foot-main{
+  flex:1;min-width:0;display:flex;align-items:center;flex-wrap:nowrap;gap:6px;
+}
+.ed-foot-main .btn{
+  padding:4px 9px;min-width:0;max-width:100%;overflow:hidden;
+}
+.ed-foot-main .btn.primary-slot{flex:0 1 auto}
+.ed-foot-main .btn.flex-shrink{flex:0 1 auto}
+.ed-foot-main .btn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-foot-right{flex:0 0 auto;margin-left:auto;display:flex;align-items:center;gap:6px}
+
+/* Details sidebar internal components */
+.res-card{
+  padding:8px 10px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:5px;
+}
+.res-top{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.res-sub{font:var(--type-caption);color:var(--text-secondary);overflow-wrap:anywhere}
+
+.sect-hdr{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}
+.sect-hdr .t{font:var(--type-body-strong)}
+
+/* Common titles rows inside document-detail */
+.ct-list{display:flex;flex-direction:column;gap:4px}
+.ct-row{display:flex;align-items:center;gap:7px;min-height:24px}
+.ct-txt{flex:1;min-width:0;font:var(--type-caption);color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ct-bar{width:46px;height:4px;border-radius:2px;background:var(--fill-subtle-hover);flex:none;position:relative}
+.ct-bar i{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:var(--c)}
+.ct-du{width:64px;flex:none;text-align:right;font:var(--type-caption);color:var(--text-secondary);white-space:nowrap}
+
+/* Extraction provenance card & key-value grid */
+.stage-card{
+  padding:8px 10px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:6px;
+}
+.stage-hdr{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}
+
+.kv-table{display:flex;flex-direction:column;gap:3px}
+.kv-row{
+  display:flex;align-items:flex-start;gap:8px;
+  padding:3px 6px;border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);
+  font:var(--type-caption);
+}
+.kv-k{
+  width:108px;flex:none;
+  font-family:var(--font-mono);font-size:11px;line-height:16px;
+  color:var(--text-tertiary);
+}
+.kv-v{
+  flex:1;min-width:0;
+  font-family:var(--font-mono);font-size:11.5px;line-height:16px;
+  color:var(--text-primary);
+  overflow-wrap:anywhere;word-break:break-word;
+  display:flex;align-items:center;gap:5px;flex-wrap:wrap;
+}
+.kv-null{
+  display:inline-flex;align-items:center;height:16px;padding:0 5px;
+  border-radius:3px;border:1px dashed var(--stroke-control-strong);
+  font-family:var(--font-small);font-size:11px;color:var(--text-tertiary);
+}
+.kv-hidden{
+  display:inline-flex;align-items:center;height:16px;padding:0 5px;
+  border-radius:3px;background:var(--status-caution-bg);color:var(--status-caution);
+  font-family:var(--font-small);font-size:11px;font-weight:600;
+}
+
+.kv-chips{display:flex;flex-wrap:wrap;gap:4px}
+.kv-chip{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:2px 6px;max-width:100%;
+  border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);border:1px solid var(--stroke-card);
+  font-family:var(--font-mono);font-size:11px;line-height:15px;
+  color:var(--text-primary);overflow-wrap:anywhere;
+}
+.kv-chip .k{color:var(--text-tertiary)}
+.kv-chip.missing{color:var(--text-tertiary);border-style:dashed;background:transparent}
+
+/* Classification rules list inside document-detail */
+.rule-list{display:flex;flex-direction:column;gap:5px}
+.rule-item{
+  padding:6px 8px;border-radius:var(--radius-control);
+  background:var(--fill-card-secondary);border:1px solid var(--stroke-card);
+  display:flex;align-items:center;gap:8px;min-width:0;
+}
+.rule-item-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.rule-item-lbl{font:var(--type-caption);font-weight:600;color:var(--text-primary);overflow-wrap:anywhere}
+.rule-item-id{font-family:var(--font-mono);font-size:11px;line-height:14px;color:var(--text-tertiary);overflow-wrap:anywhere}
+
+/* InfoBar */
+.infobar{
+  flex:none;padding:7px 10px;
+  border-radius:var(--radius-control);
+  border:1px solid var(--stroke-card);
+  background:var(--fill-card-secondary);
+  display:flex;align-items:flex-start;gap:var(--space-s);
+  font:var(--type-caption);color:var(--text-secondary);
+  overflow-wrap:anywhere;word-break:break-word;
+}
+.infobar .ib-ic{flex:none;margin-top:1px;color:var(--text-secondary)}
+.infobar .ib-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow-wrap:anywhere}
+.infobar .ib-title{font:var(--type-body-strong);font-size:13px;line-height:18px;color:var(--text-primary);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.infobar.accent-info{
+  background:color-mix(in srgb,var(--accent-fill) 8%,var(--fill-card));
+  border-color:color-mix(in srgb,var(--accent-fill) 28%,transparent);
+  color:var(--text-primary);
+}
+.infobar.accent-info .ib-ic{color:var(--accent-text)}
+.infobar.caution{
+  background:var(--status-caution-bg);
+  border-color:color-mix(in srgb,var(--status-caution) 32%,transparent);
+  color:var(--text-primary);
+}
+.infobar.caution .ib-ic{color:var(--status-caution)}
+
+/* Raw intervals list (lane-merged sidebar) */
+.raw-list{display:flex;flex-direction:column;gap:5px}
+.raw-iv{
+  padding:7px 9px;
+  border-radius:var(--radius-control);
+  background:var(--fill-card);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:3px;
+}
+.raw-iv.dirty-row{
+  border-left:2.5px solid var(--status-caution);
+  padding-left:7px;
+}
+.raw-iv-top{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.raw-iv-time{font-family:var(--font-mono);font-size:11.5px;line-height:15px;font-weight:600;color:var(--text-primary);white-space:nowrap}
+.raw-iv-dur{font:var(--type-caption);color:var(--text-secondary);white-space:nowrap}
+.raw-iv-title{
+  font-family:var(--font-mono);font-size:11px;line-height:15px;
+  color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word;
+}
+.raw-iv-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font:var(--type-caption);color:var(--text-tertiary)}
+
+/* Side-by-side extraction variants showcase (segment-extraction) */
+.variants-card{
+  flex:none;padding:9px 12px;
+  display:flex;flex-direction:column;gap:6px;
+}
+.variants-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.variants-grid{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:8px;
+}
+html[data-size="min"] .variants-grid{grid-template-columns:1fr}
+.var-box{
+  padding:7px 8px;
+  border-radius:var(--radius-overlay);
+  background:var(--fill-card-secondary);
+  border:1px solid var(--stroke-card);
+  display:flex;flex-direction:column;gap:3px;min-width:0;
+}
+.var-box-hdr{display:flex;align-items:center;justify-content:space-between;gap:5px;flex-wrap:wrap}
+.var-box-app{display:flex;align-items:center;gap:5px;min-width:0}
+.var-box-app .strong{font-size:13px;line-height:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.var-raw-title{
+  padding:2px 5px;border-radius:var(--radius-control);
+  background:var(--bg-base);border:1px solid var(--stroke-divider);
+  font-family:var(--font-mono);font-size:10.5px;line-height:14px;
+  color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word;
+}
+.var-kv{display:flex;flex-direction:column;gap:1px}
+.var-kv-r{display:flex;align-items:baseline;gap:4px;font-size:10.5px;line-height:14px;min-width:0}
+.var-kv-k{width:68px;flex:none;font-family:var(--font-mono);font-size:10px;color:var(--text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.var-kv-v{flex:1;min-width:0;font-family:var(--font-mono);font-size:10.5px;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
+.var-outcome{
+  margin-top:auto;padding-top:4px;
+  border-top:1px solid var(--stroke-divider);
+  font:var(--type-caption);font-size:10.5px;line-height:14px;
+  color:var(--text-secondary);overflow-wrap:anywhere;
+}
+
+/* Stale document ref notice & softened stale content (document-stale) */
+.stale-notice{
+  flex:none;padding:9px 10px;
+  border-radius:var(--radius-overlay);
+  background:var(--status-caution-bg);
+  border:1px solid color-mix(in srgb,var(--status-caution) 34%,transparent);
+  display:flex;flex-direction:column;gap:6px;
+}
+.stale-top{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.stale-title{font:var(--type-body-strong);font-size:13px;line-height:18px;color:var(--text-primary);flex:1;min-width:0;overflow-wrap:anywhere}
+.stale-desc{font:var(--type-caption);color:var(--text-primary);overflow-wrap:anywhere}
+.stale-steps{
+  display:flex;flex-direction:column;gap:4px;
+  padding-top:5px;border-top:1px solid color-mix(in srgb,var(--status-caution) 22%,transparent);
+}
+.stale-step{
+  display:flex;align-items:center;gap:6px;
+  font:var(--type-caption);color:var(--text-primary);overflow-wrap:anywhere;
+}
+.stale-step.queued{color:var(--text-secondary)}
+.step-dot{
+  width:14px;height:14px;flex:none;display:grid;place-items:center;
+}
+.step-dot i{width:7px;height:7px;border-radius:50%;border:1.5px solid var(--text-tertiary);display:block}
+.stale-dim{opacity:.48;display:flex;flex-direction:column;gap:10px;pointer-events:none}
+</style>
+<script>
+const __p = new URLSearchParams(location.search);
+document.documentElement.dataset.theme = __p.get('theme') || 'light';
+if (__p.get('size') === 'min') document.documentElement.dataset.size = 'min';
+</script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.4" fill="currentColor"/></symbol>
+  <symbol id="today-f" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5" fill="currentColor" stroke="none"/><path d="M4 9.5h16" stroke="var(--cut)"/><path d="M8 3.5v3M16 3.5v3"/><circle cx="12" cy="14.5" r="1.6" fill="var(--cut)" stroke="none"/></symbol>
+  <symbol id="week" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M4 9.5h16M8 3.5v3M16 3.5v3M8 13h8M8 16.5h5"/></symbol>
+  <symbol id="tag" viewBox="0 0 24 24"><path d="M4 4h8l8.5 8.5a1.5 1.5 0 0 1 0 2.1l-5.9 5.9a1.5 1.5 0 0 1-2.1 0L4 12z"/><circle cx="8.3" cy="8.3" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><path d="M10.29 4.59L10.47 2.32L13.53 2.32L13.71 4.59L16.03 5.55L17.76 4.07L19.93 6.24L18.45 7.97L19.41 10.29L21.68 10.47L21.68 13.53L19.41 13.71L18.45 16.03L19.93 17.76L17.76 19.93L16.03 18.45L13.71 19.41L13.53 21.68L10.47 21.68L10.29 19.41L7.97 18.45L6.24 19.93L4.07 17.76L5.55 16.03L4.59 13.71L2.32 13.53L2.32 10.47L4.59 10.29L5.55 7.97L4.07 6.24L6.24 4.07L7.97 5.55Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="chev-l" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+  <symbol id="chev-r" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+  <symbol id="chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
+  <symbol id="menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="add" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="code" viewBox="0 0 24 24"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></symbol>
+  <symbol id="doc" viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9.5 12h5M9.5 15.5h5"/></symbol>
+  <symbol id="mail" viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="M4 7l8 6 8-6"/></symbol>
+  <symbol id="terminal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M7.5 10l3 2.5-3 2.5M12.5 15h4"/></symbol>
+  <symbol id="book" viewBox="0 0 24 24"><path d="M5 4.5h9.5a2.5 2.5 0 0 1 2.5 2.5v12.5H7.5A2.5 2.5 0 0 0 5 21z"/><path d="M5 4.5v15A2.5 2.5 0 0 1 7.5 17H17"/></symbol>
+  <symbol id="globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.3 3.8 5.1 3.8 8.5s-1.3 6.2-3.8 8.5c-2.5-2.3-3.8-5.1-3.8-8.5S9.5 5.8 12 3.5z"/></symbol>
+  <symbol id="chat" viewBox="0 0 24 24"><path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4.5 3.5V16H6a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="folder" viewBox="0 0 24 24"><path d="M3.5 7a2 2 0 0 1 2-2h4.2l2 2h6.8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.5"/><path d="M5.5 19.5c.8-3.4 3.2-5 6.5-5s5.7 1.6 6.5 5"/></symbol>
+  <symbol id="layers" viewBox="0 0 24 24"><path d="M12 4l8 4.5-8 4.5-8-4.5zM4 12.5l8 4.5 8-4.5M4 16.5l8 4.5 8-4.5"/></symbol>
+  <symbol id="shield" viewBox="0 0 24 24"><path d="M12 3.5l7 2.5v5.5c0 4-2.8 7.2-7 9-4.2-1.8-7-5-7-9V6z"/></symbol>
+  <symbol id="trash" viewBox="0 0 24 24"><path d="M5 7h14M9.5 7V4.5h5V7M7 7l.8 12.5h8.4L17 7"/></symbol>
+  <symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="tree" viewBox="0 0 24 24"><path d="M6 5v14M6 9h5M6 15h5"/><rect x="11" y="7" width="8" height="4" rx="1"/><rect x="11" y="13" width="8" height="4" rx="1"/></symbol>
+  <symbol id="hand" viewBox="0 0 24 24"><path d="M8 12V6.5a1.2 1.2 0 0 1 2.4 0V11M10.4 10.5V5a1.2 1.2 0 0 1 2.4 0v5.5M12.8 10.5V6a1.2 1.2 0 0 1 2.4 0v5M15.2 11.5V8.5a1.2 1.2 0 0 1 2.4 0v6c0 3-2.1 5.5-5.2 5.5h-1.6c-2.2 0-3.8-1.4-4.6-3.4l-1.5-3.6a1.2 1.2 0 0 1 2.1-1.1L8 13.5"/></symbol>
+  <symbol id="range-sel" viewBox="0 0 24 24"><path d="M5 4v16M19 4v16M8 12h8M10.5 9.5L8 12l2.5 2.5M13.5 9.5L16 12l-2.5 2.5"/></symbol>
+  <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><circle cx="12" cy="8" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="eye-off" viewBox="0 0 24 24"><path d="M3.5 3.5l17 17M9.9 9.9a3 3 0 0 0 4.2 4.2M6.2 6.8C4.4 8.1 3.1 10 2.5 12c1.6 3.9 5.3 6.5 9.5 6.5 1.8 0 3.5-.5 5-1.3M10.5 5.6c.5-.1 1-.1 1.5-.1 4.2 0 7.9 2.6 9.5 6.5-.6 1.4-1.4 2.7-2.5 3.7"/></symbol>
+  <symbol id="ring14" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--stroke-control-strong)" stroke-width="1.8"/><path d="M8 2a6 6 0 0 1 6 6" fill="none" stroke="var(--accent-fill)" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="logo" viewBox="0 0 24 24"><path d="M12 2.5l8 4.5v10l-8 4.5-8-4.5V7z" fill="var(--accent-fill)" stroke="none"/><path d="M12 2.5v19M4 7l16 10M20 7L4 17" stroke="var(--text-on-accent)" stroke-width="1" opacity=".7"/></symbol>
+</defs></svg>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="app"><svg class="ic s16"><use href="#logo"/></svg><span>Quartz</span></div>
+    <div class="btns">
+      <div><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></div>
+      <div><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></div>
+    </div>
+  </div>
+  <div class="body">
+    <nav class="nav" id="nav"></nav>
+    <div class="wrap" id="wrap">
+      <div class="main-wrap" id="main-wrap">
+        <main class="main" id="main"></main>
+        <div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="main-thumb"></div></div>
+      </div>
+      <div class="panel-scrim" id="panel-scrim"></div>
+      <aside class="details" id="details" style="display:none"></aside>
+    </div>
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const rawLang = params.get('lang') || 'zh-CN';
+const lang = (rawLang === 'en' || rawLang === 'en-XA') ? rawLang : 'zh-CN';
+const stateKey = params.get('state') || 'ranking-documents';
+const isMin = params.get('size') === 'min';
+document.documentElement.lang = lang === 'en-XA' ? 'en' : lang;
+document.documentElement.dataset.lang = lang;
+
+const PANEL_STATES = new Set([
+  'document-detail',
+  'lane-merged',
+  'segment-extraction',
+  'document-stale',
+]);
+const hasPanel = PANEL_STATES.has(stateKey);
+if (hasPanel) document.documentElement.dataset.panelOpen = 'true';
+if (hasPanel && !isMin) document.documentElement.dataset.hasPanel = 'true';
+
+/* Pseudo-locale generator matching quartz-i18n/src/pseudo.rs (~40% tilde padding + brackets) */
+const ACCENT_MAP = {
+  A:'À',B:'Ɓ',C:'Ç',D:'Ď',E:'É',F:'Ƒ',G:'Ĝ',H:'Ĥ',I:'Î',J:'Ĵ',K:'Ķ',L:'Ļ',M:'Ḿ',
+  N:'Ñ',O:'Ö',P:'Ƥ',Q:'Ǫ',R:'Ŕ',S:'Š',T:'Ţ',U:'Û',V:'Ṽ',W:'Ŵ',X:'Ẋ',Y:'Ý',Z:'Ž',
+  a:'à',b:'ƀ',c:'ç',d:'đ',e:'é',f:'ƒ',g:'ĝ',h:'ĥ',i:'î',j:'ĵ',k:'ķ',l:'ļ',m:'ɱ',
+  n:'ñ',o:'ö',p:'ƥ',q:'ǫ',r:'ŕ',s:'š',t:'ţ',u:'û',v:'ṽ',w:'ŵ',x:'ẋ',y:'ý',z:'ž',
+};
+function pseudoStr(s) {
+  if (!s || typeof s !== 'string') return s;
+  const accented = [...s].map(ch => ACCENT_MAP[ch] || ch).join('');
+  const pad = Math.ceil((s.length * 2) / 5);
+  return '[' + accented + '~'.repeat(pad) + ']';
+}
+function pseudoObj(val, skipKeys = new Set([
+  'c', 'ic', 'w', 'code', 'key', 'id', 'exe', 'app', 'doc', 'proj', 'prof',
+  'ruleId', 'statusCode', 'time', 'rawTitle', 'normTitle', 'idTuple',
+  'rangeNormal', 'rangeEmpty', 'sharePct', 'pct',
+])) {
+  if (typeof val === 'string') return pseudoStr(val);
+  if (Array.isArray(val)) return val.map(v => pseudoObj(v, skipKeys));
+  if (val && typeof val === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      out[k] = skipKeys.has(k) ? v : pseudoObj(v, skipKeys);
+    }
+    return out;
+  }
+  return val;
+}
+
+const COPY = {
+  'zh-CN': {
+    nav: { today: '今天', week: '本周', rules: '分类与规则', settings: '设置' },
+    cats: {
+      dev: '开发',
+      learn: '学习',
+      comm: '沟通',
+      sys: '系统与工具',
+      unclassified: '未分类',
+    },
+    today: {
+      dateNormal: '11月16日 周一',
+      dateEmpty: '11月15日 周日',
+      todayBtn: '今天',
+      updating: '正在更新…',
+      stats: {
+        active: '活跃时长', focus: '专注占比', distraction: '分心占比',
+        unclassified: '未分类', longestFocus: '最长连续专注', switches: '每小时切换',
+        hUnit: '小时', mUnit: '分', swUnit: '次',
+      },
+      legendNormal: [
+        { c: '--cat-8', text: '开发 4 小时 18 分' },
+        { c: '--cat-1', text: '学习 1 小时 14 分' },
+        { c: '--cat-3', text: '沟通 52 分' },
+        { c: '--cat-10', text: '系统与工具 23 分' },
+        { c: '--cat-neutral', text: '未分类 28 分' },
+      ],
+      legendEmpty: [
+        { c: '--cat-8', text: '开发 58 分' },
+        { c: '--cat-3', text: '沟通 46 分' },
+        { c: '--cat-10', text: '系统与工具 10 分' },
+        { c: '--cat-neutral', text: '未分类 24 分' },
+      ],
+      tl: {
+        title: '时间轴',
+        rangeNormal: '08:33 – 18:45',
+        rangeEmpty: '09:15 – 17:30',
+        modePan: '平移',
+        modeSelect: '选择',
+        appLanes: '应用泳道',
+        catOnly: '仅分类',
+        full24: '整 24 小时',
+        cat: '分类',
+        dev: '开发',
+        devLong: '开发 1 小时 42 分',
+        learn: '学习',
+        comm: '沟通',
+        excl: '已排除 62 分钟',
+        appsNormal: ['VS Code', 'Word', 'Outlook', 'Windows Terminal', 'Microsoft Edge'],
+        appsEmpty: ['Windows Terminal', 'Microsoft Edge', '微信', '任务管理器'],
+      },
+      hourly: { title: '按小时', y0: '0 分', y30: '30 分', y60: '60 分' },
+      rank: {
+        title: '排行',
+        tabs: ['应用', '文档'],
+        refreshingNote: '正在刷新引用…',
+        footNote: '仅统计具有文档身份的活动；同名文档按项目与配置文件分别统计，无文档身份的终端与聊天窗口不列于此。',
+        docs: [
+          {
+            c: '--cat-8', ic: 'code', doc: 'main.rs', proj: 'Quartz', prof: null,
+            app: 'Visual Studio Code', w: '100%', dur: '1 小时 24 分', share: '占 19%',
+          },
+          {
+            c: '--cat-8', ic: 'code', doc: '07-ui.md', proj: 'Quartz', prof: null,
+            app: 'Visual Studio Code', w: '67%', dur: '56 分', share: '占 13%',
+          },
+          {
+            c: '--cat-8', ic: 'code', doc: 'main.rs', proj: 'bench-harness', prof: null,
+            app: 'Visual Studio Code', w: '50%', dur: '42 分', share: '占 10%',
+          },
+          {
+            c: '--cat-1', ic: 'doc', doc: '架构设计评审.docx', proj: null, prof: null,
+            app: 'Microsoft Word', w: '45%', dur: '38 分', share: '占 9%',
+          },
+          {
+            c: '--cat-1', ic: 'globe', doc: 'Rust 标准库手册', proj: null, prof: '工作',
+            app: 'Microsoft Edge', w: '36%', dur: '30 分', share: '占 7%',
+          },
+        ],
+        empty: {
+          title: '今天没有识别到文档',
+          desc: '今天的活动主要来自终端会话、无文档标题的窗口或已隐藏标题的记录，因此没有可按文档统计的项目。',
+          action: '切换到应用视图',
+        },
+      },
+      pending: {
+        title: '待标注的离开',
+        range: '15:18 – 15:38 · 20 分',
+        rest: '休息', meeting: '会议', reading: '阅读思考', ignore: '忽略', other: '其他…',
+      },
+    },
+    docDetail: {
+      doc: 'main.rs',
+      proj: 'Quartz',
+      appSub: 'Visual Studio Code · code.exe',
+      todayTotal: '1 小时 24 分',
+      todayShare: '占今日活跃 19%',
+      catName: '开发',
+      catSource: '规则：Quartz Rust 项目',
+      idSummary: '文档身份：code.exe · main.rs · Quartz（profile：缺失）',
+      d7Title: '近 7 天',
+      d7Total: '累计 6 小时 18 分',
+      d7Days: ['周二', '周三', '周四', '周五', '周六', '周日', '今天'],
+      titlesTitle: '常见标题',
+      titles: [
+        { rawTitle: 'main.rs - Quartz - Visual Studio Code', w: '100%', dur: '3 小时 42 分' },
+        { rawTitle: '● main.rs - Quartz - Visual Studio Code', w: '54%', dur: '2 小时 00 分' },
+        { rawTitle: 'main.rs - Quartz (Workspace) - Visual Studio Code', w: '16%', dur: '36 分' },
+      ],
+      provTitle: '文档提取来源',
+      statusExtracted: '已提取',
+      statusCode: 'extracted',
+      ruleLbl: '提取规则',
+      ruleId: 'builtin.extraction/vscode-project@v1',
+      dirtyNote: 'dirty = true（● 未保存标记已剥离，不参与身份）',
+      normTitle: 'main.rs - Quartz',
+      profileMissing: '缺失',
+      provHint: '由内置规则提取（非通用回退）；同项目的已保存与未保存标题自动归入同一文档。',
+      rulesTitle: '生效分类规则',
+      explainBtn: '查看解释',
+      rules: [
+        { name: 'Quartz Rust 项目', ruleId: 'user.local.classification/quartz-rust@v3', c: '--cat-8', cat: '开发' },
+        { name: 'Visual Studio Code', ruleId: 'builtin.classification/vscode@v2', c: '--cat-8', cat: '开发' },
+      ],
+      footClassify: '归类为…',
+      footPrivacy: '创建隐私规则…',
+      footDeleteTip: '删除相关数据暂未开放，将在后续版本提供',
+    },
+    laneMerged: {
+      ttApp: 'Visual Studio Code',
+      ttDoc: 'main.rs',
+      ttProj: 'Quartz',
+      ttTime: '14:00 – 15:18',
+      ttDur: '1 小时 18 分',
+      ttCat: '开发',
+      ttRule: '规则：Quartz Rust 项目',
+      ttMerged: '合并了 5 段原始区间',
+      ttMergedSub: '● 未保存标记变化不拆段',
+      ttClickHint: '点击查看全部原始区间',
+      panelSub: '14:00 – 15:18 · 1 小时 18 分 · Visual Studio Code',
+      mergedBadge: '合并 5 段',
+      infoTitle: '同窗口同文档连续片段已合并',
+      infoDesc: '泳道按同一窗口实例与文档身份合并展示，● 未保存标记切换不会拆段；点击后在此查看每段原始区间与原始标题。',
+      rawListTitle: '原始区间（5 段）',
+      cleanBadge: '已保存',
+      dirtyBadge: '● 未保存',
+      rawRows: [
+        { time: '14:00:00 – 14:14:22', dur: '14 分 22 秒', dirty: false, rawTitle: 'main.rs - Quartz - Visual Studio Code', rule: 'Quartz Rust 项目' },
+        { time: '14:14:22 – 14:29:05', dur: '14 分 43 秒', dirty: true,  rawTitle: '● main.rs - Quartz - Visual Studio Code', rule: 'Quartz Rust 项目' },
+        { time: '14:29:05 – 14:43:48', dur: '14 分 43 秒', dirty: false, rawTitle: 'main.rs - Quartz - Visual Studio Code', rule: 'Quartz Rust 项目' },
+        { time: '14:43:48 – 15:01:12', dur: '17 分 24 秒', dirty: true,  rawTitle: '● main.rs - Quartz - Visual Studio Code', rule: 'Quartz Rust 项目' },
+        { time: '15:01:12 – 15:18:00', dur: '16 分 48 秒', dirty: false, rawTitle: 'main.rs - Quartz - Visual Studio Code', rule: 'Quartz Rust 项目' },
+      ],
+    },
+    segExtract: {
+      panelTitle: '片段提取详情',
+      panelSub: 'Visual Studio Code · 14:14:22 – 14:29:05 · 14 分 43 秒',
+      rawLabel: '原始窗口标题',
+      rawTitle: '● main.rs - Quartz - Visual Studio Code',
+      fieldsTitle: '提取输出字段',
+      statusBadge: '已提取 · extracted',
+      nullTag: '缺失 (null)',
+      hiddenTag: '已隐藏（隐私规则）',
+      dirtyTrueVal: 'true（● 已剥离）',
+      dirtyFalseVal: 'false',
+      fallbackRuleVal: 'null（通用回退）',
+      skippedRuleVal: 'null（未执行）',
+      idTitle: '派生的文档身份',
+      idBadgeOk: '已生成身份',
+      idTuple: '(code.exe, "main.rs", "Quartz", null)',
+      idNote: '文档身份由 (app, document, project, profile) 组成（NFC 规范化、保留大小写、null ≠ ""）；dirty 与 normalized_title 不参与身份。',
+      variantsTitle: '其他提取状态对照（同页片段）',
+      variantsSub: '对照回退（fallback）、显式无文档（empty）与隐藏标题（unknown）',
+      variants: [
+        {
+          app: 'SumatraPDF', exe: 'SumatraPDF.exe', ic: 'book', time: '16:10 – 16:38',
+          badgeCls: 'ovr', badgeTxt: '回退 · fallback',
+          rawTitle: 'quartz-architecture-v2.pdf - SumatraPDF',
+          document: 'quartz-architecture-v2.pdf',
+          project: null, profile: null, dirty: 'false',
+          normTitle: 'quartz-architecture-v2.pdf',
+          rule: 'fallback',
+          statusCode: 'fallback',
+          outcome: '已生成文档身份：无专属规则命中时去掉“ - 应用名”后缀，保留数字与括号。',
+        },
+        {
+          app: 'Windows Terminal', exe: 'windowsterminal.exe', ic: 'terminal', time: '11:10 – 11:24',
+          badgeCls: 'dis', badgeTxt: '无文档 · empty',
+          rawTitle: 'pwsh — cargo clippy',
+          document: null,
+          project: null, profile: null, dirty: 'false',
+          normTitle: 'pwsh — cargo clippy',
+          ruleId: 'builtin.extraction/windows-terminal-tab@v1',
+          statusCode: 'empty',
+          outcome: '无文档身份：终端标签规则不捕获 document，泳道保留原始标题边界，不进入文档排行。',
+        },
+        {
+          app: 'Microsoft Outlook', exe: 'olk.exe', ic: 'mail', time: '15:40 – 16:05',
+          badgeCls: 'warn', badgeTxt: '未知 · unknown',
+          rawTitleHidden: true,
+          document: null,
+          project: null, profile: null, dirty: null,
+          normTitle: null,
+          rule: 'skipped',
+          statusCode: 'unknown',
+          outcome: '无文档身份：历史隐私规则已隐藏标题，全部提取字段为空，不进入文档排行。',
+        },
+      ],
+    },
+    stale: {
+      title: '文档引用已过期',
+      code: 'stale_document_ref',
+      desc: '当日记录或提取规则已更新。正在自动刷新文档排行以获取最新引用，随后重新加载详情，无需手动重试。',
+      step1: '步骤 1：正在刷新文档排行与引用范围…',
+      step2: '步骤 2：等待完成后自动重新加载文档详情',
+    },
+  },
+  'en': {
+    nav: { today: 'Today', week: 'Week', rules: 'Categories & Rules', settings: 'Settings' },
+    cats: {
+      dev: 'Development',
+      learn: 'Learning',
+      comm: 'Communication',
+      sys: 'System & Tools',
+      unclassified: 'Unclassified',
+    },
+    today: {
+      dateNormal: 'Mon, Nov 16',
+      dateEmpty: 'Sun, Nov 15',
+      todayBtn: 'Today',
+      updating: 'Updating…',
+      stats: {
+        active: 'Active time', focus: 'Focus share', distraction: 'Distraction',
+        unclassified: 'Unclassified', longestFocus: 'Longest focus', switches: 'Switches / hr',
+        hUnit: 'h', mUnit: 'm', swUnit: '',
+      },
+      legendNormal: [
+        { c: '--cat-8', text: 'Development 4h 18m' },
+        { c: '--cat-1', text: 'Learning 1h 14m' },
+        { c: '--cat-3', text: 'Communication 52m' },
+        { c: '--cat-10', text: 'System & Tools 23m' },
+        { c: '--cat-neutral', text: 'Unclassified 28m' },
+      ],
+      legendEmpty: [
+        { c: '--cat-8', text: 'Development 58m' },
+        { c: '--cat-3', text: 'Communication 46m' },
+        { c: '--cat-10', text: 'System & Tools 10m' },
+        { c: '--cat-neutral', text: 'Unclassified 24m' },
+      ],
+      tl: {
+        title: 'Timeline',
+        rangeNormal: '08:33 – 18:45',
+        rangeEmpty: '09:15 – 17:30',
+        modePan: 'Pan',
+        modeSelect: 'Select',
+        appLanes: 'App lanes',
+        catOnly: 'Category only',
+        full24: 'Full 24h',
+        cat: 'Category',
+        dev: 'Development',
+        devLong: 'Development 1h 42m',
+        learn: 'Learning',
+        comm: 'Communication',
+        excl: 'Excluded 62m',
+        appsNormal: ['VS Code', 'Word', 'Outlook', 'Windows Terminal', 'Microsoft Edge'],
+        appsEmpty: ['Windows Terminal', 'Microsoft Edge', 'WeChat', 'Task Manager'],
+      },
+      hourly: { title: 'By hour', y0: '0m', y30: '30m', y60: '60m' },
+      rank: {
+        title: 'Ranking',
+        tabs: ['Apps', 'Documents'],
+        refreshingNote: 'Refreshing references…',
+        footNote: 'Only activities with a document identity are listed; same-name files in different projects stay separate, and terminal shells or chat windows are omitted.',
+        docs: [
+          {
+            c: '--cat-8', ic: 'code', doc: 'main.rs', proj: 'Quartz', prof: null,
+            app: 'Visual Studio Code', w: '100%', dur: '1h 24m', share: '19% share',
+          },
+          {
+            c: '--cat-8', ic: 'code', doc: '07-ui.md', proj: 'Quartz', prof: null,
+            app: 'Visual Studio Code', w: '67%', dur: '56m', share: '13% share',
+          },
+          {
+            c: '--cat-8', ic: 'code', doc: 'main.rs', proj: 'bench-harness', prof: null,
+            app: 'Visual Studio Code', w: '50%', dur: '42m', share: '10% share',
+          },
+          {
+            c: '--cat-1', ic: 'doc', doc: 'Design-Review.docx', proj: null, prof: null,
+            app: 'Microsoft Word', w: '45%', dur: '38m', share: '9% share',
+          },
+          {
+            c: '--cat-1', ic: 'globe', doc: 'Rust Std Manual', proj: null, prof: 'Work',
+            app: 'Microsoft Edge', w: '36%', dur: '30m', share: '7% share',
+          },
+        ],
+        empty: {
+          title: 'No documents identified today',
+          desc: 'Today’s activity came from terminal shells, windows without a document title, or hidden-title records, so no document identities are available.',
+          action: 'Switch to Apps view',
+        },
+      },
+      pending: {
+        title: 'Pending away',
+        range: '15:18 – 15:38 · 20m',
+        rest: 'Rest', meeting: 'Meeting', reading: 'Reading', ignore: 'Ignore', other: 'Other…',
+      },
+    },
+    docDetail: {
+      doc: 'main.rs',
+      proj: 'Quartz',
+      appSub: 'Visual Studio Code · code.exe',
+      todayTotal: '1h 24m',
+      todayShare: '19% of today’s active time',
+      catName: 'Development',
+      catSource: 'Rule: Quartz Rust project',
+      idSummary: 'Identity: code.exe · main.rs · Quartz (profile: missing)',
+      d7Title: 'Past 7 days',
+      d7Total: '6h 18m total',
+      d7Days: ['Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun', 'Today'],
+      titlesTitle: 'Common titles',
+      titles: [
+        { rawTitle: 'main.rs - Quartz - Visual Studio Code', w: '100%', dur: '3h 42m' },
+        { rawTitle: '● main.rs - Quartz - Visual Studio Code', w: '54%', dur: '2h 00m' },
+        { rawTitle: 'main.rs - Quartz (Workspace) - Visual Studio Code', w: '16%', dur: '36m' },
+      ],
+      provTitle: 'Extraction provenance',
+      statusExtracted: 'Extracted',
+      statusCode: 'extracted',
+      ruleLbl: 'Extractor rule',
+      ruleId: 'builtin.extraction/vscode-project@v1',
+      dirtyNote: 'dirty = true (● unsaved marker stripped, excluded from identity)',
+      normTitle: 'main.rs - Quartz',
+      profileMissing: 'Missing',
+      provHint: 'Matched by builtin rule (not generic fallback); clean and unsaved titles in the same project merge under one identity.',
+      rulesTitle: 'Classification rules',
+      explainBtn: 'Explain',
+      rules: [
+        { name: 'Quartz Rust project', ruleId: 'user.local.classification/quartz-rust@v3', c: '--cat-8', cat: 'Development' },
+        { name: 'Visual Studio Code', ruleId: 'builtin.classification/vscode@v2', c: '--cat-8', cat: 'Development' },
+      ],
+      footClassify: 'Classify as…',
+      footPrivacy: 'Privacy rule…',
+      footDeleteTip: 'Delete related data is not available yet; coming in a later release',
+    },
+    laneMerged: {
+      ttApp: 'Visual Studio Code',
+      ttDoc: 'main.rs',
+      ttProj: 'Quartz',
+      ttTime: '14:00 – 15:18',
+      ttDur: '1h 18m',
+      ttCat: 'Development',
+      ttRule: 'Rule: Quartz Rust project',
+      ttMerged: 'Merged 5 raw intervals',
+      ttMergedSub: '● unsaved-marker churn kept together',
+      ttClickHint: 'Click to view all raw intervals',
+      panelSub: '14:00 – 15:18 · 1h 18m · Visual Studio Code',
+      mergedBadge: '5 merged',
+      infoTitle: 'Contiguous intervals merged on lane',
+      infoDesc: 'Same window instance and document identity merge visually; ● unsaved-marker changes do not split the block. Inspect every raw interval below.',
+      rawListTitle: 'Raw intervals (5)',
+      cleanBadge: 'Saved',
+      dirtyBadge: '● Unsaved',
+      rawRows: [
+        { time: '14:00:00 – 14:14:22', dur: '14m 22s', dirty: false, rawTitle: 'main.rs - Quartz - Visual Studio Code', rule: 'Quartz Rust project' },
+        { time: '14:14:22 – 14:29:05', dur: '14m 43s', dirty: true,  rawTitle: '● main.rs - Quartz - Visual Studio Code', rule: 'Quartz Rust project' },
+        { time: '14:29:05 – 14:43:48', dur: '14m 43s', dirty: false, rawTitle: 'main.rs - Quartz - Visual Studio Code', rule: 'Quartz Rust project' },
+        { time: '14:43:48 – 15:01:12', dur: '17m 24s', dirty: true,  rawTitle: '● main.rs - Quartz - Visual Studio Code', rule: 'Quartz Rust project' },
+        { time: '15:01:12 – 15:18:00', dur: '16m 48s', dirty: false, rawTitle: 'main.rs - Quartz - Visual Studio Code', rule: 'Quartz Rust project' },
+      ],
+    },
+    segExtract: {
+      panelTitle: 'Segment extraction',
+      panelSub: 'Visual Studio Code · 14:14:22 – 14:29:05 · 14m 43s',
+      rawLabel: 'Raw window title',
+      rawTitle: '● main.rs - Quartz - Visual Studio Code',
+      fieldsTitle: 'Extraction output fields',
+      statusBadge: 'Extracted · extracted',
+      nullTag: 'Missing (null)',
+      hiddenTag: 'Hidden (privacy rule)',
+      dirtyTrueVal: 'true (● stripped)',
+      dirtyFalseVal: 'false',
+      fallbackRuleVal: 'null (generic fallback)',
+      skippedRuleVal: 'null (skipped)',
+      idTitle: 'Derived document identity',
+      idBadgeOk: 'Identity created',
+      idTuple: '(code.exe, "main.rs", "Quartz", null)',
+      idNote: 'Identity is (app, document, project, profile) with NFC & case preserved (null ≠ ""); dirty and normalized_title do not affect identity.',
+      variantsTitle: 'Other extraction status variants (same day)',
+      variantsSub: 'Side-by-side comparison of fallback, empty (no document), and unknown (hidden title)',
+      variants: [
+        {
+          app: 'SumatraPDF', exe: 'SumatraPDF.exe', ic: 'book', time: '16:10 – 16:38',
+          badgeCls: 'ovr', badgeTxt: 'Fallback · fallback',
+          rawTitle: 'quartz-architecture-v2.pdf - SumatraPDF',
+          document: 'quartz-architecture-v2.pdf',
+          project: null, profile: null, dirty: 'false',
+          normTitle: 'quartz-architecture-v2.pdf',
+          rule: 'fallback',
+          statusCode: 'fallback',
+          outcome: 'Identity created: generic fallback strips " - App" suffix while preserving digits and brackets.',
+        },
+        {
+          app: 'Windows Terminal', exe: 'windowsterminal.exe', ic: 'terminal', time: '11:10 – 11:24',
+          badgeCls: 'dis', badgeTxt: 'Empty · empty',
+          rawTitle: 'pwsh — cargo clippy',
+          document: null,
+          project: null, profile: null, dirty: 'false',
+          normTitle: 'pwsh — cargo clippy',
+          ruleId: 'builtin.extraction/windows-terminal-tab@v1',
+          statusCode: 'empty',
+          outcome: 'No identity: terminal tab rule captures no document; lane keeps raw title boundaries and omits from Documents ranking.',
+        },
+        {
+          app: 'Microsoft Outlook', exe: 'olk.exe', ic: 'mail', time: '15:40 – 16:05',
+          badgeCls: 'warn', badgeTxt: 'Unknown · unknown',
+          rawTitleHidden: true,
+          document: null,
+          project: null, profile: null, dirty: null,
+          normTitle: null,
+          rule: 'skipped',
+          statusCode: 'unknown',
+          outcome: 'No identity: historical privacy rule dropped the title, so no extraction fields are produced.',
+        },
+      ],
+    },
+    stale: {
+      title: 'Document reference expired — refreshing',
+      code: 'stale_document_ref',
+      desc: 'Today’s activity or extraction rules changed. Refreshing the document ranking first to obtain a fresh reference, then reloading details automatically.',
+      step1: 'Step 1: Refreshing document ranking & reference range…',
+      step2: 'Step 2: Reloading document details automatically once ready',
+    },
+  },
+};
+
+COPY['en-XA'] = pseudoObj(COPY.en);
+/* Keep technical/proper identifiers literal in en-XA so pseudo-locale stresses UI labels authentically */
+COPY['en-XA'].today.tl.appsNormal = COPY.en.today.tl.appsNormal;
+COPY['en-XA'].today.tl.appsEmpty = COPY.en.today.tl.appsEmpty;
+COPY['en-XA'].today.rank.docs = COPY.en.today.rank.docs.map(d => ({
+  ...d,
+  dur: pseudoStr(d.dur),
+  share: pseudoStr(d.share),
+}));
+COPY['en-XA'].docDetail.appSub = COPY.en.docDetail.appSub;
+COPY['en-XA'].laneMerged.ttApp = COPY.en.laneMerged.ttApp;
+COPY['en-XA'].laneMerged.ttTime = COPY.en.laneMerged.ttTime;
+COPY['en-XA'].segExtract.variants = COPY.en.segExtract.variants.map((v, i) => ({
+  ...v,
+  badgeTxt: pseudoStr(v.badgeTxt),
+  outcome: pseudoStr(v.outcome),
+}));
+
+const T = COPY[lang];
+
+function catChip(colorVar, label) {
+  return `<span class="chip" style="--c:var(${colorVar})"><i></i><span class="ell">${label}</span></span>`;
+}
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  const isRail = isMin || hasPanel;
+  if (isRail) nav.classList.add('rail');
+  const menuRow = isMin
+    ? `<div style="height:4px;flex:none"></div>`
+    : `<div class="nav-item" style="margin-top:4px"><svg class="ic"><use href="#menu"/></svg></div>`;
+  nav.innerHTML =
+    menuRow +
+    `<div class="nav-item selected"><i class="ind"></i><svg class="ic"><use href="#today-f"/></svg><span>${T.nav.today}</span></div>` +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#week"/></svg><span>${T.nav.week}</span></div>` +
+    `<div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#tag"/></svg><span>${T.nav.rules}</span></div>` +
+    `<div class="spacer"></div>` +
+    `<div class="bottom"><div class="nav-item"><i class="ind"></i><svg class="ic"><use href="#gear"/></svg><span>${T.nav.settings}</span></div></div>`;
+}
+
+function renderTodayMain() {
+  const td = T.today;
+  const s = td.stats;
+  const tl = td.tl;
+  const h = td.hourly;
+  const r = td.rank;
+  const isEmptyDocs = stateKey === 'ranking-documents-empty';
+  const isStale = stateKey === 'document-stale';
+  const isMerged = stateKey === 'lane-merged';
+  const isSegExtract = stateKey === 'segment-extraction';
+  const swUnit = s.swUnit ? `<small>${s.swUnit}</small>` : '';
+
+  const dateBarHtml =
+    `<div class="datebar">` +
+      `<button class="btn icon"><svg class="ic s16"><use href="#chev-l"/></svg></button>` +
+      `<div class="btn date"><svg class="ic s16"><use href="#today"/></svg><span class="strong ell">${isEmptyDocs ? td.dateEmpty : td.dateNormal}</span><span class="grow"></span><svg class="ic s16"><use href="#chev-d"/></svg></div>` +
+      `<button class="btn icon"><svg class="ic s16"><use href="#chev-r"/></svg></button>` +
+      `<button class="btn">${td.todayBtn}</button>` +
+      (isStale
+        ? `<div class="refresh-ind"><svg class="ring-xs"><use href="#ring14"/></svg><span>${td.updating}</span></div>`
+        : '') +
+    `</div>`;
+
+  const statusCardHtml = isEmptyDocs
+    ? `<div class="card" style="padding:10px 16px;flex:none">` +
+        `<div class="stats">` +
+          `<div class="stat"><div class="v big">2<small>${s.hUnit}</small>18<small>${s.mUnit}</small></div><div class="l">${s.active}</div></div>` +
+          `<div class="stat"><div class="v">42%</div><div class="l">${s.focus}</div></div>` +
+          `<div class="stat"><div class="v">0%</div><div class="l">${s.distraction}</div></div>` +
+          `<div class="stat"><div class="v">24<small>${s.mUnit}</small></div><div class="l">${s.unclassified} <svg class="ic s16" style="width:12px;height:12px"><use href="#chev-r"/></svg></div></div>` +
+          `<div class="stat"><div class="v">58<small>${s.mUnit}</small></div><div class="l">${s.longestFocus}</div></div>` +
+          `<div class="stat"><div class="v">4${swUnit}</div><div class="l">${s.switches}</div></div>` +
+        `</div>` +
+        `<div class="catbar" style="margin-top:8px">` +
+          `<div style="--c:var(--cat-8);flex:58"></div>` +
+          `<div style="--c:var(--cat-3);flex:46"></div>` +
+          `<div style="--c:var(--cat-10);flex:10"></div>` +
+          `<div style="--c:var(--cat-neutral);flex:24"></div>` +
+        `</div>` +
+        `<div class="legend" style="margin-top:6px">` +
+          td.legendEmpty.map(l => `<span style="--c:var(${l.c})"><i></i>${l.text}</span>`).join('') +
+        `</div>` +
+      `</div>`
+    : `<div class="card" style="padding:10px 16px;flex:none">` +
+        `<div class="stats">` +
+          `<div class="stat"><div class="v big">7<small>${s.hUnit}</small>15<small>${s.mUnit}</small></div><div class="l">${s.active}</div></div>` +
+          `<div class="stat"><div class="v">76%</div><div class="l">${s.focus}</div></div>` +
+          `<div class="stat"><div class="v">0%</div><div class="l">${s.distraction}</div></div>` +
+          `<div class="stat"><div class="v">28<small>${s.mUnit}</small></div><div class="l">${s.unclassified} <svg class="ic s16" style="width:12px;height:12px"><use href="#chev-r"/></svg></div></div>` +
+          `<div class="stat"><div class="v">1<small>${s.hUnit}</small>42<small>${s.mUnit}</small></div><div class="l">${s.longestFocus}</div></div>` +
+          `<div class="stat"><div class="v">3${swUnit}</div><div class="l">${s.switches}</div></div>` +
+        `</div>` +
+        `<div class="catbar" style="margin-top:8px">` +
+          `<div style="--c:var(--cat-8);flex:258"></div>` +
+          `<div style="--c:var(--cat-1);flex:74"></div>` +
+          `<div style="--c:var(--cat-3);flex:52"></div>` +
+          `<div style="--c:var(--cat-10);flex:23"></div>` +
+          `<div style="--c:var(--cat-neutral);flex:28"></div>` +
+        `</div>` +
+        `<div class="legend" style="margin-top:6px">` +
+          td.legendNormal.map(l => `<span style="--c:var(${l.c})"><i></i>${l.text}</span>`).join('') +
+        `</div>` +
+      `</div>`;
+
+  const gridLefts = isMin
+    ? [8, 28, 48, 68, 88]
+    : [4.4, 14.2, 24.0, 33.8, 43.6, 53.4, 63.2, 73.0, 82.8, 92.6];
+  const hours = isMin
+    ? ['09:00', '11:00', '13:00', '15:00', '17:00']
+    : ['09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00','18:00'];
+  const gridHtml = gridLefts.map(x => `<i style="left:${x}%"></i>`).join('');
+  const ticksHtml = gridLefts.map((x, i) => `<i class="tick" style="left:${x}%"></i><span class="tickl" style="left:${x}%">${hours[i]}</span>`).join('');
+
+  let lanesHtml = '';
+  let mainTrackHtml = '';
+  let gridHeight = 152;
+
+  if (isEmptyDocs) {
+    gridHeight = 128;
+    const laneIcons = ['terminal', 'globe', 'chat', 'gear'];
+    const laneBlocks = [
+      [[8.0, 9.5, '--cat-8'], [17.7, 6.2, '--cat-8'], [45.0, 8.2, '--cat-8']],
+      [[24.5, 5.8, '--cat-neutral', 'none'], [58.0, 7.6, '--cat-neutral', 'none']],
+      [[31.0, 7.2, '--cat-3'], [66.2, 8.8, '--cat-3']],
+      [[53.5, 4.0, '--cat-10']],
+    ];
+    lanesHtml = laneBlocks.map((blks, idx) =>
+      `<div class="trow lane">` +
+        `<div class="lab"><svg class="ic s16"><use href="#${laneIcons[idx]}"/></svg><span class="ell">${tl.appsEmpty[idx]}</span></div>` +
+        `<div class="trk">` +
+          blks.map(([l, w, c, extra]) => `<div class="blk ${extra || ''}" style="left:${l}%;width:calc(${w}% - 1px);--c:var(${c});--c-on:var(${c === '--cat-neutral' ? '--text-primary' : c + '-on'})"></div>`).join('') +
+        `</div>` +
+      `</div>`
+    ).join('');
+    mainTrackHtml =
+      `<div class="blk" style="left:8.0%;width:calc(15.9% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.dev}</div>` +
+      `<div class="blk none" style="left:24.5%;width:calc(5.8% - 1px);--c:var(--cat-neutral);--c-on:var(--text-primary)"></div>` +
+      `<div class="blk" style="left:31.0%;width:calc(7.2% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)">${tl.comm}</div>` +
+      `<div class="blk lock" style="left:38.2%;width:calc(6.8% - 1px)"></div>` +
+      `<div class="blk" style="left:45.0%;width:calc(8.2% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)">${tl.dev}</div>` +
+      `<div class="blk" style="left:53.5%;width:calc(4.0% - 1px);--c:var(--cat-10);--c-on:var(--cat-10-on)"></div>` +
+      `<div class="blk none" style="left:58.0%;width:calc(7.6% - 1px);--c:var(--cat-neutral);--c-on:var(--text-primary)"></div>` +
+      `<div class="blk" style="left:66.2%;width:calc(8.8% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)">${tl.comm}</div>`;
+  } else {
+    const laneIcons = ['code', 'doc', 'mail', 'terminal', 'globe'];
+    const laneBlocks = [
+      [
+        [5.0, 12.2, '--cat-8', '', 'main.rs'],
+        [19.4, 8.2, '--cat-8', '', '07-ui.md'],
+        [29.8, 6.2, '--cat-8', '', ''],
+        [53.4, 12.6, '--cat-8', (isMerged || isSegExtract) ? 'ctx-target' : '', 'main.rs'],
+        [66.3, 5.2, '--cat-8', '', ''],
+      ],
+      [[17.2, 2.2, '--cat-1'], [48.2, 5.0, '--cat-1']],
+      [[2.4, 2.5, '--cat-3'], [44.2, 3.8, '--cat-3'], [71.8, 4.2, '--cat-3'], [94.8, 2.6, '--cat-3']],
+      [[17.4, 1.8, '--cat-8'], [27.6, 2.0, '--cat-10'], [29.7, 1.4, '--cat-10'], [76.2, 2.4, '--cat-10']],
+      [[78.8, 5.8, '--cat-1', '', '']],
+    ];
+    lanesHtml = laneBlocks.map((blks, idx) =>
+      `<div class="trow lane">` +
+        `<div class="lab"><svg class="ic s16"><use href="#${laneIcons[idx]}"/></svg><span class="ell">${tl.appsNormal[idx]}</span></div>` +
+        `<div class="trk">` +
+          blks.map(([l, w, c, extra, lbl]) =>
+            `<div class="blk ${extra || ''}" style="left:${l}%;width:calc(${w}% - 1px);--c:var(${c});--c-on:var(${c === '--cat-neutral' ? '--text-primary' : c + '-on'})">${lbl && !isMin ? `<span class="blk-label">${lbl}</span>` : ''}</div>`
+          ).join('') +
+        `</div>` +
+      `</div>`
+    ).join('');
+    mainTrackHtml =
+      `<div class="blk" style="left:2.4%;width:calc(2.5% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+      `<div class="blk" style="left:5.0%;width:calc(12.2% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)"><span class="blk-label">${hasPanel || isMin ? tl.dev : tl.devLong}</span></div>` +
+      `<div class="blk" style="left:17.2%;width:calc(2.2% - 1px);--c:var(--cat-1);--c-on:var(--cat-1-on)"></div>` +
+      `<div class="blk" style="left:19.4%;width:calc(8.2% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)"><span class="blk-label">${tl.dev}</span></div>` +
+      `<div class="blk" style="left:27.6%;width:calc(2.1% - 1px);--c:var(--cat-10);--c-on:var(--cat-10-on)"></div>` +
+      `<div class="blk" style="left:29.8%;width:calc(6.2% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)"></div>` +
+      `<div class="blk lock" style="left:36.0%;width:calc(8.2% - 1px)"></div>` +
+      `<div class="blk" style="left:44.2%;width:calc(3.8% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+      `<div class="blk" style="left:48.2%;width:calc(5.0% - 1px);--c:var(--cat-1);--c-on:var(--cat-1-on)"></div>` +
+      `<div class="blk" style="left:53.4%;width:calc(18.1% - 1px);--c:var(--cat-8);--c-on:var(--cat-8-on)"><span class="blk-label">${tl.dev}</span></div>` +
+      `<div class="blk" style="left:71.8%;width:calc(4.2% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>` +
+      `<div class="blk" style="left:76.2%;width:calc(2.4% - 1px);--c:var(--cat-10);--c-on:var(--cat-10-on)"></div>` +
+      `<div class="blk" style="left:78.8%;width:calc(5.8% - 1px);--c:var(--cat-1);--c-on:var(--cat-1-on)"><span class="blk-label">${tl.learn}</span></div>` +
+      `<div class="blk excl" style="left:84.6%;width:calc(10.2% - 1px)">${hasPanel || isMin ? '' : `<span class="blk-label">${tl.excl}</span>`}</div>` +
+      `<div class="blk" style="left:94.8%;width:calc(2.6% - 1px);--c:var(--cat-3);--c-on:var(--cat-3-on)"></div>`;
+  }
+
+  let overlayHtml = '';
+  if (isMerged) {
+    const m = T.laneMerged;
+    overlayHtml =
+      `<div class="sel-layer" style="height:${gridHeight}px">` +
+        `<div class="range-band" style="left:53.4%;width:12.6%"></div>` +
+      `</div>` +
+      `<div class="merge-tt" style="left:calc(var(--gut) + 12%);top:22px">` +
+        `<div class="merge-tt-row">` +
+          `<svg class="ic s16" style="color:var(--text-secondary)"><use href="#code"/></svg>` +
+          `<span class="strong">${m.ttDoc}</span>` +
+          `<span class="id-pill proj"><svg class="ic s16"><use href="#folder"/></svg><span class="ptxt">${m.ttProj}</span></span>` +
+        `</div>` +
+        `<div class="cap sec">${m.ttApp}</div>` +
+        `<div class="row cap" style="gap:8px"><span class="mono grow">${m.ttTime}</span><span class="strong">${m.ttDur}</span></div>` +
+        `<div class="merge-tt-row" style="margin-top:1px">${catChip('--cat-8', m.ttCat)}<span class="cap sec">${m.ttRule}</span></div>` +
+        `<div class="merge-tt-badge">` +
+          `<svg class="ic s16"><use href="#layers"/></svg>` +
+          `<span class="strong" style="font-size:12px">${m.ttMerged}</span>` +
+          `<span class="cap sec">${m.ttMergedSub}</span>` +
+        `</div>` +
+        `<div class="cap ter">${m.ttClickHint}</div>` +
+      `</div>`;
+  } else if (isSegExtract) {
+    overlayHtml =
+      `<div class="sel-layer" style="height:${gridHeight}px">` +
+        `<div class="range-band" style="left:53.4%;width:12.6%"></div>` +
+      `</div>`;
+  }
+
+  const timelineCardHtml =
+    `<div class="card" id="timeline-card" style="flex:none;padding:12px 16px 10px;position:relative">` +
+      `<div class="tl-head" style="margin-bottom:10px">` +
+        `<div class="tl-head-l">` +
+          `<span class="h-sub">${tl.title}</span>` +
+          `<span class="cap sec">${isEmptyDocs ? tl.rangeEmpty : tl.rangeNormal}</span>` +
+        `</div>` +
+        `<div class="tl-head-r">` +
+          `<div class="seg mode-seg" role="radiogroup" aria-label="Timeline mode">` +
+            `<div class="on"><svg class="ic s16"><use href="#hand"/></svg><span>${tl.modePan}</span></div>` +
+            `<div><svg class="ic s16"><use href="#range-sel"/></svg><span>${tl.modeSelect}</span></div>` +
+          `</div>` +
+          `<div class="seg"><div class="on">${tl.appLanes}</div><div>${tl.catOnly}</div></div>` +
+          `<div class="row gap4" style="flex:none">` +
+            `<button class="btn compact icon"><svg class="ic s16"><use href="#minus"/></svg></button>` +
+            `<button class="btn compact icon"><svg class="ic s16"><use href="#add"/></svg></button>` +
+            `<button class="btn compact">${tl.full24}</button>` +
+          `</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="plot" style="padding:4px 0 2px"><div class="tl">` +
+        `<div class="grid" style="height:${gridHeight}px">${gridHtml}</div>` +
+        `<div class="trow mtrk"><div class="lab">${tl.cat}</div><div class="trk" style="position:relative">${mainTrackHtml}</div></div>` +
+        `<div class="lanes">${lanesHtml}</div>` +
+        `<div class="trow ruler" style="margin-top:4px"><div class="lab"></div><div class="trk">${ticksHtml}</div></div>` +
+        overlayHtml +
+      `</div></div>` +
+    `</div>`;
+
+  /* For segment-extraction, render side-by-side fallback / empty / unknown variants right below timeline */
+  if (isSegExtract) {
+    const se = T.segExtract;
+    const varCardsHtml = se.variants.map(v => {
+      const nullHtml = `<span class="kv-null">${se.nullTag}</span>`;
+      const rawHtml = v.rawTitleHidden
+        ? `<div class="var-raw-title"><span class="kv-hidden">${se.hiddenTag}</span></div>`
+        : `<div class="var-raw-title">${v.rawTitle}</div>`;
+      const ruleHtml = v.ruleId
+        ? v.ruleId
+        : (v.rule === 'fallback' ? `<span class="sec">${se.fallbackRuleVal}</span>` : `<span class="sec">${se.skippedRuleVal}</span>`);
+      return `<div class="var-box">` +
+        `<div class="var-box-hdr">` +
+          `<div class="var-box-app"><svg class="ic s16" style="color:var(--text-secondary)"><use href="#${v.ic}"/></svg><span class="strong">${v.app}</span></div>` +
+          `<span class="badge ${v.badgeCls}"><span class="btxt">${v.badgeTxt}</span></span>` +
+        `</div>` +
+        `<div class="cap ter mono">${v.exe} · ${v.time}</div>` +
+        rawHtml +
+        `<div class="var-kv">` +
+          `<div class="var-kv-r"><span class="var-kv-k">document</span><span class="var-kv-v">${v.document ? v.document : nullHtml}</span></div>` +
+          `<div class="var-kv-r"><span class="var-kv-k">project</span><span class="var-kv-v">${v.project ? v.project : nullHtml}</span></div>` +
+          `<div class="var-kv-r"><span class="var-kv-k">profile</span><span class="var-kv-v">${v.profile ? v.profile : nullHtml}</span></div>` +
+          `<div class="var-kv-r"><span class="var-kv-k">dirty</span><span class="var-kv-v">${v.dirty !== null ? v.dirty : nullHtml}</span></div>` +
+          `<div class="var-kv-r"><span class="var-kv-k">normalized</span><span class="var-kv-v">${v.normTitle ? v.normTitle : nullHtml}</span></div>` +
+          `<div class="var-kv-r"><span class="var-kv-k">rule</span><span class="var-kv-v">${ruleHtml}</span></div>` +
+          `<div class="var-kv-r"><span class="var-kv-k">status</span><span class="var-kv-v">${v.statusCode}</span></div>` +
+        `</div>` +
+        `<div class="var-outcome">${v.outcome}</div>` +
+      `</div>`;
+    }).join('');
+
+    const variantsCardHtml =
+      `<div class="card variants-card" id="variants-card">` +
+        `<div class="variants-head">` +
+          `<span class="h-sub">${se.variantsTitle}</span>` +
+          `<span class="cap sec">${se.variantsSub}</span>` +
+        `</div>` +
+        `<div class="variants-grid">${varCardsHtml}</div>` +
+      `</div>`;
+
+    return dateBarHtml + statusCardHtml + timelineCardHtml + variantsCardHtml;
+  }
+
+  const cols = isEmptyDocs
+    ? [
+        [['--cat-8', 42]],
+        [['--cat-8', 56]],
+        [['--cat-neutral', 34], ['--cat-3', 28]],
+        [['--cat-3', 38]],
+        [],
+        [['--cat-8', 48], ['--cat-10', 22]],
+        [['--cat-neutral', 44]],
+        [['--cat-3', 52]],
+        [],
+      ]
+    : [
+        [['--cat-3', 24]],
+        [['--cat-8', 110], ['--cat-1', 10]],
+        [['--cat-8', 88], ['--cat-1', 18], ['--cat-10', 14]],
+        [['--cat-8', 74], ['--cat-10', 16]],
+        [['--cat-8', 36]],
+        [['--cat-3', 38], ['--cat-1', 28]],
+        [['--cat-8', 102], ['--cat-1', 18]],
+        [['--cat-8', 64], ['--cat-3', 32]],
+        [['--cat-10', 24], ['--cat-1', 54]],
+        [['--cat-1', 20]],
+        [['--cat-3', 26]],
+      ];
+  const colsHtml = cols.map(st =>
+    `<div class="col"><div class="stack">${st.map(([c, px]) => `<div style="--c:var(${c});height:${px}.0px"></div>`).join('')}</div></div>`
+  ).join('');
+  const hLabels = (isEmptyDocs ? [9,10,11,12,13,14,15,16,17] : [8,9,10,11,12,13,14,15,16,17,18]).map(n => `<span>${n}</span>`).join('');
+
+  let rankBodyHtml = '';
+  if (isEmptyDocs) {
+    rankBodyHtml =
+      `<div class="rank-empty">` +
+        `<div class="rank-empty-tile"><svg class="ic"><use href="#doc"/></svg></div>` +
+        `<div class="rank-empty-title">${r.empty.title}</div>` +
+        `<div class="rank-empty-desc">${r.empty.desc}</div>` +
+        `<button class="btn compact" style="margin-top:2px"><span>${r.empty.action}</span></button>` +
+      `</div>`;
+  } else {
+    const selectedIdx = (stateKey === 'document-detail' || stateKey === 'document-stale' || stateKey === 'lane-merged') ? 0 : -1;
+    rankBodyHtml =
+      `<div class="rank-list">` +
+        r.docs.map((row, idx) =>
+          `<div class="doc-rank${idx === selectedIdx ? ' sel' : ''}" style="--c:var(${row.c})">` +
+            `<i class="cb"></i>` +
+            `<svg class="ic s16 app-ic"><use href="#${row.ic}"/></svg>` +
+            `<div class="doc-nm">` +
+              `<div class="doc-nm-top">` +
+                `<span class="doc-title">${row.doc}</span>` +
+                (row.proj ? `<span class="id-pill proj"><svg class="ic s16"><use href="#folder"/></svg><span class="ptxt">${row.proj}</span></span>` : '') +
+                (row.prof ? `<span class="id-pill prof"><svg class="ic s16"><use href="#user"/></svg><span class="ptxt">${row.prof}</span></span>` : '') +
+              `</div>` +
+              `<div class="doc-nm-sub"><span class="app-lbl">${row.app}</span></div>` +
+            `</div>` +
+            `<div class="bar"><div class="fill" style="width:${row.w}"></div></div>` +
+            `<div class="doc-du"><span class="du-main">${row.dur}</span><span class="du-share">${row.share}</span></div>` +
+          `</div>`
+        ).join('') +
+      `</div>` +
+      `<div class="rank-foot-note">${r.footNote}</div>`;
+  }
+
+  const bottomRowHtml =
+    `<div class="row gap8 two-col" style="flex:none;align-items:stretch">` +
+      `<div class="card grow hourly-card" style="padding:12px 14px;min-width:0">` +
+        `<div class="h-sub" style="margin-bottom:8px">${h.title}</div>` +
+        `<div class="plot" style="padding:4px 0 6px">` +
+          `<div class="hours">` +
+            `<div class="y"><span style="bottom:0px">${h.y0}</span><span style="bottom:60px">${h.y30}</span><span style="bottom:120px">${h.y60}</span></div>` +
+            `<div class="plotarea"><div class="gl" style="bottom:60px"></div><div class="gl" style="bottom:120px"></div>${colsHtml}</div>` +
+          `</div>` +
+          `<div class="hlabels">${hLabels}</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="card grow ranking-card" id="ranking-card" style="padding:12px 14px;min-width:0">` +
+        `<div class="rank-head">` +
+          `<span class="h-sub">${r.title}</span>` +
+          `<div class="rank-head-r">` +
+            (isStale ? `<span class="cap ter" style="display:inline-flex;align-items:center;gap:4px"><svg class="ring-xs"><use href="#ring14"/></svg>${r.refreshingNote}</span>` : '') +
+            `<div class="seg">${r.tabs.map((t, i) => `<div${i === 1 ? ' class="on"' : ''}>${t}</div>`).join('')}</div>` +
+          `</div>` +
+        `</div>` +
+        rankBodyHtml +
+      `</div>` +
+    `</div>`;
+
+  const p = td.pending;
+  const pendingRowHtml = isEmptyDocs
+    ? ''
+    : `<div class="card pending" style="flex:none">` +
+        `<svg class="ic s16" style="color:var(--text-secondary)"><use href="#clock"/></svg>` +
+        `<span class="strong">${p.title}</span>` +
+        `<span class="sec cap">${p.range}</span>` +
+        `<span class="grow"></span>` +
+        `<div class="row gap4" style="flex-wrap:wrap">` +
+          `<button class="btn compact">${p.rest}</button>` +
+          `<button class="btn compact">${p.meeting}</button>` +
+          `<button class="btn compact">${p.reading}</button>` +
+          `<button class="btn compact">${p.ignore}</button>` +
+          `<button class="btn compact">${p.other}</button>` +
+        `</div>` +
+      `</div>`;
+
+  return dateBarHtml + statusCardHtml + timelineCardHtml + bottomRowHtml + pendingRowHtml;
+}
+
+/* ===========================
+   Details Sidebar Builders
+   =========================== */
+function renderPanelFooter(disabledAll) {
+  const d = T.docDetail;
+  const disCls = disabledAll ? ' disabled' : '';
+  const disAttr = disabledAll ? ' disabled' : '';
+  return `<div class="ed-foot">` +
+    `<div class="ed-foot-main">` +
+      `<button class="btn compact primary-slot${disCls}"${disAttr}><span>${d.footClassify}</span></button>` +
+      `<button class="btn compact flex-shrink${disCls}"${disAttr}><svg class="ic s16"><use href="#shield"/></svg><span>${d.footPrivacy}</span></button>` +
+    `</div>` +
+    `<div class="ed-foot-right">` +
+      `<button class="btn compact icon disabled" disabled title="${d.footDeleteTip}" aria-label="${d.footDeleteTip}"><svg class="ic s16"><use href="#trash"/></svg></button>` +
+    `</div>` +
+  `</div>`;
+}
+
+function renderDocumentDetailBody(isStale) {
+  const d = T.docDetail;
+  const heights = [62, 92, 74, 100, 28, 0, 84];
+  const barsHtml = heights.map(pct =>
+    `<div style="--c:var(--accent-fill);height:${pct === 0 ? 1 : pct}%;${pct === 0 ? 'opacity:0' : ''}"></div>`
+  ).join('');
+  const labelsHtml = d.d7Days.map((day, idx) =>
+    `<span${idx === 6 ? ' class="today"' : ''}>${day}</span>`
+  ).join('');
+
+  const contentHtml =
+    `<div class="res-card">` +
+      `<div class="res-top">` +
+        `<span class="strong">${d.todayTotal}</span>` +
+        `<span class="cap sec">${d.todayShare}</span>` +
+      `</div>` +
+      `<div class="row gap8" style="flex-wrap:wrap">` +
+        catChip('--cat-8', d.catName) +
+        `<span class="cap sec">${d.catSource}</span>` +
+      `</div>` +
+      `<div class="res-sub">${d.idSummary}</div>` +
+    `</div>` +
+
+    `<div class="sect">` +
+      `<div class="sect-hdr"><span class="t">${d.d7Title}</span><span class="cap sec">${d.d7Total}</span></div>` +
+      `<div class="plot" style="padding:8px 6px 6px">` +
+        `<div class="d7">${barsHtml}</div>` +
+        `<div class="d7l">${labelsHtml}</div>` +
+      `</div>` +
+    `</div>` +
+
+    `<div class="sect">` +
+      `<div class="sect-hdr"><span class="t">${d.titlesTitle}</span></div>` +
+      `<div class="ct-list">` +
+        d.titles.map(t =>
+          `<div class="ct-row">` +
+            `<span class="ct-txt" title="${t.rawTitle}">${t.rawTitle}</span>` +
+            `<div class="ct-bar" style="--c:var(--accent-fill)"><i style="width:${t.w}"></i></div>` +
+            `<span class="ct-du">${t.dur}</span>` +
+          `</div>`
+        ).join('') +
+      `</div>` +
+    `</div>` +
+
+    `<div class="stage-card">` +
+      `<div class="stage-hdr">` +
+        `<span class="strong" style="font-size:13px">${d.provTitle}</span>` +
+        `<span class="badge ok"><span class="btxt">${d.statusExtracted} · ${d.statusCode}</span></span>` +
+      `</div>` +
+      `<div class="kv-chips">` +
+        `<span class="kv-chip"><span class="k">rule=</span>${d.ruleId}</span>` +
+        `<span class="kv-chip"><span class="k">document=</span>${d.doc}</span>` +
+        `<span class="kv-chip"><span class="k">project=</span>${d.proj}</span>` +
+        `<span class="kv-chip missing"><span class="k">profile=</span>${d.profileMissing}</span>` +
+        `<span class="kv-chip"><span class="k">normalized=</span>${d.normTitle}</span>` +
+      `</div>` +
+      `<div class="cap sec" style="overflow-wrap:anywhere">${d.dirtyNote}</div>` +
+      `<div class="cap ter" style="overflow-wrap:anywhere">${d.provHint}</div>` +
+    `</div>` +
+
+    `<div class="sect">` +
+      `<div class="sect-hdr">` +
+        `<span class="t">${d.rulesTitle}</span>` +
+        `<button class="btn compact${isStale ? ' disabled' : ''}"${isStale ? ' disabled' : ''}><svg class="ic s16"><use href="#tree"/></svg><span>${d.explainBtn}</span></button>` +
+      `</div>` +
+      `<div class="rule-list">` +
+        d.rules.map(rl =>
+          `<div class="rule-item">` +
+            `<div class="rule-item-txt">` +
+              `<span class="rule-item-lbl">${rl.name}</span>` +
+              `<span class="rule-item-id">${rl.ruleId}</span>` +
+            `</div>` +
+            catChip(rl.c, rl.cat) +
+          `</div>`
+        ).join('') +
+      `</div>` +
+    `</div>`;
+
+  if (!isStale) return contentHtml;
+
+  const st = T.stale;
+  return `<div class="stale-notice">` +
+    `<div class="stale-top">` +
+      `<svg class="ring-xs"><use href="#ring14"/></svg>` +
+      `<span class="stale-title">${st.title}</span>` +
+      `<span class="badge warn mono"><span class="btxt">${st.code}</span></span>` +
+    `</div>` +
+    `<div class="stale-desc">${st.desc}</div>` +
+    `<div class="stale-steps">` +
+      `<div class="stale-step"><svg class="ring-xs"><use href="#ring14"/></svg><span>${st.step1}</span></div>` +
+      `<div class="stale-step queued"><span class="step-dot"><i></i></span><span>${st.step2}</span></div>` +
+    `</div>` +
+  `</div>` +
+  `<div class="stale-dim">${contentHtml}</div>`;
+}
+
+function renderLaneMergedPanel() {
+  const m = T.laneMerged;
+  const d = T.docDetail;
+  return `<div class="ed-head">` +
+      `<div class="ed-app-tile"><svg class="ic s16"><use href="#code"/></svg></div>` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title">` +
+          `<span class="ed-head-name">${m.ttDoc}</span>` +
+          `<span class="id-pill proj"><svg class="ic s16"><use href="#folder"/></svg><span class="ptxt">${m.ttProj}</span></span>` +
+          `<span class="badge ovr"><span class="btxt">${m.mergedBadge}</span></span>` +
+        `</div>` +
+        `<div class="cap sec">${m.panelSub}</div>` +
+      `</div>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        `<div class="infobar accent-info">` +
+          `<svg class="ic s16 ib-ic"><use href="#layers"/></svg>` +
+          `<div class="ib-body">` +
+            `<div class="ib-title">${m.infoTitle}</div>` +
+            `<div>${m.infoDesc}</div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="sect">` +
+          `<div class="sect-hdr">` +
+            `<span class="t">${m.rawListTitle}</span>` +
+            `<button class="btn compact"><svg class="ic s16"><use href="#tree"/></svg><span>${d.explainBtn}</span></button>` +
+          `</div>` +
+          `<div class="raw-list">` +
+            m.rawRows.map(row =>
+              `<div class="raw-iv${row.dirty ? ' dirty-row' : ''}">` +
+                `<div class="raw-iv-top">` +
+                  `<span class="raw-iv-time">${row.time}</span>` +
+                  `<span class="raw-iv-dur">${row.dur}</span>` +
+                  `<span class="grow"></span>` +
+                  `<span class="badge ${row.dirty ? 'warn' : 'ok'}"><span class="btxt">${row.dirty ? m.dirtyBadge : m.cleanBadge}</span></span>` +
+                `</div>` +
+                `<div class="raw-iv-title">${row.rawTitle}</div>` +
+                `<div class="raw-iv-meta">${catChip('--cat-8', m.ttCat)}<span>${row.rule}</span></div>` +
+              `</div>`
+            ).join('') +
+          `</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    renderPanelFooter(false);
+}
+
+function renderSegmentExtractionPanel() {
+  const se = T.segExtract;
+  const d = T.docDetail;
+  const nullHtml = `<span class="kv-null">${se.nullTag}</span>`;
+  return `<div class="ed-head">` +
+      `<div class="ed-app-tile"><svg class="ic s16"><use href="#code"/></svg></div>` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title">` +
+          `<span class="ed-head-name">${se.panelTitle}</span>` +
+          `<span class="badge ok"><span class="btxt">${se.statusBadge}</span></span>` +
+        `</div>` +
+        `<div class="cap sec">${se.panelSub}</div>` +
+      `</div>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">` +
+        `<div class="res-card">` +
+          `<div class="cap sec">${se.rawLabel}</div>` +
+          `<div class="mono" style="color:var(--text-primary);overflow-wrap:anywhere">${se.rawTitle}</div>` +
+        `</div>` +
+        `<div class="stage-card">` +
+          `<div class="stage-hdr">` +
+            `<span class="strong" style="font-size:13px">${se.fieldsTitle}</span>` +
+            `<button class="btn compact"><svg class="ic s16"><use href="#tree"/></svg><span>${d.explainBtn}</span></button>` +
+          `</div>` +
+          `<div class="kv-table">` +
+            `<div class="kv-row"><span class="kv-k">document</span><span class="kv-v">main.rs</span></div>` +
+            `<div class="kv-row"><span class="kv-k">project</span><span class="kv-v">Quartz</span></div>` +
+            `<div class="kv-row"><span class="kv-k">profile</span><span class="kv-v">${nullHtml}</span></div>` +
+            `<div class="kv-row"><span class="kv-k">dirty</span><span class="kv-v"><span class="badge warn"><span class="btxt">${se.dirtyTrueVal}</span></span></span></div>` +
+            `<div class="kv-row"><span class="kv-k">normalized_title</span><span class="kv-v">main.rs - Quartz</span></div>` +
+            `<div class="kv-row"><span class="kv-k">extractor_rule</span><span class="kv-v">builtin.extraction/vscode-project@v1</span></div>` +
+            `<div class="kv-row"><span class="kv-k">status</span><span class="kv-v"><span class="badge ok"><span class="btxt">extracted</span></span></span></div>` +
+          `</div>` +
+        `</div>` +
+        `<div class="stage-card">` +
+          `<div class="stage-hdr">` +
+            `<span class="strong" style="font-size:13px">${se.idTitle}</span>` +
+            `<span class="badge ok"><span class="btxt">${se.idBadgeOk}</span></span>` +
+          `</div>` +
+          `<div class="var-raw-title">${se.idTuple}</div>` +
+          `<div class="cap sec" style="overflow-wrap:anywhere">${se.idNote}</div>` +
+        `</div>` +
+      `</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    renderPanelFooter(false);
+}
+
+function renderDetailsPanel() {
+  const aside = document.getElementById('details');
+  if (!hasPanel) {
+    aside.style.display = 'none';
+    return;
+  }
+  aside.style.display = 'flex';
+  if (stateKey === 'lane-merged') {
+    aside.innerHTML = renderLaneMergedPanel();
+    return;
+  }
+  if (stateKey === 'segment-extraction') {
+    aside.innerHTML = renderSegmentExtractionPanel();
+    return;
+  }
+  const d = T.docDetail;
+  const isStale = stateKey === 'document-stale';
+  aside.innerHTML =
+    `<div class="ed-head">` +
+      `<div class="ed-app-tile"><svg class="ic s16"><use href="#code"/></svg></div>` +
+      `<div class="ed-head-txt">` +
+        `<div class="ed-head-title">` +
+          `<span class="ed-head-name">${d.doc}</span>` +
+          `<span class="id-pill proj"><svg class="ic s16"><use href="#folder"/></svg><span class="ptxt">${d.proj}</span></span>` +
+        `</div>` +
+        `<div class="cap sec">${d.appSub}</div>` +
+      `</div>` +
+      `<button class="btn subtle icon compact"><svg class="ic s16"><use href="#close"/></svg></button>` +
+    `</div>` +
+    `<div class="ed-body-wrap" id="ed-body-wrap">` +
+      `<div class="ed-body" id="ed-body">${renderDocumentDetailBody(isStale)}</div>` +
+      `<div class="scroll-track" aria-hidden="true"><div class="scroll-thumb" id="ed-thumb"></div></div>` +
+    `</div>` +
+    renderPanelFooter(isStale);
+}
+
+function updateScrollThumb(scroller, wrapEl, thumbEl) {
+  if (!scroller || !wrapEl || !thumbEl) return;
+  const sh = scroller.scrollHeight;
+  const ch = scroller.clientHeight;
+  if (sh > ch + 2) {
+    wrapEl.classList.add('scrollable');
+    const trackH = ch - 8;
+    const thumbH = Math.max(24, Math.round((ch / sh) * trackH));
+    const maxScroll = sh - ch;
+    const thumbTop = maxScroll > 0 ? Math.round((scroller.scrollTop / maxScroll) * (trackH - thumbH)) : 0;
+    thumbEl.style.height = thumbH + 'px';
+    thumbEl.style.top = thumbTop + 'px';
+  } else {
+    wrapEl.classList.remove('scrollable');
+  }
+}
+
+renderNav();
+document.getElementById('main').innerHTML = renderTodayMain();
+renderDetailsPanel();
+
+/* Auto-scroll relevant focus card into view where needed */
+const mainEl = document.getElementById('main');
+if (isMin && stateKey === 'ranking-documents') {
+  const rc = document.getElementById('ranking-card');
+  if (rc) mainEl.scrollTop = Math.max(0, rc.offsetTop - 8);
+} else if (!isMin && stateKey === 'segment-extraction') {
+  const vc = document.getElementById('variants-card');
+  if (vc) {
+    const bottom = vc.offsetTop + vc.offsetHeight + 12;
+    if (bottom > mainEl.clientHeight) {
+      mainEl.scrollTop = bottom - mainEl.clientHeight;
+    }
+  }
+}
+
+updateScrollThumb(mainEl, document.getElementById('main-wrap'), document.getElementById('main-thumb'));
+updateScrollThumb(document.getElementById('ed-body'), document.getElementById('ed-body-wrap'), document.getElementById('ed-thumb'));
+</script>
+</body>
+</html>
