@@ -1,0 +1,11 @@
+{
+  "start_date": "2025-01-02",
+  "end_date": "2025-01-09",
+  "bucket": "week",
+  "dimensions": [
+    "document",
+    "category",
+    "app"
+  ],
+  "cursor": null
+}

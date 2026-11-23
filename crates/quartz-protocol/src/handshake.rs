@@ -288,6 +288,9 @@ pub enum Capability {
     /// Visible document rankings, extraction, references and details version 1.
     #[serde(rename = "query.documents.v1")]
     QueryDocumentsV1,
+    /// Bounded day and week summaries version 1.
+    #[serde(rename = "query.range.v1")]
+    QueryRangeV1,
     /// Grouped unclassified active work version 1.
     #[serde(rename = "query.unclassified.v1")]
     QueryUnclassifiedV1,

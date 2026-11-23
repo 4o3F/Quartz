@@ -2,6 +2,7 @@
 
 pub(crate) mod calendar;
 pub(crate) mod classification;
+mod day_walker;
 mod details;
 #[cfg(any(windows, test))]
 pub(crate) mod dispatch;
@@ -10,6 +11,7 @@ pub(crate) mod input;
 mod paging;
 mod pending_away;
 pub(crate) mod pipeline;
+mod range;
 #[cfg(any(windows, test))]
 pub(crate) mod runner;
 #[cfg(test)]
@@ -20,6 +22,7 @@ pub(crate) mod versions;
 
 use crate::store::{ReadOnlyStore, query::ReadSnapshot, query_error::ReadQueryError};
 use calendar::DayCalendar;
+use day_walker::DayWalker;
 use details::{EntityCalendar, EntityDetailAccumulator, EntitySelection, SegmentDetailProjection};
 use input::QueryRange;
 use paging::{PageBudget, PagePosition};
@@ -31,14 +34,18 @@ use quartz_protocol::{
     QuerySegmentDetailResponse, QueryTimelineRequest, QueryTimelineResponse, QueryVersions,
     SEGMENT_DETAIL_MAX_SPAN_MS,
 };
+use range::{FirstWeekday, RangeAccumulator};
 use serde::Serialize;
 use timing::{QueryStage, QueryTimer, QueryTimings};
-use unclassified::{UnclassifiedAccumulator, UnclassifiedCalendar};
+use unclassified::UnclassifiedAccumulator;
 
 /// Increment whenever matching, slicing, duration, aggregation, or projection semantics change.
 pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 6;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
 const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
+/// A 366-logical-day reference can include a backward UTC offset change of up to one day.
+const MAX_DOCUMENT_REFERENCE_MS: i64 =
+    MAX_QUERY_RANGE_MS + quartz_domain::capture::limits::UTC_DAY_MS;
 
 #[derive(Debug, snafu::Snafu)]
 pub(crate) enum RunQueryError {
@@ -48,6 +55,10 @@ pub(crate) enum RunQueryError {
     InvalidDetailRange,
     #[snafu(display("invalid unclassified query dates or search length"))]
     InvalidUnclassifiedRequest,
+    #[snafu(display("invalid range query dates or dimensions"))]
+    InvalidRangeRequest,
+    #[snafu(display("could not resolve the effective first weekday"))]
+    ReadFirstWeekdayError,
     #[snafu(display("invalid query cursor"))]
     InvalidCursor,
     #[snafu(display("query input versions changed"))]
@@ -105,7 +116,8 @@ impl RunQueryError {
             Self::InvalidCursor
             | Self::InvalidDetailRange
             | Self::InvalidDocumentRef
-            | Self::InvalidUnclassifiedRequest => ErrorKind::BadRequest,
+            | Self::InvalidUnclassifiedRequest
+            | Self::InvalidRangeRequest => ErrorKind::BadRequest,
             Self::StaleDocumentRef => ErrorKind::StaleDocumentRef,
             Self::StaleCursor => ErrorKind::StaleCursor,
             _ => ErrorKind::Internal,
@@ -117,6 +129,7 @@ pub(crate) enum QueryRequest {
     Facts(QueryFactsRequest),
     Day(QueryDayRequest),
     Unclassified(quartz_protocol::QueryUnclassifiedRequest),
+    Range(quartz_protocol::QueryRangeRequest),
     PendingAway(QueryPendingAwayRequest),
     Timeline(QueryTimelineRequest),
     SegmentDetail(QuerySegmentDetailRequest),
@@ -130,6 +143,7 @@ impl QueryRequest {
     ) -> Result<Self, serde_json::Error> {
         match op {
             quartz_protocol::Op::QueryFacts => serde_json::from_value(body).map(Self::Facts),
+            quartz_protocol::Op::QueryRange => serde_json::from_value(body).map(Self::Range),
             quartz_protocol::Op::QueryUnclassified => {
                 serde_json::from_value(body).map(Self::Unclassified)
             }
@@ -155,6 +169,7 @@ impl QueryRequest {
             Self::Facts(facts) => CursorQuery::from(facts),
             Self::Day(day) => CursorQuery::from(day),
             Self::Unclassified(request) => CursorQuery::from(request),
+            Self::Range(request) => CursorQuery::from(request),
             Self::PendingAway(away) => CursorQuery::from(away),
             Self::Timeline(timeline) => CursorQuery::from(timeline),
             Self::SegmentDetail(detail) => CursorQuery::from(detail),
@@ -168,6 +183,7 @@ pub(crate) enum QueryResponse {
     Facts(QueryFactsResponse),
     Day(QueryDayResponse),
     Unclassified(quartz_protocol::QueryUnclassifiedResponse),
+    Range(quartz_protocol::QueryRangeResponse),
     PendingAway(QueryPendingAwayResponse),
     Timeline(QueryTimelineResponse),
     SegmentDetail(QuerySegmentDetailResponse),
@@ -189,6 +205,7 @@ enum Stage {
 enum Aggregation {
     Day(DayAccumulator),
     Unclassified(UnclassifiedAccumulator),
+    Range(RangeAccumulator),
     PendingAway(pending_away::PendingAwayAccumulator),
     Timeline(TimelineProjection),
     SegmentDetail(SegmentDetailProjection),
@@ -207,8 +224,9 @@ pub(crate) struct QueryJob {
     calendar: Option<DayCalendar>,
     entity_calendar: Option<EntityCalendar>,
     scan_range: QueryRange,
-    unclassified_calendar: Option<UnclassifiedCalendar>,
+    day_walker: Option<DayWalker>,
     unclassified: Option<UnclassifiedAccumulator>,
+    range_accumulator: Option<RangeAccumulator>,
     stage: Stage,
 }
 impl QueryJob {
@@ -217,23 +235,32 @@ impl QueryJob {
         request: QueryRequest,
         rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
     ) -> Result<Self, RunQueryError> {
+        Self::start_in_zone(reader, request, rules, jiff::tz::TimeZone::try_system()?)
+    }
+    pub(crate) fn start_in_zone(
+        reader: &mut Option<ReadOnlyStore>,
+        request: QueryRequest,
+        rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
+        zone: jiff::tz::TimeZone,
+    ) -> Result<Self, RunQueryError> {
         let mut snapshot = reader
             .take()
             .ok_or(RunQueryError::ReaderUnavailable)?
             .snapshot();
-        match Self::prepare(&mut snapshot, &request, rules.hashes()) {
+        match Self::prepare(&mut snapshot, &request, rules.hashes(), zone) {
             Ok(prepared) => Ok(Self {
                 snapshot,
                 range: prepared.range,
                 reference_range: prepared.reference_range,
                 entity: prepared.entity,
                 versions: prepared.versions,
+                range_accumulator: prepared.range_accumulator,
                 parameters: prepared.parameters,
                 position: prepared.position,
                 calendar: prepared.calendar,
                 entity_calendar: prepared.entity_calendar,
                 scan_range: prepared.scan_range,
-                unclassified_calendar: prepared.unclassified_calendar,
+                day_walker: prepared.day_walker,
                 unclassified: match &request {
                     QueryRequest::Unclassified(request) => {
                         Some(UnclassifiedAccumulator::new(request))
@@ -260,64 +287,90 @@ impl QueryJob {
         snapshot: &mut ReadSnapshot,
         request: &QueryRequest,
         rule_hashes: &quartz_domain::rules::registry::SnapshotHashes,
+        zone: jiff::tz::TimeZone,
     ) -> Result<PreparedQuery, RunQueryError> {
         snapshot.begin()?;
         let settings = snapshot.settings()?;
         let calendar = match request {
             QueryRequest::Facts(_) => None,
-            QueryRequest::Day(day) => {
-                Some(DayCalendar::new(day.local_date, settings.day_start_offset)?)
-            }
-            QueryRequest::PendingAway(away) => Some(DayCalendar::new(
+            QueryRequest::Day(day) => Some(DayCalendar::in_zone(
+                day.local_date,
+                settings.day_start_offset,
+                zone.clone(),
+            )?),
+            QueryRequest::PendingAway(away) => Some(DayCalendar::in_zone(
                 away.local_date,
                 settings.day_start_offset,
+                zone.clone(),
             )?),
             QueryRequest::Unclassified(_)
+            | QueryRequest::Range(_)
             | QueryRequest::Timeline(_)
             | QueryRequest::SegmentDetail(_)
             | QueryRequest::EntityDetail(_) => None,
         };
         let entity_calendar = match request {
-            QueryRequest::EntityDetail(detail) => Some(EntityCalendar::new(
+            QueryRequest::EntityDetail(detail) => Some(EntityCalendar::in_zone(
                 detail.local_date,
                 settings.day_start_offset,
+                zone.clone(),
             )?),
             _ => None,
         };
-        let mut unclassified_calendar = match request {
-            QueryRequest::Unclassified(request) => Some(UnclassifiedCalendar::new(
-                request,
+        let mut day_walker = match request {
+            QueryRequest::Unclassified(request) => {
+                if request.search.as_ref().is_some_and(|search| {
+                    search.chars().count() > quartz_protocol::UNCLASSIFIED_MAX_SEARCH_SCALARS
+                }) {
+                    return Err(RunQueryError::InvalidUnclassifiedRequest);
+                }
+                Some(DayWalker::new(
+                    request.start_date,
+                    request.end_date,
+                    settings.day_start_offset,
+                    zone.clone(),
+                )?)
+            }
+            QueryRequest::Range(request) => Some(DayWalker::new(
+                request.start_date,
+                request.end_date,
                 settings.day_start_offset,
-                jiff::tz::TimeZone::try_system()?,
+                zone.clone(),
             )?),
+            _ => None,
+        };
+        let first_weekday = match request {
+            QueryRequest::Range(request)
+                if request.bucket == quartz_protocol::RangeBucket::Week =>
+            {
+                Some(FirstWeekday::resolve(snapshot.first_day_of_week()?)?)
+            }
+            _ => None,
+        };
+        let mut range_accumulator = match request {
+            QueryRequest::Range(request) => Some(RangeAccumulator::new(request, first_weekday)?),
             _ => None,
         };
         let range = match request {
-            QueryRequest::Unclassified(_) => {
-                unclassified_calendar
-                    .as_ref()
-                    .expect("range calendar")
-                    .range
+            QueryRequest::Unclassified(_) | QueryRequest::Range(_) => {
+                day_walker.as_ref().expect("range calendar").range
             }
             QueryRequest::Day(_) | QueryRequest::PendingAway(_) => {
                 calendar.as_ref().expect("day calendar").range
             }
-            QueryRequest::Facts(facts) => {
-                let zone = jiff::tz::TimeZone::try_system()?;
-                QueryRange {
-                    start: facts
-                        .local_date
-                        .to_zoned_datetime(zone.clone())?
-                        .timestamp()
-                        .as_millisecond(),
-                    end: facts
-                        .local_date
-                        .tomorrow()?
-                        .to_zoned_datetime(zone)?
-                        .timestamp()
-                        .as_millisecond(),
-                }
-            }
+            QueryRequest::Facts(facts) => QueryRange {
+                start: facts
+                    .local_date
+                    .to_zoned_datetime(zone.clone())?
+                    .timestamp()
+                    .as_millisecond(),
+                end: facts
+                    .local_date
+                    .tomorrow()?
+                    .to_zoned_datetime(zone.clone())?
+                    .timestamp()
+                    .as_millisecond(),
+            },
             QueryRequest::EntityDetail(_) => {
                 entity_calendar.as_ref().expect("entity calendar").range
             }
@@ -341,7 +394,7 @@ impl QueryJob {
                 end: timeline.end_utc_ms,
             },
         };
-        if !matches!(request, QueryRequest::Unclassified(_))
+        if day_walker.is_none()
             && (range.start >= range.end
                 || range
                     .end
@@ -354,7 +407,8 @@ impl QueryJob {
         jiff::Timestamp::from_millisecond(range.end)?;
         let reference_range = match request {
             QueryRequest::Day(day) => {
-                EntityCalendar::new(day.local_date, settings.day_start_offset)?.range
+                EntityCalendar::in_zone(day.local_date, settings.day_start_offset, zone.clone())?
+                    .range
             }
             QueryRequest::EntityDetail(detail) => match &detail.entity {
                 quartz_protocol::DetailEntity::App { .. } => {
@@ -376,7 +430,9 @@ impl QueryJob {
                         || reference
                             .end
                             .checked_sub(reference.start)
-                            .is_none_or(|duration| !(1..=MAX_QUERY_RANGE_MS).contains(&duration))
+                            .is_none_or(|duration| {
+                                !(1..=MAX_DOCUMENT_REFERENCE_MS).contains(&duration)
+                            })
                     {
                         return Err(RunQueryError::InvalidDocumentRef);
                     }
@@ -397,9 +453,14 @@ impl QueryJob {
                 .collect(),
             settings,
             rule_hashes: rule_hashes.clone(),
-            time_zone: jiff::tz::TimeZone::try_system()?,
+            time_zone: zone.clone(),
         }
         .digest(reference_range);
+        let reference_versions = versions.clone();
+        let versions = match first_weekday {
+            Some(first) => first.bind_versions(&versions),
+            None => versions,
+        };
         let entity = match request {
             QueryRequest::EntityDetail(detail) => Some(match &detail.entity {
                 quartz_protocol::DetailEntity::App { id } => EntitySelection::App { id: *id },
@@ -422,6 +483,7 @@ impl QueryJob {
         let parameters = request.parameters();
         let cursor = match request {
             QueryRequest::Unclassified(request) => request.cursor.as_ref(),
+            QueryRequest::Range(request) => request.cursor.as_ref(),
             QueryRequest::Facts(facts) => facts.cursor.as_ref(),
             QueryRequest::Day(day) => day.cursor.as_ref(),
             QueryRequest::PendingAway(away) => away.cursor.as_ref(),
@@ -435,14 +497,36 @@ impl QueryJob {
         } else {
             PagePosition::from_cursor(cursor, &versions, &parameters)?
         };
+        if let Some(accumulator) = &mut range_accumulator {
+            let calendar = day_walker.as_ref().expect("range calendar");
+            let reference = quartz_protocol::ReferenceRange {
+                start_utc_ms: reference_range.start,
+                end_utc_ms: reference_range.end,
+            };
+            let response = quartz_protocol::QueryRangeResponse {
+                time_zone: calendar.time_zone.clone(),
+                day_start_offset_min: calendar.offset.minutes(),
+                reference_range: position.is_first().then_some(reference),
+                buckets: Vec::new(),
+                versions: versions.clone(),
+                next_cursor: None,
+            };
+            let budget = PageBudget::new(&response)?.with_cursor(&QueryCursor::new(
+                versions.clone(),
+                parameters.clone(),
+                usize::MAX,
+            ))?;
+            accumulator.start_page(response, budget, position, reference, reference_versions);
+        }
         let categories = snapshot.categories()?;
-        let scan_range = match &mut unclassified_calendar {
+        let scan_range = match &mut day_walker {
             Some(calendar) => calendar.next_range().expect("validated nonempty dates"),
             None => range,
         };
         Ok(PreparedQuery {
             scan_range,
-            unclassified_calendar,
+            day_walker,
+            range_accumulator,
             categories,
             range,
             reference_range,
@@ -538,6 +622,9 @@ impl QueryJob {
                     return Ok(None);
                 }
                 let output = match &self.request {
+                    QueryRequest::Range(_) => Aggregation::Range(
+                        self.range_accumulator.take().expect("range fold retained"),
+                    ),
                     QueryRequest::Unclassified(_) => Aggregation::Unclassified(
                         self.unclassified.take().expect("daily fold retained"),
                     ),
@@ -579,6 +666,7 @@ impl QueryJob {
                 timer.measure(QueryStage::Aggregate, || {
                     for segment in segments.by_ref().take(QUERY_BATCH_ROWS) {
                         match &mut output {
+                            Aggregation::Range(range) => range.push(&segment, &facts),
                             Aggregation::Day(day) => day.push(&segment, &facts),
                             Aggregation::Unclassified(groups) => groups.push(&segment, &facts),
                             Aggregation::PendingAway(away) => away.push(&segment),
@@ -611,20 +699,22 @@ impl QueryJob {
                     };
                     return Ok(None);
                 }
-                if let Aggregation::Unclassified(groups) = output {
-                    if let Some(range) = self
-                        .unclassified_calendar
-                        .as_mut()
-                        .expect("fold calendar")
-                        .next_range()
-                    {
-                        self.scan_range = range;
-                        self.snapshot.restart_scan();
-                        self.unclassified = Some(groups);
-                        self.stage = Stage::Read(Pipeline::new(range, facts.into_classifier()));
-                        return Ok(None);
+                if let Some(walker) = &mut self.day_walker
+                    && let Some(range) = walker.next_range()
+                {
+                    match output {
+                        Aggregation::Unclassified(groups) => self.unclassified = Some(groups),
+                        Aggregation::Range(mut groups) => {
+                            timer
+                                .measure(QueryStage::Aggregate, || groups.next_day(walker.date))?;
+                            self.range_accumulator = Some(groups);
+                        }
+                        _ => unreachable!("daily scan aggregation"),
                     }
-                    output = Aggregation::Unclassified(groups);
+                    self.scan_range = range;
+                    self.snapshot.restart_scan();
+                    self.stage = Stage::Read(Pipeline::new(range, facts.into_classifier()));
+                    return Ok(None);
                 }
                 let response =
                     timer.measure(QueryStage::Aggregate, || self.finish_aggregation(output))?;
@@ -637,8 +727,16 @@ impl QueryJob {
     }
     fn finish_aggregation(&self, output: Aggregation) -> Result<QueryResponse, RunQueryError> {
         Ok(match output {
+            Aggregation::Range(groups) => {
+                let page = groups.finish()?;
+                let mut response = page.response;
+                response.next_cursor = page.next.map(|position| {
+                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
+                });
+                QueryResponse::Range(response)
+            }
             Aggregation::Unclassified(groups) => {
-                let calendar = self.unclassified_calendar.as_ref().expect("fold calendar");
+                let calendar = self.day_walker.as_ref().expect("fold calendar");
                 let reference_range = quartz_protocol::ReferenceRange {
                     start_utc_ms: self.range.start,
                     end_utc_ms: self.range.end,
@@ -739,7 +837,7 @@ impl QueryJob {
                 });
             }
 
-            QueryResponse::Day(_) | QueryResponse::Unclassified(_) => {}
+            QueryResponse::Day(_) | QueryResponse::Unclassified(_) | QueryResponse::Range(_) => {}
             QueryResponse::PendingAway(away) => {
                 let items = std::mem::take(&mut away.ranges);
                 let page = self.page_budget(away)?.page(items, self.position)?;
@@ -825,7 +923,8 @@ pub(crate) struct CompletedQuery {
 #[derive(Debug)]
 struct PreparedQuery {
     scan_range: QueryRange,
-    unclassified_calendar: Option<UnclassifiedCalendar>,
+    day_walker: Option<DayWalker>,
+    range_accumulator: Option<RangeAccumulator>,
     categories: Vec<quartz_domain::categories::Category>,
     range: QueryRange,
     reference_range: QueryRange,

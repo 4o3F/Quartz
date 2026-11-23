@@ -4,7 +4,7 @@ use quartz_protocol::{HourCycle, LocaleSettings, Weekday};
 use windows::{Win32::Globalization, core::PCWSTR};
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum LocaleSetting {
+pub(crate) enum LocaleSetting {
     TimeFormat,
     FirstDayOfWeek,
 }
@@ -18,7 +18,7 @@ impl LocaleSetting {
 }
 
 #[derive(Debug, snafu::Snafu)]
-pub(super) enum ReadLocaleError {
+pub(crate) enum ReadLocaleError {
     #[snafu(display("could not read Windows regional setting {setting:?}"))]
     Windows {
         setting: LocaleSetting,
@@ -32,9 +32,9 @@ pub(super) enum ReadLocaleError {
     Size { source: std::num::TryFromIntError },
 }
 
-pub(super) struct UserLocale;
+pub(crate) struct UserLocale;
 impl UserLocale {
-    pub(super) fn read() -> Result<LocaleSettings, ReadLocaleError> {
+    pub(crate) fn read() -> Result<LocaleSettings, ReadLocaleError> {
         let format = Self::text(LocaleSetting::TimeFormat)?;
         let day = Self::text(LocaleSetting::FirstDayOfWeek)?;
         Ok(LocaleSettings {

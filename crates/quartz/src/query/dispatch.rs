@@ -66,6 +66,11 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
+            let response = database.port.call(QueryRequest::Range(quartz_protocol::QueryRangeRequest {
+                start_date: crate::store::query::test_support::FIXTURE_DATE.parse().expect("date"), end_date: "2025-01-03".parse().expect("date"),
+                bucket: quartz_protocol::RangeBucket::Day, dimensions: vec![quartz_protocol::RangeDimension::Category], cursor: None,
+            })).await.expect("range dispatcher response");
+            assert!(matches!(response, QueryResponse::Range(page) if page.buckets.len() == 1 && page.buckets[0].active_ms == Some(4000)));
             let response = database.port.call(QueryRequest::Unclassified(quartz_protocol::QueryUnclassifiedRequest {
                 start_date: crate::store::query::test_support::FIXTURE_DATE.parse().expect("date"),
                 end_date: "2025-01-03".parse().expect("date"),

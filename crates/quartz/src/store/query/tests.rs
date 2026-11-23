@@ -2727,3 +2727,817 @@ fn unclassified_returns_effective_day_offset_and_rejects_cursors_after_offset_ch
         "midnight fixture falls before the shifted day start"
     );
 }
+
+impl QueryFixture {
+    fn range_request(
+        &self,
+        bucket: quartz_protocol::RangeBucket,
+    ) -> quartz_protocol::QueryRangeRequest {
+        let start_date: quartz_protocol::LocalDate = FIXTURE_DATE.parse().expect("date");
+        quartz_protocol::QueryRangeRequest {
+            start_date,
+            end_date: start_date.tomorrow().expect("end"),
+            bucket,
+            dimensions: vec![
+                quartz_protocol::RangeDimension::Category,
+                quartz_protocol::RangeDimension::App,
+                quartz_protocol::RangeDimension::Document,
+            ],
+            cursor: None,
+        }
+    }
+    fn range_page(
+        &mut self,
+        request: quartz_protocol::QueryRangeRequest,
+    ) -> quartz_protocol::QueryRangeResponse {
+        let response = self.run(QueryRequest::Range(request)).expect("range query");
+        assert!(serde_json::to_vec(&response).expect("wire").len() <= QUERY_PAGE_BYTES);
+        let QueryResponse::Range(page) = response else {
+            panic!("range response")
+        };
+        page
+    }
+    fn run_in_zone(
+        &mut self,
+        request: QueryRequest,
+        zone: jiff::tz::TimeZone,
+    ) -> Result<QueryResponse, RunQueryError> {
+        let mut reader = self.store.take_query_reader();
+        match QueryJob::start_in_zone(&mut reader, request, self.rules(), zone) {
+            Ok(job) => {
+                let completed = job.run_measured()?;
+                self.store.return_query_reader(completed.reader);
+                Ok(completed.response)
+            }
+            Err(error) => {
+                self.store
+                    .return_query_reader(reader.expect("restored reader"));
+                Err(error)
+            }
+        }
+    }
+    fn set_first_weekday(&mut self, first: quartz_protocol::FirstDayOfWeekSetting) {
+        crate::store::settings::Settings::new(&mut self.store.writer)
+            .update_ui(quartz_protocol::SettingsSetRequest {
+                first_day_of_week: Some(first),
+                ..Default::default()
+            })
+            .expect("weekday setting");
+    }
+}
+#[test]
+fn range_pages_totals_once_preserve_order_and_reject_changed_or_stale_cursors() {
+    use quartz_protocol::{RangeBucket, RangeDimension, RangeEntity, WorkEntity};
+    let mut fixture = QueryFixture::new(900);
+    fixture.set_first_weekday(quartz_protocol::FirstDayOfWeekSetting::Sunday);
+    let mut request = fixture.range_request(RangeBucket::Week);
+    request.dimensions = vec![
+        RangeDimension::Document,
+        RangeDimension::Category,
+        RangeDimension::App,
+    ];
+    let original = request.clone();
+    let mut groups = Vec::new();
+    let mut totals = Vec::new();
+    let first = fixture.range_page(request.clone());
+    let continuation = first.next_cursor.clone().expect("multiple pages");
+    let versions = first.versions.clone();
+    let mut pages = 0;
+    loop {
+        let page = fixture.range_page(request.clone());
+        assert_eq!(page.reference_range.is_some(), request.cursor.is_none());
+        for bucket in page.buckets {
+            totals.extend(bucket.active_ms);
+            groups.extend(bucket.groups);
+        }
+        pages += 1;
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        request.cursor = Some(cursor);
+    }
+    assert!(pages > 1);
+    assert_eq!(totals, vec![900_000]);
+    assert_eq!(groups.len(), 1801);
+    assert!(
+        groups[..900]
+            .iter()
+            .all(|group| group.dimension == RangeDimension::Document)
+    );
+    assert_eq!(groups[900].dimension, RangeDimension::Category);
+    assert!(
+        groups[901..]
+            .iter()
+            .all(|group| group.dimension == RangeDimension::App)
+    );
+    let ids: Vec<_> = groups[..900]
+        .iter()
+        .map(|group| match &group.entity {
+            RangeEntity::Work(WorkEntity::Document { app, .. }) => app.0,
+            _ => panic!("document"),
+        })
+        .collect();
+    assert_eq!(ids, (1..=900).collect::<Vec<_>>());
+    let mut changed = original.clone();
+    changed.cursor = Some(continuation.clone());
+    changed.dimensions.reverse();
+    assert_eq!(
+        fixture
+            .run(QueryRequest::Range(changed))
+            .expect_err("changed dimensions")
+            .kind(),
+        ErrorKind::BadRequest
+    );
+    let mut changed = original.clone();
+    changed.cursor = Some(QueryCursor::new(
+        versions.clone(),
+        quartz_protocol::CursorQuery::from(&changed),
+        usize::MAX,
+    ));
+    assert_eq!(
+        fixture
+            .run(QueryRequest::Range(changed))
+            .expect_err("invalid position")
+            .kind(),
+        ErrorKind::BadRequest
+    );
+    fixture.set_first_weekday(quartz_protocol::FirstDayOfWeekSetting::Saturday);
+    let mut changed = original.clone();
+    changed.cursor = Some(continuation.clone());
+    assert_eq!(
+        fixture
+            .run(QueryRequest::Range(changed))
+            .expect_err("changed week boundary")
+            .kind(),
+        ErrorKind::StaleCursor
+    );
+    fixture.set_first_weekday(quartz_protocol::FirstDayOfWeekSetting::Sunday);
+    fixture.bump_fact_version();
+    let mut changed = original;
+    changed.cursor = Some(continuation);
+    assert_eq!(
+        fixture
+            .run(QueryRequest::Range(changed))
+            .expect_err("changed inputs")
+            .kind(),
+        ErrorKind::StaleCursor
+    );
+}
+#[test]
+fn range_rejects_empty_duplicate_dimensions_and_invalid_dates_as_bad_request() {
+    use quartz_protocol::{RangeBucket, RangeDimension};
+    let mut fixture = QueryFixture::new(1);
+    let original = fixture.range_request(RangeBucket::Day);
+    let mut invalid = Vec::new();
+    for dimensions in [vec![], vec![RangeDimension::App, RangeDimension::App]] {
+        let mut request = original.clone();
+        request.dimensions = dimensions;
+        invalid.push(request);
+    }
+    for end in ["2025-01-02", "2025-01-01", "2026-01-04"] {
+        let mut request = original.clone();
+        request.end_date = end.parse().expect("end");
+        invalid.push(request);
+    }
+    for request in invalid {
+        assert_eq!(
+            fixture
+                .run(QueryRequest::Range(request))
+                .expect_err("invalid range")
+                .kind(),
+            ErrorKind::BadRequest
+        );
+    }
+    assert_eq!(fixture.range_page(original).buckets.len(), 1);
+}
+#[test]
+fn range_privacy_and_offline_activity_match_day_metrics_and_rankings() {
+    use quartz_protocol::{AnnotationKind, RangeBucket, RangeDimension, RangeEntity, WorkEntity};
+    for level in [
+        enums::CaptureLevel::Full,
+        enums::CaptureLevel::TitleHidden,
+        enums::CaptureLevel::Excluded,
+    ] {
+        let mut fixture = QueryFixture::new(4);
+        fixture.mask_idle(500, 750);
+        fixture.annotate(
+            1,
+            AnnotationKind::OfflineActivity,
+            500,
+            750,
+            Some(quartz_protocol::BuiltinCategory::Learning),
+        );
+        fixture.annotate(
+            2,
+            AnnotationKind::CategoryOverride,
+            1000,
+            2000,
+            Some(quartz_protocol::BuiltinCategory::Development),
+        );
+        fixture.redact_titles(level);
+        let request = fixture.range_request(RangeBucket::Day);
+        let page = fixture.range_page(request);
+        let bucket = &page.buckets[0];
+        let day_request = fixture.request_day();
+        let QueryResponse::Day(day) = fixture.run(day_request).expect("day") else {
+            panic!("day")
+        };
+        assert_eq!(
+            bucket.active_ms,
+            Some(day.metrics.expect("metrics").active_ms)
+        );
+        let app_groups: Vec<_> = bucket
+            .groups
+            .iter()
+            .filter(|group| group.dimension == RangeDimension::App)
+            .collect();
+        assert_eq!(app_groups.len(), day.applications.len());
+        for (group, app) in app_groups.iter().zip(day.applications) {
+            assert_eq!(group.active_ms, app.active_ms);
+            assert!(
+                matches!(&group.entity, RangeEntity::Work(WorkEntity::App {id, ..}) if *id == app.app.id)
+            );
+        }
+        let documents: Vec<_> = bucket
+            .groups
+            .iter()
+            .filter(|group| group.dimension == RangeDimension::Document)
+            .collect();
+        if level != enums::CaptureLevel::Full {
+            assert!(documents.is_empty());
+        }
+        let category_ms: i64 = bucket
+            .groups
+            .iter()
+            .filter(|group| group.dimension == RangeDimension::Category)
+            .map(|group| group.active_ms)
+            .sum();
+        assert_eq!(Some(category_ms), bucket.active_ms);
+        let wire = serde_json::to_string(&page).expect("wire");
+        if level != enums::CaptureLevel::Full {
+            assert!(!wire.contains("private title fixture"));
+        }
+        if level == enums::CaptureLevel::Excluded {
+            assert!(!wire.contains("Application"));
+        }
+    }
+}
+
+fn range_entity_key(entity: &quartz_protocol::RangeEntity) -> String {
+    let mut value = serde_json::to_value(entity).expect("entity");
+    value
+        .as_object_mut()
+        .expect("object")
+        .remove("document_ref");
+    serde_json::to_string(&value).expect("identity")
+}
+#[test]
+fn range_every_dimension_equals_sum_of_days_across_clock_changes_and_day_offsets() {
+    use quartz_protocol::{
+        CategoryEntity, RangeBucket, RangeDimension, RangeEntity, RangeGroup, WorkEntity,
+    };
+    let mut fixture = QueryFixture::new(8);
+    fixture.store.test_day_offset_write(240).expect("offset");
+    fixture.set_first_weekday(quartz_protocol::FirstDayOfWeekSetting::Sunday);
+    let end = fixture.start + 9 * UTC_DAY_MS;
+    diesel::update(capture_runs::table)
+        .set(capture_runs::ended_utc_ms.eq(Some(end)))
+        .execute(&mut fixture.store.writer)
+        .expect("run");
+    diesel::update(clock_segments::table)
+        .set((
+            clock_segments::end_utc_ms.eq(Some(end)),
+            clock_segments::end_mono_ms.eq(Some(9 * UTC_DAY_MS)),
+        ))
+        .execute(&mut fixture.store.writer)
+        .expect("clock");
+    for id in 1..=8_i64 {
+        let start = (id - 1) * UTC_DAY_MS + 5 * 3_600_000;
+        diesel::update(intervals::table.filter(intervals::id.eq(Some(id))))
+            .set((
+                intervals::start_utc_ms.eq(fixture.start + start),
+                intervals::end_utc_ms.eq(Some(fixture.start + start + 1000)),
+                intervals::start_mono_ms.eq(start),
+                intervals::end_mono_ms.eq(Some(start + 1000)),
+            ))
+            .execute(&mut fixture.store.writer)
+            .expect("spread facts");
+    }
+    // A second clock segment revisits the same UTC interval with a different monotonic slope.
+    let mut clock = clock_segments::table
+        .select(crate::store::rows::ClockSegmentsRow::as_select())
+        .first::<crate::store::rows::ClockSegmentsRow>(&mut fixture.store.writer)
+        .expect("clock");
+    clock.id = Some(2);
+    clock.start_utc_ms = fixture.start + 5 * 3_600_000;
+    clock.start_mono_ms = 10 * UTC_DAY_MS;
+    clock.end_utc_ms = Some(clock.start_utc_ms + 1000);
+    clock.end_mono_ms = Some(clock.start_mono_ms + 2000);
+    diesel::insert_into(clock_segments::table)
+        .values(&clock)
+        .execute(&mut fixture.store.writer)
+        .expect("repeated UTC clock");
+    diesel::update(intervals::table.filter(intervals::id.eq(Some(8_i64))))
+        .set((
+            intervals::clock_segment_id.eq(2_i64),
+            intervals::start_utc_ms.eq(clock.start_utc_ms),
+            intervals::end_utc_ms.eq(clock.end_utc_ms),
+            intervals::start_mono_ms.eq(clock.start_mono_ms),
+            intervals::end_mono_ms.eq(clock.end_mono_ms),
+            intervals::duration_ms.eq(Some(2000_i64)),
+        ))
+        .execute(&mut fixture.store.writer)
+        .expect("repeated UTC fact");
+    fixture.mask_idle(5 * 3_600_000 + 100, 5 * 3_600_000 + 300);
+    fixture.annotate(
+        1,
+        quartz_protocol::AnnotationKind::OfflineActivity,
+        5 * 3_600_000 + 100,
+        5 * 3_600_000 + 300,
+        Some(quartz_protocol::BuiltinCategory::Learning),
+    );
+    let mut request = fixture.range_request(RangeBucket::Day);
+    request.end_date = request
+        .start_date
+        .checked_add(jiff::Span::new().days(9))
+        .expect("end");
+    let day_range = fixture.range_page(request.clone());
+    assert_eq!(day_range.buckets.len(), 9);
+    let mut expected_total = 0;
+    let mut expected_groups = std::collections::BTreeMap::<String, i64>::new();
+    for bucket in day_range.buckets {
+        let mut day_request = quartz_protocol::QueryDayRequest {
+            local_date: bucket.start_date,
+            cursor: None,
+        };
+        let mut daily_groups = std::collections::BTreeMap::<String, i64>::new();
+        loop {
+            let QueryResponse::Day(day) = fixture
+                .run(QueryRequest::Day(day_request.clone()))
+                .expect("daily baseline")
+            else {
+                panic!("day")
+            };
+            if let Some(metrics) = day.metrics {
+                assert_eq!(bucket.active_ms, Some(metrics.active_ms));
+                expected_total += metrics.active_ms;
+            }
+            for hour in day.hours.into_iter().flatten() {
+                for category in hour
+                    .categories
+                    .into_iter()
+                    .filter(|category| category.duration_ms > 0)
+                {
+                    let key = range_entity_key(&RangeEntity::Category(CategoryEntity::Category {
+                        category: category.category,
+                    }));
+                    *daily_groups.entry(key).or_default() += category.duration_ms;
+                }
+            }
+            for app in day.applications {
+                let key = range_entity_key(&RangeEntity::Work(WorkEntity::App {
+                    id: app.app.id,
+                    exe_name: app.app.exe_name,
+                    display_name: app.app.display_name,
+                }));
+                *daily_groups.entry(key).or_default() += app.active_ms;
+            }
+            for document in day.documents {
+                let key = range_entity_key(&RangeEntity::Work(WorkEntity::Document {
+                    document_ref: document.document_ref,
+                    app: document.app,
+                    document: document.document,
+                    project: document.project,
+                    profile: document.profile,
+                }));
+                *daily_groups.entry(key).or_default() += document.active_ms;
+            }
+            let Some(cursor) = day.next_cursor else { break };
+            day_request.cursor = Some(cursor);
+        }
+        let actual: std::collections::BTreeMap<_, _> = bucket
+            .groups
+            .iter()
+            .map(|group| (range_entity_key(&group.entity), group.active_ms))
+            .collect();
+        assert_eq!(actual, daily_groups, "day {}", bucket.start_date);
+        for group in bucket.groups {
+            *expected_groups
+                .entry(range_entity_key(&group.entity))
+                .or_default() += group.active_ms;
+        }
+    }
+    request.bucket = RangeBucket::Week;
+    let page = fixture.range_page(request.clone());
+    assert_eq!(
+        page.buckets.first().expect("first").start_date,
+        request.start_date
+    );
+    assert_eq!(
+        page.buckets.last().expect("last").end_date,
+        request.end_date
+    );
+    assert!(
+        page.buckets
+            .iter()
+            .skip(1)
+            .all(|bucket| bucket.start_date.weekday() == jiff::civil::Weekday::Sunday)
+    );
+    assert_eq!(
+        page.buckets
+            .iter()
+            .filter_map(|bucket| bucket.active_ms)
+            .sum::<i64>(),
+        expected_total
+    );
+    let mut actual = std::collections::BTreeMap::<String, i64>::new();
+    for RangeGroup {
+        entity, active_ms, ..
+    } in page.buckets.into_iter().flat_map(|bucket| bucket.groups)
+    {
+        *actual.entry(range_entity_key(&entity)).or_default() += active_ms;
+    }
+    assert_eq!(actual, expected_groups);
+    // Requesting one dimension preserves its result and the same denominator.
+    request.bucket = RangeBucket::Day;
+    for dimension in [
+        RangeDimension::Category,
+        RangeDimension::App,
+        RangeDimension::Document,
+    ] {
+        request.dimensions = vec![dimension];
+        let page = fixture.range_page(request.clone());
+        assert_eq!(
+            page.buckets
+                .iter()
+                .filter_map(|bucket| bucket.active_ms)
+                .sum::<i64>(),
+            expected_total
+        );
+        assert!(
+            page.buckets
+                .iter()
+                .flat_map(|bucket| &bucket.groups)
+                .all(|group| group.dimension == dimension)
+        );
+    }
+}
+#[test]
+fn range_and_unclassified_document_refs_round_trip_across_a_366_day_dst_range() {
+    use quartz_protocol::{
+        DetailEntity, QueryEntityDetailRequest, RangeBucket, RangeDimension, RangeEntity,
+        WorkEntity,
+    };
+    let mut fixture = QueryFixture::new(1);
+    fixture.store.test_day_offset_write(240).expect("offset");
+    fixture.set_first_weekday(quartz_protocol::FirstDayOfWeekSetting::Sunday);
+    let zone = jiff::tz::TimeZone::get("America/Los_Angeles").expect("zone");
+    let mut request = fixture.range_request(RangeBucket::Week);
+    request.start_date = "2024-11-01".parse().expect("start");
+    request.end_date = "2025-11-02".parse().expect("end");
+    request.dimensions = vec![RangeDimension::Document];
+    let unclassified = quartz_protocol::QueryUnclassifiedRequest {
+        start_date: request.start_date,
+        end_date: request.end_date,
+        group_by: quartz_protocol::UnclassifiedGroupBy::Document,
+        search: None,
+        cursor: None,
+    };
+    for query in [
+        QueryRequest::Range(request),
+        QueryRequest::Unclassified(unclassified),
+    ] {
+        let response = fixture
+            .run_in_zone(query, zone.clone())
+            .expect("366 logical days");
+        struct IssuedDocument {
+            reference_range: quartz_protocol::ReferenceRange,
+            document_ref: quartz_protocol::DocumentRef,
+        }
+        let issued = match response {
+            QueryResponse::Range(page) => {
+                let entity = page
+                    .buckets
+                    .into_iter()
+                    .flat_map(|bucket| bucket.groups)
+                    .find_map(|group| match group.entity {
+                        RangeEntity::Work(WorkEntity::Document { document_ref, .. }) => {
+                            Some(document_ref)
+                        }
+                        _ => None,
+                    })
+                    .expect("document");
+                IssuedDocument {
+                    reference_range: page.reference_range.expect("range"),
+                    document_ref: entity,
+                }
+            }
+            QueryResponse::Unclassified(page) => {
+                let WorkEntity::Document { document_ref, .. } =
+                    page.items.into_iter().next().expect("item").entity
+                else {
+                    panic!("document")
+                };
+                IssuedDocument {
+                    reference_range: page.reference_range.expect("range"),
+                    document_ref,
+                }
+            }
+            _ => panic!("group query"),
+        };
+        let reference_range = issued.reference_range;
+        assert_eq!(
+            reference_range.end_utc_ms - reference_range.start_utc_ms,
+            366 * UTC_DAY_MS + 3_600_000
+        );
+        let detail = QueryEntityDetailRequest {
+            entity: DetailEntity::Document {
+                document_ref: issued.document_ref,
+            },
+            reference_range: Some(reference_range),
+            local_date: "2025-01-07".parse().expect("detail date"),
+            cursor: None,
+        };
+        let QueryResponse::EntityDetail(page) = fixture
+            .run_in_zone(QueryRequest::EntityDetail(detail.clone()), zone.clone())
+            .expect("document round trip")
+        else {
+            panic!("detail")
+        };
+        assert_eq!(
+            page.daily
+                .expect("daily")
+                .iter()
+                .map(|day| day.active_ms)
+                .sum::<i64>(),
+            1000
+        );
+        let mut invalid = detail;
+        invalid.reference_range.as_mut().expect("range").end_utc_ms =
+            reference_range.start_utc_ms + 367 * UTC_DAY_MS + 1;
+        assert_eq!(
+            fixture
+                .run_in_zone(QueryRequest::EntityDetail(invalid), zone.clone())
+                .expect_err("reference bound")
+                .kind(),
+            ErrorKind::BadRequest
+        );
+    }
+}
+
+#[test]
+fn range_dst_day_buckets_equal_day_queries_with_a_four_hour_start_offset() {
+    use crate::query::calendar::{DayCalendar, DayStartOffset};
+    use quartz_protocol::{QueryDayRequest, RangeBucket};
+    struct Case {
+        start: &'static str,
+        end: &'static str,
+        hours: i64,
+    }
+    let zone = jiff::tz::TimeZone::get("America/Los_Angeles").expect("zone");
+    for case in [
+        Case {
+            start: "2026-03-07",
+            end: "2026-03-09",
+            hours: 47,
+        },
+        Case {
+            start: "2026-10-31",
+            end: "2026-11-02",
+            hours: 49,
+        },
+    ] {
+        let mut fixture = QueryFixture::new(1);
+        fixture.store.test_day_offset_write(240).expect("offset");
+        let offset = DayStartOffset::try_from(240).expect("offset");
+        let start_date = case.start.parse().expect("date");
+        let end_date: quartz_protocol::LocalDate = case.end.parse().expect("date");
+        let start = DayCalendar::in_zone(start_date, offset, zone.clone())
+            .expect("start")
+            .range
+            .start;
+        let end = DayCalendar::in_zone(
+            end_date.yesterday().expect("last date"),
+            offset,
+            zone.clone(),
+        )
+        .expect("end")
+        .range
+        .end;
+        let duration = end - start;
+        diesel::update(capture_runs::table)
+            .set((
+                capture_runs::started_utc_ms.eq(start),
+                capture_runs::ended_utc_ms.eq(Some(end)),
+            ))
+            .execute(&mut fixture.store.writer)
+            .expect("run");
+        diesel::update(clock_segments::table)
+            .set((
+                clock_segments::start_utc_ms.eq(start),
+                clock_segments::end_utc_ms.eq(Some(end)),
+                clock_segments::end_mono_ms.eq(Some(duration)),
+            ))
+            .execute(&mut fixture.store.writer)
+            .expect("clock");
+        // Stored closed facts are at most one UTC day; split the synthetic activity accordingly.
+        const FACT_CHUNK_MS: i64 = UTC_DAY_MS / 2;
+        let mut fact = intervals::table
+            .select(crate::store::rows::IntervalsRow::as_select())
+            .first::<crate::store::rows::IntervalsRow>(&mut fixture.store.writer)
+            .expect("fact template");
+        diesel::delete(intervals::table)
+            .execute(&mut fixture.store.writer)
+            .expect("replace fact");
+        let mut at = start;
+        let mut sequence = 0;
+        while at < end {
+            let next = (at + FACT_CHUNK_MS).min(end);
+            sequence += 1;
+            fact.id = None;
+            fact.sequence = sequence;
+            fact.start_utc_ms = at;
+            fact.end_utc_ms = Some(next);
+            fact.start_mono_ms = at - start;
+            fact.end_mono_ms = Some(next - start);
+            fact.duration_ms = Some(next - at);
+            diesel::insert_into(intervals::table)
+                .values(&fact)
+                .execute(&mut fixture.store.writer)
+                .expect("bounded fact");
+            at = next;
+        }
+        let mut request = fixture.range_request(RangeBucket::Day);
+        request.start_date = start_date;
+        request.end_date = end_date;
+        let QueryResponse::Range(page) = fixture
+            .run_in_zone(QueryRequest::Range(request), zone.clone())
+            .expect("range")
+        else {
+            panic!("range")
+        };
+        assert_eq!(page.time_zone, "America/Los_Angeles");
+        assert_eq!(page.day_start_offset_min, 240);
+        let mut total = 0;
+        for bucket in page.buckets {
+            let QueryResponse::Day(day) = fixture
+                .run_in_zone(
+                    QueryRequest::Day(QueryDayRequest {
+                        local_date: bucket.start_date,
+                        cursor: None,
+                    }),
+                    zone.clone(),
+                )
+                .expect("day")
+            else {
+                panic!("day")
+            };
+            let active = day.metrics.expect("metrics").active_ms;
+            assert_eq!(bucket.active_ms, Some(active));
+            assert_eq!(bucket.groups.len(), 3);
+            assert!(bucket.groups.iter().all(|group| group.active_ms == active));
+            total += active;
+        }
+        assert_eq!(total, case.hours * 3_600_000);
+    }
+}
+
+#[test]
+fn range_paging_spans_clipped_week_buckets_and_releases_finished_groups() {
+    use quartz_protocol::RangeBucket;
+    let mut fixture = QueryFixture::new(900);
+    fixture.set_first_weekday(quartz_protocol::FirstDayOfWeekSetting::Sunday);
+    let mut request = fixture.range_request(RangeBucket::Week);
+    request.end_date = "2025-01-11".parse().expect("clipped end");
+    let mut totals = Vec::new();
+    let mut groups = 0;
+    let mut first_bucket_pages = 0;
+    loop {
+        let page = fixture.range_page(request.clone());
+        for bucket in page.buckets {
+            if bucket.start_date == request.start_date {
+                first_bucket_pages += 1;
+            }
+            if let Some(active_ms) = bucket.active_ms {
+                totals.push(active_ms);
+            }
+            groups += bucket.groups.len();
+        }
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        request.cursor = Some(cursor);
+    }
+    assert!(first_bucket_pages > 1);
+    assert_eq!(totals, [900_000, 0]);
+    assert_eq!(groups, 1801);
+}
+
+#[test]
+fn resident_reader_reuses_fixed_statements_for_varying_lookup_widths_and_queries() {
+    use diesel::{Connection, connection::InstrumentationEvent};
+    use std::sync::{Arc, Mutex};
+    const QUERY_ROUNDS: i64 = 64;
+    const DATE_VARIANTS: i64 = 9;
+    const FIXTURE_INTERVAL_MS: i64 = 1000;
+    let count = i64::try_from(READ_BATCH_ROWS).expect("fixture count");
+    let mut fixture = QueryFixture::new(count);
+    fixture.set_first_weekday(quartz_protocol::FirstDayOfWeekSetting::Sunday);
+    let rules = fixture.rules();
+    let rows = intervals::table
+        .order(intervals::id)
+        .select(crate::store::rows::IntervalsRow::as_select())
+        .load::<crate::store::rows::IntervalsRow>(&mut fixture.store.writer)
+        .expect("fixture rows");
+    let rows: Vec<_> = rows
+        .into_iter()
+        .map(|fact| ForegroundDetails {
+            fact,
+            title: None,
+            window_class: None,
+        })
+        .collect();
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed = events.clone();
+    let mut reader = fixture.store.take_query_reader().expect("resident reader");
+    reader
+        .connection
+        .set_instrumentation(move |event: InstrumentationEvent<'_>| {
+            if let InstrumentationEvent::CacheQuery { sql, .. } = event {
+                observed.lock().expect("cached SQL").push(sql.to_owned());
+            }
+        });
+    let mut warmed = None;
+    // Every width and partial final chunk uses the same cached application lookup.
+    for width in 1..=READ_BATCH_ROWS {
+        let mut snapshot = reader.snapshot();
+        snapshot.begin().expect("snapshot");
+        snapshot.read_applications(&rows[..width]).expect("lookup");
+        assert_eq!(snapshot.applications.len(), width, "lookup width {width}");
+        reader = snapshot.finish().expect("same reader");
+        let count = events.lock().expect("cached SQL").len();
+        assert_eq!(count, *warmed.get_or_insert(count));
+    }
+    {
+        let cached = events.lock().expect("cached SQL");
+        let lookups: Vec<_> = cached
+            .iter()
+            .filter(|sql| sql.contains("FROM `applications`"))
+            .collect();
+        assert_eq!(lookups.len(), 1);
+        assert_eq!(lookups[0].matches('?').count(), APPLICATION_LOOKUP_ARITY);
+    }
+    let run = |reader: ReadOnlyStore, request: QueryRequest| {
+        let mut slot = Some(reader);
+        QueryJob::start(&mut slot, request, rules.clone())
+            .expect("query on resident reader")
+            .run_measured()
+            .expect("query result")
+            .reader
+    };
+    let date: quartz_protocol::LocalDate = FIXTURE_DATE.parse().expect("date");
+    let requests = |round: i64| {
+        vec![
+            QueryRequest::Day(quartz_protocol::QueryDayRequest {
+                local_date: date
+                    .checked_add(jiff::Span::new().days(round % DATE_VARIANTS))
+                    .expect("date variant"),
+                cursor: None,
+            }),
+            QueryRequest::Timeline(quartz_protocol::QueryTimelineRequest {
+                start_utc_ms: fixture.start + round * FIXTURE_INTERVAL_MS,
+                end_utc_ms: fixture.start + (count - round) * FIXTURE_INTERVAL_MS,
+                detail: quartz_protocol::TimelineDetail::App,
+                ms_per_pixel: quartz_protocol::MillisecondsPerPixel(std::num::NonZeroU64::MIN),
+                cursor: None,
+            }),
+            QueryRequest::Range(quartz_protocol::QueryRangeRequest {
+                start_date: date,
+                end_date: date
+                    .checked_add(jiff::Span::new().days(round % DATE_VARIANTS + 1))
+                    .expect("range variant"),
+                bucket: quartz_protocol::RangeBucket::Week,
+                dimensions: vec![
+                    quartz_protocol::RangeDimension::Category,
+                    quartz_protocol::RangeDimension::App,
+                    quartz_protocol::RangeDimension::Document,
+                ],
+                cursor: None,
+            }),
+        ]
+    };
+    for request in requests(0) {
+        reader = run(reader, request);
+    }
+    let prepared = events.lock().expect("cached SQL").len();
+    for round in 0..QUERY_ROUNDS {
+        for request in requests(round) {
+            reader = run(reader, request);
+        }
+        assert_eq!(
+            events.lock().expect("cached SQL").len(),
+            prepared,
+            "round {round} prepares no per-call SQL"
+        );
+    }
+}

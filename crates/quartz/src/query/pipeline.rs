@@ -89,9 +89,15 @@ pub(crate) struct SegmentFacts {
     classifier: Classifier,
 }
 impl SegmentFacts {
-    /// Carries query-local classification and extraction caches into the next logical day.
+    /// Releases daily facts before resetting the classifier for the next logical day.
     pub(super) fn into_classifier(self) -> Classifier {
-        self.classifier
+        let Self {
+            rows,
+            mut classifier,
+        } = self;
+        drop(rows);
+        classifier.reset_day();
+        classifier
     }
 
     #[cfg(test)]

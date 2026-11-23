@@ -13,7 +13,7 @@ pub(crate) enum PagePosition {
     Cursor(usize),
 }
 impl PagePosition {
-    fn index(self) -> usize {
+    pub(super) fn index(self) -> usize {
         match self {
             Self::First => 0,
             Self::Cursor(index) => index,

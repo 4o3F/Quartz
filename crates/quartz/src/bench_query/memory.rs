@@ -1,4 +1,4 @@
-//! Endpoint samples of process-private committed bytes, as requested by resources 08 §1.4.
+//! Stage-boundary and endpoint samples of process-private committed bytes, as requested by resources 08 §1.4.
 
 use super::BenchQueryError;
 
@@ -42,17 +42,33 @@ impl PrivateBytes {
 pub(super) struct MemoryPeaks {
     idle: PrivateBytes,
     peak: PrivateBytes,
+    samples: usize,
 }
 impl MemoryPeaks {
     pub(super) fn new(idle: PrivateBytes) -> Self {
-        Self { idle, peak: idle }
+        Self {
+            idle,
+            peak: idle,
+            samples: 1,
+        }
     }
     pub(super) fn observe(&mut self, sample: PrivateBytes) {
+        self.samples += 1;
         if let Some(sample) = sample.0
             && let Some(peak) = &mut self.peak.0
         {
             *peak = (*peak).max(sample);
         }
+    }
+    pub(super) fn write_baseline(
+        &self,
+        name: &str,
+        output: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        if let Some(idle) = self.idle.0 {
+            writeln!(output, "{name}.memory_baseline_private_bytes={idle}")?;
+        }
+        output.flush()
     }
     pub(super) fn write(
         &self,
@@ -64,8 +80,9 @@ impl MemoryPeaks {
         {
             writeln!(
                 output,
-                "{name}.memory idle_private_bytes={idle} peak_private_bytes={peak} peak_private_bytes_delta={}",
-                peak - idle
+                "{name}.memory idle_private_bytes={idle} peak_private_bytes={peak} peak_private_bytes_delta={} observed_samples={}",
+                peak - idle,
+                self.samples,
             )
         } else {
             writeln!(output, "{name}.memory peak_private_bytes=not_measured")

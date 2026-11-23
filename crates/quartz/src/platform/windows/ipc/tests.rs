@@ -276,7 +276,7 @@ fn unknown_operation_preserves_connection_and_permission_errors_are_typed() {
     assert!(cli.status().is_ok());
     let mut ui = fixture.ui();
     assert!(matches!(
-        ui.request(Op::QueryRange, &json!({})),
+        ui.request(Op::RuleSetsTree, &json!({})),
         Err(CallCoreError::Protocol {
             kind: ErrorKind::NotImplemented
         })
@@ -908,6 +908,22 @@ fn cli_queries_temporary_database_over_pipe_and_host_cannot_query() {
     assert_eq!(timeline.segments.len(), 5);
     let pending_body = json!({"local_date":"2025-01-02"});
     for mut client in [fixture.cli(), fixture.ui()] {
+        let range: quartz_protocol::QueryRangeResponse = serde_json::from_value(client.request(Op::QueryRange, &json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["category","app","document"]})).expect("range query")).expect("typed range");
+        assert_eq!(range.buckets[0].active_ms, Some(4000));
+        assert_eq!(range.buckets[0].groups.len(), 9);
+        for body in [
+            json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":[]}),
+            json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["app","app"]}),
+            json!({"start_date":"2025-01-02","end_date":"2025-01-02","bucket":"day","dimensions":["app"]}),
+            json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["app"],"unknown":true}),
+        ] {
+            assert!(matches!(
+                client.request(Op::QueryRange, &body),
+                Err(CallCoreError::Protocol {
+                    kind: ErrorKind::BadRequest
+                })
+            ));
+        }
         let pending: quartz_protocol::QueryPendingAwayResponse = serde_json::from_value(
             client
                 .request(Op::QueryPendingAway, &pending_body)

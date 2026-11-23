@@ -159,6 +159,40 @@ struct ForegroundDetails {
     window_class: Option<String>,
 }
 
+/// Eight predicates share one prepared statement; padding repeats an existing ID.
+const APPLICATION_LOOKUP_ARITY: usize = 8;
+
+struct ApplicationLookup {
+    ids: [ApplicationId; APPLICATION_LOOKUP_ARITY],
+}
+impl ApplicationLookup {
+    fn new(ids: &[ApplicationId]) -> Self {
+        let first = *ids.first().expect("application lookup chunks are nonempty");
+        let mut bound = [first; APPLICATION_LOOKUP_ARITY];
+        bound[..ids.len()].copy_from_slice(ids);
+        Self { ids: bound }
+    }
+    fn load(
+        &self,
+        connection: &mut diesel::SqliteConnection,
+    ) -> diesel::QueryResult<Vec<ApplicationsRow>> {
+        applications::table
+            .filter(
+                applications::id
+                    .eq(self.ids[0].0)
+                    .or(applications::id.eq(self.ids[1].0))
+                    .or(applications::id.eq(self.ids[2].0))
+                    .or(applications::id.eq(self.ids[3].0))
+                    .or(applications::id.eq(self.ids[4].0))
+                    .or(applications::id.eq(self.ids[5].0))
+                    .or(applications::id.eq(self.ids[6].0))
+                    .or(applications::id.eq(self.ids[7].0)),
+            )
+            .select(ApplicationsRow::as_select())
+            .load(connection)
+    }
+}
+
 impl ReadSnapshot {
     fn read_applications(&mut self, rows: &[ForegroundDetails]) -> Result<(), ReadQueryError> {
         let missing: BTreeSet<ApplicationId> = rows
@@ -169,22 +203,22 @@ impl ReadSnapshot {
         if missing.is_empty() {
             return Ok(());
         }
-        let rows = applications::table
-            .filter(applications::id.eq_any(missing.iter().map(|id| id.0)))
-            .select(ApplicationsRow::as_select())
-            .load::<ApplicationsRow>(self.connection())?;
-        for row in rows {
-            let id = ApplicationId(row.id.ok_or(ReadQueryError::InvalidFacts)?);
-            self.applications.insert(
-                id,
-                Arc::new(ApplicationRef {
+        let missing: Vec<_> = missing.into_iter().collect();
+        for chunk in missing.chunks(APPLICATION_LOOKUP_ARITY) {
+            let rows = ApplicationLookup::new(chunk).load(self.connection())?;
+            for row in rows {
+                let id = ApplicationId(row.id.ok_or(ReadQueryError::InvalidFacts)?);
+                self.applications.insert(
                     id,
-                    identity_key: row.identity_key,
-                    exe_name: row.exe_name,
-                    display_name: row.display_name,
-                    aumid: row.aumid,
-                }),
-            );
+                    Arc::new(ApplicationRef {
+                        id,
+                        identity_key: row.identity_key,
+                        exe_name: row.exe_name,
+                        display_name: row.display_name,
+                        aumid: row.aumid,
+                    }),
+                );
+            }
         }
         Ok(())
     }
@@ -194,6 +228,11 @@ impl ReadSnapshot {
             .as_mut()
             .expect("live snapshot reader")
             .connection
+    }
+    pub(crate) fn first_day_of_week(
+        &mut self,
+    ) -> Result<quartz_protocol::FirstDayOfWeekSetting, ReadQueryError> {
+        Ok(super::settings::Settings::new(self.connection()).first_day_of_week()?)
     }
     pub(crate) fn settings(&mut self) -> Result<QuerySettings, ReadQueryError> {
         self.reader
@@ -224,6 +263,8 @@ impl ReadSnapshot {
     /// Restarts the bounded scans within the same snapshot for the next logical day.
     pub(crate) fn restart_scan(&mut self) {
         self.cursor = ScanCursor::initial();
+        // This dictionary belongs to the snapshot, not the resident read connection.
+        self.applications.clear();
     }
     /// Every SQL fact scan returns at most READ_BATCH_ROWS rows before yielding to writes.
     pub(crate) fn read_batch(
@@ -522,13 +563,11 @@ impl ScanCursor {
         let after_start = cursor.start_utc_ms;
         let after_id = cursor.id.0;
 
-        let mut query = intervals::table
+        let rows = intervals::table
             .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
             .left_join(
                 window_instances::table.on(intervals::window_instance_id.eq(window_instances::id)),
             )
-            .into_boxed();
-        query = query
             .filter(
                 intervals::start_utc_ms.ge(range.start.saturating_sub(UTC_DAY_MS).max(after_start)),
             )
@@ -540,8 +579,7 @@ impl ScanCursor {
                         .eq(after_start)
                         .and(intervals::id.gt(after_id))),
             )
-            .order((intervals::start_utc_ms, intervals::id));
-        let rows = query
+            .order((intervals::start_utc_ms, intervals::id))
             .filter(intervals::start_utc_ms.lt(range.end))
             .limit(limit)
             .select((
@@ -569,18 +607,15 @@ impl ScanCursor {
         let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
         let after_id = cursor.0;
 
-        let mut query = intervals::table
+        let rows = intervals::table
             .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
             .left_join(
                 window_instances::table.on(intervals::window_instance_id.eq(window_instances::id)),
             )
-            .into_boxed();
-        query = query
             .filter(intervals::end_utc_ms.is_null())
             .filter(intervals::confirmed_utc_ms.gt(range.start))
             .filter(intervals::run_id.gt(after_id))
-            .order(intervals::run_id);
-        let rows = query
+            .order(intervals::run_id)
             .filter(intervals::start_utc_ms.lt(range.end))
             .limit(limit)
             .select((
@@ -604,8 +639,7 @@ impl ScanCursor {
         let after_start = cursor.start_utc_ms;
         let after_id = cursor.id.0;
 
-        let mut query = availability_intervals::table.into_boxed();
-        query = query
+        let rows = availability_intervals::table
             .filter(
                 availability_intervals::start_utc_ms
                     .ge(range.start.saturating_sub(UTC_DAY_MS).max(after_start)),
@@ -621,8 +655,7 @@ impl ScanCursor {
             .order((
                 availability_intervals::start_utc_ms,
                 availability_intervals::id,
-            ));
-        let rows = query
+            ))
             .filter(availability_intervals::start_utc_ms.lt(range.end))
             .limit(limit)
             .select(AvailabilityIntervalsRow::as_select())
@@ -647,8 +680,7 @@ impl ScanCursor {
         let after_start = cursor.run.0;
         let after_id = cursor.reason.map_or(i32::MIN, IntegerCode::code);
 
-        let mut query = availability_intervals::table.into_boxed();
-        query = query
+        let rows = availability_intervals::table
             .filter(availability_intervals::end_utc_ms.is_null())
             .filter(availability_intervals::confirmed_utc_ms.gt(range.start))
             .filter(
@@ -661,8 +693,7 @@ impl ScanCursor {
             .order((
                 availability_intervals::run_id,
                 availability_intervals::reason,
-            ));
-        let rows = query
+            ))
             .filter(availability_intervals::start_utc_ms.lt(range.end))
             .limit(limit)
             .select(AvailabilityIntervalsRow::as_select())

@@ -5,11 +5,12 @@ use crate::{
     AnnotationsUpdateRequest, CoreStatusRequest, CoreStatusResponse, Hello, HelloResponse, Op,
     PrivacyModeSetRequest, QueryDayRequest, QueryDayResponse, QueryEntityDetailRequest,
     QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse, QueryPendingAwayRequest,
-    QueryPendingAwayResponse, QuerySegmentDetailRequest, QuerySegmentDetailResponse,
-    QueryTimelineRequest, QueryTimelineResponse, QueryUnclassifiedRequest,
-    QueryUnclassifiedResponse, SettingsGetRequest, SettingsResponse, SettingsSetRequest, Subscribe,
-    SubscribeResponse, TimedPolicyResponse, TrackingKeepAliveRequest, TrackingPauseRequest,
-    TrackingResumeRequest, UiFirstFrameRequest, UiHiddenRequest, UiOpenRequest, Unsubscribe,
+    QueryPendingAwayResponse, QueryRangeRequest, QueryRangeResponse, QuerySegmentDetailRequest,
+    QuerySegmentDetailResponse, QueryTimelineRequest, QueryTimelineResponse,
+    QueryUnclassifiedRequest, QueryUnclassifiedResponse, SettingsGetRequest, SettingsResponse,
+    SettingsSetRequest, Subscribe, SubscribeResponse, TimedPolicyResponse,
+    TrackingKeepAliveRequest, TrackingPauseRequest, TrackingResumeRequest, UiFirstFrameRequest,
+    UiHiddenRequest, UiOpenRequest, Unsubscribe,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -55,6 +56,7 @@ requests! {
     Unsubscribe => Unsubscribe => SubscribeResponse,
     QueryFactsRequest => QueryFacts => QueryFactsResponse,
     QueryDayRequest => QueryDay => QueryDayResponse,
+    QueryRangeRequest => QueryRange => QueryRangeResponse,
     QueryUnclassifiedRequest => QueryUnclassified => QueryUnclassifiedResponse,
     QuerySegmentDetailRequest => QuerySegmentDetail => QuerySegmentDetailResponse,
     QueryEntityDetailRequest => QueryEntityDetail => QueryEntityDetailResponse,

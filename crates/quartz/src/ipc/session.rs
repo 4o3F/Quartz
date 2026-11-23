@@ -223,6 +223,7 @@ impl ConnectionSession {
                         capabilities: vec![
                             quartz_protocol::Capability::QueryDocumentsV1,
                             quartz_protocol::Capability::QueryUnclassifiedV1,
+                            quartz_protocol::Capability::QueryRangeV1,
                         ],
                     },
                 )
@@ -293,6 +294,7 @@ impl ConnectionSession {
                     | Op::QueryPendingAway
                     | Op::QuerySegmentDetail
                     | Op::QueryUnclassified
+                    | Op::QueryRange
                     | Op::QueryEntityDetail => Action::from_query(
                         id,
                         crate::query::QueryRequest::decode(request.op, request.body),
@@ -311,7 +313,6 @@ impl ConnectionSession {
                         }
                     }
                     Op::Hello
-                    | Op::QueryRange
                     | Op::RuleSetsTree
                     | Op::RuleSetsGet
                     | Op::RuleSetsVersions
@@ -386,6 +387,29 @@ mod tests {
                 state: State::Ready(role),
                 allowed: AllowedRoles::Quartz,
             };
+            let range = session.receive(request(4, Op::QueryRange, serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-09","bucket":"week","dimensions":["category","app","document"]})), &receiver.borrow().status);
+            assert!(matches!(
+                range,
+                Action::Query {
+                    request: crate::query::QueryRequest::Range(_),
+                    ..
+                }
+            ));
+            for body in [
+                serde_json::json!({"start_date":"invalid","end_date":"2025-01-09","bucket":"week","dimensions":["category"]}),
+                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-09","bucket":"month","dimensions":["category"]}),
+                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-09","bucket":"week","dimensions":["category"],"time_zone":"UTC"}),
+            ] {
+                assert_eq!(
+                    session
+                        .receive(request(4, Op::QueryRange, body), &receiver.borrow().status)
+                        .reply()
+                        .outcome,
+                    ResponseOutcome::Err {
+                        error: ProtocolError::new(ErrorKind::BadRequest)
+                    }
+                );
+            }
             let unclassified = session.receive(request(5, Op::QueryUnclassified, serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":"app"})), &receiver.borrow().status);
             assert!(matches!(
                 unclassified,
@@ -492,7 +516,8 @@ mod tests {
             hello.capabilities,
             vec![
                 quartz_protocol::Capability::QueryDocumentsV1,
-                quartz_protocol::Capability::QueryUnclassifiedV1
+                quartz_protocol::Capability::QueryUnclassifiedV1,
+                quartz_protocol::Capability::QueryRangeV1,
             ]
         );
         assert!(matches!(

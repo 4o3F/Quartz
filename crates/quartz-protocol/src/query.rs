@@ -28,6 +28,7 @@ impl std::fmt::Debug for DocumentRef {
 }
 /// Half-open UTC range whose inputs determine a document reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReferenceRange {
     pub start_utc_ms: i64,
     pub end_utc_ms: i64,
@@ -113,6 +114,13 @@ pub enum CursorQuery {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         search: Option<String>,
     },
+    /// Bounded daily or weekly independent dimension summaries.
+    Range {
+        start_date: LocalDate,
+        end_date: LocalDate,
+        bucket: RangeBucket,
+        dimensions: Vec<RangeDimension>,
+    },
     /// A UTC range and its display projection.
     Timeline {
         start_utc_ms: i64,
@@ -154,6 +162,86 @@ impl From<&QueryFactsRequest> for CursorQuery {
 }
 /// Maximum logical dates in one grouped query (04 §6.2.1).
 pub const UNCLASSIFIED_MAX_DAYS: usize = 366;
+/// Maximum logical dates in a range summary (04 §6.2.1).
+pub const RANGE_MAX_DAYS: usize = UNCLASSIFIED_MAX_DAYS;
+
+/// Calendar granularity for range summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeBucket {
+    Day,
+    Week,
+}
+/// Independently aggregated identities, in the requested presentation order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeDimension {
+    Category,
+    App,
+    Document,
+}
+/// A half-open logical-date range with one or more distinct dimensions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryRangeRequest {
+    pub start_date: LocalDate,
+    pub end_date: LocalDate,
+    pub bucket: RangeBucket,
+    pub dimensions: Vec<RangeDimension>,
+    #[serde(default)]
+    pub cursor: Option<QueryCursor>,
+}
+impl From<&QueryRangeRequest> for CursorQuery {
+    fn from(request: &QueryRangeRequest) -> Self {
+        Self::Range {
+            start_date: request.start_date,
+            end_date: request.end_date,
+            bucket: request.bucket,
+            dimensions: request.dimensions.clone(),
+        }
+    }
+}
+/// Category or visible work identity within one dimension.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RangeEntity {
+    Category(CategoryEntity),
+    Work(WorkEntity),
+}
+/// Category identity using the same category reference as day summaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CategoryEntity {
+    Category { category: CategoryRef },
+}
+/// One dimension's duration for an entity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeGroup {
+    pub dimension: RangeDimension,
+    pub entity: RangeEntity,
+    pub active_ms: i64,
+}
+/// A clipped bucket; its total is omitted when groups continue on another page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeSummaryBucket {
+    pub start_date: LocalDate,
+    pub end_date: LocalDate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_ms: Option<i64>,
+    pub groups: Vec<RangeGroup>,
+}
+/// One bounded page of range summaries in the core's effective calendar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryRangeResponse {
+    pub time_zone: String,
+    pub day_start_offset_min: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_range: Option<ReferenceRange>,
+    pub buckets: Vec<RangeSummaryBucket>,
+    pub versions: QueryVersions,
+    pub next_cursor: Option<QueryCursor>,
+}
+
 /// Maximum search length in Unicode scalar values (04 §6.2.1).
 pub const UNCLASSIFIED_MAX_SEARCH_SCALARS: usize = 256;
 /// Maximum chronological samples retained per group (04 §6.2.1).
@@ -795,6 +883,73 @@ mod tests {
         assert_eq!(
             serde_json::to_value(crate::Capability::QueryUnclassifiedV1).expect("capability"),
             "query.unclassified.v1"
+        );
+    }
+    #[test]
+    fn range_wire_snapshots_preserve_entities_dimensions_and_bucket_continuations() {
+        let wire: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/range-request.json"))
+                .expect("request snapshot");
+        let request: QueryRangeRequest = serde_json::from_value(wire.clone()).expect("typed range");
+        assert_eq!(serde_json::to_value(&request).expect("encode"), wire);
+        assert_eq!(request.bucket, RangeBucket::Week);
+        assert_eq!(
+            request.dimensions,
+            [
+                RangeDimension::Document,
+                RangeDimension::Category,
+                RangeDimension::App
+            ]
+        );
+        for snapshot in [
+            include_str!("../tests/fixtures/range-first.json"),
+            include_str!("../tests/fixtures/range-continuation.json"),
+        ] {
+            let expected: serde_json::Value = serde_json::from_str(snapshot).expect("snapshot");
+            let response: QueryRangeResponse =
+                serde_json::from_value(expected.clone()).expect("response");
+            assert_eq!(serde_json::to_value(&response).expect("encode"), expected);
+            if let Some(cursor) = &response.next_cursor {
+                assert_eq!(cursor.query(), &CursorQuery::from(&request));
+                assert_eq!(cursor.position(), 2);
+                assert_eq!(response.buckets[0].active_ms, Some(1000));
+                assert!(matches!(
+                    response.buckets[0].groups[0].entity,
+                    RangeEntity::Work(WorkEntity::Document { .. })
+                ));
+            } else {
+                assert_eq!(response.buckets[0].active_ms, None);
+                assert!(response.reference_range.is_none());
+                assert!(matches!(
+                    response.buckets[0].groups[0].entity,
+                    RangeEntity::Category(CategoryEntity::Category { .. })
+                ));
+                assert!(matches!(
+                    response.buckets[0].groups[1].entity,
+                    RangeEntity::Work(WorkEntity::App { .. })
+                ));
+            }
+        }
+        for field in ["time_zone", "day_start_offset_min", "unknown"] {
+            let mut invalid = wire.clone();
+            invalid[field] = serde_json::json!("unsupported");
+            assert!(serde_json::from_value::<QueryRangeRequest>(invalid).is_err());
+        }
+        for bucket in ["month", "DAY"] {
+            let mut invalid = wire.clone();
+            invalid["bucket"] = serde_json::json!(bucket);
+            assert!(serde_json::from_value::<QueryRangeRequest>(invalid).is_err());
+        }
+        let mut invalid = wire;
+        invalid["dimensions"] = serde_json::json!(["domain"]);
+        assert!(serde_json::from_value::<QueryRangeRequest>(invalid).is_err());
+        assert_eq!(
+            serde_json::to_value(crate::Capability::QueryRangeV1).expect("capability"),
+            "query.range.v1"
+        );
+        assert_eq!(
+            <QueryRangeRequest as crate::CoreRequest>::OP,
+            crate::Op::QueryRange
         );
     }
     fn golden_category() -> CategoryRef {

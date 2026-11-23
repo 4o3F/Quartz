@@ -5,7 +5,7 @@ mod handle;
 mod instance;
 pub(crate) mod ipc;
 mod language;
-mod locale;
+pub(crate) mod locale;
 mod ports;
 mod process;
 mod sources;

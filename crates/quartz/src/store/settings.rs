@@ -214,6 +214,13 @@ impl Settings<'_> {
             i64::try_from(at).map_err(|source| AccessSettingError::Deadline { key, source })?;
         self.put(key, &millis)
     }
+    pub(super) fn first_day_of_week(
+        &mut self,
+    ) -> Result<FirstDayOfWeekSetting, AccessSettingError> {
+        Ok(self
+            .get::<FirstDayOfWeekSetting>(SettingKey::UiFirstDayOfWeek)?
+            .unwrap_or_default())
+    }
     pub(super) fn ui(&mut self) -> Result<UiSettings, AccessSettingError> {
         Ok(UiSettings {
             resident: ResidentSettings {
@@ -235,9 +242,7 @@ impl Settings<'_> {
             hour_cycle: self
                 .get::<HourCycleSetting>(SettingKey::UiHourCycle)?
                 .unwrap_or_default(),
-            first_day_of_week: self
-                .get::<FirstDayOfWeekSetting>(SettingKey::UiFirstDayOfWeek)?
-                .unwrap_or_default(),
+            first_day_of_week: self.first_day_of_week()?,
         })
     }
     fn recover_ui_value<T: DeserializeOwned + Serialize + Default>(

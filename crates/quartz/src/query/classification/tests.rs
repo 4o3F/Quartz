@@ -204,3 +204,36 @@ fn builtin_application_results_reuse_classification_while_every_title_is_extract
             .is_none()
     );
 }
+
+#[test]
+fn daily_reset_releases_memos_plans_and_result_ids_without_changing_matches() {
+    const TITLES_PER_DAY: i64 = 1100;
+    const DAYS: i64 = 3;
+    let mut classifier = isolated_classifier(Field::RawTitle);
+    let mut row = foreground();
+    for day in 0..DAYS {
+        for title in 0..TITLES_PER_DAY {
+            edit_foreground(&mut row, CaptureLevel::Full, |content| {
+                content.title_id = Some(TitleId(day * TITLES_PER_DAY + title));
+                content.title = Some(format!("document {day} {title}"));
+            });
+            let extraction = classifier.extract(&row).expect("visible extraction");
+            let id = classifier.classify(&row, Some(&extraction));
+            assert!(matches!(
+                classifier.result(id).category,
+                CategoryRef::Classified { .. }
+            ));
+        }
+        assert_eq!(
+            classifier.extractions.len(),
+            usize::try_from(TITLES_PER_DAY).expect("title count")
+        );
+        assert!(!classifier.cache.is_empty());
+        classifier.reset_day();
+        assert!(classifier.extractions.is_empty());
+        assert!(classifier.extractors.is_empty());
+        assert!(classifier.classifiers.is_empty());
+        assert!(classifier.cache.is_empty());
+        assert_eq!(classifier.results.len(), 1);
+    }
+}

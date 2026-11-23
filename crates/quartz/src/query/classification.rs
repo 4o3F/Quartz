@@ -141,6 +141,14 @@ impl Classifier {
             results: vec![Classification::unclassified()],
         }
     }
+    /// Called only after the previous day's segments and classification IDs are released.
+    pub(super) fn reset_day(&mut self) {
+        self.extractions.clear();
+        self.extractors.clear();
+        self.classifiers.clear();
+        self.cache.clear();
+        self.results.truncate(1);
+    }
     pub(super) fn annotation(
         &mut self,
         annotation: &crate::store::query::QueryAnnotation,

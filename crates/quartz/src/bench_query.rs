@@ -82,6 +82,98 @@ pub(crate) enum BenchQueryScope {
     All,
     Pipeline,
     Unclassified,
+    Range,
+}
+/// A single range workload selected by the isolated-process benchmark driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeScenario {
+    SevenDayCategory,
+    SevenDayAll,
+    SevenWeekCategory,
+    SevenWeekAll,
+    AnnualWeekCategory,
+    AnnualWeekAll,
+    AnnualDayCategory,
+    AnnualDayAll,
+}
+impl RangeScenario {
+    const ALL: [Self; 8] = [
+        Self::SevenDayCategory,
+        Self::SevenDayAll,
+        Self::SevenWeekCategory,
+        Self::SevenWeekAll,
+        Self::AnnualWeekCategory,
+        Self::AnnualWeekAll,
+        Self::AnnualDayCategory,
+        Self::AnnualDayAll,
+    ];
+    fn days(self) -> i64 {
+        match self {
+            Self::SevenDayCategory
+            | Self::SevenDayAll
+            | Self::SevenWeekCategory
+            | Self::SevenWeekAll => WEEK_DAYS,
+            Self::AnnualWeekCategory
+            | Self::AnnualWeekAll
+            | Self::AnnualDayCategory
+            | Self::AnnualDayAll => YEAR_DAYS,
+        }
+    }
+    fn bucket(self) -> quartz_protocol::RangeBucket {
+        match self {
+            Self::SevenDayCategory
+            | Self::SevenDayAll
+            | Self::AnnualDayCategory
+            | Self::AnnualDayAll => quartz_protocol::RangeBucket::Day,
+            Self::SevenWeekCategory
+            | Self::SevenWeekAll
+            | Self::AnnualWeekCategory
+            | Self::AnnualWeekAll => quartz_protocol::RangeBucket::Week,
+        }
+    }
+    fn dimensions(self) -> Vec<quartz_protocol::RangeDimension> {
+        use quartz_protocol::RangeDimension;
+        match self {
+            Self::SevenDayCategory
+            | Self::SevenWeekCategory
+            | Self::AnnualWeekCategory
+            | Self::AnnualDayCategory => vec![RangeDimension::Category],
+            Self::SevenDayAll | Self::SevenWeekAll | Self::AnnualWeekAll | Self::AnnualDayAll => {
+                vec![
+                    RangeDimension::Category,
+                    RangeDimension::App,
+                    RangeDimension::Document,
+                ]
+            }
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::SevenDayCategory => "pipeline.range.7.day.category",
+            Self::SevenDayAll => "pipeline.range.7.day.all",
+            Self::SevenWeekCategory => "pipeline.range.7.week.category",
+            Self::SevenWeekAll => "pipeline.range.7.week.all",
+            Self::AnnualWeekCategory => "pipeline.range.365.week.category",
+            Self::AnnualWeekAll => "pipeline.range.365.week.all",
+            Self::AnnualDayCategory => "pipeline.range.365.day.category",
+            Self::AnnualDayAll => "pipeline.range.365.day.all",
+        }
+    }
+    #[cfg(all(windows, test))]
+    fn runs(self) -> u32 {
+        /// Annual scans use ten latency samples per isolated process, plus a separate peak scan.
+        const ANNUAL_RUNS: u32 = 10;
+        match self {
+            Self::SevenDayCategory
+            | Self::SevenDayAll
+            | Self::SevenWeekCategory
+            | Self::SevenWeekAll => DEFAULT_RUNS,
+            Self::AnnualWeekCategory
+            | Self::AnnualWeekAll
+            | Self::AnnualDayCategory
+            | Self::AnnualDayAll => ANNUAL_RUNS,
+        }
+    }
 }
 /// Uses an isolated workload copy, or reads a previously prepared database unchanged.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -96,6 +188,7 @@ pub(crate) struct BenchQuery<'path> {
     runs: u32,
     scope: BenchQueryScope,
     input: BenchQueryInput,
+    range_scenario: Option<RangeScenario>,
 }
 impl<'path> BenchQuery<'path> {
     pub(crate) fn new(path: &'path Path, runs: u32) -> Self {
@@ -104,6 +197,7 @@ impl<'path> BenchQuery<'path> {
             runs,
             scope: BenchQueryScope::All,
             input: BenchQueryInput::Isolated,
+            range_scenario: None,
         }
     }
     pub(crate) fn with_scope(mut self, scope: BenchQueryScope) -> Self {
@@ -183,7 +277,9 @@ impl<'path> BenchQuery<'path> {
         reader = self.measure_pipeline(reader, from, memory::PrivateBytes::sample()?, output)?;
         match self.scope {
             BenchQueryScope::All => self.measure_fact_reads(&mut reader, from, output),
-            BenchQueryScope::Pipeline | BenchQueryScope::Unclassified => Ok(()),
+            BenchQueryScope::Pipeline | BenchQueryScope::Unclassified | BenchQueryScope::Range => {
+                Ok(())
+            }
         }
     }
     fn measure_fact_reads(
@@ -270,6 +366,16 @@ impl<'path> BenchQuery<'path> {
             .day_start_offset;
         let calendar =
             crate::query::calendar::DayCalendar::new(local_date, offset).context(QuerySnafu)?;
+        if self.scope == BenchQueryScope::Range {
+            writeln!(
+                output,
+                "range calendar: start_date={local_date} system_zone={:?} day_start_offset_min={}",
+                jiff::tz::TimeZone::system(),
+                offset.minutes()
+            )
+            .context(OutputSnafu)?;
+            return self.measure_range(reader, local_date, rules, idle, output);
+        }
         if self.scope == BenchQueryScope::Unclassified {
             return self.measure_unclassified(reader, local_date, rules, idle, output);
         }
@@ -303,7 +409,8 @@ impl<'path> BenchQuery<'path> {
         let mut workloads = Vec::new();
         for query in queries {
             let name = match &query {
-                QueryRequest::Unclassified(_)
+                QueryRequest::Range(_)
+                | QueryRequest::Unclassified(_)
                 | QueryRequest::Facts(_)
                 | QueryRequest::SegmentDetail(_)
                 | QueryRequest::EntityDetail(_) => {
@@ -368,6 +475,46 @@ impl<'path> BenchQuery<'path> {
             idle,
             output,
         )
+    }
+    fn measure_range(
+        &self,
+        mut reader: ReadOnlyStore,
+        start_date: quartz_protocol::LocalDate,
+        rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
+        idle: memory::PrivateBytes,
+        output: &mut impl Write,
+    ) -> Result<ReadOnlyStore, BenchQueryError> {
+        for scenario in RangeScenario::ALL {
+            if self
+                .range_scenario
+                .is_some_and(|selected| selected != scenario)
+            {
+                continue;
+            }
+            let end_date = start_date
+                .checked_add(jiff::Span::new().days(scenario.days()))
+                .map_err(crate::query::RunQueryError::from)
+                .context(QuerySnafu)?;
+            reader = self.measure_workload(
+                reader,
+                PipelineWorkload {
+                    name: scenario.name(),
+                    requests: vec![crate::query::QueryRequest::Range(
+                        quartz_protocol::QueryRangeRequest {
+                            start_date,
+                            end_date,
+                            bucket: scenario.bucket(),
+                            dimensions: scenario.dimensions(),
+                            cursor: None,
+                        },
+                    )],
+                },
+                rules.clone(),
+                idle,
+                output,
+            )?;
+        }
+        Ok(reader)
     }
     fn measure_unclassified(
         &self,
@@ -459,6 +606,31 @@ impl<'path> BenchQuery<'path> {
         let mut encoded_bytes = 0;
         let mut stages = StageSamples::default();
         let mut memory = memory::MemoryPeaks::new(idle);
+        if self.scope == BenchQueryScope::Range {
+            // Observe retained pipeline state after every bounded turn in a separate untimed scan.
+            memory = memory::MemoryPeaks::new(memory::PrivateBytes::sample()?);
+            memory.write_baseline(name, output).context(OutputSnafu)?;
+            for request in &workload.requests {
+                let mut slot = Some(reader);
+                let mut job = QueryJob::start(&mut slot, request.clone(), rules.clone())
+                    .context(QuerySnafu)?;
+                memory.observe(memory::PrivateBytes::sample()?);
+                loop {
+                    let response = job.advance().context(QuerySnafu)?;
+                    memory.observe(memory::PrivateBytes::sample()?);
+                    if let Some(response) = response {
+                        let encoded = serde_json::to_vec(&response)
+                            .map_err(crate::query::RunQueryError::from)
+                            .context(QuerySnafu)?;
+                        memory.observe(memory::PrivateBytes::sample()?);
+                        hint::black_box(encoded);
+                        break;
+                    }
+                }
+                reader = job.finish().context(QuerySnafu)?;
+                memory.observe(memory::PrivateBytes::sample()?);
+            }
+        }
         for _ in 0..self.runs {
             memory.observe(memory::PrivateBytes::sample()?);
             let started = Instant::now();
@@ -573,7 +745,7 @@ struct DocumentWorkload {
     reader: ReadOnlyStore,
     request: quartz_protocol::QueryEntityDetailRequest,
 }
-/// The weekly fold uses seven day queries until query.range is supplied by M4-B6.
+/// One measured request, or the historical seven-query day comparison.
 #[derive(Debug)]
 struct PipelineWorkload {
     name: &'static str,
@@ -631,6 +803,53 @@ mod tests {
         data_directory::DataDirectory,
         generate_data::{GenerateData, Profile},
     };
+    /// Runs the release range benchmark without starting the core or any UI process.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires QUARTZ_RANGE_BENCH_DB pointing to a simulation database"]
+    fn range_benchmark_from_simulation() {
+        let path = std::env::var_os("QUARTZ_RANGE_BENCH_DB").expect("simulation database path");
+        let path = SimulationPath::offline(Path::new(&path)).expect("independent simulation");
+        let temporary = tempfile::Builder::new()
+            .prefix("quartz-range-bench-")
+            .tempdir()
+            .expect("isolated benchmark directory");
+        let directory = DataDirectory::new(temporary.path());
+        ReadOnlyStore::open_facts(path.as_path())
+            .expect("simulation reader")
+            .copy_simulation(&directory.database())
+            .expect("snapshot copy");
+        let mut store = crate::store::Store::open(&directory).expect("benchmark store");
+        store.seed_categories().expect("categories");
+        crate::rules::registry::RegistryShell::open(
+            &mut store,
+            quartz_domain::capture::UtcInstant::try_from(0).expect("origin"),
+        )
+        .expect("builtin rules");
+        store
+            .use_classification_workload()
+            .expect("representative application names");
+        let selected =
+            std::env::var("QUARTZ_RANGE_BENCH_SCENARIO").expect("one scenario per process");
+        let scenario = RangeScenario::ALL
+            .into_iter()
+            .find(|scenario| scenario.name() == selected)
+            .expect("known range scenario");
+        let runs = scenario.runs();
+        println!(
+            "isolated classification workload; scenario={} runs={runs}; in-query peak scan before latency samples",
+            scenario.name()
+        );
+        let mut benchmark =
+            BenchQuery::new(path.as_path(), runs).with_scope(BenchQueryScope::Range);
+        benchmark.range_scenario = Some(scenario);
+        benchmark
+            .measure(
+                ReadOnlyStore::open_facts(&directory.database()).expect("prepared reader"),
+                &mut io::stdout().lock(),
+            )
+            .expect("range benchmark");
+    }
     #[test]
     fn benchmarks_tiny_capture_database() {
         let temporary = tempfile::tempdir().expect("temporary directory");
@@ -666,6 +885,12 @@ mod tests {
         )
         .expect("builtin data");
         store
+            .update_ui_settings(quartz_protocol::SettingsSetRequest {
+                first_day_of_week: Some(quartz_protocol::FirstDayOfWeekSetting::Monday),
+                ..Default::default()
+            })
+            .expect("deterministic benchmark fixture week boundary");
+        store
             .use_classification_workload()
             .expect("representative application names");
         let mut reader = ReadOnlyStore::open(&isolated.database()).expect("read-only database");
@@ -681,6 +906,13 @@ mod tests {
                 &mut output,
             )
             .expect("unclassified benchmark");
+        BenchQuery::new(&path, 2)
+            .with_scope(BenchQueryScope::Range)
+            .measure(
+                ReadOnlyStore::open(&isolated.database()).expect("range reader"),
+                &mut output,
+            )
+            .expect("range benchmark");
         let mut reader = store.take_query_reader();
         let request = crate::query::QueryRequest::Timeline(quartz_protocol::QueryTimelineRequest {
             start_utc_ms: extent.from_utc_ms,
@@ -732,6 +964,8 @@ mod tests {
             ".aggregate_merge p50_ms=",
             ".paging_encode p50_ms=",
             ".memory ",
+            "pipeline.range.365.day.all first_page_bytes=",
+            "pipeline.range.7.week.category first_page_bytes=",
             "pipeline.unclassified.app.day first_page_bytes=",
             "pipeline.unclassified.app.week.search first_page_bytes=",
             "pipeline.unclassified.document.day.search first_page_bytes=",
