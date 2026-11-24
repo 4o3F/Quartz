@@ -31,6 +31,7 @@ impl EditingFixture {
                 start_utc_ms: self.query.start + range.start,
                 end_utc_ms: self.query.start + range.end,
                 category: None,
+                label_preset: None,
                 label: None,
                 note: None,
             },
@@ -70,6 +71,7 @@ impl EditingFixture {
         assert_eq!(actual.start_utc_ms, expected.values.start_utc_ms);
         assert_eq!(actual.end_utc_ms, expected.values.end_utc_ms);
         assert_eq!(actual.category, expected.values.category);
+        assert_eq!(actual.label_preset, expected.values.label_preset);
         assert_eq!(
             actual.label,
             expected.values.label.clone().map(AnnotationText::Complete)
@@ -208,6 +210,7 @@ fn split_remainders_keep_endpoints_content_and_the_right_hand_creation_time() {
                         start_utc_ms: left.start_utc_ms,
                         end_utc_ms: left.end_utc_ms,
                         category: None,
+                        label_preset: None,
                         label: None,
                         note: None,
                     },
@@ -549,6 +552,7 @@ fn fragment_resume_skips_without_materializing_earlier_text() {
         start_utc_ms: 0,
         end_utc_ms: 1,
         category: None,
+        label_preset: None,
         label: Some(AnnotationText::Complete("short label".into())),
         note: Some(AnnotationText::Complete("🦀\n".repeat(40_000))),
         created_utc_ms: 0,
@@ -615,6 +619,7 @@ fn annotation_page_reserves_maximal_resume_for_entities_and_fragments() {
         start_utc_ms: i64::MIN,
         end_utc_ms: i64::MAX,
         category: None,
+        label_preset: Some(quartz_protocol::AnnotationLabelPreset::Rest),
         label: None,
         note: Some(AnnotationText::Complete(String::new())),
         created_utc_ms: i64::MIN,
@@ -654,4 +659,42 @@ fn annotation_page_reserves_maximal_resume_for_entities_and_fragments() {
             .annotation_chunk_bytes(&entity)
             .expect("expected fragment capacity")
     );
+}
+
+#[test]
+fn label_preset_is_returned_as_metadata_with_and_without_text_chunks() {
+    let mut fixture = EditingFixture::new();
+    let mut rest = fixture.entity(1, AnnotationKind::Note, QueryRange { start: 0, end: 100 });
+    rest.values.label_preset = Some(quartz_protocol::AnnotationLabelPreset::Rest);
+    let created = fixture.write(vec![rest.clone()], 10);
+    let request = fixture.request(QueryRange { start: 0, end: 100 });
+    let page = fixture.read(request.clone());
+    assert_eq!(page.entities.len(), 1);
+    fixture.assert_final_values(&page.entities[0], &created[0]);
+    rest.uuid = fixture
+        .entity(2, AnnotationKind::Note, QueryRange { start: 0, end: 100 })
+        .uuid;
+    rest.values.note = Some("🦀".repeat(QUERY_PAGE_BYTES));
+    fixture.write(vec![rest], 20);
+    let mut request = request;
+    let mut fragments = 0;
+    loop {
+        let page = fixture.read(request.clone());
+        for entity in page.entities {
+            assert_eq!(
+                entity.label_preset,
+                Some(quartz_protocol::AnnotationLabelPreset::Rest)
+            );
+            let wire = serde_json::to_value(&entity).expect("annotation wire");
+            assert_eq!(wire["label_preset"], "rest");
+            if matches!(entity.note, Some(AnnotationText::Chunk(_))) {
+                fragments += 1;
+            }
+        }
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        request.cursor = Some(cursor);
+    }
+    assert!(fragments > 1, "long note spans several pages");
 }

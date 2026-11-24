@@ -1120,7 +1120,7 @@ fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
                 "kind": "note",
                 "start_utc_ms": range.start,
                 "end_utc_ms": range.end,
-                "label": "休息"
+                "label_preset": "rest"
             }]
         });
         let mut cli = AnnotationClient::connect(
@@ -1178,7 +1178,11 @@ fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
             entities.entities[0].created_utc_ms,
             entities.entities[0].updated_utc_ms
         );
-        assert_eq!(entities.entities[0].values.label.as_deref(), Some("休息"));
+        assert_eq!(entities.entities[0].values.label, None);
+        assert_eq!(
+            entities.entities[0].values.label_preset,
+            Some(quartz_protocol::AnnotationLabelPreset::Rest)
+        );
         let quartz_protocol::Envelope::Event(changed) = subscriber.receive().await else {
             panic!("changed day event")
         };
@@ -1204,6 +1208,10 @@ fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
         .await;
         let updated = ui.success(4).await;
         assert!(updated["entities"][0]["label"].is_null());
+        assert_eq!(
+            updated["entities"][0].get("label_preset"),
+            Some(&serde_json::Value::Null)
+        );
         assert_eq!(updated["entities"][0]["note"], "text");
         ui.send(
             5,
@@ -1620,6 +1628,7 @@ fn annotations_lost_response_retries_after_core_restart_without_duplicate_or_sec
                 start_utc_ms: 20,
                 end_utc_ms: 80,
                 category: None,
+                label_preset: None,
                 label: Some("restart annotation".into()),
                 note: None,
             },

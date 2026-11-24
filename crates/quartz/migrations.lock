@@ -1,2 +1,3 @@
 # SHA-256 of every migration file; released migration files are immutable.
 ef84d77553722ad407ec68ca13b238a1ffa708323ddaed5662a457827f1edc8c  migrations/20261116000000_schema_v1/up.sql
+54d56ee9ad954b37dd8bf1cd724a3e9fdd610ab57d68abb6aaccd266636b0313  migrations/20261123000000_annotation_label_preset/up.sql

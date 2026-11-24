@@ -504,3 +504,5 @@ today.resume_failed:
   zh-CN: "恢复记录失败，请重试。"
 today.pending.failed:
   zh-CN: "未能将这段时间记为“%{name}”，请重试。"
+annotation.preset.rest:
+  zh-CN: 休息

@@ -285,6 +285,7 @@ impl QueryFixture {
                             end_utc_ms: self.start + end,
                             category: category
                                 .map(|key| quartz_protocol::AnnotationCategory::Builtin { key }),
+                            label_preset: None,
                             label: (kind == quartz_protocol::AnnotationKind::Note)
                                 .then(|| "fixture".into()),
                             note: None,

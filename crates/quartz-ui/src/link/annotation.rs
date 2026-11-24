@@ -1,8 +1,8 @@
 //! UI quick annotation mappings mirror the tray's stored annotation semantics.
 use super::UtcRange;
 use quartz_protocol::{
-    AnnotationCategory, AnnotationId, AnnotationKind, AnnotationValues, AnnotationsCreateRequest,
-    BuiltinCategory, CreateAnnotation,
+    AnnotationCategory, AnnotationId, AnnotationKind, AnnotationLabelPreset, AnnotationValues,
+    AnnotationsCreateRequest, BuiltinCategory, CreateAnnotation,
 };
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AwayAction {
@@ -20,12 +20,13 @@ impl AwayAction {
                 start_utc_ms: range.start,
                 end_utc_ms: range.end,
                 category: None,
+                label_preset: None,
                 label: None,
                 note: None,
             },
         };
         match self {
-            Self::Rest => entity.values.label = Some("休息".into()),
+            Self::Rest => entity.values.label_preset = Some(AnnotationLabelPreset::Rest),
             Self::Meeting | Self::Reading => {
                 entity.kind = AnnotationKind::OfflineActivity;
                 entity.values.category = Some(AnnotationCategory::Builtin {
@@ -45,6 +46,29 @@ impl AwayAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rest_quick_action_emits_label_preset_without_label() {
+        let id = AnnotationId(
+            "abcdef00-0000-4000-8000-000000000001"
+                .parse()
+                .expect("UUID"),
+        );
+        let request = AwayAction::Rest.request(
+            UtcRange {
+                start: 0,
+                end: 1000,
+            },
+            id,
+        );
+        let wire = serde_json::to_value(request).expect("quick action request");
+        let entity = wire
+            .get("entities")
+            .and_then(|entities| entities.get(0))
+            .expect("quick annotation");
+        assert_eq!(entity.get("label_preset"), Some(&serde_json::json!("rest")));
+        assert_eq!(entity.get("label"), Some(&serde_json::Value::Null));
+    }
+
     #[test]
     fn mappings_match_the_tray_and_keep_the_exact_range() {
         let range = UtcRange {
@@ -69,7 +93,11 @@ mod tests {
             match action {
                 AwayAction::Rest => {
                     assert_eq!(entity.kind, AnnotationKind::Note);
-                    assert_eq!(entity.values.label.as_deref(), Some("休息"));
+                    assert_eq!(entity.values.label, None);
+                    assert_eq!(
+                        entity.values.label_preset,
+                        Some(AnnotationLabelPreset::Rest)
+                    );
                 }
                 AwayAction::Meeting => assert_eq!(
                     entity.values.category,

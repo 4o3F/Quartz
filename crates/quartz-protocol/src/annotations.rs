@@ -25,6 +25,13 @@ impl AnnotationKind {
     }
 }
 
+/// Built-in annotation label localized by the displaying client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationLabelPreset {
+    Rest,
+}
+
 /// Category lookup accepted by annotation writes; responses use the durable UUID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -40,6 +47,8 @@ pub struct AnnotationValues {
     pub end_utc_ms: i64,
     #[serde(default)]
     pub category: Option<AnnotationCategory>,
+    #[serde(default)]
+    pub label_preset: Option<AnnotationLabelPreset>,
     #[serde(default)]
     pub label: Option<String>,
     #[serde(default)]
@@ -66,17 +75,14 @@ pub struct UpdateAnnotation {
     pub values: AnnotationValues,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AnnotationRequestWire<Kind> {
     uuid: AnnotationId,
     kind: Kind,
-    #[serde(flatten)]
-    values: AnnotationRequestValues,
-}
-#[derive(Deserialize)]
-struct AnnotationRequestValues {
     start_utc_ms: i64,
     end_utc_ms: i64,
     category: Option<RequestAnnotationCategory>,
+    label_preset: Option<AnnotationLabelPreset>,
     label: Option<String>,
     note: Option<String>,
 }
@@ -86,50 +92,56 @@ enum RequestAnnotationCategory {
     Uuid { uuid: Uuid },
     Builtin { key: BuiltinCategory },
 }
-impl From<AnnotationRequestValues> for AnnotationValues {
-    fn from(values: AnnotationRequestValues) -> Self {
-        Self {
-            start_utc_ms: values.start_utc_ms,
-            end_utc_ms: values.end_utc_ms,
-            category: values.category.map(|category| match category {
+impl<Kind> AnnotationRequestWire<Kind> {
+    fn take_values(&mut self) -> AnnotationValues {
+        AnnotationValues {
+            start_utc_ms: self.start_utc_ms,
+            end_utc_ms: self.end_utc_ms,
+            category: self.category.take().map(|category| match category {
                 RequestAnnotationCategory::Uuid { uuid } => AnnotationCategory::Uuid { uuid },
                 RequestAnnotationCategory::Builtin { key } => AnnotationCategory::Builtin { key },
             }),
-            label: values.label,
-            note: values.note,
+            label_preset: self.label_preset.take(),
+            label: self.label.take(),
+            note: self.note.take(),
         }
     }
 }
 impl From<AnnotationRequestWire<AnnotationKind>> for CreateAnnotation {
-    fn from(wire: AnnotationRequestWire<AnnotationKind>) -> Self {
+    fn from(mut wire: AnnotationRequestWire<AnnotationKind>) -> Self {
+        let values = wire.take_values();
         Self {
             uuid: wire.uuid,
             kind: wire.kind,
-            values: wire.values.into(),
+            values,
         }
     }
 }
 impl From<AnnotationRequestWire<Option<AnnotationKind>>> for UpdateAnnotation {
-    fn from(wire: AnnotationRequestWire<Option<AnnotationKind>>) -> Self {
+    fn from(mut wire: AnnotationRequestWire<Option<AnnotationKind>>) -> Self {
+        let values = wire.take_values();
         Self {
             uuid: wire.uuid,
             kind: wire.kind,
-            values: wire.values.into(),
+            values,
         }
     }
 }
 /// Creates entities in one transaction, returning existing entities for UUID retries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnnotationsCreateRequest {
     pub entities: Vec<CreateAnnotation>,
 }
 /// Sets all submitted entities to their final values in one transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnnotationsUpdateRequest {
     pub entities: Vec<UpdateAnnotation>,
 }
 /// Deletes these identities in one transaction; missing identities succeed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnnotationsDeleteRequest {
     pub uuids: Vec<AnnotationId>,
 }
@@ -191,6 +203,8 @@ pub struct SavedAnnotation {
     pub start_utc_ms: i64,
     pub end_utc_ms: i64,
     pub category: Option<AnnotationCategory>,
+    #[serde(default)]
+    pub label_preset: Option<AnnotationLabelPreset>,
     pub label: Option<AnnotationText>,
     pub note: Option<AnnotationText>,
     pub created_utc_ms: i64,
@@ -208,6 +222,98 @@ pub struct QueryAnnotationsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn label_preset_round_trips_without_localized_text() {
+        let wire = serde_json::json!({"uuid":"abcdef00-0000-4000-8000-000000000001","kind":"note","start_utc_ms":0,"end_utc_ms":1,"label_preset":"rest"});
+        let entity: CreateAnnotation = serde_json::from_value(wire).expect("preset request");
+        let encoded = serde_json::to_value(&entity).expect("encode preset");
+        assert_eq!(encoded["label_preset"], "rest");
+        assert_eq!(encoded["label"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn label_preset_requests_reject_unknown_fields_and_codes() {
+        let wire = serde_json::json!({"uuid":"abcdef00-0000-4000-8000-000000000001","kind":"note","start_utc_ms":0,"end_utc_ms":1,"label_preset":"rest"});
+        for field in ["label_preset", "unexpected"] {
+            let mut invalid = wire.clone();
+            invalid[field] = serde_json::json!("unknown");
+            assert!(serde_json::from_value::<CreateAnnotation>(invalid.clone()).is_err());
+            assert!(serde_json::from_value::<UpdateAnnotation>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn label_preset_defaults_to_null_and_round_trips_in_write_responses() {
+        let wire = serde_json::json!({"uuid":"abcdef00-0000-4000-8000-000000000001","kind":"note","start_utc_ms":0,"end_utc_ms":1,"label_preset":"rest"});
+        let create: CreateAnnotation = serde_json::from_value(wire.clone()).expect("create");
+        let update: UpdateAnnotation = serde_json::from_value(wire.clone()).expect("update");
+        assert_eq!(
+            create.values.label_preset,
+            Some(AnnotationLabelPreset::Rest)
+        );
+        assert_eq!(update.values, create.values);
+        let response = AnnotationsResponse {
+            entities: vec![Annotation {
+                uuid: create.uuid,
+                kind: create.kind,
+                values: create.values,
+                created_utc_ms: 10,
+                updated_utc_ms: 20,
+            }],
+        };
+        let encoded = serde_json::to_value(&response).expect("encode response");
+        assert_eq!(encoded["entities"][0]["label_preset"], "rest");
+        assert_eq!(
+            serde_json::from_value::<AnnotationsResponse>(encoded).expect("response round trip"),
+            response
+        );
+        for value in [None, Some(serde_json::Value::Null)] {
+            let mut body = wire.clone();
+            body.as_object_mut().expect("entity").remove("label_preset");
+            if let Some(value) = value {
+                body["label_preset"] = value;
+            }
+            let create: CreateAnnotation =
+                serde_json::from_value(body.clone()).expect("default create");
+            let update: UpdateAnnotation = serde_json::from_value(body).expect("default update");
+            assert_eq!(create.values.label_preset, None);
+            assert_eq!(update.values.label_preset, None);
+            assert_eq!(
+                serde_json::to_value(create).expect("encode null")["label_preset"],
+                serde_json::Value::Null
+            );
+        }
+        let mut unknown = serde_json::json!({"entities":[],"future":true});
+        assert!(serde_json::from_value::<AnnotationsCreateRequest>(unknown.clone()).is_err());
+        assert!(serde_json::from_value::<AnnotationsUpdateRequest>(unknown.clone()).is_err());
+        unknown.as_object_mut().expect("body").remove("entities");
+        unknown["uuids"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<AnnotationsDeleteRequest>(unknown).is_err());
+    }
+
+    #[test]
+    fn annotation_responses_default_omitted_label_presets_to_null() {
+        let wire: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/annotations-normal.json"))
+                .expect("normal page");
+        let mut entity = wire["entities"][0].clone();
+        entity
+            .as_object_mut()
+            .expect("annotation object")
+            .remove("label_preset");
+        let saved: SavedAnnotation =
+            serde_json::from_value(entity.clone()).expect("saved annotation without preset");
+        assert_eq!(saved.label_preset, None);
+        let response: AnnotationsResponse =
+            serde_json::from_value(serde_json::json!({"entities": [entity]}))
+                .expect("write response without preset");
+        assert_eq!(response.entities[0].values.label_preset, None);
+        assert_eq!(
+            serde_json::to_value(saved).expect("encode saved annotation")["label_preset"],
+            serde_json::Value::Null
+        );
+    }
 
     #[test]
     fn saved_annotation_wire_snapshots_and_continuations_round_trip() {
@@ -294,6 +400,7 @@ mod tests {
         assert_eq!(update.entities[0].kind, None);
         assert_eq!(update.entities[0].values.category, None);
         assert_eq!(update.entities[0].values.label, None);
+        assert_eq!(update.entities[0].values.label_preset, None);
         assert_eq!(update.entities[0].values.note, None);
         let delete: AnnotationsDeleteRequest = serde_json::from_value(
             serde_json::json!({"uuids":["abcdef00-0000-4000-8000-000000000001"]}),

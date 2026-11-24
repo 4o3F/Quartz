@@ -44,7 +44,7 @@ use timing::{QueryStage, QueryTimer, QueryTimings};
 use unclassified::UnclassifiedAccumulator;
 
 /// Increment whenever matching, slicing, duration, aggregation, or projection semantics change.
-pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 10;
+pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 11;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
 pub(crate) const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
 /// A 366-logical-day reference can include a backward UTC offset change of up to one day.

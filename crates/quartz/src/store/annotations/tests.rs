@@ -66,6 +66,7 @@ fn entity(value: u32, kind: AnnotationKind, start: i64, end: i64) -> CreateAnnot
                     key: BuiltinCategory::Development,
                 },
             ),
+            label_preset: None,
             label: (kind == AnnotationKind::Note).then(|| "note".into()),
             note: None,
         },
@@ -817,6 +818,7 @@ fn clipping_work_limit_is_checked_before_any_row_mutation() {
                 start_utc_ms: offset * 2,
                 end_utc_ms: offset * 2 + 1,
                 category_id: None,
+                label_preset: None,
                 label: None,
                 note: None,
                 created_utc_ms: 0,
@@ -1000,4 +1002,103 @@ fn annotation_delete_rejects_day_work_before_deleting_rows() {
         before
     );
     assert!(fixture.store.take_committed_versions().facts.is_empty());
+}
+
+#[test]
+fn label_preset_satisfies_note_content_and_is_preserved_by_updates() {
+    let mut fixture = Fixture::new();
+    let mut rest = entity(1, AnnotationKind::Note, 0, 100);
+    rest.values.label = None;
+    rest.values.label_preset = Some(AnnotationLabelPreset::Rest);
+    let created = fixture
+        .create(vec![rest.clone()])
+        .expect("preset alone is valid note content");
+    assert_eq!(created.entities[0].values, rest.values);
+    assert_eq!(
+        fixture.rows()[0].label_preset,
+        Some(enums::AnnotationLabelPreset::Rest)
+    );
+    fixture.store.take_committed_versions();
+    let unchanged = fixture
+        .update(vec![update(rest.clone())])
+        .expect("unchanged preset");
+    assert_eq!(created, unchanged);
+    assert!(fixture.store.take_committed_versions().facts.is_empty());
+    rest.values.label = Some("custom label".into());
+    rest.values.note = Some("custom note".into());
+    let with_text = fixture
+        .update(vec![update(rest.clone())])
+        .expect("preset with user text");
+    assert_eq!(with_text.entities[0].values, rest.values);
+    rest.values.label_preset = None;
+    let cleared = fixture
+        .update(vec![update(rest.clone())])
+        .expect("clear preset, keep text");
+    assert_eq!(cleared.entities[0].values, rest.values);
+    assert_eq!(fixture.rows()[0].label_preset, None);
+}
+
+#[test]
+fn label_preset_is_rejected_on_every_non_note_kind() {
+    let mut fixture = Fixture::new();
+    for kind in [
+        AnnotationKind::CategoryOverride,
+        AnnotationKind::OfflineActivity,
+        AnnotationKind::ActiveOverride,
+        AnnotationKind::DismissedAway,
+    ] {
+        let mut invalid = entity(1, kind, 0, 100);
+        invalid.values.label_preset = Some(AnnotationLabelPreset::Rest);
+        assert!(
+            matches!(
+                fixture.create(vec![invalid.clone()]),
+                Err(ExecuteAnnotationWritesError::InvalidFields)
+            ),
+            "{kind:?}"
+        );
+        invalid.values.label_preset = None;
+        fixture
+            .create(vec![invalid.clone()])
+            .expect("valid non-note");
+        invalid.values.label_preset = Some(AnnotationLabelPreset::Rest);
+        assert!(
+            matches!(
+                fixture.update(vec![update(invalid)]),
+                Err(ExecuteAnnotationWritesError::InvalidFields)
+            ),
+            "{kind:?}"
+        );
+        fixture
+            .store
+            .delete_annotations(AnnotationsDeleteRequest { uuids: vec![id(1)] })
+            .expect("remove non-note");
+    }
+    assert!(fixture.rows().is_empty());
+}
+
+#[test]
+fn note_without_label_preset_or_non_whitespace_text_is_rejected() {
+    let mut fixture = Fixture::new();
+    for text in [None, Some(""), Some(" \t\n\u{3000}")] {
+        let mut empty = entity(1, AnnotationKind::Note, 0, 100);
+        empty.values.label = text.map(String::from);
+        empty.values.note = text.map(String::from);
+        assert!(matches!(
+            fixture.create(vec![empty]),
+            Err(ExecuteAnnotationWritesError::InvalidFields)
+        ));
+    }
+    let mut rest = entity(1, AnnotationKind::Note, 0, 100);
+    rest.values.label = None;
+    rest.values.label_preset = Some(AnnotationLabelPreset::Rest);
+    fixture.create(vec![rest.clone()]).expect("preset note");
+    rest.values.label_preset = None;
+    assert!(matches!(
+        fixture.update(vec![update(rest)]),
+        Err(ExecuteAnnotationWritesError::InvalidFields)
+    ));
+    assert_eq!(
+        fixture.rows()[0].label_preset,
+        Some(enums::AnnotationLabelPreset::Rest)
+    );
 }

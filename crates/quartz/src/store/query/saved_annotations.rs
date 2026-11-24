@@ -110,6 +110,7 @@ impl ReadSnapshot {
             start_utc_ms: row.start_utc_ms,
             end_utc_ms: row.end_utc_ms,
             category,
+            label_preset: row.label_preset.map(Into::into),
             label: row.label.map(AnnotationText::Complete),
             note: row.note.map(AnnotationText::Complete),
             created_utc_ms: row.created_utc_ms,

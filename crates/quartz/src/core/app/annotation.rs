@@ -2,8 +2,8 @@
 
 use quartz_domain::capture::{AvailabilityEndReason, RowId, Timestamp};
 use quartz_protocol::{
-    AnnotationCategory, AnnotationId, AnnotationKind, AnnotationValues, AnnotationsCreateRequest,
-    BuiltinCategory, CreateAnnotation,
+    AnnotationCategory, AnnotationId, AnnotationKind, AnnotationLabelPreset, AnnotationValues,
+    AnnotationsCreateRequest, BuiltinCategory, CreateAnnotation,
 };
 
 /// 07 §1.3 only prompts for idle periods of at least fifteen minutes.
@@ -43,12 +43,13 @@ impl AnnotationChoice {
                 start_utc_ms: period.start_utc_ms,
                 end_utc_ms: period.end_utc_ms,
                 category: None,
+                label_preset: None,
                 label: None,
                 note: None,
             },
         };
         match self {
-            Self::Rest => entity.values.label = Some("休息".into()),
+            Self::Rest => entity.values.label_preset = Some(AnnotationLabelPreset::Rest),
             Self::Meeting | Self::Reading => {
                 entity.kind = AnnotationKind::OfflineActivity;
                 entity.values.category = Some(AnnotationCategory::Builtin {
@@ -162,6 +163,25 @@ mod tests {
         annotation
     }
     #[test]
+    fn rest_quick_action_emits_label_preset_without_label() {
+        let id = AnnotationId(
+            "abcdef00-0000-4000-8000-000000000001"
+                .parse()
+                .expect("UUID"),
+        );
+        let request = AnnotationChoice::Rest.request(
+            IdlePeriod {
+                start_utc_ms: 0,
+                end_utc_ms: 1000,
+            },
+            id,
+        );
+        let wire = serde_json::to_value(request).expect("quick action request");
+        assert_eq!(wire["entities"][0]["label_preset"], "rest");
+        assert_eq!(wire["entities"][0]["label"], serde_json::Value::Null);
+    }
+
+    #[test]
     fn prompt_obeys_idle_threshold_window_and_successful_choice() {
         assert!(
             ended(MIN_ANNOTATION_IDLE_MS - 1)
@@ -251,6 +271,7 @@ mod tests {
             assert_eq!(entity.values.start_utc_ms, period.start_utc_ms);
             assert_eq!(entity.values.end_utc_ms, period.end_utc_ms);
             assert_eq!(entity.values.note, None);
+            assert_eq!(entity.values.label, None);
             assert_eq!(
                 entity.kind,
                 match choice {
@@ -260,9 +281,9 @@ mod tests {
                 }
             );
             assert_eq!(
-                entity.values.label.as_deref(),
+                entity.values.label_preset,
                 if choice == AnnotationChoice::Rest {
-                    Some("休息")
+                    Some(AnnotationLabelPreset::Rest)
                 } else {
                     None
                 }

@@ -384,6 +384,20 @@ impl EnumColumn for AnnotationKind {
     const COLUMN: EnumName = EnumName::column(schema::annotations::kind);
 }
 
+/// Built-in annotation label; names are localized only for display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Integer)]
+#[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+#[repr(i32)]
+pub(super) enum AnnotationLabelPreset {
+    Rest = 1,
+}
+
+impl EnumColumn for AnnotationLabelPreset {
+    const COLUMN: EnumName = EnumName::column(schema::annotations::label_preset);
+}
+
 /// Fact source whose per-day version invalidates cached results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
@@ -507,7 +521,7 @@ impl From<quartz_domain::capture::PrivacyMode> for PrivacyMode {
 }
 
 #[rustfmt::skip]
-impl_integer_sql!(TimedPolicyKind, PrivacyMode, RunEndReason, ClockEndReason, ApplicationKind, IntervalKind, NoForegroundReason, TitleStatus, CaptureLevel, IntervalEndReason, AvailabilityReason, AvailabilityEndReason, IdleException, CategoryTendency, RuleSetKind, RuleSetSource, AnnotationKind, DataSource, GapReason);
+impl_integer_sql!(TimedPolicyKind, PrivacyMode, RunEndReason, ClockEndReason, ApplicationKind, IntervalKind, NoForegroundReason, TitleStatus, CaptureLevel, IntervalEndReason, AvailabilityReason, AvailabilityEndReason, IdleException, CategoryTendency, RuleSetKind, RuleSetSource, AnnotationKind, AnnotationLabelPreset, DataSource, GapReason);
 
 impl From<quartz_domain::capture::RunEndReason> for RunEndReason {
     fn from(value: quartz_domain::capture::RunEndReason) -> Self {

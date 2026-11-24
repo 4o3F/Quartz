@@ -726,6 +726,7 @@ fn archive_preserves_annotation_and_persisted_rule_references_on_reload() {
                         category: Some(AnnotationCategory::Uuid {
                             uuid: category.uuid.0.parse().expect("category UUID"),
                         }),
+                        label_preset: None,
                         label: None,
                         note: None,
                     },
@@ -809,6 +810,7 @@ fn archive_preserves_annotation_and_persisted_rule_references_on_reload() {
                         start_utc_ms: 0,
                         end_utc_ms: 1,
                         category: None,
+                        label_preset: None,
                         label: None,
                         note: None,
                     },

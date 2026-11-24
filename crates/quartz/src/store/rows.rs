@@ -2,9 +2,10 @@
 
 use super::{
     enums::{
-        AnnotationKind, ApplicationKind, AvailabilityEndReason, AvailabilityReason, CaptureLevel,
-        CategoryTendency, ClockEndReason, DataSource, GapReason, IdleException, IntervalEndReason,
-        IntervalKind, NoForegroundReason, RuleSetKind, RuleSetSource, RunEndReason, TitleStatus,
+        AnnotationKind, AnnotationLabelPreset, ApplicationKind, AvailabilityEndReason,
+        AvailabilityReason, CaptureLevel, CategoryTendency, ClockEndReason, DataSource, GapReason,
+        IdleException, IntervalEndReason, IntervalKind, NoForegroundReason, RuleSetKind,
+        RuleSetSource, RunEndReason, TitleStatus,
     },
     schema::{
         annotations, applications, availability_intervals, capture_gaps, capture_runs, categories,
@@ -31,6 +32,7 @@ pub(super) struct AnnotationsRow {
     pub note: Option<String>,
     pub created_utc_ms: i64,
     pub updated_utc_ms: i64,
+    pub label_preset: Option<AnnotationLabelPreset>,
 }
 
 #[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]

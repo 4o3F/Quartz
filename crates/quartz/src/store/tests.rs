@@ -72,6 +72,7 @@ fn enum_labels_match_every_rust_enum_exactly() {
         EnumLabel::all::<enums::RuleSetKind>(),
         EnumLabel::all::<enums::RuleSetSource>(),
         EnumLabel::all::<enums::AnnotationKind>(),
+        EnumLabel::all::<enums::AnnotationLabelPreset>(),
         EnumLabel::all::<enums::DataSource>(),
         EnumLabel::all::<enums::GapReason>(),
         EnumLabel::all::<enums::TimedPolicyKind>(),
@@ -122,6 +123,7 @@ fn every_enum_code_round_trips() {
     check::<enums::RuleSetKind>();
     check::<enums::RuleSetSource>();
     check::<enums::AnnotationKind>();
+    check::<enums::AnnotationLabelPreset>();
     check::<enums::DataSource>();
     check::<enums::GapReason>();
     check::<enums::TimedPolicyKind>();
@@ -229,14 +231,14 @@ fn migration_failure_rolls_back_its_transaction_and_backup_restores() {
     drop(conn);
     let mut rust = diesel_migrations::RustMigrationSource::new();
     rust.add_migration(
-        "20261117000000",
+        "20990101000000",
         "successful",
         diesel_migrations::RustMigration::new(|conn: &mut SqliteConnection| {
             conn.batch_execute("CREATE TABLE successful_upgrade(id INTEGER);")
         }),
     )
     .expect("register successful migration");
-    rust.add_migration("20261118000000", "broken", diesel_migrations::RustMigration::new(|conn: &mut SqliteConnection| conn.batch_execute("CREATE TABLE should_rollback(id INTEGER); INSERT INTO settings VALUES ('during-migration', '{}'); SELECT * FROM missing_table;"))).expect("register broken migration");
+    rust.add_migration("20990102000000", "broken", diesel_migrations::RustMigration::new(|conn: &mut SqliteConnection| conn.batch_execute("CREATE TABLE should_rollback(id INTEGER); INSERT INTO settings VALUES ('during-migration', '{}'); SELECT * FROM missing_table;"))).expect("register broken migration");
     struct WithRust(diesel_migrations::RustMigrationSource<SqliteConnection>);
     impl MigrationSource<diesel::sqlite::Sqlite> for WithRust {
         fn migrations(
@@ -266,7 +268,7 @@ fn migration_failure_rolls_back_its_transaction_and_backup_restores() {
             .applied_versions()
             .expect("applied migrations")
             .len(),
-        2
+        3
     );
     drop(failed);
     DataDirectory::new(directory.path())
@@ -789,4 +791,140 @@ fn restore_removes_surviving_hot_journal_when_main_is_missing() {
         "stale rollback journal must be removed before opening the replacement"
     );
     fixture.assert_restored();
+}
+
+#[test]
+fn label_preset_migration_converts_only_legacy_rest_notes() {
+    use diesel::sql_types::Nullable;
+    use enums::IntegerCode;
+    #[derive(Debug, QueryableByName)]
+    struct MigratedAnnotation {
+        #[diesel(sql_type = Nullable<Text>)]
+        label: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        note: Option<String>,
+        #[diesel(sql_type = Nullable<Integer>)]
+        label_preset: Option<i32>,
+    }
+    let directory = tempfile::tempdir().expect("legacy database directory");
+    let path = directory.path().join("quartz.db");
+    fs::write(&path, include_bytes!("../../../../tests/fixtures/db/v1.db"))
+        .expect("legacy database");
+    let rest = "\u{4f11}\u{606f}";
+    let mut legacy = SqliteConnection::establish(path.to_str().expect("database path"))
+        .expect("legacy connection");
+    legacy
+        .batch_execute("DELETE FROM annotations;")
+        .expect("empty legacy annotations");
+    let kinds = [
+        enums::AnnotationKind::Note,
+        enums::AnnotationKind::Note,
+        enums::AnnotationKind::Note,
+        enums::AnnotationKind::Note,
+        enums::AnnotationKind::CategoryOverride,
+        enums::AnnotationKind::OfflineActivity,
+        enums::AnnotationKind::ActiveOverride,
+        enums::AnnotationKind::DismissedAway,
+    ];
+    for (index, kind) in kinds.iter().enumerate() {
+        let identity = index + 1;
+        let label = if identity == 3 { "custom" } else { rest };
+        let note = match identity {
+            2 => Some("user note"),
+            4 => Some(""),
+            _ => None,
+        };
+        diesel::sql_query("INSERT INTO annotations(uuid,kind,start_utc_ms,end_utc_ms,label,note,created_utc_ms,updated_utc_ms) VALUES (?, ?, 0, 1000, ?, ?, 10, 20)")
+            .bind::<Text, _>(format!("legacy-{identity}"))
+            .bind::<Integer, _>(kind.code())
+            .bind::<Text, _>(label)
+            .bind::<Nullable<Text>, _>(note)
+            .execute(&mut legacy).expect("legacy annotation");
+    }
+    drop(legacy);
+    drop(Store::open(&DataDirectory::new(directory.path())).expect("migrate legacy annotations"));
+    let mut migrated = ReadOnlyStore::connect(&path)
+        .expect("migrated connection")
+        .connection;
+    let rows = diesel::sql_query("SELECT label, note, label_preset FROM annotations ORDER BY uuid")
+        .load::<MigratedAnnotation>(&mut migrated)
+        .expect("read migrated annotations");
+    assert_eq!(rows.len(), 8);
+    assert_eq!(
+        rows[0].label_preset,
+        Some(enums::AnnotationLabelPreset::Rest.code())
+    );
+    assert_eq!(rows[0].label, None);
+    assert_eq!(rows[0].note, None);
+    for (index, row) in rows.iter().enumerate().skip(1) {
+        assert_eq!(row.label_preset, None);
+        assert_eq!(
+            row.label.as_deref(),
+            Some(if index == 2 { "custom" } else { rest })
+        );
+        assert_eq!(
+            row.note.as_deref(),
+            match index {
+                1 => Some("user note"),
+                3 => Some(""),
+                _ => None,
+            }
+        );
+    }
+    #[derive(QueryableByName)]
+    struct PresetLabel {
+        #[diesel(sql_type = Text)]
+        label_preset_label: String,
+    }
+    let view =
+        diesel::sql_query("SELECT label_preset_label FROM annotations_v WHERE uuid = 'legacy-1'")
+            .get_result::<PresetLabel>(&mut migrated)
+            .expect("diagnostic preset name");
+    assert_eq!(
+        view.label_preset_label,
+        enums::AnnotationLabelPreset::Rest.label()
+    );
+}
+
+#[test]
+fn label_preset_check_rejects_non_note_kinds_and_unknown_codes() {
+    use enums::IntegerCode;
+    let mut conn = empty();
+    for kind in [
+        enums::AnnotationKind::CategoryOverride,
+        enums::AnnotationKind::OfflineActivity,
+        enums::AnnotationKind::ActiveOverride,
+        enums::AnnotationKind::DismissedAway,
+    ] {
+        let result = diesel::sql_query("INSERT INTO annotations(uuid,kind,start_utc_ms,end_utc_ms,created_utc_ms,updated_utc_ms,label_preset) VALUES ('invalid', ?, 0, 100, 0, 0, ?)")
+            .bind::<Integer, _>(kind.code())
+            .bind::<Integer, _>(enums::AnnotationLabelPreset::Rest.code())
+            .execute(&mut conn);
+        assert!(
+            matches!(
+                result,
+                Err(diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::CheckViolation,
+                    _
+                ))
+            ),
+            "{kind:?}"
+        );
+    }
+    for code in [i32::MIN, -1, 0, 2, i32::MAX] {
+        let result = diesel::sql_query("INSERT INTO annotations(uuid,kind,start_utc_ms,end_utc_ms,created_utc_ms,updated_utc_ms,label_preset) VALUES ('invalid', ?, 0, 100, 0, 0, ?)")
+            .bind::<Integer, _>(enums::AnnotationKind::Note.code())
+            .bind::<Integer, _>(code)
+            .execute(&mut conn);
+        assert!(
+            matches!(
+                result,
+                Err(diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::CheckViolation,
+                    _
+                ))
+            ),
+            "unknown preset {code}"
+        );
+    }
 }

@@ -38,6 +38,7 @@ macro_rules! messages {
 }
 
 messages! {
+    AnnotationPresetRest => "annotation.preset.rest",
     ClockTwelve => "clock.twelve" [Hours, Minutes, Name],
     ClockMorning => "clock.morning",
     ClockAfternoon => "clock.afternoon",
@@ -219,6 +220,14 @@ messages! {
     CategoryUncategorized => "category.builtin.uncategorized",
 }
 
+impl From<quartz_protocol::AnnotationLabelPreset> for Msg {
+    fn from(preset: quartz_protocol::AnnotationLabelPreset) -> Self {
+        match preset {
+            quartz_protocol::AnnotationLabelPreset::Rest => Self::AnnotationPresetRest,
+        }
+    }
+}
+
 /// A named placeholder, written `%{name}` in the catalogs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Arg {
@@ -320,6 +329,16 @@ mod tests {
             .skip(1)
             .filter_map(|rest| rest.split_once('}').map(|(name, _)| name))
             .collect()
+    }
+
+    #[test]
+    fn annotation_label_preset_uses_the_current_language() {
+        let msg = Msg::from(quartz_protocol::AnnotationLabelPreset::Rest);
+        assert_eq!(msg.key(), MessageKey::new("annotation.preset.rest"));
+        let zh = crate::format::Formatter::new(Language::SimplifiedChinese);
+        let en = crate::format::Formatter::new(Language::English);
+        assert_eq!(zh.text(msg), "\u{4f11}\u{606f}");
+        assert_eq!(en.text(msg), "Rest");
     }
 
     #[test]

@@ -215,7 +215,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 分类引用为 `{kind:"unclassified"}` 或 `{kind:"classified", id, uuid, builtin_key, name, color, tendency}`。`builtin_key` 是稳定内置键，`name` 为用户输入或 null；名称为 null 时由界面翻译 `category.builtin.<key>`。规则来源为 `{kind:"rule", rule:"<规则集>/<规则>@<版本>"}`，注解来源为 `{kind:"annotation", annotation:"<UUID>"}`，未分类来源为 `{kind:"unclassified"}`。活动状态新增 `{kind:"active_override", annotation:"<UUID>"}` 和 `{kind:"offline_activity", annotation:"<UUID>"}`。分类元数据从查询的数据库快照读取，求值使用生成游标规则哈希的同一规则快照。
 
-时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。M4 的 `app` 细节对同窗口实例、同非空文档身份的连续片段先合并，保留分类与来源边界；无身份时要求原始标题相同；合并不跨时钟段或活动状态边界。dirty 等可变提取显示字段不阻止 app 合并，合并后采用最后切片的提取显示值。`raw` 保留原始标题与提取输出边界。其余像素合并规则为：相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`app` 与 `raw` 均要求文档身份相同（含两者皆空），`raw` 还要求标题与提取输出相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。M4 查询语义版本为 10，版本摘要包含该版本，因此此前语义生成的游标返回 `stale_cursor`。
+时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。M4 的 `app` 细节对同窗口实例、同非空文档身份的连续片段先合并，保留分类与来源边界；无身份时要求原始标题相同；合并不跨时钟段或活动状态边界。dirty 等可变提取显示字段不阻止 app 合并，合并后采用最后切片的提取显示值。`raw` 保留原始标题与提取输出边界。其余像素合并规则为：相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`app` 与 `raw` 均要求文档身份相同（含两者皆空），`raw` 还要求标题与提取输出相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。M4 查询语义版本为 11，版本 11 在标注编辑值中加入 `label_preset`；版本摘要包含该版本，因此此前语义生成的游标返回 `stale_cursor`。
 
 原始事实读取按有序键收集数据，收尾每个数据库循环轮次最多转换并哈希 32 条；每条转换后释放存储表示，仅保留其协议记录。页面字节数与版本摘要直接通过写入器计算，不保留整页 JSON 缓冲区。范围查询在完成确定下一页位置的桶后停止后续日期扫描，版本仍绑定完整请求范围。
 
@@ -235,7 +235,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 - `document_ref` 为不透明字符串，绑定身份及 `reference_range` 内全部查询输入版本；客户端只保存、比较和回传。`query.entity_detail` 的 document 请求附原样 `reference_range`，该范围必须包含详情所需的 7 日；核心校验引用覆盖范围与版本后按身份重算各日，`daily` 与文档排行一致，标题和最终分类规则沿用 app 详情。document 详情增加 `extraction: [{extractor_rule,status}]`，完整列出该身份在这 7 日活跃事实中实际观察到的提取规则与状态组合，回退规则为 null；按规则引用（null 在前、文本按 Unicode 标量序）、状态（extracted、fallback、empty、unknown）排序去重。共用 `next_cursor` 先返回 `rules` 页，再返回 `extraction` 页，另一列表为空；`daily` 和 `titles` 仅在第一页返回。`extraction` 为空时省略该字段。document 请求缺少范围、引用覆盖范围不足或格式无效返回 `bad_request`；引用范围为正时长且最多 367 × 24 小时，以容纳 366 个逻辑日跨 UTC 偏移回退后的范围。app 请求不得附加该范围，违反时返回 `bad_request`，依赖变化返回 `stale_document_ref`。相同 reference_range 和输入版本内，相同身份使用相同引用。document 详情的游标保留原样 `reference_range`，分页版本摘要覆盖整个引用范围；`query.day` 的版本摘要与日期订阅同样覆盖其 7 日引用范围。客户端加载今天页时，时间轴与待补记按各自范围校验分页版本，全部读取后再查询 `query.day` 首页并比较七日摘要，以检查跨查询期间的输入变化。
 - `query.range` 的 `bucket` 为 `day | week`；`dimensions` 为非空且无重复的 `category | app | document` 数组。响应 `buckets: [{start_date, end_date, active_ms, groups: [{dimension, entity, active_ms}]}]`；每个 dimension 独立聚合，分母为同一活跃时长。按桶日期、请求维度顺序、时长降序和实体身份排序。周桶按有效每周首日切分，首尾桶裁剪到请求范围；每周首日来自 `ui.first_day_of_week`，`auto` 解析为 Windows 区域设置，无法解析时返回 `internal`。完整桶总时长 `active_ms` 仅在该桶首次出现时返回，续页省略该字段，分组可续页；空桶返回 `active_ms: 0` 和空分组。category entity 为 `{kind:"category",category}`（沿用分类引用），app entity 为 `{kind:"app",id,exe_name,display_name}`；document entity 为 `{kind:"document", document_ref, app, document, project, profile}`，其中 app 为 ApplicationId，引用覆盖整个请求范围，响应第一页返回其 UTC `reference_range`。周桶响应摘要在查询输入摘要上附加有效每周首日；文档引用使用不含分桶设置的输入摘要，供详情查询验证。非法日期范围、空维度、重复维度或未知请求字段返回 `bad_request`。年度三维请求的实测耗时超过 `quartz-pipe` 的 2 秒响应期限，客户端可能超时。
 - `query.unclassified` 的 `group_by` 为 `app | document`。只累计最终分类为空的活跃切片（人工覆盖已应用），返回 `items: [{entity, active_ms, sample_ranges}]`，entity 沿用 query.range 的 app/document 形状；每组按时序取最多 5 个 `{start_utc_ms,end_utc_ms,clock_segment_id}`，供片段归类。缺少所选实体的事实不成组，因此分组总计可以小于全日未分类时长。排序同排行；`search` 最多 256 个 Unicode 标量，对可见名称、文档、项目、profile 做 NFKC 与大小写折叠后包含匹配，过滤和分页均在核心完成。document 引用覆盖请求范围，第一页返回其 UTC `reference_range`。
-- `query.annotations` 的 UTC 范围为正时长且最多 366 天，按开始 UTC、结束 UTC、UUID 排序返回相交的 `entities`；每项包含写入响应的全部字段及创建、更新时间，保留存储端点，不裁剪。包括重叠 note 和 `dismissed_away`，不按最终活动片段过滤；归档分类仍返回 UUID 引用。UI、CLI 均可读，写入权限保持 UI-only。单实体文本超过页预算时，label/note 改用 `{text,offset_utf8,complete}` 分块值，同 UUID 可跨页重复，其他字段保持一致；客户端按字段的 UTF-8 字节偏移拼接，收齐后再显示完整编辑值，字符串与 null 仍为普通完整值。分块时能放入单字段文本预算的短字段仍为字符串；较短的分块字段传完后，若另一字段尚未传完，继续返回偏移等于该字段总字节数、text 为空、complete 为 true 的块。空范围、逆序、超过 366 × 24 小时或无效 UTC 端点返回 `invalid_range`，未知请求字段和无效游标参数或位置返回 `bad_request`。
+- `query.annotations` 的 UTC 范围为正时长且最多 366 天，按开始 UTC、结束 UTC、UUID 排序返回相交的 `entities`；每项包含写入响应的全部字段及创建、更新时间，保留存储端点，不裁剪。包括重叠 note 和 `dismissed_away`，不按最终活动片段过滤；归档分类仍返回 UUID 引用。UI、CLI 均可读，写入权限保持 UI-only。`label_preset` 返回 `"rest"` 或 null，始终为枚举元数据，不参与文本分块。单实体文本超过页预算时，label/note 改用 `{text,offset_utf8,complete}` 分块值，同 UUID 可跨页重复，其他字段保持一致；客户端按字段的 UTF-8 字节偏移拼接，收齐后再显示完整编辑值，字符串与 null 仍为普通完整值。分块时能放入单字段文本预算的短字段仍为字符串；较短的分块字段传完后，若另一字段尚未传完，继续返回偏移等于该字段总字节数、text 为空、complete 为 true 的块。空范围、逆序、超过 366 × 24 小时或无效 UTC 端点返回 `invalid_range`，未知请求字段和无效游标参数或位置返回 `bad_request`。
 
 ```jsonc
 // query.day 第一页的引用范围摘录；versions 和引用均按不透明值处理
@@ -281,7 +281,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 `ui` 返回保存值：语言与区域设置缺失时为 `auto`，预热缺失时为启用且禁止电池预热；`effective.resident.enabled` 返回有效常驻设置，`state.ui_resident` 向 UI 推送同一布尔值，供最后一个窗口关闭时判断；`effective.prewarm` 保留该策略，实际电源在悬停时读取。`effective` 与 `state` 使用相同的已解析语言和区域值。系统区域读取失败且设置仍需要自动值时，`locale` 为 `null`，核心记录警告。写入通过数据库线程的写入队列在一个事务内提交，有效保存值变化时增加元数据版本，提交后通知主线程刷新托盘并推送 `state`，响应在提交后返回。CLI 使用 `quartz settings get` 读取，使用 `quartz settings set --prewarm-enabled true --prewarm-on-battery false` 部分更新预热策略，`quartz settings set --resident-enabled false` 关闭常驻。
 
-标注写操作只允许 `ui`。请求体与响应体如下，可选字段 `category`、`label`、`note` 缺省为 `null`：
+标注写操作只允许 `ui`。请求体与响应体如下，可选字段 `category`、`label_preset`、`label`、`note` 缺省为 `null`；请求体、实体和分类引用拒绝未知字段。协议版本保持 1：
 
 ```json
 {
@@ -292,6 +292,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
       "start_utc_ms": 1763683200000,
       "end_utc_ms": 1763686800000,
       "category": { "kind": "builtin", "key": "communication" },
+      "label_preset": null,
       "label": "会议",
       "note": null
     }
@@ -299,13 +300,13 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 }
 ```
 
-- `annotations.create` 使用上面的 `entities` 数组，每个实体必须提供 `uuid`、`kind` 和开始、结束 UTC 毫秒数。分类引用为 `{ "kind": "uuid", "uuid": "..." }` 或 `{ "kind": "builtin", "key": "communication" }`，内置键为 `development`、`learning`、`communication`、`entertainment`、`system`。
-- `annotations.update` 也使用 `entities` 数组，每项提供 `uuid` 和新的范围、分类、标签、备注；省略可选字段即清空。类型保持原值；允许附带 `kind` 断言，值与已存类型不同时返回 `bad_request`。不存在的 UUID 返回 `bad_request`。同一实体的最终值未变时返回当前实体。
-- 创建、更新成功返回 `{ "entities": [...] }`，每项包含 `uuid`、`kind`、范围、分类、标签、备注、`created_utc_ms` 和 `updated_utc_ms`，按请求顺序排列。分类统一返回 UUID 引用；响应仅包含请求实体，裁剪其他行产生的剩余片段不在响应中。创建遇到已有 UUID 时，先检查提交范围和请求工作量，再返回当前已有实体，跳过其他字段校验和裁剪。
+- `annotations.create` 使用上面的 `entities` 数组，每个实体必须提供 `uuid`、`kind` 和开始、结束 UTC 毫秒数。`label_preset` 为类型化枚举，使用 snake_case 名称，当前仅 `"rest"`。分类引用为 `{ "kind": "uuid", "uuid": "..." }` 或 `{ "kind": "builtin", "key": "communication" }`，内置键为 `development`、`learning`、`communication`、`entertainment`、`system`。
+- `annotations.update` 也使用 `entities` 数组，每项提供 `uuid` 和新的范围、分类、预设标签、标签、备注；省略可选字段即清空。类型保持原值；允许附带 `kind` 断言，值与已存类型不同时返回 `bad_request`。不存在的 UUID 返回 `bad_request`。同一实体的最终值未变时返回当前实体。
+- 创建、更新成功返回 `{ "entities": [...] }`，每项包含 `uuid`、`kind`、范围、分类、`label_preset`（`"rest"` 或 null）、标签、备注、`created_utc_ms` 和 `updated_utc_ms`，按请求顺序排列。分类统一返回 UUID 引用；响应仅包含请求实体，裁剪其他行产生的剩余片段不在响应中。创建遇到已有 UUID 时，先检查提交范围和请求工作量，再返回当前已有实体，跳过其他字段校验和裁剪。
 - `annotations.delete` 使用 `{ "uuids": ["..."] }`，成功返回 `{ "accepted": true }`；不存在的 UUID 也成功，删除不恢复此前裁剪的范围。
 - 每个请求中的 UUID 必须是规范 UUID 文本，接受大写并统一为小写。同一创建或更新请求重复提交同一 UUID 返回 `bad_request`。空数组成功且不改变数据库。
 - 创建和更新的每个提交范围必须使用有效 UTC 端点，满足 `end_utc_ms > start_utc_ms`，时长最多 366 × 24 小时，与 `query.annotations` 共用范围上限。一个请求中，各提交范围所覆盖的 UTC 日期数量之和最多 367；每个范围单独计数，即使日期重叠也累计。超限在打开写事务前返回 `invalid_range`。删除请求最多包含 367 个 UUID。包含旧行、新行和裁剪剩余片段的日版本递增工作量，每个请求最多 4,096 次；修改任何行之前计算并检查，超限返回 `invalid_range`。同一请求中同一裁剪类型的最终范围不得重叠，违反时返回 `invalid_range`。创建重试的最终范围取已有实体。note 允许重叠，不同类型允许重叠。整个请求及其对其他行的裁剪在一个事务中完成，任一项失败全部回滚。
-- `category_override` 必须有分类；`offline_activity`、`active_override` 的分类可选；`dismissed_away` 不允许分类、标签或备注；`note` 的标签或备注至少一个包含非空白文本。分类不存在或已归档、字段不符合类型要求时返回 `bad_request`。当前 `bad_request` 是无附加结构字段的错误类型。
+- `category_override` 必须有分类；`offline_activity`、`active_override` 的分类可选；`dismissed_away` 不允许分类、标签或备注；`label_preset` 只允许用于 `note`；`note` 至少有一个预设，或标签、备注中至少一个包含非空白文本。分类不存在或已归档、字段不符合类型要求时返回 `bad_request`。当前 `bad_request` 是无附加结构字段的错误类型。
 - 写通道已满时返回 `busy`。数据库循环先提交待写采集事实，再处理标注事务；提交后发布受影响 UTC 日的版本，随后回复，`day:` 订阅据此推送变化。
 
 ### 6.3.1 规则集读取与写入

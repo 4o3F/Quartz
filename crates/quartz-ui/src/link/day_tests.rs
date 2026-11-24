@@ -834,7 +834,7 @@ async fn followup_successful_local_annotation_refreshes_without_a_day_event() {
     let link = harness.ui.link.clone();
     let call = tokio::spawn(async move { link.request(annotation).await });
     let write = harness.core.request(Op::AnnotationsCreate).await;
-    harness.core.ok(write, serde_json::json!({"entities":[{"uuid":entity.uuid,"kind":entity.kind,"start_utc_ms":entity.values.start_utc_ms,"end_utc_ms":entity.values.end_utc_ms,"category":entity.values.category,"label":entity.values.label,"note":entity.values.note,"created_utc_ms":0,"updated_utc_ms":0}]})).await;
+    harness.core.ok(write, serde_json::json!({"entities":[{"uuid":entity.uuid,"kind":entity.kind,"start_utc_ms":entity.values.start_utc_ms,"end_utc_ms":entity.values.end_utc_ms,"category":entity.values.category,"label_preset":entity.values.label_preset,"label":entity.values.label,"note":entity.values.note,"created_utc_ms":0,"updated_utc_ms":0}]})).await;
     call.await.expect("write task").expect("write success");
     // A cached WholeDay refresh must also query aggregates; no day event has been sent.
     const REFRESH_DEADLINE: Duration = Duration::from_secs(1);

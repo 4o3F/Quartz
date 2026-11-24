@@ -266,6 +266,7 @@ CREATE TABLE annotations (
   note             TEXT,
   created_utc_ms   INTEGER NOT NULL,
   updated_utc_ms   INTEGER NOT NULL,
+  label_preset     INTEGER CHECK (label_preset IS NULL OR (kind = 5 AND label_preset = 1)), -- 1 rest；仅 note
   CHECK (end_utc_ms > start_utc_ms)
 );
 
@@ -275,7 +276,7 @@ CREATE TABLE settings (
 ) WITHOUT ROWID;
 ```
 
-标注的类型在创建后固定。`category_override` 必须指定分类，`label` 与 `note` 可选；`offline_activity` 与 `active_override` 的分类、标签和备注均可选；`dismissed_away` 的分类、标签和备注必须全部为空；`note` 的标签或备注至少有一个包含非空白文本。任何指定的分类都必须存在且未归档，支持用 UUID 或内置键引用。更新按最终值覆盖这些可选字段，省略即清空。`created_utc_ms`、`updated_utc_ms` 由数据库循环注入的时钟提供；裁剪保留行的创建时间，拆分出的右侧新行使用本次写入时间作为创建和更新时间。
+标注的类型在创建后固定。`category_override` 必须指定分类，`label` 与 `note` 可选；`offline_activity` 与 `active_override` 的分类、标签和备注均可选；`dismissed_away` 的分类、标签和备注必须全部为空；`label_preset` 是闭集枚举，编码 1 为 `rest`，只允许用于 `note`；`note` 必须有 `label_preset`，或标签、备注中至少有一个包含非空白文本。预设与用户文字可以同时保存，界面按 `annotation.preset.<name>` 翻译预设，用户文字原样显示。CHECK 限制预设编码及适用类型；非空白文本校验由 `store::annotations` 使用 Rust 的空白字符规则执行。任何指定的分类都必须存在且未归档，支持用 UUID 或内置键引用。更新按最终值覆盖这些可选字段，省略即清空。`created_utc_ms`、`updated_utc_ms` 由数据库循环注入的时钟提供；裁剪保留行的创建时间，拆分出的右侧新行使用本次写入时间作为创建和更新时间。
 
 开放可用状态的周期确认只更新上次确认点到本次确认点覆盖的 UTC 日期版本；结构关闭和午夜拆分仍更新受表示变化影响的完整范围。
 
@@ -377,7 +378,7 @@ CREATE TABLE enum_labels (
 
 - Rust 侧使用普通枚举定义，显式写出编码（例如 `Shutdown = 1`），并通过 `IntegerCode` 实现列名、全部变体、编码和标签映射；宏只为具体枚举生成 `ToSql`/`FromSql<Integer, Sqlite>` 实现，转发到泛型转换函数。测试检查迁移写入的 `enum_labels` 与全部 Rust 枚举的列名、编码和标签集合完全一致。
 - 新增取值时，同一个迁移插入对应的 `enum_labels` 行。读到未知编码返回错误；数据库来自更新版本时核心已拒绝启动（第 8.2 节），正常运行不会遇到。
-- 迁移为主要事实表建只读视图：`intervals_v`、`availability_intervals_v`、`web_intervals_v`、`capture_gaps_v`、`annotations_v`。视图把枚举编码连接成名称，把 UTC 毫秒转换成本地时间文本，并连接应用名、标题与域名。直接打开数据库排查时查询视图即可。
+- 迁移为主要事实表建只读视图：`intervals_v`、`availability_intervals_v`、`web_intervals_v`、`capture_gaps_v`、`annotations_v`。视图把枚举编码连接成名称，把 UTC 毫秒转换成本地时间文本，并连接应用名、标题与域名。`annotations_v.label_preset_label` 显示预设的英文名称（如 `rest`），原始 `label_preset` 列保留整数编码。直接打开数据库排查时查询视图即可。
 - 视图只供人工排查，核心代码不读视图。
 
 ## 3. 索引
@@ -673,6 +674,8 @@ M4 交付隐私规则的历史字段降级；下列通用范围删除与保留�
 - 迁移放在 `crates/quartz/migrations/<时间戳>_<名称>/up.sql`，用 `embed_migrations!` 编进 exe。不提供 `down.sql`：Quartz 不支持把数据库降级到旧 schema。
 - 已发布的迁移不可修改。仓库里的 `migrations.lock` 记录每个已发布迁移的 SHA-256，CI 校验文件未变。diesel 自身不校验迁移内容，这一检查由我们补上。
 - `store/schema.rs` 必须与迁移一致。CI 在空库上执行全部迁移，再运行 `diesel print-schema`，与提交的文件逐字节比较。CHECK 约束和部分索引不出现在 schema.rs 中，由迁移测试覆盖。本地执行 `deno task check-schema` 完成空库迁移与生成结果比较，需要 Deno 2.9.8 与 Diesel CLI 2.4.0（`sqlite-bundled`）；脚本使用仓库中的 `diesel.toml` 与 `crates/quartz/schema.patch`，在 Windows 和 Linux 上均可运行。
+
+`20261123000000_annotation_label_preset` 用 `ALTER TABLE ... ADD COLUMN` 增加可空的预设列及 CHECK，在同一迁移中登记 `enum_labels` 并重建 `annotations_v`。仅将 `kind = 5 AND label = '休息' AND note IS NULL` 的历史行改为 `label_preset = 1, label = NULL`，其他列和其他行保持原值；备注为空字符串的行也保留原值。SQLite 支持在新增列时引用其他列进行 CHECK，无需重建表。
 
 ### 8.2 启动流程
 

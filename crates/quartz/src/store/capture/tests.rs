@@ -2035,6 +2035,7 @@ fn suspended_intervening_day_loads_owning_clock_and_counts_offline_wall_time() {
                             .get()
                             .as_millisecond(),
                         category: None,
+                        label_preset: None,
                         label: None,
                         note: None,
                     },
@@ -2235,6 +2236,7 @@ impl LockBeforeSleep {
                             start_utc_ms: locked.utc.get().as_millisecond(),
                             end_utc_ms: resumed.utc.get().as_millisecond(),
                             category: None,
+                            label_preset: None,
                             label: None,
                             note: None,
                         },

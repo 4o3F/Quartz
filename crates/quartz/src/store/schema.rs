@@ -12,6 +12,7 @@ diesel::table! {
         note -> Nullable<Text>,
         created_utc_ms -> BigInt,
         updated_utc_ms -> BigInt,
+        label_preset -> Nullable<Integer>,
     }
 }
 

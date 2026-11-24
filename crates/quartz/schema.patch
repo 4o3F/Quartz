@@ -1,6 +1,6 @@
 --- schema.rs
 +++ schema.rs
-@@ -5,13 +5,13 @@
+@@ -5,14 +5,14 @@
          id -> Nullable<BigInt>,
          uuid -> Text,
          kind -> Integer,
@@ -15,10 +15,11 @@
 -        updated_utc_ms -> Integer,
 +        created_utc_ms -> BigInt,
 +        updated_utc_ms -> BigInt,
+         label_preset -> Nullable<Integer>,
      }
  }
  
-@@ -24,7 +24,7 @@
+@@ -25,7 +25,7 @@
          aumid -> Nullable<Text>,
          exe_name -> Nullable<Text>,
          display_name -> Text,
@@ -27,7 +28,7 @@
      }
  }
  
-@@ -34,18 +34,18 @@
+@@ -35,18 +35,18 @@
          run_id -> BigInt,
          clock_segment_id -> BigInt,
          reason -> Integer,
@@ -57,7 +58,7 @@
      }
  }
  
-@@ -56,8 +56,8 @@
+@@ -57,8 +57,8 @@
          profile_instance_id -> Text,
          extension_id -> Text,
          label -> Nullable<Text>,
@@ -68,7 +69,7 @@
      }
  }
  
-@@ -66,10 +66,10 @@
+@@ -67,10 +67,10 @@
          id -> Nullable<BigInt>,
          run_id -> BigInt,
          clock_segment_id -> BigInt,
@@ -83,7 +84,7 @@
          reason -> Integer,
      }
  }
-@@ -78,11 +78,11 @@
+@@ -79,11 +79,11 @@
      capture_runs (id) {
          id -> Nullable<BigInt>,
          device_id -> Text,
@@ -99,7 +100,7 @@
          end_reason -> Nullable<Integer>,
      }
  }
-@@ -96,7 +96,7 @@
+@@ -97,7 +97,7 @@
          name -> Nullable<Text>,
          color -> Text,
          tendency -> Integer,
@@ -108,7 +109,7 @@
          archived -> Integer,
      }
  }
-@@ -105,12 +105,12 @@
+@@ -106,12 +106,12 @@
      clock_segments (id) {
          id -> Nullable<BigInt>,
          run_id -> BigInt,
@@ -127,7 +128,7 @@
          end_reason -> Nullable<Integer>,
      }
  }
-@@ -118,18 +118,18 @@
+@@ -119,18 +119,18 @@
  diesel::table! {
      data_day_versions (source, utc_date) {
          source -> Integer,
@@ -151,7 +152,7 @@
      }
  }
  
-@@ -152,9 +152,9 @@
+@@ -153,9 +153,9 @@
  diesel::table! {
      ingest_receipts (stream_id, epoch, message_seq) {
          stream_id -> BigInt,
@@ -164,7 +165,7 @@
          outcome -> Integer,
      }
  }
-@@ -163,7 +163,7 @@
+@@ -164,7 +164,7 @@
      intervals (id) {
          id -> Nullable<BigInt>,
          run_id -> BigInt,
@@ -173,7 +174,7 @@
          clock_segment_id -> BigInt,
          kind -> Integer,
          no_foreground_reason -> Nullable<Integer>,
-@@ -175,14 +175,14 @@
+@@ -176,14 +176,14 @@
          privacy_rule_id -> Nullable<Text>,
          privacy_label_key -> Nullable<Text>,
          privacy_label -> Nullable<Text>,
@@ -196,7 +197,7 @@
          end_reason -> Nullable<Integer>,
      }
  }
-@@ -190,12 +190,12 @@
+@@ -191,12 +191,12 @@
  diesel::table! {
      rule_set_versions (set_id, version) {
          set_id -> BigInt,
@@ -212,7 +213,7 @@
      }
  }
  
-@@ -206,14 +206,14 @@
+@@ -207,14 +207,14 @@
          kind -> Integer,
          parent_id -> Nullable<BigInt>,
          source -> Integer,
@@ -233,7 +234,7 @@
      }
  }
  
-@@ -226,11 +226,11 @@
+@@ -227,11 +227,11 @@
  
  diesel::table! {
      timed_policies (kind) {
@@ -248,7 +249,7 @@
      }
  }
  
-@@ -246,16 +246,16 @@
+@@ -247,16 +247,16 @@
          id -> Nullable<BigInt>,
          stream_id -> BigInt,
          interval_id -> BigInt,
@@ -271,7 +272,7 @@
          audible -> Integer,
          link_status -> Integer,
          web_level -> Integer,
-@@ -270,14 +270,14 @@
+@@ -271,14 +271,14 @@
          id -> Nullable<BigInt>,
          run_id -> BigInt,
          app_id -> BigInt,

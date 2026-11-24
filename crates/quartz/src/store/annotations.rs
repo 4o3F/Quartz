@@ -20,8 +20,8 @@ use quartz_domain::{
     facts::QueryRange,
 };
 use quartz_protocol::{
-    Annotation, AnnotationCategory, AnnotationId, AnnotationKind, AnnotationValues,
-    AnnotationsCreateRequest, AnnotationsDeleteRequest, AnnotationsResponse,
+    Annotation, AnnotationCategory, AnnotationId, AnnotationKind, AnnotationLabelPreset,
+    AnnotationValues, AnnotationsCreateRequest, AnnotationsDeleteRequest, AnnotationsResponse,
     AnnotationsUpdateRequest,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -245,6 +245,9 @@ impl WriteTx<'_> {
         if values.end_utc_ms <= values.start_utc_ms {
             return Err(ExecuteAnnotationWritesError::InvalidRange);
         }
+        if values.label_preset.is_some() && kind != AnnotationKind::Note {
+            return Err(ExecuteAnnotationWritesError::InvalidFields);
+        }
         let fields_valid = match kind {
             AnnotationKind::CategoryOverride => values.category.is_some(),
             AnnotationKind::OfflineActivity | AnnotationKind::ActiveOverride => true,
@@ -252,10 +255,11 @@ impl WriteTx<'_> {
                 values.category.is_none() && values.label.is_none() && values.note.is_none()
             }
             AnnotationKind::Note => {
-                values
-                    .label
-                    .as_ref()
-                    .is_some_and(|text| !text.trim().is_empty())
+                values.label_preset.is_some()
+                    || values
+                        .label
+                        .as_ref()
+                        .is_some_and(|text| !text.trim().is_empty())
                     || values
                         .note
                         .as_ref()
@@ -277,6 +281,7 @@ impl WriteTx<'_> {
             start_utc_ms: values.start_utc_ms,
             end_utc_ms: values.end_utc_ms,
             category_id,
+            label_preset: values.label_preset.map(Into::into),
             label: values.label,
             note: values.note,
             created_utc_ms: now,
@@ -518,6 +523,7 @@ impl AnnotationEntityRow {
                 start_utc_ms: row.start_utc_ms,
                 end_utc_ms: row.end_utc_ms,
                 category,
+                label_preset: row.label_preset.map(Into::into),
                 label: row.label,
                 note: row.note,
             },
@@ -543,6 +549,7 @@ impl AnnotationsRow {
         self.start_utc_ms == other.start_utc_ms
             && self.end_utc_ms == other.end_utc_ms
             && self.category_id == other.category_id
+            && self.label_preset == other.label_preset
             && self.label == other.label
             && self.note == other.note
     }
@@ -566,6 +573,21 @@ impl From<enums::AnnotationKind> for AnnotationKind {
             enums::AnnotationKind::ActiveOverride => Self::ActiveOverride,
             enums::AnnotationKind::DismissedAway => Self::DismissedAway,
             enums::AnnotationKind::Note => Self::Note,
+        }
+    }
+}
+
+impl From<AnnotationLabelPreset> for enums::AnnotationLabelPreset {
+    fn from(preset: AnnotationLabelPreset) -> Self {
+        match preset {
+            AnnotationLabelPreset::Rest => Self::Rest,
+        }
+    }
+}
+impl From<enums::AnnotationLabelPreset> for AnnotationLabelPreset {
+    fn from(preset: enums::AnnotationLabelPreset) -> Self {
+        match preset {
+            enums::AnnotationLabelPreset::Rest => Self::Rest,
         }
     }
 }

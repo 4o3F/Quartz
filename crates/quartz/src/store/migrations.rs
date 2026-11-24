@@ -25,6 +25,11 @@ impl MigrationSource<Sqlite> for Migrations {
                     "20261116000000" => {
                         include_str!("../../migrations/20261116000000_schema_v1/up.sql")
                     }
+                    "20261123000000" => {
+                        include_str!(
+                            "../../migrations/20261123000000_annotation_label_preset/up.sql"
+                        )
+                    }
                     _ => return Err(ApplyMigrationError::UnregisteredSql.into()),
                 };
                 let migration: Box<dyn Migration<Sqlite>> =

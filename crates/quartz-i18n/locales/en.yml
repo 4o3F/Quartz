@@ -504,3 +504,5 @@ today.resume_failed:
   en: "Couldn’t resume recording. Try again."
 today.pending.failed:
   en: "Couldn’t mark this time as %{name}. Try again."
+annotation.preset.rest:
+  en: Rest
