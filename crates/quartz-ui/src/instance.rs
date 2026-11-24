@@ -1,6 +1,7 @@
 //! Window-free duplicate-instance policy; transport failures still finish a duplicate launch.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(windows)]
 pub(crate) enum InstancePolicy {
     Required,
     CoreError,

@@ -90,6 +90,10 @@ impl Category {
 
     /// A user category.
     #[must_use]
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(crate) const fn custom(
         id: CategoryId,
         name: String,
@@ -106,6 +110,10 @@ impl Category {
 
     /// Whether this is the category of time no rule matched.
     #[must_use]
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(crate) fn is_uncategorized(&self) -> bool {
         self.name == CategoryName::Builtin(BuiltinCategory::Uncategorized)
     }

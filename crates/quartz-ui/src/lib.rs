@@ -5,22 +5,6 @@
 //! The view models, text formatting and timeline geometry have no GPUI dependency, so their tests
 //! run on every platform; the windows themselves are Windows-only. The link API supplies typed
 //! requests and ordered events to views through a dedicated pipe thread.
-#![cfg_attr(
-    all(test, not(windows)),
-    expect(
-        dead_code,
-        unused_imports,
-        reason = "the views that use most of the model only compile on Windows"
-    )
-)]
-#![cfg_attr(
-    all(windows, not(test), not(feature = "preview")),
-    expect(
-        dead_code,
-        unused_imports,
-        reason = "domain and document models remain available to preview before M4 and M5"
-    )
-)]
 
 #[cfg(windows)]
 mod app;
@@ -53,7 +37,7 @@ mod windows_error;
 pub use windows_error::CallWindowsError;
 
 #[cfg(windows)]
-pub use app::{Appearance, GpuiError, LoadPaletteError, LoadThemeError};
+pub use app::{Appearance, CallGpuiError, LoadPaletteError, LoadThemeError};
 #[cfg(all(windows, feature = "preview"))]
 pub use app::{
     ErrorPreviewState, ParseAppearanceError, ParsePreviewSizeError, ParsePreviewStateError,
@@ -66,3 +50,21 @@ pub use launch::{RunOptions, RunUiError};
 pub use text_scale::{ParseTextScaleError, TextScale};
 #[cfg(windows)]
 pub use text_scale::{ReadTextScaleError, ValidateTextScaleError};
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn production_library_has_no_crate_wide_lint_suppressions() {
+        let source = include_str!("lib.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("library declarations");
+        for attribute in source.split("#![").skip(1) {
+            let attribute = attribute.split(']').next().expect("crate attribute");
+            assert!(
+                !attribute.contains("allow(") && !attribute.contains("expect("),
+                "library-wide lint suppression: {attribute}"
+            );
+        }
+    }
+}

@@ -385,6 +385,13 @@ impl<'a> Widgets<'a> {
         bar.child(self.caption_control(IconName::WindowClose, WindowControlArea::Close))
     }
 
+    fn caption_hover_foreground(&self, area: WindowControlArea) -> Hsla {
+        if area == WindowControlArea::Close {
+            self.palette.text_on_critical
+        } else {
+            self.palette.text_primary
+        }
+    }
     fn caption_control(&self, icon: IconName, area: WindowControlArea) -> Stateful<Div> {
         let close = area == WindowControlArea::Close;
         let hover = if close {
@@ -392,11 +399,7 @@ impl<'a> Widgets<'a> {
         } else {
             self.palette.fill_control_hover
         };
-        let foreground = if close {
-            self.palette.text_on(hover)
-        } else {
-            self.palette.text_primary
-        };
+        let foreground = self.caption_hover_foreground(area);
         let pressed = if close {
             hover
         } else {
@@ -656,6 +659,34 @@ impl From<Glyph> for IconName {
 mod tests {
     use super::*;
     use crate::app::{runtime::ThemeBundle, tokens::SystemColors};
+
+    #[test]
+    fn custom_high_contrast_close_hover_uses_critical_text_pair() {
+        let theme = ThemeBundle::embedded().expect("theme");
+        let system = SystemColors {
+            window: gpui_kit::black(),
+            window_text: gpui_kit::white(),
+            highlight: gpui_kit::black(),
+            highlight_text: gpui_kit::white(),
+            gray_text: gpui_kit::white(),
+            button_face: gpui_kit::black(),
+        };
+        let palette = Palette::high_contrast(&system);
+        let ui = Widgets {
+            palette: &palette,
+            metrics: theme.tokens.metrics(),
+            text_scale: TextScale::UNSCALED,
+        };
+        assert_eq!(
+            ui.caption_hover_foreground(WindowControlArea::Close),
+            gpui_kit::black()
+        );
+        assert_eq!(palette.status_critical, gpui_kit::white());
+        assert_eq!(
+            ui.caption_hover_foreground(WindowControlArea::Min),
+            system.window_text
+        );
+    }
 
     #[test]
     fn high_contrast_skeletons_have_opaque_system_surfaces_and_gray_text_borders() {

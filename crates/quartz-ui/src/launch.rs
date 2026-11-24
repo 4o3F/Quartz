@@ -5,7 +5,7 @@ use crate::model::Day;
 use crate::{
     app::failure_screen::{FailureScreen, RecoveryActivity},
     app::{
-        Appearance, GpuiError, GpuiSnafu, LoadThemeError, ThemeBundle, Widgets, run_gpui,
+        Appearance, CallGpuiError, CallGpuiSnafu, LoadThemeError, ThemeBundle, Widgets, run_gpui,
         window_options,
     },
     failure::{Failure, FailureAction, FailureKind, Severity},
@@ -57,7 +57,7 @@ pub enum RunUiError {
     #[snafu(display("could not read the text size"))]
     ReadTextScale { source: ReadTextScaleError },
     #[snafu(display("could not open UI window"))]
-    OpenWindow { source: GpuiError },
+    OpenWindow { source: CallGpuiError },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -625,8 +625,8 @@ impl WindowLaunch {
             move |window, cx| {
                 appearance.observe(window, cx);
                 cx.new(|cx| {
+                    crate::app::system_theme::SystemTheme::observe_activation(window, cx);
                     cx.observe_window_activation(window, |this: &mut LaunchWindow, _, cx| {
-                        crate::app::system_theme::SystemTheme::refresh(cx);
                         if this.text_scale.refresh() == TextScaleChange::Changed {
                             cx.notify();
                         }
@@ -668,7 +668,7 @@ impl WindowLaunch {
                 })
             },
         )
-        .context(GpuiSnafu)
+        .context(CallGpuiSnafu)
         .context(OpenWindowSnafu)
         .map(|opened| UiWindow {
             handle: opened.0,

@@ -25,16 +25,14 @@ use crate::{
         TimeOfDay, TimeSpan,
     },
     timeline_scale::{
-        BuildPlotGridError, Interval, PixelPlacement, PlotGrid, RowTiles, ScaleFactor, Tick,
-        TickBudget, View, ZoomStep,
+        BuildPlotGridError, Interval, PixelPlacement, PlotGrid, RowTiles, ScaleFactor,
+        TICK_LABEL_GAP, Tick, TickBudget, View, ZoomStep,
     },
 };
 
 /// The label column left of the plot: as wide as its widest label (11 section 5.6), within this
 /// range; longer application names are ellipsized.
 const LABEL_COLUMN_RANGE: ColumnRange = ColumnRange::new(72., LABEL_COLUMN_MAX_WIDTH);
-/// Widest text an axis tick label shows, for measuring; digits are equally wide (11 section 4.1).
-const TICK_LABEL_SAMPLE: &str = "00:00";
 /// Horizontal padding of block text; the label has to fit between the paddings.
 const BLOCK_TEXT_PADDING: f32 = 6.;
 /// Narrowest the hover tooltip gets (11 section 5.6).
@@ -81,25 +79,62 @@ enum BlockHover {
 struct PlotGeometry {
     width: f32,
     grid: PlotGrid,
-    tick_label_width: f32,
-    ticks: Vec<Tick>,
+    ticks: Vec<AxisTick>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct AxisTick {
+    tick: Tick,
+    label: String,
+    width: f32,
+}
 impl PlotGeometry {
-    /// The geometry of a plot `width` wide showing `view`.
+    fn labels(&self) -> impl Iterator<Item = &AxisTick> {
+        let mut previous_right: Option<f32> = None;
+        self.ticks.iter().filter(move |tick| {
+            let center = self.grid.snap(tick.tick.fraction);
+            let left = center - tick.width / 2.;
+            let right = center + tick.width / 2.;
+            if !tick.tick.has_room_for_label(self.width, tick.width)
+                || left < 0.
+                || right > self.width
+                || previous_right.is_some_and(|previous| left < previous + TICK_LABEL_GAP)
+            {
+                return false;
+            }
+            previous_right = Some(right);
+            true
+        })
+    }
+
     fn new(
         width: f32,
         scale: ScaleFactor,
         block_gap: f32,
-        tick_label_width: f32,
         view: View,
+        format: impl Fn(TimeOfDay) -> String,
+        mut measure: impl FnMut(&str) -> f32,
     ) -> Result<Self, BuildPlotGridError> {
-        Ok(Self {
-            width,
-            grid: PlotGrid::new(width, scale, block_gap)?,
-            tick_label_width,
-            ticks: view.ticks(TickBudget::fit(width, tick_label_width)),
-        })
+        let grid = PlotGrid::new(width, scale, block_gap)?;
+        let mut budget = TickBudget::maximum();
+        let mut widest: f32 = 0.;
+        loop {
+            let ticks: Vec<_> = view
+                .ticks(budget)
+                .into_iter()
+                .map(|tick| {
+                    let label = format(tick.time);
+                    let width = measure(&label);
+                    AxisTick { tick, label, width }
+                })
+                .collect();
+            widest = ticks.iter().map(|tick| tick.width).fold(widest, f32::max);
+            let fitted = TickBudget::fit(width, widest);
+            if fitted == budget {
+                return Ok(Self { width, grid, ticks });
+            }
+            budget = fitted;
+        }
     }
 }
 
@@ -107,9 +142,67 @@ impl PlotGeometry {
 pub(super) struct PanGesture {
     start_x: f32,
     view: View,
+    motion: PanMotion,
+}
+/// One design-grid step distinguishes a drag from a click.
+const PAN_DRAG_THRESHOLD: f32 = 4.;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanMotion {
+    Pressed,
+    Dragged,
+}
+impl PanGesture {
+    fn new(start_x: f32, view: View) -> Self {
+        Self {
+            start_x,
+            view,
+            motion: PanMotion::Pressed,
+        }
+    }
+    fn move_to(&mut self, x: f32) -> Option<f32> {
+        let delta = self.start_x - x;
+        if delta.abs() >= PAN_DRAG_THRESHOLD {
+            self.motion = PanMotion::Dragged;
+        }
+        (self.motion == PanMotion::Dragged).then_some(delta)
+    }
+    fn panned_to(&mut self, x: f32, width: f32, bounds: TimeSpan) -> Option<View> {
+        use num_traits::ToPrimitive as _;
+        if width <= 0. {
+            return None;
+        }
+        let offset = self.move_to(x)?;
+        let delta = f64::from(offset)
+            * self.view.span().duration().as_secs_f64()
+            * f64::from(crate::model::MILLIS_PER_SECOND)
+            / f64::from(width);
+        Some(self.view.panned(delta.round().to_i64()?, bounds))
+    }
+    fn selects(self) -> bool {
+        self.motion == PanMotion::Pressed
+    }
 }
 
-impl AppShell {
+#[derive(Debug)]
+enum TimelineInput<'a> {
+    Down(&'a gpui_kit::MouseDownEvent),
+    Move(&'a MouseMoveEvent),
+    Up,
+    Zoom(ZoomStep),
+    ToggleFullDay,
+    Activate {
+        event: &'a ClickEvent,
+        subject: DetailsSubject,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineEffect {
+    None,
+    Redraw,
+    Select(DetailsSubject),
+}
+
+impl<Focus> AppShell<Focus> {
     pub(super) fn view(&self) -> View {
         match self.range {
             RangeChoice::Activity => {
@@ -144,44 +237,90 @@ impl AppShell {
         }
     }
 
-    fn move_pan(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        use num_traits::ToPrimitive as _;
-        let Some(pan) = self.pan else {
-            return;
-        };
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.pan = None;
-            return;
-        }
-        let Some(width) = self.plot_width.filter(|width| *width > 0.) else {
-            return;
-        };
-        let delta = f64::from(pan.start_x - f32::from(event.position.x))
-            * pan.view.span().duration().as_secs_f64()
-            * f64::from(crate::model::MILLIS_PER_SECOND)
-            / f64::from(width);
-        if let Some(delta) = delta.round().to_i64() {
-            let view = pan.view.panned(delta, self.day.full_span());
-            if view != self.view() {
-                self.range = RangeChoice::Zoomed(view);
+    fn timeline_input(&mut self, input: TimelineInput<'_>) -> TimelineEffect {
+        match input {
+            TimelineInput::Down(event) => {
+                self.pan = Some(PanGesture::new(f32::from(event.position.x), self.view()));
+            }
+            TimelineInput::Move(event) => {
+                if event.pressed_button != Some(MouseButton::Left) {
+                    self.pan = None;
+                    return TimelineEffect::None;
+                }
+                let Some(width) = self.plot_width else {
+                    return TimelineEffect::None;
+                };
+                let bounds = self.day.full_span();
+                let Some(pan) = &mut self.pan else {
+                    return TimelineEffect::None;
+                };
+                if let Some(view) = pan.panned_to(f32::from(event.position.x), width, bounds)
+                    && view != self.view()
+                {
+                    self.range = RangeChoice::Zoomed(view);
+                    self.hover = None;
+                    return TimelineEffect::Redraw;
+                }
+            }
+            TimelineInput::Up => {
+                self.pan = None;
+            }
+            TimelineInput::Zoom(step) => {
+                self.pan = None;
+                self.range =
+                    RangeChoice::Zoomed(self.view().zoomed_within(step, self.day.full_span()));
                 self.hover = None;
-                cx.notify();
+                return TimelineEffect::Redraw;
+            }
+            TimelineInput::ToggleFullDay => {
+                self.pan = None;
+                self.range = match self.range {
+                    RangeChoice::FullDay => RangeChoice::Activity,
+                    RangeChoice::Activity | RangeChoice::Zoomed(_) => RangeChoice::FullDay,
+                };
+                self.hover = None;
+                return TimelineEffect::Redraw;
+            }
+            TimelineInput::Activate { event, subject } => {
+                let pan = self.pan.take();
+                if event.is_keyboard() || pan.is_none_or(PanGesture::selects) {
+                    return TimelineEffect::Select(subject);
+                }
             }
         }
+        TimelineEffect::None
     }
+}
 
+impl AppShell {
+    fn start_pan(&mut self, event: &gpui_kit::MouseDownEvent) {
+        self.timeline_input(TimelineInput::Down(event));
+    }
+    fn select_tile(
+        &mut self,
+        event: &ClickEvent,
+        subject: DetailsSubject,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let TimelineEffect::Select(subject) =
+            self.timeline_input(TimelineInput::Activate { event, subject })
+        {
+            self.select(subject, window, cx);
+        }
+        cx.stop_propagation();
+    }
+    fn move_pan(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.timeline_input(TimelineInput::Move(event)) == TimelineEffect::Redraw {
+            cx.notify();
+        }
+    }
     fn zoom(&mut self, step: ZoomStep, cx: &mut Context<Self>) {
-        self.range = RangeChoice::Zoomed(self.view().zoomed_within(step, self.day.full_span()));
-        self.hover = None;
+        self.timeline_input(TimelineInput::Zoom(step));
         cx.notify();
     }
-
     fn toggle_full_day(&mut self, cx: &mut Context<Self>) {
-        self.range = match self.range {
-            RangeChoice::FullDay => RangeChoice::Activity,
-            RangeChoice::Activity | RangeChoice::Zoomed(_) => RangeChoice::FullDay,
-        };
-        self.hover = None;
+        self.timeline_input(TimelineInput::ToggleFullDay);
         cx.notify();
     }
 
@@ -394,10 +533,7 @@ impl AppShell {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui_kit::MouseDownEvent, _, _| {
-                    this.pan = Some(PanGesture {
-                        start_x: f32::from(event.position.x),
-                        view: this.view(),
-                    });
+                    this.start_pan(event);
                 }),
             )
             .on_mouse_move(
@@ -405,7 +541,21 @@ impl AppShell {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.pan = None),
+                cx.listener(|this, _, _, _| {
+                    this.timeline_input(TimelineInput::Up);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|_, _, window, cx| {
+                    // An occluded plot's out listener captures before the tile's click handler.
+                    let entity = cx.entity();
+                    window.defer(cx, move |_, app| {
+                        entity.update(app, |this, _| {
+                            this.timeline_input(TimelineInput::Up);
+                        })
+                    });
+                }),
             )
             .on_scroll(
                 cx.listener(move |this, event: &gpui_kit::ScrollEvent, _, cx| {
@@ -434,8 +584,9 @@ impl AppShell {
                 f32::from(layer.bounds.size.width),
                 scale,
                 f32::from(ui.metrics.timeline.block_gap),
-                measure.width(TICK_LABEL_SAMPLE, Ramp::Caption),
                 view,
+                |time| self.clock_label(time),
+                |text| measure.width(text, Ramp::Caption),
             ) else {
                 // Narrower than one marker: nothing can be drawn inside (07 section 4.3).
                 return div().size_full().into_any_element();
@@ -448,7 +599,7 @@ impl AppShell {
                 .children(
                     self.visible_lanes()
                         .iter()
-                        .map(|lane| self.lane_row(ui, view, &geometry, lane, layer)),
+                        .map(|lane| self.lane_row(ui, measure, view, &geometry, lane, layer)),
                 )
                 .child(self.axis(ui, &geometry));
             div()
@@ -470,7 +621,7 @@ impl AppShell {
                     .absolute()
                     .top(px(0.))
                     .bottom(px(0.))
-                    .left(px(geometry.grid.snap(tick.fraction)))
+                    .left(px(geometry.grid.snap(tick.tick.fraction)))
                     .w(ui.metrics.layout.divider)
                     .bg(ui.palette.stroke_divider)
             })
@@ -478,25 +629,20 @@ impl AppShell {
     }
 
     fn axis(&self, ui: &Widgets<'_>, geometry: &PlotGeometry) -> Div {
-        let label_width = geometry.tick_label_width;
-        let labels = geometry
-            .ticks
-            .iter()
-            .filter(|tick| tick.has_room_for_label(geometry.width, label_width))
-            .map(|tick| {
-                div()
-                    .absolute()
-                    .top(ui.metrics.space.xs)
-                    .left(px(geometry.grid.snap(tick.fraction) - label_width / 2.))
-                    .w(px(label_width))
-                    .flex()
-                    .justify_center()
-                    .ramp(ui, Ramp::Caption)
-                    .tabular_figures()
-                    .whitespace_nowrap()
-                    .text_color(ui.palette.text_tertiary)
-                    .child(self.clock_label(tick.time))
-            });
+        let labels = geometry.labels().map(|tick| {
+            div()
+                .absolute()
+                .top(ui.metrics.space.xs)
+                .left(px(geometry.grid.snap(tick.tick.fraction) - tick.width / 2.))
+                .w(px(tick.width))
+                .flex()
+                .justify_center()
+                .ramp(ui, Ramp::Caption)
+                .tabular_figures()
+                .whitespace_nowrap()
+                .text_color(ui.palette.text_tertiary)
+                .child(tick.label.clone())
+        });
         div().relative().h(Self::axis_height(ui)).children(labels)
     }
 
@@ -537,7 +683,11 @@ impl AppShell {
     {
         element
             .on_mouse_move(layer.listen(move |this, event: &MouseMoveEvent, _, cx| {
-                this.set_hover(target, event.position, cx);
+                this.move_pan(event, cx);
+                if event.pressed_button.is_none() {
+                    this.set_hover(target, event.position, cx);
+                }
+                cx.stop_propagation();
             }))
             .on_hover(layer.listen(move |this, hovered: &bool, _, cx| {
                 if !*hovered {
@@ -573,10 +723,13 @@ impl AppShell {
                 .child(body)
                 .on_mouse_down(
                     MouseButton::Left,
-                    layer.listen(|_, _, _, cx| cx.stop_propagation()),
+                    layer.listen(|this, event: &gpui_kit::MouseDownEvent, _, cx| {
+                        this.start_pan(event);
+                        cx.stop_propagation();
+                    }),
                 )
-                .on_click(layer.listen(move |this, _, window, cx| {
-                    this.select(DetailsSubject::MainBlock(span), window, cx)
+                .on_click(layer.listen(move |this, event: &ClickEvent, window, cx| {
+                    this.select_tile(event, DetailsSubject::MainBlock(span), window, cx)
                 }));
             intervals.push(Interval {
                 placement: pixels,
@@ -609,9 +762,9 @@ impl AppShell {
                 Arg::Duration.with(&self.formatter.duration(span.duration())),
             ],
         );
-        block_text(
-            ui,
+        ui.block_text(
             ui.category_mark(body, category.color),
+            Self::track_height(ui),
             measure.fit_block_label(block, BLOCK_TEXT_PADDING, &name, &full),
             if ui.palette.contrast == crate::app::tokens::ContrastMode::High {
                 ui.palette.text_primary
@@ -657,8 +810,7 @@ impl AppShell {
                         Arg::Duration.with(&self.formatter.duration(state.span.duration())),
                     ],
                 );
-                block_text(
-                    ui,
+                ui.block_text(
                     body.bg(
                         if palette.contrast == crate::app::tokens::ContrastMode::High {
                             palette.status_neutral
@@ -666,6 +818,7 @@ impl AppShell {
                             ui.state_color(palette.status_neutral, metrics.opacity.neutral_state)
                         },
                     ),
+                    Self::track_height(ui),
                     measure.fit_block_label(block, BLOCK_TEXT_PADDING, &name, &full),
                     palette.text_primary,
                 )
@@ -707,6 +860,7 @@ impl AppShell {
     fn lane_row(
         &self,
         ui: &Widgets<'_>,
+        measure: &TextMeasure<'_>,
         view: View,
         geometry: &PlotGeometry,
         lane: &Lane,
@@ -722,25 +876,30 @@ impl AppShell {
             let target = HoverTarget::Segment(id);
             let tile = tile(("segment", id.get()), pixels)
                 .cursor_pointer()
-                .on_click(layer.listen(move |this, _: &ClickEvent, window, cx| {
-                    this.select(DetailsSubject::Segment(id), window, cx);
+                .on_mouse_down(
+                    MouseButton::Left,
+                    layer.listen(|this, event: &gpui_kit::MouseDownEvent, _, cx| {
+                        this.start_pan(event);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_click(layer.listen(move |this, event: &ClickEvent, window, cx| {
+                    this.select_tile(event, DetailsSubject::Segment(id), window, cx);
                 }))
                 .child({
                     let category = self.day.category(segment.category).color;
-                    block_text(
-                        ui,
+                    ui.block_text(
                         ui.category_mark(
                             block_body(ui, self.block_hover(target), pixels),
                             category,
                         ),
-                        layer.with_ui(|_, measure, _| {
-                            measure.fit_block_label(
-                                pixels,
-                                BLOCK_TEXT_PADDING,
-                                &segment.title,
-                                &segment.title,
-                            )
-                        }),
+                        Self::lane_height(ui),
+                        measure.fit_block_label(
+                            pixels,
+                            BLOCK_TEXT_PADDING,
+                            &segment.title,
+                            &segment.title,
+                        ),
                         ui.palette.text_on(ui.palette.category(category)),
                     )
                 });
@@ -815,12 +974,12 @@ impl AppShell {
                     .child(ui.icon(app.glyph.into(), Density::Compact, palette.text_primary))
                     .child(app.name.clone()),
             )
-            .child(
+            .children(segment.visible_title().map(|title| {
                 div()
                     .ramp(ui, Ramp::Caption)
                     .text_color(palette.text_secondary)
-                    .child(segment.title.clone()),
-            )
+                    .child(title.to_owned())
+            }))
             .children(segment.domain.clone().map(|domain| {
                 div()
                     .ramp(ui, Ramp::Caption)
@@ -931,28 +1090,310 @@ fn block_body(ui: &Widgets<'_>, hover: BlockHover, block: PixelPlacement) -> Div
 }
 
 /// Adds `label`, when there is one, as block text in `color`.
-fn block_text(ui: &Widgets<'_>, body: Div, label: Option<String>, color: Hsla) -> Div {
-    body.when_some(label, |body, text| {
-        body.child(
-            div()
-                .px(px(BLOCK_TEXT_PADDING))
-                .h_full()
-                .when(
-                    ui.palette.contrast == crate::app::tokens::ContrastMode::High,
-                    |label| {
-                        label
-                            .bg(ui.palette.bg_base)
-                            .mt(ui.metrics.layout.divider)
-                            .ml(ui.metrics.layout.divider)
-                            .h(AppShell::track_height(ui) - 2. * ui.metrics.layout.divider)
-                    },
-                )
-                .flex()
-                .items_center()
-                .whitespace_nowrap()
-                .ramp(ui, Ramp::Caption)
-                .text_color(color)
-                .child(text),
+impl Widgets<'_> {
+    fn block_text(&self, body: Div, height: Pixels, label: Option<String>, color: Hsla) -> Div {
+        body.when_some(label, |body, text| {
+            body.child(self.block_label(height, text, color))
+        })
+    }
+    fn block_label(&self, height: Pixels, text: String, color: Hsla) -> Div {
+        let ui = self;
+        div()
+            .px(px(BLOCK_TEXT_PADDING))
+            .h_full()
+            .text_color(color)
+            .when(
+                ui.palette.contrast == crate::app::tokens::ContrastMode::High,
+                |label| {
+                    label
+                        .bg(ui.palette.bg_base)
+                        .mt(ui.metrics.layout.divider)
+                        .ml(ui.metrics.layout.divider)
+                        .h(height - 2. * ui.metrics.layout.divider)
+                        .text_color(ui.palette.text_primary)
+                },
+            )
+            .flex()
+            .items_center()
+            .whitespace_nowrap()
+            .ramp(ui, Ramp::Caption)
+            .child(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        app::{
+            runtime::ThemeBundle,
+            tokens::{Palette, SystemColors},
+        },
+        text_scale::TextScale,
+    };
+
+    fn shell() -> AppShell<()> {
+        use crate::{
+            model::fixture,
+            text_scale::{LiveTextScale, TextScaleSource},
+        };
+        AppShell {
+            live: None,
+            #[cfg(feature = "preview")]
+            preview: None,
+            calendar: None,
+            day: fixture::day(
+                vec![fixture::segment(
+                    1,
+                    fixture::EDITOR,
+                    fixture::WORK,
+                    (8, 0),
+                    (12, 0),
+                )],
+                vec![],
+            ),
+            formatter: crate::format::Formatter::new(quartz_i18n::Language::English),
+            tokens: ThemeBundle::embedded().expect("theme").tokens(),
+            page: super::super::Page::Today,
+            nav: crate::layout::NavLayout::Expanded,
+            details: None,
+            detail_generation: Default::default(),
+            text_scale: LiveTextScale::read(TextScaleSource::Fixed(TextScale::UNSCALED))
+                .expect("scale"),
+            details_scroll: gpui_kit::ScrollHandle::new(),
+            placement: crate::layout::PanelPlacement::Closed,
+            panel_focus: (),
+            root_focus: (),
+            ranking: Default::default(),
+            lanes: LaneMode::Swimlanes,
+            range: RangeChoice::Zoomed(
+                View::new(TimeSpan::new(TimeOfDay::hm(8, 0), TimeOfDay::hm(12, 0))).expect("view"),
+            ),
+            hover: None,
+            plot_width: Some(480.),
+            pan: None,
+        }
+    }
+    fn down(x: f32) -> gpui_kit::MouseDownEvent {
+        gpui_kit::MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(px(x), px(10.)),
+            modifiers: Default::default(),
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+    fn movement(x: f32, button: Option<MouseButton>) -> MouseMoveEvent {
+        MouseMoveEvent {
+            position: point(px(x), px(10.)),
+            pressed_button: button,
+            modifiers: Default::default(),
+        }
+    }
+    #[test]
+    fn shell_release_outside_tile_then_zoom_mouse_and_keyboard_activation() {
+        let mut shell = shell();
+        let subject = DetailsSubject::Segment(crate::model::SegmentId::new(1));
+        shell.timeline_input(TimelineInput::Down(&down(240.)));
+        assert_eq!(
+            shell.timeline_input(TimelineInput::Move(&movement(
+                120.,
+                Some(MouseButton::Left)
+            ))),
+            TimelineEffect::Redraw
+        );
+        assert_eq!(shell.view().span().start(), TimeOfDay::hm(9, 0));
+        shell.timeline_input(TimelineInput::Up);
+        assert!(
+            shell.pan.is_none(),
+            "releasing outside the originating tile ends the drag"
+        );
+        shell.timeline_input(TimelineInput::Zoom(ZoomStep::Out));
+        let zoomed = shell.view();
+        shell.timeline_input(TimelineInput::Move(&movement(60., Some(MouseButton::Left))));
+        assert_eq!(
+            shell.view(),
+            zoomed,
+            "a press from elsewhere cannot resume the old pan"
+        );
+        shell.timeline_input(TimelineInput::Down(&down(240.)));
+        let click = ClickEvent::Mouse(gpui_kit::MouseClickEvent {
+            down: down(240.),
+            up: gpui_kit::MouseUpEvent {
+                button: MouseButton::Left,
+                position: point(px(240.), px(10.)),
+                modifiers: Default::default(),
+                click_count: 1,
+            },
+        });
+        assert_eq!(
+            shell.timeline_input(TimelineInput::Activate {
+                event: &click,
+                subject
+            }),
+            TimelineEffect::Select(subject)
+        );
+        shell.timeline_input(TimelineInput::Down(&down(240.)));
+        shell.timeline_input(TimelineInput::Move(&movement(
+            120.,
+            Some(MouseButton::Left),
+        )));
+        assert_eq!(
+            shell.timeline_input(TimelineInput::Activate {
+                event: &click,
+                subject
+            }),
+            TimelineEffect::None,
+            "mouse release after a drag does not select"
+        );
+        shell.timeline_input(TimelineInput::Down(&down(240.)));
+        shell.timeline_input(TimelineInput::Move(&movement(
+            120.,
+            Some(MouseButton::Left),
+        )));
+        assert_eq!(
+            shell.timeline_input(TimelineInput::Activate {
+                event: &ClickEvent::default(),
+                subject
+            }),
+            TimelineEffect::Select(subject),
+            "keyboard and accessibility activation must bypass mouse suppression"
+        );
+    }
+    #[test]
+    fn shell_unpressed_move_zoom_and_full_day_clear_pan() {
+        for input in [
+            TimelineInput::Move(&movement(120., None)),
+            TimelineInput::Zoom(ZoomStep::In),
+            TimelineInput::ToggleFullDay,
+        ] {
+            let mut shell = shell();
+            shell.timeline_input(TimelineInput::Down(&down(240.)));
+            shell.timeline_input(TimelineInput::Move(&movement(
+                120.,
+                Some(MouseButton::Left),
+            )));
+            shell.timeline_input(input);
+            assert!(shell.pan.is_none());
+        }
+    }
+
+    #[test]
+    fn formatted_tick_widths_control_spacing_and_edge_clipping() {
+        let scale = ScaleFactor::try_new(1.).expect("scale");
+        let short = PlotGeometry::new(
+            600.,
+            scale,
+            1.,
+            View::full_day(),
+            |time| time.to_string(),
+            |_| 36.,
         )
-    })
+        .expect("plot");
+        let long = PlotGeometry::new(
+            600.,
+            scale,
+            1.,
+            View::full_day(),
+            |time| format!("{time} AM"),
+            |label| {
+                assert!(label.ends_with(" AM"), "measure the actual formatted label");
+                96.
+            },
+        )
+        .expect("plot");
+        assert!(long.ticks.len() < short.ticks.len());
+        for pair in long.ticks.windows(2) {
+            let [left, right] = pair else {
+                unreachable!("two ticks");
+            };
+            assert!(
+                (right.tick.fraction - left.tick.fraction) * long.width
+                    >= (left.width + right.width) / 2. + 8.
+            );
+        }
+        let shown: Vec<_> = long.labels().collect();
+        assert!(
+            shown
+                .iter()
+                .all(|tick| tick.tick.fraction > 0. && tick.tick.fraction < 1.)
+        );
+        assert!(shown.iter().all(|tick| tick.width == 96.));
+    }
+
+    #[test]
+    fn enlarged_clock_labels_do_not_overlap_on_25_hour_days() {
+        let span = TimeSpan::new(
+            TimeOfDay::START,
+            TimeOfDay::from_elapsed_millis(25 * 60 * 60 * 1000),
+        );
+        let geometry = PlotGeometry::new(
+            480.,
+            ScaleFactor::try_new(1.25).expect("scale"),
+            1.,
+            View::new(span).expect("day"),
+            |time| format!("{time} PM"),
+            |_| 216.,
+        )
+        .expect("plot");
+        let labels: Vec<_> = geometry.labels().collect();
+        assert!(!labels.is_empty());
+        for pair in labels.windows(2) {
+            let [left, right] = pair else {
+                unreachable!("pair");
+            };
+            let gap = geometry.grid.snap(right.tick.fraction)
+                - geometry.grid.snap(left.tick.fraction)
+                - (left.width + right.width) / 2.;
+            assert!(gap >= TICK_LABEL_GAP);
+        }
+    }
+
+    #[test]
+    fn high_contrast_labels_use_window_pair_and_their_own_row_height() {
+        let theme = ThemeBundle::embedded().expect("theme");
+        let mut colors: SystemColors =
+            serde_json::from_str(include_str!("../../../themes/preview-high-contrast.json"))
+                .expect("colors");
+        colors.window_text = colors.highlight;
+        let palette = Palette::high_contrast(&colors);
+        for factor in [1., 2.25] {
+            let ui = Widgets {
+                palette: &palette,
+                metrics: theme.tokens.metrics(),
+                text_scale: TextScale::try_new(factor).expect("text scale"),
+            };
+            for height in [AppShell::track_height(&ui), AppShell::lane_height(&ui)] {
+                let mut label =
+                    ui.block_label(height, "Title".into(), palette.text_on(palette.accent_fill));
+                let style = label.style();
+                assert_eq!(style.background, Some(colors.window.into()));
+                assert_eq!(style.text_style().color, Some(colors.window_text));
+                assert_eq!(
+                    style.size.height,
+                    Some((height - 2. * ui.metrics.layout.divider).into())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simulated_tile_drag_pans_and_suppresses_selection_even_after_returning_to_origin() {
+        let view =
+            View::new(TimeSpan::new(TimeOfDay::hm(8, 0), TimeOfDay::hm(12, 0))).expect("view");
+        let mut gesture = PanGesture::new(240., view);
+        assert_eq!(gesture.move_to(239.), None);
+        assert!(gesture.selects(), "small pointer jitter is a click");
+        let panned = gesture
+            .panned_to(120., 480., TimeSpan::DAY)
+            .expect("drag pans");
+        assert_eq!(panned.span().start(), TimeOfDay::hm(9, 0));
+        assert!(!gesture.selects(), "drag must not select a tile");
+        gesture.move_to(240.);
+        assert!(!gesture.selects(), "returning to the origin remains a drag");
+        assert!(
+            PanGesture::new(240., view).selects(),
+            "the next click may select"
+        );
+    }
 }

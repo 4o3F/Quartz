@@ -10,6 +10,7 @@ pub(crate) const EXPANDED_MIN_WIDTH: f32 = 1008.;
 /// The smallest window width (07 section 2.3).
 pub(crate) const MIN_WINDOW_WIDTH: f32 = 640.;
 /// The smallest window height (07 section 2.3).
+#[cfg(windows)]
 pub(crate) const MIN_WINDOW_HEIGHT: f32 = 480.;
 /// The narrowest timeline plot that stays usable: about six labeled ticks and readable block
 /// labels (11 section 5.5). Raising it moves the point where the details panel turns into an
@@ -72,6 +73,7 @@ pub(crate) enum NavLayout {
 impl NavLayout {
     /// The other layout.
     #[must_use]
+    #[cfg(windows)]
     pub(crate) const fn toggled(self) -> Self {
         match self {
             Self::Expanded => Self::Rail,
@@ -167,6 +169,10 @@ pub(crate) struct ShellLayout {
 }
 
 impl ShellLayout {
+    pub(crate) fn shows_nav_toggle(self, panel: PanelState) -> bool {
+        self.class == WindowClass::Expanded && panel == PanelState::Closed
+    }
+
     /// Resolves the layout of a window `viewport_width` wide when the user chose `nav_choice`.
     ///
     /// Only the Expanded class shows the full sidebar. An open panel sits beside the main area
@@ -295,6 +301,30 @@ impl ColumnRange {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn forced_rail_hides_navigation_toggle_and_restores_it_after_details_close() {
+        let sizes = super::ShellSizes::new(240., 48., 360., 24., 16., 1., 8.);
+        for width in [640., 800., 1280.] {
+            let open = super::ShellLayout::resolve(
+                width,
+                super::NavLayout::Rail,
+                super::PanelState::Open,
+                &sizes,
+            );
+            assert!(!open.shows_nav_toggle(super::PanelState::Open));
+            let closed = super::ShellLayout::resolve(
+                width,
+                super::NavLayout::Expanded,
+                super::PanelState::Closed,
+                &sizes,
+            );
+            assert_eq!(
+                closed.shows_nav_toggle(super::PanelState::Closed),
+                width >= 1008.
+            );
+        }
+    }
+
     use super::*;
 
     /// The metrics of `themes/fluent.json`: 240 and 48 sidebar, 360 panel, 24 margin, 16 padding,

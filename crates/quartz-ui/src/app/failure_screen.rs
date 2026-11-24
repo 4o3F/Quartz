@@ -6,8 +6,8 @@ use super::{
 };
 use crate::{
     failure::{
-        CopyPlacement, DetailLine, DetailsExpansion, Failure, FailureAction, FailurePresentation,
-        Severity,
+        CopyPlacement, DetailGroup, DetailLine, DetailsExpansion, Failure, FailureAction,
+        FailurePresentation, Severity,
     },
     format::{Formatter, Msg},
     text_scale::TextScale,
@@ -421,7 +421,6 @@ impl FailureScreen {
             .pb(space.l)
             .border_t(ui.metrics.layout.divider)
             .border_color(ui.palette.stroke_divider);
-        let mut values = div().flex().flex_col().gap(space.xs);
         // The widest actual localized label defines the shared key column.
         let measure =
             super::measure::TextMeasure::new(window, *ui, window.text_style().font_family);
@@ -433,35 +432,35 @@ impl FailureScreen {
             })
             .map(|label| px(measure.width(label, Ramp::Caption)))
             .fold(px(0.), gpui_kit::Pixels::max);
-        for (index, line) in lines.into_iter().enumerate() {
-            match line {
-                DetailLine::Value { label, value } => {
-                    values = values.child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap(space.l)
-                            .ramp(ui, Ramp::Caption)
-                            .child(
-                                div()
-                                    .w(key_width)
-                                    .flex_shrink_0()
-                                    .text_color(ui.palette.text_secondary)
-                                    .child(label),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .font(ui.mono_font())
-                                    .whitespace_normal()
-                                    .child(value),
-                            ),
-                    );
+        for (index, group) in DetailLine::grouped(lines).into_iter().enumerate() {
+            match group {
+                DetailGroup::Values(values) => {
+                    body = body.child(div().flex().flex_col().gap(space.xs).children(
+                        values.into_iter().map(|value| {
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap(space.l)
+                                .ramp(ui, Ramp::Caption)
+                                .child(
+                                    div()
+                                        .w(key_width)
+                                        .flex_shrink_0()
+                                        .text_color(ui.palette.text_secondary)
+                                        .child(value.label),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .font(ui.mono_font())
+                                        .whitespace_normal()
+                                        .child(value.value),
+                                )
+                        }),
+                    ));
                 }
-                DetailLine::Text(text) => {
-                    body = body.child(values);
-                    values = div().flex().flex_col().gap(space.xs);
+                DetailGroup::Text(text) => {
                     body = body.child(
                         div()
                             .ramp(ui, Ramp::Caption)
@@ -470,9 +469,7 @@ impl FailureScreen {
                             .child(text),
                     );
                 }
-                DetailLine::Command(command) => {
-                    body = body.child(values);
-                    values = div().flex().flex_col().gap(space.xs);
+                DetailGroup::Command(command) => {
                     let copied = command.clone();
                     body = body.child(
                         div()
@@ -534,7 +531,7 @@ impl FailureScreen {
                 }
             }
         }
-        body.child(values)
+        body
     }
 }
 impl Render for FailureScreen {

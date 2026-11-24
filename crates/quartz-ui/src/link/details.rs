@@ -1,11 +1,16 @@
 //! Read-only sidebar queries on the existing pipe runtime.
-use super::{DayFailure, DayGeneration, Link, LinkEvent, RequestCoreError, UtcRange};
+use super::{DayGeneration, UtcRange};
+#[cfg(windows)]
+use super::{Link, LinkEvent, LoadDataError, RequestCoreError};
 use quartz_protocol::{
-    ApplicationId, DetailEntity, EntityClassificationRule, EntityDailyDuration,
-    EntityTitleDuration, LocalDate, QueryEntityDetailRequest, QuerySegmentDetailRequest,
+    ApplicationId, EntityClassificationRule, EntityDailyDuration, EntityTitleDuration, LocalDate,
     TimelineSegment, WindowInstanceRef,
 };
+#[cfg(windows)]
+use quartz_protocol::{DetailEntity, QueryEntityDetailRequest, QuerySegmentDetailRequest};
+#[cfg(windows)]
 use std::{collections::BTreeSet, future::Future, pin::Pin};
+#[cfg(windows)]
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -53,12 +58,13 @@ pub struct EntityData {
     pub titles: Vec<EntityTitleDuration>,
     pub rules: Vec<EntityClassificationRule>,
 }
+#[cfg(windows)]
 impl Link {
     async fn entity_details(
         &self,
         app: ApplicationId,
         date: LocalDate,
-    ) -> Result<EntityData, DayFailure> {
+    ) -> Result<EntityData, LoadDataError> {
         let mut query = QueryEntityDetailRequest {
             reference_range: None,
             entity: DetailEntity::App { id: app },
@@ -68,8 +74,8 @@ impl Link {
         let first = self.request(query.clone()).await?;
         let mut data = EntityData {
             app,
-            daily: first.daily.ok_or(DayFailure::InvalidData)?,
-            titles: first.titles.ok_or(DayFailure::InvalidData)?,
+            daily: first.daily.ok_or(LoadDataError::InvalidData)?,
+            titles: first.titles.ok_or(LoadDataError::InvalidData)?,
             rules: first.rules,
         };
         let versions = first.versions;
@@ -80,14 +86,14 @@ impl Link {
                 return Err(Self::stale_day());
             }
             if page.next_cursor == query.cursor || page.daily.is_some() || page.titles.is_some() {
-                return Err(DayFailure::InvalidData);
+                return Err(LoadDataError::InvalidData);
             }
             data.rules.extend(page.rules);
             query.cursor = page.next_cursor;
         }
         Ok(data)
     }
-    async fn details_once(&self, request: DetailRequest) -> Result<DetailData, DayFailure> {
+    async fn details_once(&self, request: DetailRequest) -> Result<DetailData, LoadDataError> {
         let mut intervals = Vec::new();
         if let DetailTarget::Segment {
             range,
@@ -117,7 +123,7 @@ impl Link {
                     break;
                 }
                 if page.next_cursor == query.cursor {
-                    return Err(DayFailure::InvalidData);
+                    return Err(LoadDataError::InvalidData);
                 }
                 query.cursor = page.next_cursor;
             }
@@ -143,30 +149,33 @@ impl Link {
             entities,
         })
     }
-    async fn query_details(&self, request: DetailRequest) -> Result<DetailData, DayFailure> {
+    async fn query_details(&self, request: DetailRequest) -> Result<DetailData, LoadDataError> {
         for attempt in 0..=super::day::MAX_STALE_RESTARTS {
             match self.details_once(request).await {
                 Err(error) if error.is_stale() && attempt < super::day::MAX_STALE_RESTARTS => {
                     continue;
                 }
-                Err(error) if error.is_stale() => return Err(DayFailure::StaleExhausted),
+                Err(error) if error.is_stale() => return Err(LoadDataError::StaleExhausted),
                 result => return result,
             }
         }
-        Err(DayFailure::StaleExhausted)
+        Err(LoadDataError::StaleExhausted)
     }
 }
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg(windows)]
 pub(super) struct DetailIntent {
     pub request: Option<DetailRequest>,
     pub generation: DetailGeneration,
 }
+#[cfg(windows)]
 pub(super) struct DetailLoader {
     intents: watch::Sender<DetailIntent>,
     changes: watch::Sender<Option<LocalDate>>,
     date: Option<LocalDate>,
     generation: DetailGeneration,
 }
+#[cfg(windows)]
 impl DetailLoader {
     pub fn start(link: Link, events: mpsc::Sender<LinkEvent>) -> Self {
         let (intents, requests) = watch::channel(DetailIntent::default());
@@ -201,7 +210,7 @@ impl DetailLoader {
         mut intents: watch::Receiver<DetailIntent>,
         mut changes: watch::Receiver<Option<LocalDate>>,
     ) {
-        type LoadFuture = Pin<Box<dyn Future<Output = Result<DetailData, DayFailure>> + Send>>;
+        type LoadFuture = Pin<Box<dyn Future<Output = Result<DetailData, LoadDataError>> + Send>>;
         let mut active: Option<LoadFuture> = None;
         let mut latest: Option<DetailRequest> = None;
         let mut queued = None;

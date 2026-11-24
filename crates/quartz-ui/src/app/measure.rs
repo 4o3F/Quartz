@@ -6,7 +6,7 @@ use std::fmt;
 use gpui_kit::{Font, FontStyle, SharedString, TextRun, Window, WindowTextSystem, black};
 
 use super::{metrics::Ramp, widgets::Widgets};
-use crate::timeline_scale::{MeasuredLabel, PixelPlacement};
+use crate::timeline_scale::PixelPlacement;
 
 /// Measures text in the fonts the views render it in.
 pub(crate) struct TextMeasure<'a> {
@@ -69,12 +69,8 @@ impl<'a> TextMeasure<'a> {
         short: &str,
         full: &str,
     ) -> Option<String> {
-        let measured = |text| MeasuredLabel {
-            text,
-            width: self.width(text, Ramp::Caption),
-        };
         block
-            .fitting_label(padding, measured(full), measured(short))
+            .fit_label_with(padding, short, full, |text| self.width(text, Ramp::Caption))
             .map(str::to_owned)
     }
 

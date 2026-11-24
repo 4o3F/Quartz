@@ -143,6 +143,10 @@ impl Day {
             .collect()
     }
 
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(super) fn compute_category_totals(&self) -> Vec<CategoryTotal> {
         let mut totals =
             self.totals_by_category(self.segments.iter().map(|segment| CategoryTotal {
@@ -153,6 +157,10 @@ impl Day {
         totals
     }
 
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(super) fn compute_summary(&self) -> DaySummary {
         let active = total(self.segments.iter().map(Segment::duration));
         let tendency_total = |wanted: Tendency| {
@@ -180,6 +188,10 @@ impl Day {
     }
 
     /// Longest run of back-to-back focus segments.
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     fn longest_focus_streak(&self) -> Duration {
         let mut longest = Duration::ZERO;
         let mut current = Duration::ZERO;
@@ -199,6 +211,10 @@ impl Day {
         longest
     }
 
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     fn switches(&self) -> u32 {
         let switches = self
             .segments
@@ -209,6 +225,10 @@ impl Day {
         u32::try_from(switches).expect("a day has far fewer than 4 billion segments")
     }
 
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(super) fn compute_activity_range(&self) -> Option<TimeSpan> {
         let spans = || {
             self.segments
@@ -221,6 +241,10 @@ impl Day {
         Some(TimeSpan::new(start, end))
     }
 
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(super) fn compute_hourly(&self) -> Vec<HourlyBar> {
         let Some(range) = self.compute_activity_range() else {
             return Vec::new();

@@ -31,6 +31,10 @@ impl TimeOfDay {
     /// Panics when the time lies outside 00:00 to 24:00 or `minutes` is 60 or more. Meant for
     /// literals, where the check runs at compile time.
     #[must_use]
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(crate) const fn hm(hours: u32, minutes: u32) -> Self {
         assert!(minutes < MINUTES_PER_HOUR, "minutes must be below 60");
         assert!(
@@ -102,7 +106,7 @@ impl TimeOfDay {
 /// A span would end before it starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Snafu)]
 #[snafu(display("span ends at {end} before it starts at {start}"))]
-pub(crate) struct InvertedTimeSpanError {
+pub(crate) struct BuildTimeSpanError {
     start: TimeOfDay,
     end: TimeOfDay,
 }
@@ -121,13 +125,13 @@ impl TimeSpan {
     /// Builds a span.
     ///
     /// # Errors
-    /// Returns [`InvertedTimeSpanError`] when `end` is before `start`.
+    /// Returns [`BuildTimeSpanError`] when `end` is before `start`.
     pub(crate) const fn try_new(
         start: TimeOfDay,
         end: TimeOfDay,
-    ) -> Result<Self, InvertedTimeSpanError> {
+    ) -> Result<Self, BuildTimeSpanError> {
         if end.0 < start.0 {
-            Err(InvertedTimeSpanError { start, end })
+            Err(BuildTimeSpanError { start, end })
         } else {
             Ok(Self { start, end })
         }
@@ -180,6 +184,10 @@ impl TimeSpan {
 
     /// Time shared with `other`, zero when disjoint.
     #[must_use]
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(crate) fn overlap(self, other: Self) -> Duration {
         self.intersection(other)
             .map_or(Duration::ZERO, Self::duration)
@@ -190,6 +198,10 @@ impl TimeSpan {
     /// # Panics
     /// Panics when `end` is before the current start.
     #[must_use]
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(crate) const fn extended_to(self, end: TimeOfDay) -> Self {
         Self::new(self.start, end)
     }

@@ -378,6 +378,12 @@ impl SettingsEvents {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThemeUpdate {
+    Unchanged,
+    Changed,
+}
+
 /// Embedded typed defaults and a resolved palette; system changes never decode JSON.
 #[derive(Debug)]
 pub(crate) struct SystemTheme {
@@ -385,6 +391,7 @@ pub(crate) struct SystemTheme {
     tokens: Rc<Tokens>,
     mapping: ComponentMapping,
     material: Material,
+    applied_mode: Option<ThemeMode>,
     support: BackdropSupport,
     subscriptions: Option<SettingsEvents>,
     notifications: Option<NotificationWindow>,
@@ -394,7 +401,11 @@ pub(crate) struct SystemTheme {
 }
 impl Global for SystemTheme {}
 impl SystemTheme {
-    pub(crate) fn install(theme: ThemeBundle, cx: &mut App) {
+    pub(crate) fn install(
+        theme: ThemeBundle,
+        appearance: super::runtime::Appearance,
+        cx: &mut App,
+    ) {
         let events = ThemeEvents::default();
         let subscriptions = SettingsEvents::register(&events);
         let notifications = match NotificationWindow::create(&events) {
@@ -423,6 +434,7 @@ impl SystemTheme {
             tokens: theme.tokens(),
             mapping: theme.mapping,
             material: Material::Solid,
+            applied_mode: None,
             support,
             subscriptions: Some(subscriptions),
             notifications,
@@ -435,6 +447,7 @@ impl SystemTheme {
             std::future::ready(())
         })
         .detach();
+        appearance.apply(cx);
         Self::refresh(cx);
         let listener = cx.spawn(async move |cx| {
             loop {
@@ -484,6 +497,29 @@ impl SystemTheme {
         }
         Self::high_contrast().map(|enabled| enabled.then(SystemColors::read))
     }
+    /// The window owner installs one activation refresh; child views only observe their text size.
+    pub(crate) fn observe_activation<T: 'static>(window: &mut Window, cx: &gpui_kit::Context<T>) {
+        cx.observe_window_activation(window, |_, window, cx| {
+            if window.is_window_active() {
+                Self::refresh(cx);
+            }
+        })
+        .detach();
+    }
+    fn replace_resolved(
+        &mut self,
+        tokens: Tokens,
+        material: Material,
+        mode: ThemeMode,
+    ) -> ThemeUpdate {
+        if *self.tokens == tokens && self.material == material && self.applied_mode == Some(mode) {
+            return ThemeUpdate::Unchanged;
+        }
+        self.tokens = Rc::new(tokens);
+        self.material = material;
+        self.applied_mode = Some(mode);
+        ThemeUpdate::Changed
+    }
     pub(crate) fn refresh(cx: &mut App) {
         let state = cx.global::<Self>();
         let Some(subscriptions) = &state.subscriptions else {
@@ -528,14 +564,17 @@ impl SystemTheme {
         if contrast.is_some() || state.support != BackdropSupport::Supported {
             material = Material::Solid;
         }
-        let tokens = Rc::new(
-            state
-                .base
-                .resolved(accent.as_ref(), material, contrast.as_ref()),
-        );
-        let state = cx.global_mut::<Self>();
-        state.tokens = tokens;
-        state.material = material;
+        let tokens = state
+            .base
+            .resolved(accent.as_ref(), material, contrast.as_ref());
+        let mode = Theme::global(cx).mode;
+        if cx
+            .global_mut::<Self>()
+            .replace_resolved(tokens, material, mode)
+            == ThemeUpdate::Unchanged
+        {
+            return;
+        }
         Self::apply_components(cx);
         cx.defer(|cx| {
             for handle in cx.windows() {
@@ -710,6 +749,23 @@ mod tests {
     }
 
     #[test]
+    fn initial_refresh_follows_appearance_selection() {
+        let source = include_str!("system_theme.rs");
+        let install = source
+            .split("pub(crate) fn install(")
+            .nth(1)
+            .expect("install method")
+            .split("    fn shutdown(")
+            .next()
+            .expect("install body");
+        let appearance = install
+            .find("appearance.apply(cx)")
+            .expect("initial appearance selection");
+        let refresh = install.find("Self::refresh(cx)").expect("initial refresh");
+        assert!(appearance < refresh);
+    }
+
+    #[test]
     fn quit_releases_subscriptions_before_platform_teardown_and_global_drop() {
         let apartment = Rc::new(Cell::new(ApartmentState::Initialized));
         let drops = Rc::new(Cell::new(0));
@@ -730,6 +786,7 @@ mod tests {
             tokens: theme.tokens(),
             mapping: theme.mapping,
             material: Material::Solid,
+            applied_mode: Some(ThemeMode::Light),
             support: BackdropSupport::Supported,
             subscriptions: Some(subscriptions),
             notifications: Some(NotificationWindow::for_shutdown_test(Rc::clone(&released))),
@@ -765,6 +822,56 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn injected_theme_reads_apply_only_changed_resolved_states() {
+        let theme = ThemeBundle::embedded().expect("theme");
+        let base = theme.tokens();
+        let mut state = SystemTheme {
+            base: Rc::clone(&base),
+            tokens: Rc::clone(&base),
+            mapping: theme.mapping,
+            material: Material::Solid,
+            applied_mode: Some(ThemeMode::Light),
+            support: BackdropSupport::Supported,
+            subscriptions: None,
+            notifications: None,
+            listener: None,
+            #[cfg(feature = "preview")]
+            preview_colors: PreviewTheme::load_colors(),
+        };
+        let reads = Cell::new(0);
+        let component_updates = Cell::new(0);
+        let window_updates = Cell::new(0);
+        let mut refresh = |material, mode, colors: Option<&SystemColors>| {
+            reads.set(reads.get() + 1);
+            let resolved = base.resolved(None, material, colors);
+            if state.replace_resolved(resolved, material, mode) == ThemeUpdate::Changed {
+                component_updates.set(component_updates.get() + 1);
+                window_updates.set(window_updates.get() + 1);
+            }
+        };
+        refresh(Material::Solid, ThemeMode::Light, None);
+        refresh(Material::Solid, ThemeMode::Light, None);
+        assert_eq!(component_updates.get(), 0);
+        let colors = PreviewTheme::load_colors();
+        refresh(Material::Solid, ThemeMode::Light, Some(&colors));
+        refresh(Material::Solid, ThemeMode::Light, Some(&colors));
+        assert_eq!(component_updates.get(), 1);
+        refresh(Material::Mica, ThemeMode::Light, None);
+        refresh(Material::Mica, ThemeMode::Light, None);
+        assert_eq!(reads.get(), 6);
+        assert_eq!(component_updates.get(), 2);
+        assert_eq!(window_updates.get(), 2);
+        refresh(Material::Mica, ThemeMode::Dark, None);
+        refresh(Material::Mica, ThemeMode::Dark, None);
+        assert_eq!(
+            component_updates.get(),
+            3,
+            "mode changes must update DWM even with identical light/dark token bundles"
+        );
+        assert_eq!(window_updates.get(), 3);
     }
 
     #[test]

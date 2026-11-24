@@ -26,6 +26,7 @@ fn show_and_activate_select_window_restore_activation_and_frame_acknowledgement(
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn closed_bridge_reports_a_typed_start_error() {
     let (commands, receive) = mpsc::channel(BRIDGE_CAPACITY);

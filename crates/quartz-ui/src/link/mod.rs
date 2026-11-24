@@ -7,22 +7,27 @@ mod annotation;
 mod day;
 mod details;
 use crate::failure::Failure;
+#[cfg(windows)]
 pub(crate) use annotation::AwayAction;
+#[cfg(windows)]
 pub(crate) use day::REFRESH_INDICATOR_DELAY;
 pub use day::{
-    DayData, DayFailure, DayFailureCode, DayGeneration, DayLoad, DayRequest, DayView,
+    DayData, DayGeneration, DayLoad, DayRequest, DayView, LoadDataError, LoadDataErrorCode,
     LocalFailureCode, UtcRange,
 };
 pub use details::{DetailData, DetailGeneration, DetailRequest, DetailTarget, EntityData};
 use quartz_pipe::CallCoreError;
-use quartz_protocol::{
-    ControlOp, CoreRequest, CoreVersion, DayChanged, InstanceId, JsonValue, Op, StateSnapshot,
-    Topic,
-};
-use snafu::{ResultExt, Snafu};
+use quartz_protocol::{ControlOp, CoreVersion, DayChanged, InstanceId, StateSnapshot};
+#[cfg(windows)]
+use quartz_protocol::{CoreRequest, JsonValue, Op, Topic};
+#[cfg(windows)]
+use snafu::ResultExt;
+use snafu::Snafu;
+#[cfg(windows)]
 use tokio::sync::{mpsc, oneshot};
 
 /// Bounded command, pending-request and event counts (01 §6–§7.2, 04 §7).
+#[cfg(windows)]
 const BRIDGE_CAPACITY: usize = 64;
 /// Minimal blocking pool ceiling (01 §7.2).
 #[cfg(windows)]
@@ -47,7 +52,7 @@ pub enum LinkEvent {
     },
     DetailLoaded {
         generation: DetailGeneration,
-        result: Result<DetailData, DayFailure>,
+        result: Result<DetailData, LoadDataError>,
     },
     State(StateSnapshot),
     Day(DayChanged),
@@ -59,7 +64,7 @@ pub enum LinkEvent {
     },
     DayLoaded {
         generation: DayGeneration,
-        result: Result<DayData, DayFailure>,
+        result: Result<DayData, LoadDataError>,
     },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +125,8 @@ pub struct StartLinkError {
 /// The foreground receiver was dropped, so the worker must close its pipe.
 #[derive(Debug, Snafu)]
 #[snafu(display("UI event receiver is closed"))]
-pub(super) struct UiClosed;
+#[cfg(windows)]
+pub(super) struct SendUiEventError;
 
 /// Failures while launching the core, waiting for readiness, or making its single connection attempt.
 #[derive(Debug, Snafu)]
@@ -147,7 +153,9 @@ impl StartCoreError {
     }
 }
 
+#[cfg(windows)]
 type Reply = oneshot::Sender<Result<JsonValue, RequestCoreError>>;
+#[cfg(windows)]
 enum Command {
     SelectDetails {
         request: Option<DetailRequest>,
@@ -181,6 +189,7 @@ enum Command {
     },
 }
 #[derive(Debug, Clone, Copy)]
+#[cfg(windows)]
 enum TopicChange {
     Subscribe,
     Unsubscribe,
@@ -194,14 +203,17 @@ enum InitialConnection {
 
 /// A view-side handle; its futures only wait on bounded channels.
 #[derive(Debug, Clone)]
+#[cfg(windows)]
 pub struct Link {
     commands: mpsc::Sender<Command>,
 }
 /// Unique event receiver; dropping it stops the worker and closes the pipe.
 #[derive(Debug)]
+#[cfg(windows)]
 pub struct LinkEvents {
     receiver: mpsc::Receiver<LinkEvent>,
 }
+#[cfg(windows)]
 impl LinkEvents {
     pub async fn recv(&mut self) -> Option<LinkEvent> {
         self.receiver.recv().await
@@ -209,6 +221,7 @@ impl LinkEvents {
 }
 /// The handle and event receiver owned by the UI process.
 #[derive(Debug)]
+#[cfg(windows)]
 pub struct LinkBridge {
     pub link: Link,
     pub events: LinkEvents,
@@ -273,7 +286,15 @@ impl LinkBridge {
         })
     }
 }
+#[cfg(windows)]
 impl Link {
+    #[cfg(test)]
+    pub(crate) fn closed_for_test() -> Self {
+        let (commands, receiver) = mpsc::channel(BRIDGE_CAPACITY);
+        drop(receiver);
+        Self { commands }
+    }
+
     /// Queues the close notification before a subsequent show can acknowledge its first frame.
     pub(crate) fn hidden(&self) -> Result<(), RequestCoreError> {
         self.commands

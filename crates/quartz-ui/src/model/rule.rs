@@ -7,6 +7,10 @@ pub(crate) struct RuleId(u32);
 impl RuleId {
     /// Wraps a rule id from the data source.
     #[must_use]
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(crate) const fn new(id: u32) -> Self {
         Self(id)
     }
@@ -16,7 +20,15 @@ impl RuleId {
 /// as the core starts sending them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RuleField {
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     AppExeName,
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     WebDomain,
 }
 
@@ -34,6 +46,10 @@ impl RuleField {
 /// A condition operator of the rule format (03 section 2.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RuleOperator {
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     Equals,
 }
 

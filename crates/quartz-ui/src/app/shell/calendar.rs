@@ -24,7 +24,10 @@ const WEEKDAY_HEIGHT: f32 = 28.;
 const DAY_ROW_HEIGHT: f32 = 38.;
 const DAY_CIRCLE_SIZE: f32 = 34.;
 const TODAY_RING_WIDTH: f32 = 1.5;
+/// Seven weekdays in the Gregorian calendar used by jiff.
 const DAYS_PER_WEEK: i8 = 7;
+/// Align the flyout below the date picker after the previous-day button (today-states.html).
+const FLYOUT_LEFT: f32 = 40.;
 #[derive(Debug, Clone, Copy)]
 enum MonthDirection {
     Previous,
@@ -174,7 +177,7 @@ impl AppShell {
             .child(next);
         let weekdays = div()
             .grid()
-            .grid_cols(7)
+            .grid_cols(u16::try_from(DAYS_PER_WEEK).expect("positive weekday count"))
             .children((0..DAYS_PER_WEEK).map(|offset| {
                 div()
                     .h(px(WEEKDAY_HEIGHT))
@@ -244,7 +247,7 @@ impl AppShell {
                     .id("date-calendar")
                     .absolute()
                     .top(ui.metrics.density(Density::Standard).control_height + ui.metrics.space.xs)
-                    .left(px(40.))
+                    .left(px(FLYOUT_LEFT))
                     .w(px(FLYOUT_WIDTH))
                     .rounded(ui.metrics.radius.overlay)
                     .shadow(ui.shadows(&ui.metrics.shadow.overlay))
@@ -258,10 +261,15 @@ impl AppShell {
                     ))
                     .child(header)
                     .child(
-                        div()
-                            .p(ui.metrics.space.m)
-                            .child(weekdays)
-                            .child(div().grid().grid_cols(7).gap_y(px(2.)).children(cells)),
+                        div().p(ui.metrics.space.m).child(weekdays).child(
+                            div()
+                                .grid()
+                                .grid_cols(
+                                    u16::try_from(DAYS_PER_WEEK).expect("positive weekday count"),
+                                )
+                                .gap_y(ui.metrics.space.xxs)
+                                .children(cells),
+                        ),
                     ),
             )
             .into_any_element(),
@@ -271,6 +279,41 @@ impl AppShell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn calendar_placement_uses_named_dimensions_and_one_week_length() {
+        let source = include_str!("calendar.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("implementation");
+        assert!(!source.contains(".grid_cols(7)"));
+        assert!(!source.contains(".left(px(40.))"));
+        assert!(!source.contains(".gap_y(px(2.))"));
+    }
+
+    #[test]
+    fn calendar_cells_remain_in_complete_seven_day_rows_for_every_week_start() {
+        for year in [2024, 2026] {
+            for month in 1..=12 {
+                let month = CalendarMonth::new(Date::new(year, month, 1).expect("month"));
+                for offset in 0..DAYS_PER_WEEK {
+                    let first = Weekday::Monday.wrapping_add(i64::from(offset));
+                    let cells = month.cells(first);
+                    assert_eq!(
+                        cells.len() % usize::try_from(DAYS_PER_WEEK).expect("week length"),
+                        0
+                    );
+                    assert_eq!(
+                        cells.iter().flatten().count(),
+                        usize::try_from(month.first.days_in_month()).expect("days")
+                    );
+                    for date in cells.iter().flatten() {
+                        assert_eq!(date.month(), month.first.month());
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn calendar_grid_respects_monday_and_sunday_first_without_future_selection_data() {
         let month = CalendarMonth::new(Date::new(2026, 11, 21).expect("date"));

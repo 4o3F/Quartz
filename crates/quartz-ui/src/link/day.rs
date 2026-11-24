@@ -1,22 +1,33 @@
 //! Version-bound day loading on the pipe runtime; GPUI only sends intents and receives results.
-use super::{BRIDGE_CAPACITY, Link, LinkEvent, RequestCoreError};
+use super::RequestCoreError;
+#[cfg(windows)]
+use super::{BRIDGE_CAPACITY, Link, LinkEvent};
 use quartz_pipe::CallCoreError;
 use quartz_protocol::{
     ApplicationRank, DayMetrics, ErrorKind, HourStack, LocalDate, MillisecondsPerPixel,
-    PendingAway, QueryDayRequest, QueryPendingAwayRequest, QueryTimelineRequest, QueryVersions,
-    TimelineDetail, TimelineSegment, Topic,
+    PendingAway, TimelineSegment,
 };
-use std::{future::Future, num::NonZeroU32, pin::Pin, time::Duration};
+#[cfg(windows)]
+use quartz_protocol::{
+    QueryDayRequest, QueryPendingAwayRequest, QueryTimelineRequest, QueryVersions, TimelineDetail,
+};
+use std::num::NonZeroU32;
+#[cfg(windows)]
+use std::{future::Future, pin::Pin, time::Duration};
+#[cfg(windows)]
 use tokio::{
     sync::{mpsc, watch},
     time::Instant,
 };
 
 /// Entire query sets may restart twice after version invalidation.
+#[cfg(windows)]
 pub const MAX_STALE_RESTARTS: usize = 2;
 /// A settled timeline view waits this long before querying again.
+#[cfg(windows)]
 pub const ZOOM_SETTLE_DELAY: Duration = Duration::from_millis(180);
 /// Fast refreshes leave the date bar unchanged.
+#[cfg(windows)]
 pub const REFRESH_INDICATOR_DELAY: Duration = Duration::from_millis(300);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct DayGeneration(u64);
@@ -45,35 +56,38 @@ pub struct DayRequest {
     pub physical_width: NonZeroU32,
 }
 impl DayRequest {
-    pub fn ms_per_pixel(&self, range: UtcRange) -> Result<MillisecondsPerPixel, DayFailure> {
+    pub fn ms_per_pixel(&self, range: UtcRange) -> Result<MillisecondsPerPixel, LoadDataError> {
         let span = u64::try_from(
             range
                 .end
                 .checked_sub(range.start)
-                .ok_or(DayFailure::InvalidData)?,
+                .ok_or(LoadDataError::InvalidData)?,
         )
-        .map_err(|_| DayFailure::InvalidData)?;
+        .map_err(|_| LoadDataError::InvalidData)?;
         let value = span.div_ceil(u64::from(self.physical_width.get()));
         Ok(MillisecondsPerPixel(
-            std::num::NonZeroU64::new(value).ok_or(DayFailure::InvalidData)?,
+            std::num::NonZeroU64::new(value).ok_or(LoadDataError::InvalidData)?,
         ))
     }
-    pub fn physical_width(logical: f32, scale: f32) -> Result<NonZeroU32, DayFailure> {
+    pub fn physical_width(logical: f32, scale: f32) -> Result<NonZeroU32, LoadDataError> {
         use num_traits::ToPrimitive as _;
         if !logical.is_finite() || !scale.is_finite() || logical <= 0. || scale <= 0. {
-            return Err(DayFailure::InvalidData);
+            return Err(LoadDataError::InvalidData);
         }
         (logical * scale)
             .round()
             .to_u32()
             .and_then(NonZeroU32::new)
-            .ok_or(DayFailure::InvalidData)
+            .ok_or(LoadDataError::InvalidData)
     }
 }
-#[derive(Debug)]
-pub enum DayFailure {
+#[derive(Debug, snafu::Snafu)]
+pub enum LoadDataError {
+    #[snafu(display("could not request view data"))]
     Request { source: RequestCoreError },
+    #[snafu(display("could not decode valid view data"))]
     InvalidData,
+    #[snafu(display("could not load a stable data version after retrying"))]
     StaleExhausted,
 }
 /// Local failures have a separate namespace from core protocol errors.
@@ -95,11 +109,11 @@ impl LocalFailureCode {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DayFailureCode {
+pub enum LoadDataErrorCode {
     Protocol(ErrorKind),
     Local(LocalFailureCode),
 }
-impl DayFailureCode {
+impl LoadDataErrorCode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Protocol(kind) => kind.code(),
@@ -107,34 +121,35 @@ impl DayFailureCode {
         }
     }
 }
-impl std::fmt::Display for DayFailureCode {
+impl std::fmt::Display for LoadDataErrorCode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
-impl DayFailure {
+impl LoadDataError {
     pub fn is_busy(&self) -> bool {
-        matches!(self.code(), DayFailureCode::Protocol(ErrorKind::Busy))
+        matches!(self.code(), LoadDataErrorCode::Protocol(ErrorKind::Busy))
     }
-    pub fn code(&self) -> DayFailureCode {
+    pub fn code(&self) -> LoadDataErrorCode {
         match self {
             Self::Request {
                 source:
                     RequestCoreError::Call {
                         source: CallCoreError::Protocol { kind },
                     },
-            } => DayFailureCode::Protocol(kind.clone()),
+            } => LoadDataErrorCode::Protocol(kind.clone()),
             Self::Request {
                 source: RequestCoreError::Busy,
-            } => DayFailureCode::Protocol(ErrorKind::Busy),
+            } => LoadDataErrorCode::Protocol(ErrorKind::Busy),
             Self::Request {
                 source: RequestCoreError::Timeout,
-            } => DayFailureCode::Local(LocalFailureCode::Timeout),
-            Self::Request { .. } => DayFailureCode::Local(LocalFailureCode::Connection),
-            Self::InvalidData => DayFailureCode::Local(LocalFailureCode::InvalidResponse),
-            Self::StaleExhausted => DayFailureCode::Local(LocalFailureCode::StaleExhausted),
+            } => LoadDataErrorCode::Local(LocalFailureCode::Timeout),
+            Self::Request { .. } => LoadDataErrorCode::Local(LocalFailureCode::Connection),
+            Self::InvalidData => LoadDataErrorCode::Local(LocalFailureCode::InvalidResponse),
+            Self::StaleExhausted => LoadDataErrorCode::Local(LocalFailureCode::StaleExhausted),
         }
     }
+    #[cfg(windows)]
     pub(super) fn is_stale(&self) -> bool {
         matches!(
             self,
@@ -148,7 +163,7 @@ impl DayFailure {
         )
     }
 }
-impl From<RequestCoreError> for DayFailure {
+impl From<RequestCoreError> for LoadDataError {
     fn from(source: RequestCoreError) -> Self {
         Self::Request { source }
     }
@@ -165,39 +180,60 @@ pub struct DayData {
     pub raw: Vec<TimelineSegment>,
     pub pending: Vec<PendingAway>,
 }
+#[derive(Clone)]
+#[cfg(windows)]
+struct DayCache {
+    data: DayData,
+    day_versions: QueryVersions,
+    aggregate_versions: QueryVersions,
+    reference_range: Option<quartz_protocol::ReferenceRange>,
+}
+#[cfg(windows)]
+impl DayCache {
+    fn aggregates(&self) -> Option<Self> {
+        if self.reference_range.is_some() {
+            return None;
+        }
+        Some(Self {
+            day_versions: self.day_versions.clone(),
+            aggregate_versions: self.aggregate_versions.clone(),
+            reference_range: self.reference_range,
+            data: DayData {
+                date: self.data.date,
+                bounds: self.data.bounds,
+                visible: self.data.visible,
+                metrics: self.data.metrics.clone(),
+                hours: self.data.hours.clone(),
+                applications: self.data.applications.clone(),
+                pending: self.data.pending.clone(),
+                categories: Vec::new(),
+                raw: Vec::new(),
+            },
+        })
+    }
+}
+#[cfg(windows)]
 struct TimelinePages {
     segments: Vec<TimelineSegment>,
     versions: QueryVersions,
 }
+#[cfg(windows)]
 impl Link {
-    async fn reconcile_day_subscription(
-        &self,
-        subscribed: &mut Option<LocalDate>,
-        target: LocalDate,
-    ) -> Result<(), RequestCoreError> {
-        if *subscribed == Some(target) {
-            return Ok(());
-        }
-        if let Some(previous) = *subscribed {
-            self.unsubscribe(vec![Topic::Day(previous)]).await?;
-            *subscribed = None;
-        }
-        self.subscribe(vec![Topic::Day(target)]).await?;
-        *subscribed = Some(target);
-        Ok(())
-    }
-    async fn query_day_once(&self, request: DayRequest) -> Result<DayData, DayFailure> {
+    async fn query_day_once(&self, request: DayRequest) -> Result<DayCache, LoadDataError> {
         let mut query = QueryDayRequest {
             local_date: request.date,
             cursor: None,
         };
         let first = self.request(query.clone()).await?;
         let reference_range = first.reference_range;
-        let metrics = first.metrics.ok_or(DayFailure::InvalidData)?;
-        let hours = first.hours.ok_or(DayFailure::InvalidData)?;
+        let metrics = first.metrics.ok_or(LoadDataError::InvalidData)?;
+        let hours = first.hours.ok_or(LoadDataError::InvalidData)?;
         let bounds = UtcRange {
-            start: hours.first().ok_or(DayFailure::InvalidData)?.start_utc_ms,
-            end: hours.last().ok_or(DayFailure::InvalidData)?.end_utc_ms,
+            start: hours
+                .first()
+                .ok_or(LoadDataError::InvalidData)?
+                .start_utc_ms,
+            end: hours.last().ok_or(LoadDataError::InvalidData)?.end_utc_ms,
         };
         let mut applications = first.applications;
         let version = first.versions;
@@ -208,7 +244,7 @@ impl Link {
                 return Err(Self::stale_day());
             }
             if page.next_cursor == query.cursor {
-                return Err(DayFailure::InvalidData);
+                return Err(LoadDataError::InvalidData);
             }
             applications.extend(page.applications);
             query.cursor = page.next_cursor;
@@ -218,7 +254,7 @@ impl Link {
             DayView::Range(range) => range,
         };
         if visible.start < bounds.start || visible.end > bounds.end {
-            return Err(DayFailure::InvalidData);
+            return Err(LoadDataError::InvalidData);
         }
         let resolution = request.ms_per_pixel(visible)?;
         let categories = self
@@ -255,7 +291,7 @@ impl Link {
                 break;
             }
             if page.next_cursor == query.cursor {
-                return Err(DayFailure::InvalidData);
+                return Err(LoadDataError::InvalidData);
             }
             query.cursor = page.next_cursor;
         }
@@ -270,20 +306,26 @@ impl Link {
                 return Err(Self::stale_day());
             }
         }
-        Ok(DayData {
-            date: request.date,
-            bounds,
-            visible,
-            metrics,
-            hours,
-            applications,
-            categories: categories.segments,
-            raw: raw.segments,
-            pending,
+        let day_versions = versions.ok_or(LoadDataError::InvalidData)?;
+        Ok(DayCache {
+            day_versions,
+            aggregate_versions: version,
+            reference_range,
+            data: DayData {
+                date: request.date,
+                bounds,
+                visible,
+                metrics,
+                hours,
+                applications,
+                categories: categories.segments,
+                raw: raw.segments,
+                pending,
+            },
         })
     }
-    pub(super) fn stale_day() -> DayFailure {
-        DayFailure::from(RequestCoreError::Call {
+    pub(super) fn stale_day() -> LoadDataError {
+        LoadDataError::from(RequestCoreError::Call {
             source: CallCoreError::Protocol {
                 kind: ErrorKind::StaleCursor,
             },
@@ -294,7 +336,7 @@ impl Link {
         range: UtcRange,
         detail: TimelineDetail,
         ms_per_pixel: MillisecondsPerPixel,
-    ) -> Result<TimelinePages, DayFailure> {
+    ) -> Result<TimelinePages, LoadDataError> {
         let mut query = QueryTimelineRequest {
             start_utc_ms: range.start,
             end_utc_ms: range.end,
@@ -318,24 +360,78 @@ impl Link {
                 break;
             }
             if page.next_cursor == query.cursor {
-                return Err(DayFailure::InvalidData);
+                return Err(LoadDataError::InvalidData);
             }
             query.cursor = page.next_cursor;
         }
         Ok(TimelinePages {
             segments,
-            versions: versions.ok_or(DayFailure::InvalidData)?,
+            versions: versions.ok_or(LoadDataError::InvalidData)?,
         })
     }
-    pub(super) async fn query_day(&self, request: DayRequest) -> Result<DayData, DayFailure> {
+    async fn validate_cached_day(&self, cached: &DayCache) -> Result<(), LoadDataError> {
+        let latest = self
+            .request(QueryDayRequest {
+                local_date: cached.data.date,
+                cursor: None,
+            })
+            .await?;
+        if latest.reference_range.is_some() || latest.versions != cached.aggregate_versions {
+            return Err(Self::stale_day());
+        }
+        Ok(())
+    }
+    async fn refine_day(
+        &self,
+        request: DayRequest,
+        mut cached: DayCache,
+    ) -> Result<DayCache, LoadDataError> {
+        self.validate_cached_day(&cached).await?;
+        let visible = match request.view {
+            DayView::WholeDay => cached.data.bounds,
+            DayView::Range(range) => range,
+        };
+        if visible.start < cached.data.bounds.start || visible.end > cached.data.bounds.end {
+            return Err(LoadDataError::InvalidData);
+        }
+        let resolution = request.ms_per_pixel(visible)?;
+        let categories = self
+            .timeline_pages(visible, TimelineDetail::Category, resolution)
+            .await?;
+        let raw = self
+            .timeline_pages(visible, TimelineDetail::Raw, resolution)
+            .await?;
+        if categories.versions != raw.versions
+            || (visible == cached.data.bounds && categories.versions != cached.day_versions)
+        {
+            return Err(Self::stale_day());
+        }
+        self.validate_cached_day(&cached).await?;
+        cached.data.visible = visible;
+        cached.data.categories = categories.segments;
+        cached.data.raw = raw.segments;
+        Ok(cached)
+    }
+    async fn query_day(
+        &self,
+        request: DayRequest,
+        mut cached: Option<DayCache>,
+    ) -> Result<DayCache, LoadDataError> {
         for attempt in 0..=MAX_STALE_RESTARTS {
-            match self.query_day_once(request).await {
+            let result = match cached
+                .take()
+                .filter(|cached| cached.data.date == request.date)
+            {
+                Some(cached) => self.refine_day(request, cached).await,
+                None => self.query_day_once(request).await,
+            };
+            match result {
                 Err(error) if error.is_stale() && attempt < MAX_STALE_RESTARTS => continue,
-                Err(error) if error.is_stale() => return Err(DayFailure::StaleExhausted),
+                Err(error) if error.is_stale() => return Err(LoadDataError::StaleExhausted),
                 result => return result,
             }
         }
-        Err(DayFailure::StaleExhausted)
+        Err(LoadDataError::StaleExhausted)
     }
 }
 #[derive(Debug, Clone, Copy)]
@@ -343,6 +439,7 @@ pub enum DayLoad {
     Immediate,
     Settled,
 }
+#[cfg(windows)]
 pub(super) enum DayCommand {
     Load {
         request: DayRequest,
@@ -350,20 +447,30 @@ pub(super) enum DayCommand {
         mode: DayLoad,
     },
 }
+#[cfg(windows)]
 pub(super) struct DayLoader {
     sender: mpsc::Sender<DayCommand>,
     changed: watch::Sender<Option<LocalDate>>,
     date: Option<LocalDate>,
+    task: tokio::task::JoinHandle<()>,
 }
+#[cfg(windows)]
+impl Drop for DayLoader {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+#[cfg(windows)]
 impl DayLoader {
     pub fn start(link: Link, events: mpsc::Sender<LinkEvent>) -> Self {
         let (sender, receiver) = mpsc::channel(BRIDGE_CAPACITY);
         let (changed, changes) = watch::channel(None);
-        tokio::spawn(Self::run(link, events, receiver, changes));
+        let task = tokio::spawn(Self::run(link, events, receiver, changes));
         Self {
             sender,
             changed,
             date: None,
+            task,
         }
     }
     pub fn send(&mut self, command: DayCommand) -> Result<(), RequestCoreError> {
@@ -377,6 +484,11 @@ impl DayLoader {
         self.date = Some(date);
         Ok(())
     }
+    pub fn invalidate(&self) {
+        if let Some(date) = self.date {
+            self.changed(date);
+        }
+    }
     pub fn changed(&self, date: LocalDate) {
         if self.date == Some(date) {
             // A watch value retains one invalidation regardless of the event burst size.
@@ -389,10 +501,12 @@ impl DayLoader {
         mut commands: mpsc::Receiver<DayCommand>,
         mut changes: watch::Receiver<Option<LocalDate>>,
     ) {
-        type LoadFuture = Pin<Box<dyn Future<Output = Result<DayData, DayFailure>> + Send>>;
+        type LoadFuture = Pin<Box<dyn Future<Output = Result<DayCache, LoadDataError>> + Send>>;
         let mut active: Option<LoadFuture> = None;
+        let mut cached: Option<DayCache> = None;
+        let mut revision = 0_u64;
+        let mut loading_revision = revision;
         let mut latest: Option<DayRequest> = None;
-        let mut subscribed: Option<LocalDate> = None;
         let mut generation = DayGeneration::default();
         let mut loading_generation = generation;
         let mut queued = None;
@@ -410,20 +524,12 @@ impl DayLoader {
                                 // Dropping the request future detaches its reply receiver; the pipe
                                 // worker still consumes late responses by their request identities.
                                 active = None;
-                                queued = None;
-                                deadline = None;
                             }
+                            let mode = if latest.is_none() { DayLoad::Immediate } else { mode };
+                            if matches!(mode, DayLoad::Immediate) || matches!(request.view, DayView::WholeDay)
+                                || latest.is_some_and(|previous| previous.date != request.date) { cached = None; }
                             generation = next;
                             latest = Some(request);
-                            if let Err(source) = link.reconcile_day_subscription(&mut subscribed, request.date).await {
-                                if events.send(LinkEvent::DayLoaded {
-                                    generation: next,
-                                    result: Err(source.into()),
-                                }).await.is_err() {
-                                    break;
-                                }
-                                continue;
-                            }
                             queued = Some(request);
                             deadline = Some(Instant::now() + match mode {
                                 DayLoad::Immediate => Duration::ZERO,
@@ -437,7 +543,9 @@ impl DayLoader {
                         break;
                     }
                     let date = *changes.borrow_and_update();
-                    if let Some(request) = latest.filter(|request| Some(request.date) == date && subscribed == date) {
+                    cached = None;
+                    revision = revision.saturating_add(1);
+                    if let Some(request) = latest.filter(|request| Some(request.date) == date) {
                         queued = Some(request);
                         if active.is_none() {
                             deadline = Some(Instant::now());
@@ -451,6 +559,10 @@ impl DayLoader {
                     }
                 } => {
                     active = None;
+                    let result = result.map(|loaded| {
+                        if revision == loading_revision { cached = loaded.aggregates(); }
+                        loaded.data
+                    });
                     if events.send(LinkEvent::DayLoaded {
                         generation: loading_generation,
                         result,
@@ -474,7 +586,9 @@ impl DayLoader {
                             break;
                         }
                         let link = link.clone();
-                        active = Some(Box::pin(async move { link.query_day(request).await }));
+                        let cached = cached.clone();
+                        loading_revision = revision;
+                        active = Some(Box::pin(async move { link.query_day(request, cached).await }));
                     }
                 }
             }
@@ -488,49 +602,49 @@ mod tests {
     #[test]
     fn failure_codes_preserve_protocol_kinds_and_type_local_failures() {
         struct Case {
-            failure: DayFailure,
-            expected: DayFailureCode,
+            failure: LoadDataError,
+            expected: LoadDataErrorCode,
             shown: &'static str,
         }
         for case in [
             Case {
-                failure: DayFailure::Request {
+                failure: LoadDataError::Request {
                     source: RequestCoreError::Timeout,
                 },
-                expected: DayFailureCode::Local(LocalFailureCode::Timeout),
+                expected: LoadDataErrorCode::Local(LocalFailureCode::Timeout),
                 shown: "timeout",
             },
             Case {
-                failure: DayFailure::Request {
+                failure: LoadDataError::Request {
                     source: RequestCoreError::Disconnected,
                 },
-                expected: DayFailureCode::Local(LocalFailureCode::Connection),
+                expected: LoadDataErrorCode::Local(LocalFailureCode::Connection),
                 shown: "connection_error",
             },
             Case {
-                failure: DayFailure::InvalidData,
-                expected: DayFailureCode::Local(LocalFailureCode::InvalidResponse),
+                failure: LoadDataError::InvalidData,
+                expected: LoadDataErrorCode::Local(LocalFailureCode::InvalidResponse),
                 shown: "invalid_response",
             },
             Case {
-                failure: DayFailure::StaleExhausted,
-                expected: DayFailureCode::Local(LocalFailureCode::StaleExhausted),
+                failure: LoadDataError::StaleExhausted,
+                expected: LoadDataErrorCode::Local(LocalFailureCode::StaleExhausted),
                 shown: "stale_exhausted",
             },
             Case {
-                failure: DayFailure::Request {
+                failure: LoadDataError::Request {
                     source: RequestCoreError::Busy,
                 },
-                expected: DayFailureCode::Protocol(ErrorKind::Busy),
+                expected: LoadDataErrorCode::Protocol(ErrorKind::Busy),
                 shown: "busy",
             },
             Case {
-                failure: DayFailure::from(RequestCoreError::Call {
+                failure: LoadDataError::from(RequestCoreError::Call {
                     source: CallCoreError::Protocol {
                         kind: ErrorKind::InvalidRange,
                     },
                 }),
-                expected: DayFailureCode::Protocol(ErrorKind::InvalidRange),
+                expected: LoadDataErrorCode::Protocol(ErrorKind::InvalidRange),
                 shown: "invalid_range",
             },
         ] {

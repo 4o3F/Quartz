@@ -70,7 +70,13 @@ impl AppShell {
                     PendingAction::ALL.map(|action| {
                         let range = *range;
                         let label = ButtonContent::Label(self.formatter.text(action.label()));
-                        if action == PendingAction::Other {
+                        if action == PendingAction::Other
+                            || self.day.utc_range(range.span).is_some_and(|range| {
+                                self.live
+                                    .as_ref()
+                                    .is_some_and(|live| live.actions.contains(range))
+                            })
+                        {
                             return ui.disabled_button(
                                 action.element_id(),
                                 Density::Compact,

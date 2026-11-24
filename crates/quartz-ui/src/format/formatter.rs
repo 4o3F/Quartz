@@ -6,9 +6,11 @@ use jiff::civil::{Date, Weekday};
 use quartz_i18n::Language;
 
 use super::message::{Arg, ArgValue, Msg};
+#[cfg(windows)]
+use crate::model::RankingKind;
 use crate::model::{
-    BuiltinCategory, CategoryName, ClassificationSource, Day, MINUTES_PER_HOUR, RankingKind,
-    RuleCondition, SECONDS_PER_MINUTE, Share, StateKind,
+    BuiltinCategory, CategoryName, ClassificationSource, Day, MINUTES_PER_HOUR, RuleCondition,
+    SECONDS_PER_MINUTE, Share, StateKind,
 };
 
 /// Looks up translations and formats values for one interface language.
@@ -155,6 +157,7 @@ impl Formatter {
 }
 impl Formatter {
     #[cfg(debug_assertions)]
+    #[cfg(windows)]
     pub(crate) fn language(self) -> Language {
         self.language
     }
@@ -221,6 +224,7 @@ impl Formatter {
 
     /// The application switches per hour of the status card.
     #[must_use]
+    #[cfg(windows)]
     pub(crate) fn switches(self, per_hour: u64) -> String {
         self.text_with(
             Msg::StatSwitchCount,
@@ -259,6 +263,7 @@ impl Formatter {
 
     /// Label of a ranking tab.
     #[must_use]
+    #[cfg(windows)]
     pub(crate) fn ranking_tab(self, kind: RankingKind) -> String {
         self.text(match kind {
             RankingKind::Apps => Msg::RankingApps,
@@ -277,9 +282,18 @@ impl Formatter {
         form: SourceText<'_>,
     ) -> String {
         match source {
-            ClassificationSource::ProtocolRule(rule) => {
-                self.text_with(Msg::DetailsRuleLine, &[Arg::Condition.with(rule.as_str())])
-            }
+            ClassificationSource::ProtocolRule(rule) => match form {
+                SourceText::Short => {
+                    self.text_with(Msg::DetailsRuleLine, &[Arg::Condition.with(rule.as_str())])
+                }
+                SourceText::WithCategory(category) => self.text_with(
+                    Msg::TooltipRule,
+                    &[
+                        Arg::Condition.with(rule.as_str()),
+                        Arg::Category.with(&self.category_name(category)),
+                    ],
+                ),
+            },
             ClassificationSource::Mixed => self.text(Msg::TooltipMixed),
             ClassificationSource::Rule { rule, .. } => {
                 let condition = day.rule(*rule).condition.value.as_str();
@@ -475,6 +489,26 @@ mod tests {
             EN.rule_condition(&condition),
             r#"app.exe_name equals "a \"b\".exe""#
         );
+    }
+
+    #[test]
+    fn protocol_rule_tooltip_includes_the_category_in_each_language() {
+        let day = crate::model::fixture::day(vec![], vec![]);
+        let rule = ClassificationSource::ProtocolRule("builtin/editor@1".parse().expect("rule"));
+        let work = CategoryName::Builtin(BuiltinCategory::Development);
+        for formatter in [ZH, EN, Formatter::new(Language::PseudoEnglish)] {
+            let tooltip = formatter.classification(&day, &rule, SourceText::WithCategory(&work));
+            assert_eq!(
+                tooltip,
+                formatter.text_with(
+                    Msg::TooltipRule,
+                    &[
+                        Arg::Condition.with("builtin/editor@1"),
+                        Arg::Category.with(&formatter.category_name(&work)),
+                    ]
+                )
+            );
+        }
     }
 
     #[test]

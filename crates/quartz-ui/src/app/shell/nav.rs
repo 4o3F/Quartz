@@ -12,7 +12,7 @@ use crate::{
         metrics::{Density, Ramp},
         widgets::{RampExt as _, Widgets},
     },
-    layout::{NavLayout, ShellLayout, WindowClass},
+    layout::{NavLayout, PanelState, ShellLayout},
 };
 
 /// Smallest height of a navigation item, as in the WinUI navigation view; it grows with the text.
@@ -36,21 +36,32 @@ impl AppShell {
             .h_full()
             .p(space.xs)
             .gap(space.xxs)
-            .when(shell.class == WindowClass::Expanded, |nav| {
-                nav.child(
-                    div()
-                        .id("nav-toggle")
-                        .flex()
-                        .items_center()
-                        .min_h(px(ITEM_HEIGHT))
-                        .px(space.m)
-                        .rounded(ui.metrics.radius.control)
-                        .cursor_pointer()
-                        .hover(ui.subtle_hover())
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_nav(cx)))
-                        .child(ui.icon(IconName::Menu, Density::Compact, ui.palette.text_primary)),
-                )
-            })
+            .when(
+                shell.shows_nav_toggle(if self.details.is_some() {
+                    PanelState::Open
+                } else {
+                    PanelState::Closed
+                }),
+                |nav| {
+                    nav.child(
+                        div()
+                            .id("nav-toggle")
+                            .flex()
+                            .items_center()
+                            .min_h(px(ITEM_HEIGHT))
+                            .px(space.m)
+                            .rounded(ui.metrics.radius.control)
+                            .cursor_pointer()
+                            .hover(ui.subtle_hover())
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_nav(cx)))
+                            .child(ui.icon(
+                                IconName::Menu,
+                                Density::Compact,
+                                ui.palette.text_primary,
+                            )),
+                    )
+                },
+            )
             .child(
                 div().flex().flex_col().gap(space.xxs).children(
                     Page::NAV_ITEMS

@@ -39,6 +39,17 @@ The user accepted these answers to the questions above; 07-ui.md is authoritativ
 - Plot areas sit directly on `bg.base` (or Mica) in both light and dark, without card fill (07 §10). The light mockups still show a transparent plot area on the card; follow 07.
 - Data-integrity warnings may use `status.critical` / `status.caution`; "no red warnings" applies to judging user behaviour (07 §6).
 
+### Robustness fixes (batch 5b)
+
+- While details force the 48 px navigation rail, hide the navigation toggle; closing details restores the user's navigation choice and the toggle in Expanded windows (07 §8).
+- High contrast timeline labels use the system window text on an opaque system window background. The label height follows its own track or swimlane, with the existing inside-border inset (11 §2).
+- Timeline tiles and the plot background share pan handling. A drag starts after one 4 px design-grid step; releasing a drag does not open details, including when the pointer returns to its starting point.
+- Away-label actions disable all choices for the affected interval while submitting. An action failure appears above the loaded Today cards with the action name and error code; its buttons become available for retry. Resume failures use the same inline presentation with their own message.
+- Live detail category swatches use the existing legend swatch size and category pattern; category-coloured week and title bars use the same pattern (11 §2).
+
+- Timeline pans end on any mouse release or an unpressed move and are cleared by zoom/full-day controls. Keyboard activation always selects its target, independently of mouse gestures.
+- View refinements reuse single-day aggregates only after matching the core's aggregate query versions before and after the timeline read. Seven-day reference scopes, full loads, explicit retry and successful local mutations reload aggregates. Resume notices clear on retry, success or recording recovery; changing the displayed date clears action notices.
+
 ## Error screen (`errors.html`)
 
 Unified startup, connection, and fatal error screen for the 960×640 window (also verified at the 640×480 minimum via `?size=min`). Query parameters: `?state=<key>&theme=light|dark&lang=zh-CN|en[&size=min][&details=open|closed]`. Uses only `tokens.css` variables and shared controls from `mockup.css`.

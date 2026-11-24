@@ -133,6 +133,7 @@ mod tests {
             PrewarmAction::Open
         );
     }
+    #[cfg(windows)]
     #[test]
     fn reopening_rejects_the_previous_windows_query_results() {
         let previous = crate::app::QueryGenerations::default().next();

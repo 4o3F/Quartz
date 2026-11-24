@@ -2,6 +2,7 @@
 
 mod live;
 use live::LiveDay;
+#[cfg(windows)]
 pub(crate) use live::PendingAwaySpan;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -34,6 +35,10 @@ pub(crate) struct EarlierDays(pub [Duration; EARLIER_DAYS]);
 
 /// The raw facts of one day, before [`Day::new`] validates them.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    all(not(test), not(feature = "preview")),
+    expect(dead_code, reason = "used by preview fixtures and their model tests")
+)]
 pub(crate) struct DayParts {
     pub(crate) date: Date,
     /// Categories in list order, which is also the stacking order of charts.
@@ -99,6 +104,10 @@ struct Derived {
 /// The model's origin and loading state are explicit; only live days carry core display metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DaySource {
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     Fixture,
     Loading,
     Live(LiveDay),
@@ -128,6 +137,10 @@ impl Day {
     /// # Errors
     /// Returns [`BuildDayError`] for duplicate ids, references to items that are not part of the
     /// day, empty or overlapping spans, and applications without history.
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(crate) fn new(parts: DayParts) -> Result<Self, BuildDayError> {
         let DayParts {
             date,
@@ -369,6 +382,10 @@ impl Day {
 }
 
 /// Collects `ids`, failing with `duplicate` on the first one seen twice.
+#[cfg_attr(
+    all(not(test), not(feature = "preview")),
+    expect(dead_code, reason = "used by preview fixtures and their model tests")
+)]
 fn unique<T: Ord + Copy>(
     ids: impl IntoIterator<Item = T>,
     duplicate: impl Fn(T) -> BuildDayError,
@@ -382,6 +399,10 @@ fn unique<T: Ord + Copy>(
     Ok(seen)
 }
 
+#[cfg_attr(
+    all(not(test), not(feature = "preview")),
+    expect(dead_code, reason = "used by preview fixtures and their model tests")
+)]
 fn validate_segment(
     segment: &Segment,
     category_ids: &BTreeSet<CategoryId>,
@@ -417,6 +438,10 @@ fn validate_segment(
 }
 
 /// Fails when any two spans of segments and states share time.
+#[cfg_attr(
+    all(not(test), not(feature = "preview")),
+    expect(dead_code, reason = "used by preview fixtures and their model tests")
+)]
 fn ensure_disjoint(segments: &[Segment], states: &[StateBlock]) -> Result<(), BuildDayError> {
     let mut spans: Vec<TimeSpan> = segments
         .iter()

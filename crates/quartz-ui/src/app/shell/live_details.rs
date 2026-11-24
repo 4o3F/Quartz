@@ -7,7 +7,7 @@ use crate::{
     },
     format::Msg,
     layout::PanelPlacement,
-    link::{DayFailure, DetailData, DetailGeneration, DetailRequest, DetailTarget},
+    link::{DetailData, DetailGeneration, DetailRequest, DetailTarget, LoadDataError},
     model::{
         CategoryColor, DetailsSubject,
         live_details::{CategoryDisplay, LiveDetails},
@@ -23,12 +23,11 @@ const TITLE_BAR_HEIGHT: f32 = 4.;
 const WEEK_HEIGHT: f32 = 88.;
 const SKELETON_ROWS: usize = 6;
 const SKELETON_ROW_HEIGHT: f32 = 28.;
-const CATEGORY_DOT_SIZE: f32 = 6.;
 #[derive(Debug)]
 pub(super) enum DetailPhase {
     Loading,
     Ready(LiveDetails),
-    Failed(DayFailure),
+    Failed(LoadDataError),
 }
 #[derive(Debug)]
 pub(super) struct LivePanel {
@@ -114,7 +113,7 @@ impl AppShell {
     pub(crate) fn detail_loaded(
         &mut self,
         generation: DetailGeneration,
-        result: Result<DetailData, DayFailure>,
+        result: Result<DetailData, LoadDataError>,
         cx: &mut Context<Self>,
     ) {
         if !self.detail_generation.accepts(generation) {
@@ -129,9 +128,9 @@ impl AppShell {
         };
         panel.phase = match result.and_then(|data| {
             if data.request != panel.request {
-                return Err(DayFailure::InvalidData);
+                return Err(LoadDataError::InvalidData);
             }
-            LiveDetails::from_protocol(data).map_err(|_| DayFailure::InvalidData)
+            LiveDetails::from_protocol(data).map_err(|_| LoadDataError::InvalidData)
         }) {
             Ok(details) => DetailPhase::Ready(details),
             Err(error) => DetailPhase::Failed(error),
@@ -284,6 +283,30 @@ impl AppShell {
             )
             .child(self.details_actions(ui))
     }
+    fn title_duration(ui: &Widgets<'_>, duration: String, width: f32) -> Div {
+        div()
+            .w(px(width))
+            .flex_shrink_0()
+            .flex()
+            .justify_end()
+            .ramp(ui, Ramp::Caption)
+            .tabular_figures()
+            .text_color(ui.palette.text_secondary)
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(duration),
+            )
+    }
+    fn detail_mark(ui: &Widgets<'_>, body: Div, category: Option<CategoryColor>) -> Div {
+        match category {
+            Some(category) => ui.category_mark(body, category),
+            None => body.bg(ui.palette.accent_fill),
+        }
+    }
     fn detail_category(&self, ui: &Widgets<'_>, category: &CategoryDisplay) -> Div {
         div()
             .flex()
@@ -292,12 +315,10 @@ impl AppShell {
             .items_center()
             .gap(ui.metrics.space.xs)
             .ramp(ui, Ramp::Caption)
-            .child(
-                div()
-                    .size(px(CATEGORY_DOT_SIZE))
-                    .rounded_full()
-                    .bg(ui.palette.category(category.color)),
-            )
+            .child(ui.category_mark(
+                ui.swatch(ui.palette.category(category.color)),
+                category.color,
+            ))
             .child(
                 div()
                     .min_w(px(0.))
@@ -385,25 +406,26 @@ impl AppShell {
                 .map(|day| day.duration)
                 .max()
                 .unwrap_or_default();
-            let color = panel
-                .color
-                .map_or(ui.palette.accent_fill, |color| ui.palette.category(color));
-            let bars = div()
-                .flex()
-                .gap(ui.metrics.space.s)
-                .h(px(WEEK_HEIGHT))
-                .items_end()
-                .children(entity.daily.iter().map(|day| {
-                    div().flex_1().h(px(WEEK_HEIGHT)).flex().items_end().child(
-                        div()
-                            .w_full()
-                            .h(px(WEEK_HEIGHT
-                                * crate::model::Share::of(day.duration, longest)
-                                    .fraction()))
-                            .rounded_t(ui.metrics.timeline.block_radius)
-                            .bg(color),
-                    )
-                }));
+            let bars =
+                div()
+                    .flex()
+                    .gap(ui.metrics.space.s)
+                    .h(px(WEEK_HEIGHT))
+                    .items_end()
+                    .children(entity.daily.iter().map(|day| {
+                        div().flex_1().h(px(WEEK_HEIGHT)).flex().items_end().child(
+                            Self::detail_mark(
+                                ui,
+                                div()
+                                    .w_full()
+                                    .h(px(WEEK_HEIGHT
+                                        * crate::model::Share::of(day.duration, longest)
+                                            .fraction()))
+                                    .rounded_t(ui.metrics.timeline.block_radius),
+                                panel.color,
+                            ),
+                        )
+                    }));
             let labels = div()
                 .flex()
                 .px(ui.metrics.space.s)
@@ -480,34 +502,19 @@ impl AppShell {
                                 )
                                 .rounded(ui.metrics.timeline.block_radius)
                                 .bg(ui.palette.fill_subtle_hover)
-                                .child(
+                                .child(Self::detail_mark(
+                                    ui,
                                     div()
                                         .h_full()
                                         .w(gpui_kit::relative(
                                             crate::model::Share::of(row.duration, title_max)
                                                 .fraction(),
                                         ))
-                                        .rounded(ui.metrics.timeline.block_radius)
-                                        .bg(color),
-                                ),
+                                        .rounded(ui.metrics.timeline.block_radius),
+                                    panel.color,
+                                )),
                         )
-                        .child(
-                            div()
-                                .w(px(value_width))
-                                .flex_shrink_0()
-                                .flex()
-                                .justify_end()
-                                .ramp(ui, Ramp::Caption)
-                                .text_color(ui.palette.text_secondary)
-                                .child(
-                                    div()
-                                        .min_w(px(0.))
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .child(duration),
-                                ),
-                        )
+                        .child(Self::title_duration(ui, duration, value_width))
                 }),
             );
             body = body.child(self.section(
@@ -567,5 +574,49 @@ impl AppShell {
             ));
         }
         body
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        app::{
+            runtime::ThemeBundle,
+            tokens::{Palette, SystemColors},
+        },
+        model::PaletteSlot,
+        text_scale::TextScale,
+    };
+    #[test]
+    fn detail_category_marks_use_patterns_and_title_durations_use_tabular_figures() {
+        let theme = ThemeBundle::embedded().expect("theme");
+        let colors: SystemColors =
+            serde_json::from_str(include_str!("../../../themes/preview-high-contrast.json"))
+                .expect("colors");
+        let palette = Palette::high_contrast(&colors);
+        let ui = Widgets {
+            palette: &palette,
+            metrics: theme.tokens.metrics(),
+            text_scale: TextScale::UNSCALED,
+        };
+        for slot in PaletteSlot::ALL {
+            let mut mark = AppShell::detail_mark(&ui, div(), Some(CategoryColor::Palette(slot)));
+            assert_eq!(
+                mark.style().background,
+                Some(colors.window.into()),
+                "category marks must use the opaque patterned surface"
+            );
+            let mut swatch = ui.category_mark(
+                ui.swatch(palette.category(CategoryColor::Palette(slot))),
+                CategoryColor::Palette(slot),
+            );
+            assert_eq!(swatch.style().background, Some(colors.window.into()));
+        }
+        let mut duration = AppShell::title_duration(&ui, "1h 5m".into(), 60.);
+        assert_eq!(
+            duration.style().text_style().font_features,
+            Some(Widgets::tabular_figures())
+        );
     }
 }

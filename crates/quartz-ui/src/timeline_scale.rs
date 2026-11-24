@@ -13,11 +13,10 @@ pub(crate) const ACTIVITY_MARGIN_MINUTES: u32 = 15;
 pub(crate) const MIN_ZOOM_MINUTES: u32 = 5;
 /// Most axis ticks a view shows; a view picks the finest step that stays within it.
 pub(crate) const MAX_TICKS: u8 = 14;
-/// Fewest axis ticks a view shows, however narrow the plot is: the coarsest tick step is six
-/// hours, which puts four intervals on a whole day.
+/// Fewest tick intervals; large labels may omit ticks while retaining this grid density.
 const MIN_TICKS: u8 = 4;
 /// Space kept between two neighboring axis labels.
-const TICK_LABEL_GAP: f32 = 8.;
+pub(crate) const TICK_LABEL_GAP: f32 = 8.;
 /// Narrowest painted block in logical pixels, so one-pixel blocks stay visible (07 section 4.3).
 pub(crate) const MIN_BLOCK_WIDTH: f32 = 2.;
 /// Candidate tick steps in minutes, finest first; the last one fits a whole day.
@@ -88,6 +87,7 @@ pub(crate) struct Placement {
 
 /// Left edge and width of a span in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg(windows)]
 pub(crate) struct PixelSpan {
     pub(crate) left: f32,
     pub(crate) width: f32,
@@ -159,6 +159,7 @@ impl PlotGrid {
     /// The left edge and width of `placement` in logical pixels, without the block minimum or
     /// gap; for the selection overlay.
     #[must_use]
+    #[cfg(windows)]
     pub(crate) fn span(self, placement: Placement) -> PixelSpan {
         let left = self.edge(placement.left);
         let right = self.edge(placement.left + placement.width);
@@ -332,6 +333,7 @@ impl<T> RowTiles<T> {
 
     /// The items in paint order: blocks, then each marker's representative above them.
     #[must_use]
+    #[cfg(windows)]
     pub(crate) fn into_paint_order(self) -> Vec<T> {
         let markers = self.markers.into_iter().map(|marker| marker.representative);
         self.blocks
@@ -343,6 +345,7 @@ impl<T> RowTiles<T> {
 }
 
 /// A label with its measured width.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct MeasuredLabel<'a> {
     pub(crate) text: &'a str,
@@ -350,9 +353,28 @@ pub(crate) struct MeasuredLabel<'a> {
 }
 
 impl PixelPlacement {
+    /// Measures each distinct nonempty candidate at most once, stopping at the first fit.
+    pub(crate) fn fit_label_with<'a>(
+        self,
+        padding: f32,
+        short: &'a str,
+        full: &'a str,
+        mut measure: impl FnMut(&str) -> f32,
+    ) -> Option<&'a str> {
+        let room = self.body_width() - 2. * padding;
+        if !full.is_empty() && measure(full) <= room {
+            return Some(full);
+        }
+        if short != full && !short.is_empty() && measure(short) <= room {
+            return Some(short);
+        }
+        None
+    }
+
     /// The longest of `full` and `short` that fits inside the block with `padding` on each side;
     /// `None` when neither does.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn fitting_label<'a>(
         self,
         padding: f32,
@@ -362,7 +384,7 @@ impl PixelPlacement {
         let room = self.body_width() - 2. * padding;
         [full, short]
             .into_iter()
-            .find(|label| label.width <= room)
+            .find(|label| !label.text.is_empty() && label.width <= room)
             .map(|label| label.text)
     }
 }
@@ -393,6 +415,11 @@ impl TickBudget {
     /// The most ticks a view shows.
     #[cfg(test)]
     pub(crate) const MAX: Self = Self(MAX_TICKS);
+
+    #[cfg(windows)]
+    pub(crate) const fn maximum() -> Self {
+        Self(MAX_TICKS)
+    }
 
     /// As many labels `label_width` wide, with a gap between them, as fit in a plot `plot_width`
     /// wide, within [`MIN_TICKS`] and [`MAX_TICKS`].
@@ -493,6 +520,7 @@ impl View {
             .collect()
     }
 
+    #[cfg(windows)]
     pub(crate) fn panned(self, delta_millis: i64, bounds: TimeSpan) -> Self {
         let length = self.span.end().millis() - self.span.start().millis();
         let max_start = bounds.end().millis().saturating_sub(length);
@@ -515,25 +543,24 @@ impl View {
         self.zoomed_within(step, TimeSpan::DAY)
     }
     pub(crate) fn zoomed_within(self, step: ZoomStep, bounds: TimeSpan) -> Self {
-        let length = self.span.end().seconds() - self.span.start().seconds();
-        let center = self.span.start().seconds() + length / 2;
-        let half = match step {
-            ZoomStep::In => length / 4,
-            ZoomStep::Out => length,
-        };
-        let half = half.clamp(
-            MIN_ZOOM_MINUTES * SECONDS_PER_MINUTE / 2,
-            bounds.end().seconds() / 2,
-        );
-        let start = TimeOfDay::from_elapsed_millis(
-            center.saturating_sub(half) * crate::model::MILLIS_PER_SECOND,
-        );
-        let end = TimeOfDay::from_elapsed_millis(
-            center.saturating_add(half).min(bounds.end().seconds())
-                * crate::model::MILLIS_PER_SECOND,
-        );
+        let length = self.span.end().millis() - self.span.start().millis();
+        let available = bounds.end().millis() - bounds.start().millis();
+        let minimum = (MIN_ZOOM_MINUTES * SECONDS_PER_MINUTE * crate::model::MILLIS_PER_SECOND)
+            .min(available);
+        let requested = match step {
+            ZoomStep::In => length / 2,
+            ZoomStep::Out => length.saturating_mul(2),
+        }
+        .clamp(minimum, available);
+        let center = self.span.start().millis() + length / 2;
+        let start = center
+            .saturating_sub(requested / 2)
+            .clamp(bounds.start().millis(), bounds.end().millis() - requested);
         Self {
-            span: TimeSpan::new(start, end),
+            span: TimeSpan::new(
+                TimeOfDay::from_elapsed_millis(start),
+                TimeOfDay::from_elapsed_millis(start + requested),
+            ),
         }
     }
 }
@@ -548,6 +575,61 @@ mod tests {
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-5
+    }
+
+    #[test]
+    fn edge_zoom_out_reaches_exact_bounds_and_preserves_requested_length() {
+        for bounds in [TimeSpan::DAY, span((1, 0), (23, 0))] {
+            let mut view = View::new(TimeSpan::new(
+                bounds.start(),
+                bounds.start().later_by_minutes(5),
+            ))
+            .expect("view");
+            for _ in 0..20 {
+                let expected = (view.span().duration() * 2).min(bounds.duration());
+                view = view.zoomed_within(ZoomStep::Out, bounds);
+                assert_eq!(view.span().duration(), expected);
+                assert!(view.span().start() >= bounds.start());
+                assert!(view.span().end() <= bounds.end());
+            }
+            assert_eq!(view.span(), bounds);
+        }
+    }
+
+    #[test]
+    fn identical_label_candidates_are_measured_once_and_empty_candidates_are_skipped() {
+        let grid = PlotGrid::new(480., ScaleFactor::try_new(1.).expect("scale"), 1.).expect("grid");
+        let block = grid.place(Placement {
+            left: 0.,
+            width: 1.,
+        });
+        let mut count = 0;
+        assert_eq!(
+            block.fit_label_with(6., "title", "title", |_| {
+                count += 1;
+                1000.
+            }),
+            None
+        );
+        assert_eq!(count, 1);
+        assert_eq!(
+            block.fit_label_with(6., "", "", |_| panic!("empty text must not be measured")),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_block_labels_are_absent() {
+        let grid = PlotGrid::new(480., ScaleFactor::try_new(1.).expect("scale"), 1.).expect("grid");
+        let block = grid.place(Placement {
+            left: 0.,
+            width: 1.,
+        });
+        let empty = MeasuredLabel {
+            text: "",
+            width: 0.,
+        };
+        assert_eq!(block.fitting_label(6., empty, empty), None);
     }
 
     #[test]
@@ -890,7 +972,7 @@ mod tests {
             Duration::from_secs(5 * 60)
         );
         let early = View::new(span((0, 0), (4, 0))).expect("non-empty");
-        assert_eq!(early.zoomed(ZoomStep::Out).span(), span((0, 0), (6, 0)));
+        assert_eq!(early.zoomed(ZoomStep::Out).span(), span((0, 0), (8, 0)));
         assert_eq!(View::full_day().zoomed(ZoomStep::Out).span(), TimeSpan::DAY);
     }
 

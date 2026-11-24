@@ -241,7 +241,16 @@ impl DayHarness {
             self.core.ok(query, serde_json::json!({"reference_range": reference_range, "applications":[],"documents":[],"versions":verified,"next_cursor":null})).await;
         }
     }
-    async fn loaded(&mut self) -> Result<DayData, DayFailure> {
+    async fn finish_fresh(&mut self, first: Request) {
+        self.core.ok(first, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"metrics":{"active_ms":7000,"focus_ratio":0.0,"distract_ratio":0.0,"unclassified_ms":7000,"longest_focus_ms":0,"switches_per_hour":0.0},"hours":[{"start_utc_ms":0,"end_utc_ms":86400000,"local_start":"1970-01-01T00:00:00+00:00[UTC]","categories":[]}],"versions":"day-v2","next_cursor":null})).await;
+        for _ in [TimelineDetail::Category, TimelineDetail::Raw] {
+            let query = self.core.request(Op::QueryTimeline).await;
+            self.core.ok(query, serde_json::json!({"segments":[],"versions":"range-v2","next_cursor":null})).await;
+        }
+        let pending = self.core.request(Op::QueryPendingAway).await;
+        self.core.ok(pending, serde_json::json!({"ranges":[],"versions":"day-v2","next_cursor":null})).await;
+    }
+    async fn loaded(&mut self) -> Result<DayData, LoadDataError> {
         loop {
             match self.ui.events.recv().await.expect("UI event") {
                 LinkEvent::DayLoaded { result, .. } => return result,
@@ -303,9 +312,9 @@ async fn stale_exhaustion_and_busy_are_typed_inline_failures() {
         let error = harness.loaded().await.expect_err("typed failure");
         let expected = match kind {
             quartz_protocol::ErrorKind::StaleCursor => {
-                DayFailureCode::Local(LocalFailureCode::StaleExhausted)
+                LoadDataErrorCode::Local(LocalFailureCode::StaleExhausted)
             }
-            kind => DayFailureCode::Protocol(kind),
+            kind => LoadDataErrorCode::Protocol(kind),
         };
         assert_eq!(error.code(), expected);
         harness.ui.stop().await;
@@ -426,7 +435,7 @@ async fn subscribe_failure_reconciles_the_actual_subscription_on_retry_or_date_s
         let failure = harness.loaded().await.expect_err("subscription rejected");
         assert_eq!(
             failure.code(),
-            DayFailureCode::Protocol(quartz_protocol::ErrorKind::Busy)
+            LoadDataErrorCode::Protocol(quartz_protocol::ErrorKind::Busy)
         );
         if let Recovery::Switch = recovery {
             request.date = request.date.yesterday().expect("another date");
@@ -565,5 +574,273 @@ async fn changed_seven_day_inputs_restart_the_whole_day_load() {
         )
         .await;
     harness.loaded().await.expect("fresh ranking scope");
+    harness.ui.stop().await;
+}
+
+#[tokio::test]
+async fn hiding_removes_registered_and_inflight_day_subscriptions_across_reopens() {
+    enum SubscriptionStage { Registered, InFlight }
+    for stage in [SubscriptionStage::Registered, SubscriptionStage::InFlight] {
+        let mut harness = DayHarness::start().await;
+        let mut generation = DayGeneration::default().next();
+        for cycle in 0..2 {
+            if cycle > 0 {
+                harness.core.event(Topic::Control, serde_json::json!({"op":"ui.show"})).await;
+                loop { if matches!(harness.ui.events.recv().await, Some(LinkEvent::Control(ControlOp::UiShow))) { break; } }
+            }
+            harness.ui.link.load_day(harness.request(), generation, DayLoad::Immediate).await.expect("load");
+            let subscribe = harness.core.request(Op::Subscribe).await;
+            let delayed = match stage {
+                SubscriptionStage::Registered => {
+                    harness.core.ok(subscribe, serde_json::json!({})).await;
+                    Some(harness.core.request(Op::QueryDay).await)
+                }
+                SubscriptionStage::InFlight => Some(subscribe),
+            };
+            harness.ui.link.hidden().expect("hide");
+            let remove = harness.core.request(Op::Unsubscribe).await;
+            let topics: quartz_protocol::Unsubscribe = serde_json::from_value(remove.body.clone()).expect("unsubscribe");
+            assert_eq!(topics.topics, [Topic::Day(harness.date)]);
+            harness.core.ok(remove, serde_json::json!({})).await;
+            let hidden = harness.core.request(Op::UiHidden).await;
+            harness.core.ok(hidden, serde_json::json!({"accepted":true})).await;
+            if let Some(delayed) = delayed { harness.core.ok(delayed, serde_json::json!({})).await; }
+            assert!(tokio::time::timeout(Duration::from_millis(25), harness.core.peer.receive()).await.is_err(), "late subscription acknowledgement must not restart the hidden loader");
+            harness.date = harness.date.yesterday().expect("previous date");
+            generation = generation.next();
+        }
+        harness.ui.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn first_geometry_request_is_immediate_even_when_marked_settled() {
+    let mut harness = DayHarness::start().await;
+    tokio::time::pause();
+    harness.ui.link.load_day(harness.request(), DayGeneration::default().next(), DayLoad::Settled).await.expect("geometry");
+    harness.core.subscribe(vec![Topic::Day(harness.date)]).await;
+    let query = tokio::time::timeout(Duration::from_millis(1), harness.core.request(Op::QueryDay)).await.expect("first query starts without the 180 ms debounce");
+    tokio::time::resume();
+    harness.finish(query, Paging::Single).await;
+    harness.loaded().await.expect("first day");
+    harness.ui.stop().await;
+}
+
+#[tokio::test]
+async fn view_refinements_reuse_aggregates_and_day_events_invalidate_them() {
+    let mut harness = DayHarness::start().await;
+    let generation = DayGeneration::default().next();
+    let query = harness.start_load(generation).await;
+    harness.finish(query, Paging::Multiple).await;
+    let initial = harness.loaded().await.expect("initial day");
+    let mut request = harness.request();
+    request.view = DayView::Range(UtcRange { start: 1000, end: 1_800_000 });
+    harness.ui.link.load_day(request, generation.next(), DayLoad::Settled).await.expect("refinement");
+    let check = harness.core.request(Op::QueryDay).await;
+    harness.core.ok(check, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"versions":"day-v1","next_cursor":null})).await;
+    for detail in [TimelineDetail::Category, TimelineDetail::Raw] {
+        let query = harness.core.request(Op::QueryTimeline).await;
+        let parameters: QueryTimelineRequest = serde_json::from_value(query.body.clone()).expect("timeline");
+        assert_eq!(parameters.detail, detail);
+        assert_eq!(parameters.start_utc_ms, 1000);
+        harness.core.ok(query, serde_json::json!({"segments":[],"versions":"range-v1","next_cursor":null})).await;
+    }
+    let check = harness.core.request(Op::QueryDay).await;
+    harness.core.ok(check, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"versions":"day-v1","next_cursor":null})).await;
+    let refined = harness.loaded().await.expect("refined day");
+    assert_eq!(refined.metrics, initial.metrics);
+    assert_eq!(refined.hours, initial.hours);
+    assert_eq!(refined.applications, initial.applications);
+    assert_eq!(refined.pending, initial.pending);
+    assert!(tokio::time::timeout(Duration::from_millis(25), harness.core.peer.receive()).await.is_err(), "a refinement uses two timeline requests and two aggregate version checks, without reloading aggregate pages or away ranges");
+    harness.core.event(Topic::Day(harness.date), serde_json::to_value(quartz_protocol::DayChanged { date: harness.date, versions: QueryVersions("day-v2".into()) }).expect("event")).await;
+    let query = harness.core.request(Op::QueryDay).await;
+    harness.finish(query, Paging::Single).await;
+    harness.loaded().await.expect("fresh aggregates after invalidation");
+    harness.ui.stop().await;
+}
+
+#[tokio::test]
+async fn failed_hidden_subscription_cleanup_closes_the_connection_to_release_topics() {
+    let mut harness = DayHarness::start().await;
+    let _delayed = harness.start_load(DayGeneration::default().next()).await;
+    harness.ui.link.hidden().expect("hide");
+    let remove = harness.core.request(Op::Unsubscribe).await;
+    harness.core.reject(remove, quartz_protocol::ErrorKind::Busy).await;
+    loop {
+        match harness.ui.events.recv().await.expect("event") {
+            LinkEvent::Disconnected => break,
+            LinkEvent::DayLoading { .. } => {},
+            event => panic!("unexpected event {event:?}"),
+        }
+    }
+    harness.ui.stop().await;
+}
+
+#[tokio::test]
+async fn hidden_cleanup_waits_for_capacity_without_losing_the_hidden_notice() {
+    let mut harness = DayHarness::start().await;
+    let delayed = harness.start_load(DayGeneration::default().next()).await;
+    let mut calls = Vec::new();
+    // Keep one slot for the hide command's unsubscribe, with a day query already outstanding.
+    for _ in 0..BRIDGE_CAPACITY - 2 {
+        let link = harness.ui.link.clone();
+        calls.push(tokio::spawn(async move { link.request(quartz_protocol::UiOpenRequest {}).await }));
+    }
+    let mut held = Vec::new();
+    for _ in 0..BRIDGE_CAPACITY - 2 { held.push(harness.core.request(Op::UiOpen).await); }
+    harness.ui.link.hidden().expect("hide");
+    let remove = harness.core.request(Op::Unsubscribe).await;
+    assert!(tokio::time::timeout(Duration::from_millis(25), harness.core.peer.receive()).await.is_err(), "the hidden notice waits until there is capacity");
+    harness.core.ok(remove, serde_json::json!({})).await;
+    // Bound the lifecycle-notice wait after freeing a request slot.
+    const HIDDEN_NOTICE_DEADLINE: Duration = Duration::from_secs(1);
+    let hidden = tokio::time::timeout(HIDDEN_NOTICE_DEADLINE, harness.core.request(Op::UiHidden))
+        .await.expect("the hidden notice is sent as soon as capacity is available");
+    harness.core.ok(hidden, serde_json::json!({"accepted":true})).await;
+    for request in held { harness.core.ok(request, serde_json::json!({"accepted":true})).await; }
+    harness.core.ok(delayed, serde_json::json!({})).await;
+    for call in calls { call.await.expect("request task").expect("request response"); }
+    harness.ui.stop().await;
+}
+
+#[tokio::test]
+async fn followup_full_refresh_bypasses_cached_aggregates() {
+    let mut harness = DayHarness::start().await;
+    let generation = DayGeneration::default().next();
+    let query = harness.start_load(generation).await;
+    harness.finish(query, Paging::Single).await;
+    harness.loaded().await.expect("initial");
+    let mut request = harness.request();
+    request.view = DayView::Range(UtcRange { start: 1000, end: 1_800_000 });
+    harness.ui.link.load_day(request, generation.next(), DayLoad::Immediate).await.expect("explicit refresh");
+    let query = harness.core.request(Op::QueryDay).await;
+    harness.finish(query, Paging::Single).await;
+    harness.loaded().await.expect("full refresh");
+    harness.ui.stop().await;
+}
+#[tokio::test]
+async fn followup_refinement_checks_versions_without_waiting_for_a_day_event() {
+    let mut harness = DayHarness::start().await;
+    let generation = DayGeneration::default().next();
+    let query = harness.start_load(generation).await;
+    harness.finish(query, Paging::Multiple).await;
+    harness.loaded().await.expect("initial");
+    let mut request = harness.request();
+    request.view = DayView::Range(UtcRange { start: 1000, end: 1_800_000 });
+    harness.ui.link.load_day(request, generation.next(), DayLoad::Settled).await.expect("refinement");
+    let check = harness.core.request(Op::QueryDay).await;
+    harness.core.ok(check, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"versions":"day-v2","next_cursor":null})).await;
+    let fresh = harness.core.request(Op::QueryDay).await;
+    harness.finish_fresh(fresh).await;
+    harness.loaded().await.expect("changed version triggers complete reload");
+    harness.ui.stop().await;
+}
+#[tokio::test]
+async fn followup_seven_day_rankings_are_not_reused_on_refinement() {
+    let mut harness = DayHarness::start().await;
+    let generation = DayGeneration::default().next();
+    let first = harness.start_load(generation).await;
+    harness.finish_scope(first, Paging::Multiple, DayVersionScope::Documents { verified: QueryVersions("ranking-v1".into()) }).await;
+    harness.loaded().await.expect("seven-day ranking");
+    let mut request = harness.request();
+    request.view = DayView::Range(UtcRange { start: 1000, end: 1_800_000 });
+    harness.ui.link.load_day(request, generation.next(), DayLoad::Settled).await.expect("refinement");
+    let first = harness.core.request(Op::QueryDay).await;
+    harness.finish_scope(first, Paging::Multiple, DayVersionScope::Documents { verified: QueryVersions("ranking-v1".into()) }).await;
+    harness.loaded().await.expect("full seven-day data");
+    harness.ui.stop().await;
+}
+#[tokio::test]
+async fn followup_late_load_stays_hidden_until_a_show_control() {
+    let mut harness = DayHarness::start().await;
+    let generation = DayGeneration::default().next();
+    let first = harness.start_load(generation).await;
+    harness.finish(first, Paging::Single).await;
+    harness.loaded().await.expect("initial");
+    harness.ui.link.hidden().expect("hide");
+    let remove = harness.core.request(Op::Unsubscribe).await;
+    harness.core.ok(remove, serde_json::json!({})).await;
+    let hidden = harness.core.request(Op::UiHidden).await;
+    harness.core.ok(hidden, serde_json::json!({"accepted":true})).await;
+    harness.ui.link.load_day(harness.request(), generation.next(), DayLoad::Immediate).await.expect("late task intent");
+    assert!(tokio::time::timeout(Duration::from_millis(25), harness.core.peer.receive()).await.is_err(), "hidden workers ignore late query tasks");
+    harness.core.event(Topic::Control, serde_json::json!({"op":"ui.show"})).await;
+    loop { if matches!(harness.ui.events.recv().await, Some(LinkEvent::Control(ControlOp::UiShow))) { break; } }
+    harness.ui.link.load_day(harness.request(), generation.next().next(), DayLoad::Immediate).await.expect("new window intent");
+    harness.core.subscribe(vec![Topic::Day(harness.date)]).await;
+    let first = harness.core.request(Op::QueryDay).await;
+    harness.finish(first, Paging::Single).await;
+    // A control event is also delivered to the UI receiver.
+    loop { if matches!(harness.ui.events.recv().await, Some(LinkEvent::DayLoaded { result: Ok(_), .. })) { break; } }
+    harness.ui.stop().await;
+}
+#[tokio::test]
+async fn followup_date_switch_retires_old_loader_before_subscribe_answers() {
+    let mut harness = DayHarness::start().await;
+    let generation = DayGeneration::default().next();
+    let delayed = harness.start_load(generation).await;
+    let mut request = harness.request();
+    request.date = request.date.yesterday().expect("date");
+    harness.ui.link.load_day(request, generation.next(), DayLoad::Immediate).await.expect("date switch");
+    let remove = harness.core.request(Op::Unsubscribe).await;
+    harness.core.ok(remove, serde_json::json!({})).await;
+    let subscribe = harness.core.request(Op::Subscribe).await;
+    harness.core.event(Topic::Day(harness.date), serde_json::json!({"date":harness.date,"versions":"changed"})).await;
+    harness.core.ok(delayed, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"metrics":{"active_ms":0,"focus_ratio":0.0,"distract_ratio":0.0,"unclassified_ms":0,"longest_focus_ms":0,"switches_per_hour":0.0},"hours":[{"start_utc_ms":0,"end_utc_ms":86400000,"local_start":"1970-01-01T00:00:00+00:00[UTC]","categories":[]}],"versions":"day-v1","next_cursor":null})).await;
+    assert!(tokio::time::timeout(Duration::from_millis(25), harness.core.peer.receive()).await.is_err(), "old date cannot query while waiting for the new subscription");
+    harness.core.reject(subscribe, quartz_protocol::ErrorKind::Busy).await;
+    harness.loaded().await.expect_err("subscription busy");
+    harness.core.event(Topic::Day(harness.date), serde_json::json!({"date":harness.date,"versions":"changed-again"})).await;
+    assert!(tokio::time::timeout(Duration::from_millis(25), harness.core.peer.receive()).await.is_err());
+    harness.ui.stop().await;
+}
+
+#[tokio::test]
+async fn followup_refinement_rechecks_versions_after_reading_new_timeline_segments() {
+    let mut harness = DayHarness::start().await;
+    let generation = DayGeneration::default().next();
+    let first = harness.start_load(generation).await;
+    harness.finish(first, Paging::Single).await;
+    harness.loaded().await.expect("initial");
+    let mut request = harness.request();
+    request.view = DayView::Range(UtcRange { start: 1000, end: 1_800_000 });
+    harness.ui.link.load_day(request, generation.next(), DayLoad::Settled).await.expect("refinement");
+    let before = harness.core.request(Op::QueryDay).await;
+    harness.core.ok(before, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"versions":"day-v1","next_cursor":null})).await;
+    for _ in [TimelineDetail::Category, TimelineDetail::Raw] {
+        let query = harness.core.request(Op::QueryTimeline).await;
+        harness.core.ok(query, serde_json::json!({"segments":[],"versions":"range-v2","next_cursor":null})).await;
+    }
+    let after = harness.core.request(Op::QueryDay).await;
+    harness.core.ok(after, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"versions":"day-v2","next_cursor":null})).await;
+    let first = harness.core.request(Op::QueryDay).await;
+    harness.finish_fresh(first).await;
+    let day = harness.loaded().await.expect("coherent fresh version");
+    assert_eq!(day.metrics.active_ms, 7000);
+    assert!(day.pending.is_empty());
+    harness.ui.stop().await;
+}
+#[tokio::test]
+async fn followup_successful_local_annotation_refreshes_without_a_day_event() {
+    let mut harness = DayHarness::start().await;
+    let generation = DayGeneration::default().next();
+    let first = harness.start_load(generation).await;
+    harness.finish(first, Paging::Single).await;
+    harness.loaded().await.expect("initial");
+    let id = quartz_protocol::AnnotationId("abcdef00-0000-4000-8000-000000000001".parse().expect("UUID"));
+    let annotation = AwayAction::Rest.request(UtcRange { start: 0, end: 900_000 }, id);
+    let entity = annotation.entities.first().expect("note").clone();
+    let link = harness.ui.link.clone();
+    let call = tokio::spawn(async move { link.request(annotation).await });
+    let write = harness.core.request(Op::AnnotationsCreate).await;
+    harness.core.ok(write, serde_json::json!({"entities":[{"uuid":entity.uuid,"kind":entity.kind,"start_utc_ms":entity.values.start_utc_ms,"end_utc_ms":entity.values.end_utc_ms,"category":entity.values.category,"label":entity.values.label,"note":entity.values.note,"created_utc_ms":0,"updated_utc_ms":0}]})).await;
+    call.await.expect("write task").expect("write success");
+    // A cached WholeDay refresh must also query aggregates; no day event has been sent.
+    const REFRESH_DEADLINE: Duration = Duration::from_secs(1);
+    let first = tokio::time::timeout(REFRESH_DEADLINE, harness.core.request(Op::QueryDay)).await.expect("local mutation invalidates the loader");
+    // The latest loaded request is WholeDay, so its full-day timeline versions match the day.
+    harness.finish(first, Paging::Single).await;
+    harness.loaded().await.expect("mutation refresh");
     harness.ui.stop().await;
 }

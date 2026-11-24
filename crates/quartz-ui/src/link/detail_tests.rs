@@ -158,7 +158,7 @@ impl DetailHarness {
                 .await;
         }
     }
-    async fn loaded(&mut self, expected: DetailGeneration) -> Result<DetailData, DayFailure> {
+    async fn loaded(&mut self, expected: DetailGeneration) -> Result<DetailData, LoadDataError> {
         loop {
             match self.ui.events.recv().await.expect("detail event") {
                 LinkEvent::DetailLoading { generation } => assert!(expected.accepts(generation)),
@@ -352,7 +352,7 @@ async fn stale_detail_cursor_restarts_the_whole_selection_and_exhaustion_is_type
                     .await
                     .expect_err("bounded failure")
                     .code(),
-                DayFailureCode::Local(LocalFailureCode::StaleExhausted)
+                LoadDataErrorCode::Local(LocalFailureCode::StaleExhausted)
             ),
         }
         harness.ui.stop().await;
@@ -562,7 +562,7 @@ async fn busy_detail_is_a_typed_failure_until_an_explicit_retry() {
             .await
             .expect_err("busy detail")
             .code(),
-        DayFailureCode::Protocol(wire::ErrorKind::Busy)
+        LoadDataErrorCode::Protocol(wire::ErrorKind::Busy)
     );
     assert!(
         tokio::time::timeout(QUIET_PERIOD, harness.core.peer.receive())

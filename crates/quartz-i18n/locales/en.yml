@@ -499,3 +499,8 @@ details.duration.hours_minutes_seconds:
 
 details.clock.twelve:
   en: "%{hours}:%{minutes}:%{value} %{name}"
+
+today.resume_failed:
+  en: "Couldn’t resume recording. Try again."
+today.pending.failed:
+  en: "Couldn’t mark this time as %{name}. Try again."

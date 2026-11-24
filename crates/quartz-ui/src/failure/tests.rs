@@ -307,3 +307,30 @@ fn copied_diagnostics_contain_the_message_code_values_and_exact_command_without_
         assert!(!text.contains("<br>"));
     }
 }
+
+#[test]
+fn restore_commands_and_warning_create_no_empty_value_groups() {
+    let lines = vec![
+        DetailLine::Value {
+            label: "code".into(),
+            value: "migration_failed".into(),
+        },
+        DetailLine::Value {
+            label: "backup".into(),
+            value: "backup.db".into(),
+        },
+        DetailLine::Command("restore backup.db".into()),
+        DetailLine::Command("restore another.db".into()),
+        DetailLine::Text("Restoring replaces the database".into()),
+    ];
+    let groups = DetailLine::grouped(lines);
+    assert_eq!(groups.len(), 4);
+    assert!(matches!(groups.first(), Some(DetailGroup::Values(values)) if values.len() == 2));
+    assert!(matches!(groups.last(), Some(DetailGroup::Text(_))));
+    let Some(DetailGroup::Values(values)) = groups.first() else {
+        panic!("leading value group");
+    };
+    assert_eq!(values.first().expect("code row").label, "code");
+    assert_eq!(values.first().expect("code row").value, "migration_failed");
+    assert!(DetailLine::grouped(Vec::new()).is_empty());
+}

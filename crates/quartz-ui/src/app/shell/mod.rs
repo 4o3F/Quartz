@@ -247,9 +247,9 @@ impl OpenDetails {
     }
 }
 
-/// Root view of the main window.
+/// Root view of the main window; headless controller tests supply unit focus handles.
 #[derive(Debug)]
-pub(crate) struct AppShell {
+pub(crate) struct AppShell<Focus = FocusHandle> {
     live: Option<live::LivePage>,
     #[cfg(feature = "preview")]
     preview: Option<preview::PreviewDay>,
@@ -268,9 +268,9 @@ pub(crate) struct AppShell {
     /// The placement the previous frame used, to notice when the panel starts to float.
     placement: PanelPlacement,
     /// Focus of the details panel, so `Esc` reaches it while it floats.
-    panel_focus: FocusHandle,
+    panel_focus: Focus,
     /// Focus of the main area, where it returns when the panel closes.
-    root_focus: FocusHandle,
+    root_focus: Focus,
     ranking: RankingKind,
     lanes: LaneMode,
     range: RangeChoice,
@@ -301,7 +301,6 @@ impl AppShell {
     #[must_use]
     pub(crate) fn new(init: ShellInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe_window_activation(window, |this, _, cx| {
-            crate::app::system_theme::SystemTheme::refresh(cx);
             this.refresh_text_scale(cx);
         })
         .detach();
@@ -335,6 +334,10 @@ impl AppShell {
     }
 
     /// Shows the tooltip of `segment` as if the pointer were at `position`.
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(crate) fn show_tooltip(&mut self, segment: SegmentId, position: Point<Pixels>) {
         self.hover = Some(Hover {
             target: HoverTarget::Segment(segment),

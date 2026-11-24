@@ -56,6 +56,8 @@ messages! {
     EmptyPastTitle => "today.empty_past.title",
     EmptyPastMessage => "today.empty_past.message",
     Resume => "today.resume",
+    ResumeFailed => "today.resume_failed",
+    AwayFailed => "today.pending.failed" [Name],
     StopStarting => "today.stop.starting",
     StopPersistence => "today.stop.persistence",
     StopSession => "today.stop.session",

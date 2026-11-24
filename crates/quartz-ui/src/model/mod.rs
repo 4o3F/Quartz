@@ -17,18 +17,34 @@ mod track;
 
 pub(crate) use application::{AppId, AppInfo, Glyph};
 pub(crate) use category::{BuiltinCategory, Category, CategoryId, CategoryName, Tendency};
-pub(crate) use day::{Day, DayParts, DaySource, EARLIER_DAYS, EarlierDays, PendingAwaySpan};
-pub(crate) use details::{BarDay, Details, DetailsSubject, IntervalCard};
-pub(crate) use palette::{CategoryColor, PaletteSlot, PaletteSlotMap};
-pub(crate) use ranking::{RankKey, RankRow, RankingKind};
-pub(crate) use rule::{Explanation, Rule, RuleCondition, RuleField, RuleId, RuleOperator};
+#[cfg(windows)]
+pub(crate) use day::PendingAwaySpan;
+pub(crate) use day::{Day, DaySource};
+#[cfg(any(test, feature = "preview"))]
+pub(crate) use day::{DayParts, EARLIER_DAYS, EarlierDays};
+pub(crate) use details::DetailsSubject;
+#[cfg(windows)]
+pub(crate) use details::{BarDay, Details, IntervalCard};
+#[cfg(windows)]
+pub(crate) use palette::PaletteSlotMap;
+pub(crate) use palette::{CategoryColor, PaletteSlot};
+#[cfg(windows)]
+pub(crate) use ranking::RankKey;
+pub(crate) use ranking::{RankRow, RankingKind};
+#[cfg(windows)]
+pub(crate) use rule::Explanation;
+pub(crate) use rule::RuleCondition;
+#[cfg(any(test, feature = "preview"))]
+pub(crate) use rule::{Rule, RuleField, RuleId, RuleOperator};
 pub(crate) use segment::{ClassificationSource, Segment, SegmentId};
 pub(crate) use state::{AwayLabel, ClockAnomaly, StateBlock, StateKind};
 pub(crate) use summary::{DaySummary, HourlyBar, Share};
 pub(crate) use time::{
     MILLIS_PER_SECOND, MINUTES_PER_HOUR, SECONDS_PER_MINUTE, TimeOfDay, TimeSpan,
 };
-pub(crate) use track::{Lane, MainBlock};
+#[cfg(windows)]
+pub(crate) use track::Lane;
+pub(crate) use track::MainBlock;
 
 #[cfg(test)]
 pub(crate) mod fixture;

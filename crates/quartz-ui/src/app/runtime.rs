@@ -40,11 +40,11 @@ pub enum LoadThemeError {
     display("the GPUI platform layer reported an error"),
     visibility(pub(crate))
 )]
-pub struct GpuiError {
-    #[snafu(source(from(anyhow::Error, GpuiError::capture)))]
+pub struct CallGpuiError {
+    #[snafu(source(from(anyhow::Error, CallGpuiError::capture)))]
     source: anyhow::Error,
 }
-impl GpuiError {
+impl CallGpuiError {
     fn capture(source: anyhow::Error) -> anyhow::Error {
         // Window errors can contain COM error information; return owned diagnostics after GPUI exits.
         anyhow::anyhow!("{source:#}")
@@ -113,7 +113,7 @@ pub enum Appearance {
 }
 
 impl Appearance {
-    fn apply(self, cx: &mut App) {
+    pub(super) fn apply(self, cx: &mut App) {
         match self {
             Self::System => Theme::sync_system_appearance(None, cx),
             Self::Light => Theme::change(ThemeMode::Light, None, cx),
@@ -126,9 +126,10 @@ impl Appearance {
         if self == Self::System {
             window
                 .observe_window_appearance(|window, cx| {
+                    if Theme::global(cx).mode != ThemeMode::from(window.appearance()) {
+                        Theme::sync_system_appearance(Some(window), cx);
+                    }
                     SystemTheme::refresh(cx);
-                    Theme::sync_system_appearance(Some(window), cx);
-                    SystemTheme::apply_components(cx);
                 })
                 .detach();
         }
@@ -153,6 +154,10 @@ pub(crate) fn window_options(title: String, bounds: Bounds<Pixels>, cx: &App) ->
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowClosePolicy {
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     Quit,
     Managed,
 }
@@ -189,9 +194,7 @@ pub(crate) fn run_gpui<E: 'static>(
             LayoutDirection::from_locale(language.code()).set_global(cx);
             #[cfg(feature = "preview")]
             cx.set_global(theme.preview);
-            SystemTheme::install(theme, cx);
-            appearance.apply(cx);
-            SystemTheme::apply_components(cx);
+            SystemTheme::install(theme, appearance, cx);
             if let Err(error) = open(cx) {
                 report.set(Some(error));
                 cx.quit();
@@ -226,7 +229,7 @@ mod tests {
             drops: Arc::clone(&drops),
         })
         .context("creating GPUI window");
-        let result = Err::<(), _>(source).context(GpuiSnafu);
+        let result = Err::<(), _>(source).context(CallGpuiSnafu);
         let error = result.expect_err("window error");
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(

@@ -285,8 +285,26 @@ impl Day {
         }
         day.categories = map.categories;
         day.apps = map.apps;
+        let activity_range = track
+            .iter()
+            .filter(|block| matches!(block, MainBlock::Active { .. }))
+            .map(MainBlock::span)
+            .reduce(|span, next| {
+                TimeSpan::new(span.start().min(next.start()), span.end().max(next.end()))
+            });
+        let mut category_totals: Vec<_> = totals
+            .into_iter()
+            .filter(|entry| !entry.1.is_zero())
+            .map(|(category, total)| CategoryTotal { category, total })
+            .collect();
+        category_totals.sort_by(|left, right| {
+            right
+                .total
+                .cmp(&left.total)
+                .then(left.category.cmp(&right.category))
+        });
         day.derived = Derived {
-            activity_range: day.compute_activity_range(),
+            activity_range,
             summary: DaySummary {
                 active: Mapping::duration(data.metrics.active_ms)?,
                 focus: Mapping::ratio(data.metrics.focus_ratio)?,
@@ -295,24 +313,12 @@ impl Day {
                 longest_focus_streak: Mapping::duration(data.metrics.longest_focus_ms)?,
                 switches: 0,
             },
-            category_totals: totals
-                .into_iter()
-                .map(|(category, total)| CategoryTotal { category, total })
-                .collect(),
+            category_totals,
             hourly,
             main_track: track,
             lanes: day.compute_lanes(),
             rankings: Rankings::default(),
         };
-        day.derived.activity_range = day
-            .derived
-            .main_track
-            .iter()
-            .filter(|block| matches!(block, MainBlock::Active { .. }))
-            .map(MainBlock::span)
-            .reduce(|span, next| {
-                TimeSpan::new(span.start().min(next.start()), span.end().max(next.end()))
-            });
         let mut app_ids = BTreeMap::new();
         for (protocol, local) in map.app_ids {
             app_ids.insert(local, protocol);
@@ -351,6 +357,7 @@ impl Day {
         )
         .ok()
     }
+    #[cfg(windows)]
     pub(crate) fn local_clock_at(&self, utc: i64) -> Option<jiff::civil::Time> {
         let DaySource::Live(live) = &self.source else {
             return None;
@@ -529,6 +536,68 @@ mod tests {
             pending: Vec::new(),
         }
     }
+    #[test]
+    fn projected_titles_have_no_label_or_tooltip_title_row() {
+        let mut input = data();
+        input.raw.first_mut().expect("raw").title = None;
+        let day = Day::from_protocol(input).expect("day");
+        assert_eq!(day.segments.first().expect("segment").visible_title(), None);
+    }
+
+    #[test]
+    fn live_mapping_avoids_the_redundant_raw_activity_scan() {
+        let source = include_str!("live.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("implementation");
+        assert!(
+            !source.contains("day.compute_activity_range()"),
+            "live bounds must come from the main track, including offline activity, without scanning raw application segments first"
+        );
+    }
+
+    #[test]
+    fn live_activity_range_includes_offline_activity_without_raw_application_segments() {
+        let mut input = data();
+        input.raw.clear();
+        let day = Day::from_protocol(input).expect("day");
+        assert_eq!(
+            day.activity_range(),
+            Some(TimeSpan::new(
+                TimeOfDay::from_elapsed_millis(1),
+                TimeOfDay::from_elapsed_millis(4001)
+            ))
+        );
+    }
+
+    #[test]
+    fn live_category_totals_drop_zeros_and_sort_by_descending_duration() {
+        let mut input = data();
+        let hour = input.hours.first_mut().expect("hour");
+        hour.categories.first_mut().expect("classified").duration_ms = 1000;
+        hour.categories
+            .last_mut()
+            .expect("unclassified")
+            .duration_ms = 3000;
+        let day = Day::from_protocol(input.clone()).expect("day");
+        let durations: Vec<_> = day
+            .category_totals()
+            .iter()
+            .map(|total| total.total.as_millis())
+            .collect();
+        assert_eq!(durations, [3000, 1000]);
+        input
+            .hours
+            .first_mut()
+            .expect("hour")
+            .categories
+            .last_mut()
+            .expect("unclassified")
+            .duration_ms = 0;
+        let day = Day::from_protocol(input).expect("day");
+        assert_eq!(day.category_totals().len(), 1);
+    }
+
     #[test]
     fn multicolored_rollback_hour_preserves_all_categories_and_exact_labels() {
         let mut data = data();

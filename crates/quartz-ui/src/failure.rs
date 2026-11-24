@@ -49,6 +49,7 @@ impl FailureAction {
             Self::Exit => Msg::FailureExit,
         })
     }
+    #[cfg(windows)]
     pub(crate) fn element_id(self) -> &'static str {
         match self {
             Self::StartCore => "start-core",
@@ -316,6 +317,7 @@ impl Failure {
         };
         Self::new(kind)
     }
+    #[cfg(windows)]
     pub(crate) fn from_request(error: &crate::link::RequestCoreError) -> Self {
         match error {
             crate::link::RequestCoreError::Closed => Self::new(FailureKind::InterfaceUnavailable),
@@ -325,6 +327,7 @@ impl Failure {
             crate::link::RequestCoreError::Call { source } => Self::from_connection(source),
         }
     }
+    #[cfg(windows)]
     pub(crate) fn from_start(error: &crate::link::StartCoreError) -> Self {
         match error {
             crate::link::StartCoreError::Closed => Self::new(FailureKind::InterfaceUnavailable),
@@ -341,6 +344,7 @@ pub(crate) enum DetailsExpansion {
     Expanded,
 }
 impl DetailsExpansion {
+    #[cfg(windows)]
     pub(crate) fn toggle(&mut self) {
         *self = match self {
             Self::Collapsed => Self::Expanded,
@@ -361,7 +365,37 @@ pub(crate) enum DetailLine {
     Command(String),
     Text(String),
 }
+/// Consecutive values share a column; commands and text occupy their own rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DetailGroup {
+    Values(Vec<DetailValue>),
+    Command(String),
+    Text(String),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DetailValue {
+    pub(crate) label: String,
+    pub(crate) value: String,
+}
 impl DetailLine {
+    pub(crate) fn grouped(lines: Vec<Self>) -> Vec<DetailGroup> {
+        let mut groups = Vec::new();
+        for line in lines {
+            match line {
+                Self::Value { label, value } => {
+                    let value = DetailValue { label, value };
+                    match groups.last_mut() {
+                        Some(DetailGroup::Values(values)) => values.push(value),
+                        _ => groups.push(DetailGroup::Values(vec![value])),
+                    }
+                }
+                Self::Command(text) => groups.push(DetailGroup::Command(text)),
+                Self::Text(text) => groups.push(DetailGroup::Text(text)),
+            }
+        }
+        groups
+    }
+
     fn text(&self) -> String {
         match self {
             Self::Value { label, value } => format!("{label}: {value}"),

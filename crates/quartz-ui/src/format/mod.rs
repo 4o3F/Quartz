@@ -3,5 +3,7 @@
 mod formatter;
 mod message;
 
-pub(crate) use formatter::{DurationParts, Formatter, SourceText};
+pub(crate) use formatter::Formatter;
+#[cfg(windows)]
+pub(crate) use formatter::{DurationParts, SourceText};
 pub(crate) use message::{Arg, Msg};

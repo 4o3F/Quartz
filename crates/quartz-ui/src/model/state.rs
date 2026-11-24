@@ -6,6 +6,10 @@ use super::{category::CategoryId, time::TimeSpan};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AwayLabel {
     /// Shown in the pending-away row until the user labels or dismisses it.
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     Pending,
     /// Already labeled, dismissed, or too short to ask about.
     Settled,
@@ -32,6 +36,7 @@ pub(crate) enum StateKind {
 pub(crate) enum ClockAnomaly {
     #[default]
     None,
+    #[cfg(windows)]
     Detected,
 }
 

@@ -48,6 +48,7 @@ pub enum ReadTextScaleError {
         source: crate::CallWindowsError,
     },
     /// Windows reported a factor outside the range of its own slider.
+    #[cfg(windows)]
     #[snafu(display("the Windows text size setting is not a valid scale"))]
     InvalidSetting { source: ValidateTextScaleError },
 }
@@ -91,6 +92,10 @@ impl TextScale {
 
     /// The factor as Windows reports it.
     #[must_use]
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub const fn get(self) -> f64 {
         self.exact
     }
@@ -135,6 +140,10 @@ pub(crate) enum TextScaleSource {
     #[default]
     System,
     /// A fixed scale, such as the preview override.
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     Fixed(TextScale),
 }
 
@@ -227,6 +236,18 @@ impl FromStr for TextScale {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn native_system_text_scale_is_unscaled_and_fixed_sources_remain_stable() {
+        let mut system = LiveTextScale::read(TextScaleSource::System).expect("system scale");
+        assert_eq!(system.current(), TextScale::UNSCALED);
+        assert_eq!(system.refresh(), TextScaleChange::Unchanged);
+        let enlarged = TextScale::try_new(2.25).expect("scale");
+        let mut fixed = LiveTextScale::read(TextScaleSource::Fixed(enlarged)).expect("fixed scale");
+        assert_eq!(fixed.current(), enlarged);
+        assert_eq!(fixed.refresh(), TextScaleChange::Unchanged);
+    }
 
     #[test]
     fn the_range_edges_are_valid_and_values_beyond_them_are_not() {

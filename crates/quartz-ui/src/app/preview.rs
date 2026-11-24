@@ -20,7 +20,8 @@ use windows::Win32::{
 use super::{
     AppShell, Page, RangeChoice, ShellInit,
     runtime::{
-        Appearance, GpuiError, GpuiSnafu, LoadThemeError, ThemeBundle, run_gpui, window_options,
+        Appearance, CallGpuiError, CallGpuiSnafu, LoadThemeError, ThemeBundle, run_gpui,
+        window_options,
     },
 };
 use crate::{
@@ -326,13 +327,13 @@ pub enum RunPreviewError {
     LoadTheme { source: LoadThemeError },
     /// GPUI could not create the window.
     #[snafu(display("could not open the preview window"))]
-    OpenWindow { source: GpuiError },
+    OpenWindow { source: CallGpuiError },
     /// The window could not be moved off-screen, so it was never shown.
     #[snafu(display("could not place the preview window off-screen"))]
     PlaceWindow { source: PlaceWindowError },
     /// The off-screen window could not be given its size.
     #[snafu(display("could not resize the preview window"))]
-    ResizeWindow { source: GpuiError },
+    ResizeWindow { source: CallGpuiError },
 }
 
 /// Moves the hidden `window` outside every display, then shows it without activating it.
@@ -518,7 +519,7 @@ impl PreviewOptions {
                 }
             })
         })
-        .context(GpuiSnafu)
+        .context(CallGpuiSnafu)
         .context(OpenWindowSnafu)?;
         if let Some(error) = placement.take() {
             return Err(RunPreviewError::PlaceWindow { source: error });
@@ -529,7 +530,7 @@ impl PreviewOptions {
                     window.resize(window_size);
                     window.refresh();
                 })
-                .context(GpuiSnafu)
+                .context(CallGpuiSnafu)
                 .context(ResizeWindowSnafu)?;
         }
         Ok(())
@@ -562,6 +563,7 @@ impl PreviewOptions {
             }
             self.appearance.observe(window, cx);
             cx.new(|cx| {
+                super::system_theme::SystemTheme::observe_activation(window, cx);
                 let mut shell = AppShell::new(init, window, cx);
                 shell.configure_preview(self.state);
                 if let Some(segment) = hover {
@@ -570,7 +572,7 @@ impl PreviewOptions {
                 shell
             })
         })
-        .context(GpuiSnafu)
+        .context(CallGpuiSnafu)
         .context(OpenWindowSnafu)?;
         if let Some(error) = placement.take() {
             return Err(RunPreviewError::PlaceWindow { source: error });
@@ -585,7 +587,7 @@ impl PreviewOptions {
                 window.resize(window_size);
                 window.refresh();
             })
-            .context(GpuiSnafu)
+            .context(CallGpuiSnafu)
             .context(ResizeWindowSnafu)
     }
 }

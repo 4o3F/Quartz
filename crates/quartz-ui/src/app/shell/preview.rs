@@ -2,7 +2,7 @@
 use super::{AppShell, calendar::CalendarMonth, live::LoadPhase};
 use crate::{
     app::preview::{PreviewState, TodayPreviewState},
-    link::DayFailure,
+    link::LoadDataError,
     model::Day,
 };
 use quartz_protocol::{LocaleSettings, StateSnapshot, StopReason};
@@ -11,7 +11,7 @@ use quartz_protocol::{LocaleSettings, StateSnapshot, StopReason};
 pub(super) struct PreviewDay {
     pub snapshot: StateSnapshot,
     pub phase: LoadPhase,
-    pub failure: Option<DayFailure>,
+    pub failure: Option<LoadDataError>,
 }
 impl AppShell {
     pub(crate) fn configure_preview(&mut self, state: PreviewState) {
@@ -81,7 +81,7 @@ impl AppShell {
                 LoadPhase::Ready
             },
             failure: (scenario == Some(TodayPreviewState::QueryFailed))
-                .then_some(DayFailure::InvalidData),
+                .then_some(LoadDataError::InvalidData),
         });
     }
 }

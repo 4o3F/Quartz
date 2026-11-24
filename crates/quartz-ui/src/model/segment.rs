@@ -10,6 +10,10 @@ pub(crate) enum ClassificationSource {
     ProtocolRule(quartz_protocol::ClassificationRuleId),
     Mixed,
     /// A matched rule and the value its field had.
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     Rule {
         rule: RuleId,
         actual: String,
@@ -33,6 +37,7 @@ impl SegmentId {
 
     /// The raw id, for element ids.
     #[must_use]
+    #[cfg(windows)]
     pub(crate) const fn get(self) -> u32 {
         self.0
     }
@@ -56,6 +61,11 @@ pub(crate) struct Segment {
 }
 
 impl Segment {
+    /// The title row is absent when privacy projection supplied no visible text.
+    pub(crate) fn visible_title(&self) -> Option<&str> {
+        (!self.title.is_empty()).then_some(self.title.as_str())
+    }
+
     /// Length of the segment.
     #[must_use]
     pub(crate) fn duration(&self) -> Duration {

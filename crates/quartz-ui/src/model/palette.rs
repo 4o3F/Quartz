@@ -58,6 +58,10 @@ impl PaletteSlot {
     /// The first slot no color in `used` takes, in palette order (11 section 3.3); `None` when
     /// all 14 are taken.
     #[must_use]
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(crate) fn first_unused(used: &[CategoryColor]) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -65,6 +69,7 @@ impl PaletteSlot {
     }
 
     /// Stable ordinal for high contrast chart patterns (11 section 2).
+    #[cfg(windows)]
     pub(crate) const fn ordinal(self) -> u8 {
         self.0
     }
@@ -80,6 +85,7 @@ pub(crate) struct PaletteSlotMap<T>([T; PALETTE_LEN]);
 
 impl<T: Copy> PaletteSlotMap<T> {
     /// Uses one system color for all category slots in high contrast (11 section 2).
+    #[cfg(windows)]
     pub(crate) fn filled(value: T) -> Self {
         Self([value; PALETTE_LEN])
     }

@@ -6,7 +6,7 @@ use crate::{
         widgets::{ButtonContent, InfoBarStyle, RampExt as _, SkeletonTone, Widgets},
     },
     format::{Formatter, Msg},
-    link::{DayFailure, DayGeneration, DayLoad, DayRequest, DayView, Link},
+    link::{DayGeneration, DayLoad, DayRequest, DayView, Link, LoadDataError},
     model::{Day, DaySource, TimeOfDay},
 };
 use gpui_kit::{
@@ -41,10 +41,152 @@ pub(super) struct LivePage {
     pub snapshot: StateSnapshot,
     pub generation: DayGeneration,
     pub phase: LoadPhase,
-    pub failure: Option<DayFailure>,
+    pub failure: Option<LoadDataError>,
     request: Option<DayRequest>,
+    pub(super) actions: ActionWrites,
     indicator: Indicator,
     timer: Option<Task<()>>,
+    load_task: Option<Task<()>>,
+    resume_task: Option<Task<()>>,
+}
+impl LivePage {
+    fn finish_annotation(
+        &mut self,
+        day: &Day,
+        range: crate::link::UtcRange,
+        action: crate::link::AwayAction,
+        result: Result<(), crate::link::RequestCoreError>,
+    ) {
+        let succeeded = result.is_ok();
+        self.actions.finish(range, action, result);
+        if succeeded {
+            self.actions.reconcile(day);
+        }
+    }
+    fn clear_resume_failure(&mut self) {
+        if self
+            .actions
+            .failure
+            .as_ref()
+            .is_some_and(|failure| matches!(failure.action, MutationAction::Resume))
+        {
+            self.actions.failure = None;
+        }
+    }
+    fn begin_resume(&mut self) {
+        self.resume_task = None;
+        self.clear_resume_failure();
+    }
+    fn observe_recording(&mut self) {
+        if self.snapshot.recording {
+            self.resume_task = None;
+            self.clear_resume_failure();
+        }
+    }
+    fn change_date(&mut self) {
+        self.actions.failure = None;
+        self.load_task = None;
+        self.resume_task = None;
+    }
+    fn finish_resume(&mut self, result: Result<(), crate::link::RequestCoreError>) {
+        match result {
+            Ok(()) => self.clear_resume_failure(),
+            Err(_) if self.snapshot.recording => self.clear_resume_failure(),
+            Err(source) => {
+                self.actions.failure = Some(ActionFailure {
+                    action: MutationAction::Resume,
+                    error: source.into(),
+                })
+            }
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WritePhase {
+    Writing,
+    Submitted,
+}
+#[derive(Debug)]
+struct SpanWrite {
+    range: crate::link::UtcRange,
+    phase: WritePhase,
+}
+#[derive(Debug, Clone, Copy)]
+enum MutationAction {
+    Away(crate::link::AwayAction),
+    Resume,
+}
+impl MutationAction {
+    fn message(self, formatter: Formatter) -> String {
+        match self {
+            Self::Resume => formatter.text(Msg::ResumeFailed),
+            Self::Away(action) => formatter.text_with(
+                Msg::AwayFailed,
+                &[crate::format::Arg::Name.with(&formatter.text(match action {
+                    crate::link::AwayAction::Rest => Msg::PendingRest,
+                    crate::link::AwayAction::Meeting => Msg::PendingMeeting,
+                    crate::link::AwayAction::Reading => Msg::PendingReading,
+                    crate::link::AwayAction::Ignore => Msg::PendingDismiss,
+                }))],
+            ),
+        }
+    }
+}
+#[derive(Debug)]
+struct ActionFailure {
+    action: MutationAction,
+    error: LoadDataError,
+}
+#[derive(Debug, Default)]
+pub(super) struct ActionWrites {
+    spans: Vec<SpanWrite>,
+    failure: Option<ActionFailure>,
+}
+impl ActionWrites {
+    pub(super) fn contains(&self, range: crate::link::UtcRange) -> bool {
+        self.spans.iter().any(|write| write.range == range)
+    }
+    fn begin(&mut self, range: crate::link::UtcRange) -> Result<(), crate::link::RequestCoreError> {
+        if self.contains(range) {
+            return Err(crate::link::RequestCoreError::Busy);
+        }
+        self.spans.push(SpanWrite {
+            range,
+            phase: WritePhase::Writing,
+        });
+        self.failure = None;
+        Ok(())
+    }
+    fn finish(
+        &mut self,
+        range: crate::link::UtcRange,
+        action: crate::link::AwayAction,
+        result: Result<(), crate::link::RequestCoreError>,
+    ) {
+        match result {
+            Ok(()) => {
+                if let Some(write) = self.spans.iter_mut().find(|write| write.range == range) {
+                    write.phase = WritePhase::Submitted;
+                }
+            }
+            Err(source) => {
+                self.spans.retain(|write| write.range != range);
+                self.failure = Some(ActionFailure {
+                    action: MutationAction::Away(action),
+                    error: source.into(),
+                });
+            }
+        }
+    }
+    fn reconcile(&mut self, day: &Day) {
+        self.spans.retain(|write| {
+            write.phase == WritePhase::Writing
+                || day
+                    .pending_ranges()
+                    .iter()
+                    .any(|pending| day.utc_range(pending.span) == Some(write.range))
+        });
+    }
 }
 impl AppShell {
     pub(super) fn day_snapshot(&self) -> Option<&StateSnapshot> {
@@ -61,7 +203,7 @@ impl AppShell {
         }
         self.live.as_ref().map(|live| live.phase)
     }
-    fn day_failure(&self) -> Option<&DayFailure> {
+    fn day_failure(&self) -> Option<&LoadDataError> {
         #[cfg(feature = "preview")]
         if let Some(preview) = &self.preview {
             return preview.failure.as_ref();
@@ -151,8 +293,11 @@ impl AppShell {
             phase: LoadPhase::Loading,
             failure: None,
             request: None,
+            actions: ActionWrites::default(),
             indicator: Indicator::Hidden,
             timer: None,
+            load_task: None,
+            resume_task: None,
         });
         cx.notify();
     }
@@ -168,12 +313,18 @@ impl AppShell {
                 && snapshot.logical_date != live.snapshot.logical_date)
                 || self.day.date() > snapshot.logical_date
         });
+        let recovered = self
+            .live
+            .as_ref()
+            .is_some_and(|live| !live.snapshot.recording && snapshot.recording);
         if follow {
             self.cancel_details(cx);
         }
         if let Some(live) = &mut self.live {
             live.snapshot = snapshot;
+            live.observe_recording();
             if follow {
+                live.change_date();
                 self.calendar = None;
                 self.hover = None;
                 self.pan = None;
@@ -186,6 +337,9 @@ impl AppShell {
                 live.timer = None;
                 live.indicator = Indicator::Hidden;
             }
+        }
+        if recovered && !follow {
+            self.retry_day(cx);
         }
         cx.notify();
     }
@@ -222,7 +376,7 @@ impl AppShell {
     pub(crate) fn day_loaded(
         &mut self,
         generation: DayGeneration,
-        result: Result<crate::link::DayData, DayFailure>,
+        result: Result<crate::link::DayData, LoadDataError>,
         cx: &mut Context<Self>,
     ) {
         let Some(live) = &mut self.live else {
@@ -233,12 +387,14 @@ impl AppShell {
         }
         live.timer = None;
         live.indicator = Indicator::Hidden;
-        match result.and_then(|data| Day::from_protocol(data).map_err(|_| DayFailure::InvalidData))
+        match result
+            .and_then(|data| Day::from_protocol(data).map_err(|_| LoadDataError::InvalidData))
         {
             Ok(day) => {
                 if matches!(self.day.source(), DaySource::Loading) {
                     self.range = RangeChoice::Activity;
                 }
+                live.actions.reconcile(&day);
                 self.day = day;
                 self.hover = None;
                 live.phase = LoadPhase::Ready;
@@ -260,14 +416,16 @@ impl AppShell {
         let generation = live.generation;
         let link = live.link.clone();
         self.day_loading(generation, cx);
-        cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             if let Err(source) = link.load_day(request, generation, mode).await {
                 let _ = this.update(cx, |this, cx| {
-                    this.day_loaded(generation, Err(DayFailure::Request { source }), cx)
+                    this.day_loaded(generation, Err(LoadDataError::Request { source }), cx)
                 });
             }
-        })
-        .detach();
+        });
+        if let Some(live) = &mut self.live {
+            live.load_task = Some(task);
+        }
     }
     pub(super) fn observe_plot(&mut self, logical: f32, scale: f32, cx: &mut Context<Self>) {
         self.plot_width = Some(logical);
@@ -293,7 +451,12 @@ impl AppShell {
         if live.request == Some(request) {
             return;
         }
-        self.load_request(request, DayLoad::Settled, cx);
+        let mode = if live.request.is_none() {
+            DayLoad::Immediate
+        } else {
+            DayLoad::Settled
+        };
+        self.load_request(request, mode, cx);
     }
     pub(super) fn measure_plot(&self, cx: &Context<Self>) -> Canvas<()> {
         let entity = cx.entity();
@@ -326,6 +489,7 @@ impl AppShell {
         self.pan = None;
         let previous = live.request;
         live.generation = live.generation.next();
+        live.change_date();
         live.failure = None;
         live.phase = LoadPhase::Loading;
         live.request = None;
@@ -416,25 +580,52 @@ impl AppShell {
         }
         Some(bar.into_any_element())
     }
-    fn resume(&self, cx: &mut Context<Self>) {
-        let Some(live) = &self.live else {
+    fn resume(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = &mut self.live else {
             return;
         };
+        live.begin_resume();
         let link = live.link.clone();
-        cx.spawn(async move |this, cx| {
-            if let Err(source) = link
+        let date = self.day.date();
+        cx.notify();
+        let task = cx.spawn(async move |this, cx| {
+            let result = link
                 .request(quartz_protocol::TrackingResumeRequest {})
                 .await
-            {
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(live) = &mut this.live {
-                        live.failure = Some(source.into());
-                        cx.notify();
-                    }
-                });
-            }
-        })
-        .detach();
+                .map(|_| ());
+            let _ = this.update(cx, |this, cx| {
+                if this.day.date() != date {
+                    return;
+                }
+                if let Some(live) = &mut this.live {
+                    live.finish_resume(result);
+                }
+                cx.notify();
+            });
+        });
+        if let Some(live) = &mut self.live {
+            live.resume_task = Some(task);
+        }
+    }
+    pub(super) fn action_notice(&self, ui: &Widgets<'_>) -> Option<AnyElement> {
+        let failure = self.live.as_ref()?.actions.failure.as_ref()?;
+        Some(
+            ui.card()
+                .p(ui.metrics.space.l)
+                .flex()
+                .flex_col()
+                .gap(ui.metrics.space.xs)
+                .ramp(ui, Ramp::Body)
+                .child(failure.action.message(self.formatter))
+                .child(
+                    div()
+                        .ramp(ui, Ramp::Caption)
+                        .font(ui.mono_font())
+                        .text_color(ui.palette.text_secondary)
+                        .child(failure.error.code().to_string()),
+                )
+                .into_any_element(),
+        )
     }
     pub(super) fn live_notice(
         &self,
@@ -877,14 +1068,20 @@ impl AppShell {
 
 impl AppShell {
     pub(super) fn annotate(
-        &self,
+        &mut self,
         action: crate::link::AwayAction,
         range: crate::model::PendingAwaySpan,
         cx: &mut Context<Self>,
     ) {
-        let Some(live) = &self.live else {
+        let Some(range) = self.day.utc_range(range.span) else {
             return;
         };
+        let Some(live) = &mut self.live else {
+            return;
+        };
+        if live.actions.contains(range) {
+            return;
+        }
         let uuid = match windows::core::GUID::new().map(|id| format!("{id:?}")) {
             Ok(text) => match text.parse() {
                 Ok(uuid) => quartz_protocol::AnnotationId(uuid),
@@ -898,21 +1095,220 @@ impl AppShell {
                 return;
             }
         };
-        let Some(range) = self.day.utc_range(range.span) else {
+        if live.actions.begin(range).is_err() {
             return;
-        };
+        }
+        cx.notify();
+        let date = self.day.date();
         let request = action.request(range, uuid);
         let link = live.link.clone();
         cx.spawn(async move |this, cx| {
-            if let Err(source) = link.request(request).await {
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(live) = &mut this.live {
-                        live.failure = Some(source.into());
-                        cx.notify();
-                    }
-                });
-            }
+            let result = link.request(request).await.map(|_| ());
+            let _ = this.update(cx, |this, cx| {
+                let Some(live) = &mut this.live else {
+                    return;
+                };
+                if this.day.date() != date {
+                    live.actions.spans.retain(|write| write.range != range);
+                    return;
+                }
+                live.finish_annotation(&this.day, range, action, result);
+                cx.notify();
+            });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::link::{AwayAction, RequestCoreError, UtcRange};
+
+    fn page() -> LivePage {
+        LivePage {
+            link: Link::closed_for_test(),
+            snapshot: StateSnapshot {
+                logical_date: "1970-01-01".parse().expect("date"),
+                foreground: None,
+                recording: false,
+                stop_reason: Some(StopReason::Paused),
+                timed_policies: Default::default(),
+                browser_streams: Vec::new(),
+                ui_resident: quartz_protocol::ResidentEnabled::Disabled,
+                ui_language: quartz_protocol::UiLanguage::English,
+                locale: None,
+            },
+            generation: DayGeneration::default(),
+            phase: LoadPhase::Ready,
+            failure: None,
+            request: None,
+            actions: ActionWrites::default(),
+            indicator: Indicator::Hidden,
+            timer: None,
+            load_task: None,
+            resume_task: None,
+        }
+    }
+    #[test]
+    fn resume_error_is_cleared_by_retry_success_and_recording_recovery() {
+        let mut page = page();
+        page.finish_resume(Err(RequestCoreError::Timeout));
+        assert!(page.actions.failure.is_some());
+        page.begin_resume();
+        assert!(
+            page.actions.failure.is_none(),
+            "retry clears the previous Resume notice"
+        );
+        page.finish_resume(Err(RequestCoreError::Timeout));
+        page.finish_resume(Ok(()));
+        assert!(
+            page.actions.failure.is_none(),
+            "successful Resume clears the notice"
+        );
+        page.finish_resume(Err(RequestCoreError::Timeout));
+        page.snapshot.recording = true;
+        page.observe_recording();
+        assert!(
+            page.actions.failure.is_none(),
+            "tray recovery clears Resume errors"
+        );
+    }
+    #[test]
+    fn date_change_clears_action_errors_and_late_success_reconciles_pending_spans() {
+        let mut page = page();
+        let range = UtcRange {
+            start: 0,
+            end: 900_000,
+        };
+        page.actions.begin(range).expect("submit");
+        page.actions
+            .finish(range, AwayAction::Rest, Err(RequestCoreError::Timeout));
+        page.change_date();
+        assert!(
+            page.actions.failure.is_none(),
+            "navigation and midnight follow clear notices"
+        );
+        page.actions.begin(range).expect("submit again");
+        let updated_day = Day::empty(page.snapshot.logical_date);
+        page.actions.reconcile(&updated_day);
+        assert!(
+            page.actions.contains(range),
+            "the write is still in flight during day_loaded"
+        );
+        page.finish_annotation(&updated_day, range, AwayAction::Rest, Ok(()));
+        assert!(
+            !page.actions.contains(range),
+            "late success observes the already refreshed day"
+        );
+    }
+
+    #[test]
+    fn away_submissions_guard_each_span_until_success_is_reflected_and_allow_failed_retries() {
+        let first = UtcRange {
+            start: 0,
+            end: 900_000,
+        };
+        let second = UtcRange {
+            start: 900_000,
+            end: 1_800_000,
+        };
+        let mut writes = ActionWrites::default();
+        writes.begin(first).expect("first write");
+        assert!(matches!(writes.begin(first), Err(RequestCoreError::Busy)));
+        writes
+            .begin(second)
+            .expect("another span remains independent");
+        writes.finish(first, AwayAction::Rest, Ok(()));
+        assert!(
+            writes.begin(first).is_err(),
+            "success still waits for refreshed data"
+        );
+        writes.finish(second, AwayAction::Meeting, Err(RequestCoreError::Timeout));
+        assert!(!writes.contains(second));
+        let failure = writes.failure.as_ref().expect("action failure");
+        assert!(matches!(
+            failure.action,
+            MutationAction::Away(AwayAction::Meeting)
+        ));
+        assert_eq!(failure.error.code().as_str(), "timeout");
+        writes.begin(second).expect("retry failed action");
+        writes.reconcile(&Day::empty("1970-01-01".parse().expect("date")));
+        assert!(!writes.contains(first));
+        assert!(
+            writes.contains(second),
+            "a refresh cannot release a write still in flight"
+        );
+    }
+
+    #[test]
+    fn annotation_failure_preserves_ready_day_content_and_uses_its_own_notice() {
+        let snapshot = StateSnapshot {
+            logical_date: "1970-01-01".parse().expect("date"),
+            foreground: None,
+            recording: true,
+            stop_reason: None,
+            timed_policies: Default::default(),
+            browser_streams: Vec::new(),
+            ui_resident: quartz_protocol::ResidentEnabled::Disabled,
+            ui_language: quartz_protocol::UiLanguage::English,
+            locale: None,
+        };
+        let mut live = LivePage {
+            link: Link::closed_for_test(),
+            snapshot,
+            generation: DayGeneration::default(),
+            phase: LoadPhase::Ready,
+            failure: None,
+            request: None,
+            actions: ActionWrites::default(),
+            indicator: Indicator::Hidden,
+            timer: None,
+            load_task: None,
+            resume_task: None,
+        };
+        let range = UtcRange {
+            start: 0,
+            end: 900_000,
+        };
+        live.actions.begin(range).expect("submit");
+        live.finish_annotation(
+            &Day::empty(live.snapshot.logical_date),
+            range,
+            AwayAction::Rest,
+            Err(RequestCoreError::Timeout),
+        );
+        assert_eq!(live.phase, LoadPhase::Ready);
+        assert!(
+            live.failure.is_none(),
+            "day-load notice must not replace the loaded content"
+        );
+        assert!(live.actions.failure.is_some());
+        assert!(
+            !live.actions.contains(range),
+            "failed actions can be retried"
+        );
+    }
+
+    #[test]
+    fn mutation_failures_name_the_action_instead_of_a_day_load_failure() {
+        let formatter = Formatter::new(quartz_i18n::Language::English);
+        assert_eq!(
+            MutationAction::Resume.message(formatter),
+            "Couldn’t resume recording. Try again."
+        );
+        assert!(
+            MutationAction::Away(AwayAction::Rest)
+                .message(formatter)
+                .contains("Break")
+        );
+        let mut writes = ActionWrites::default();
+        let range = UtcRange {
+            start: 0,
+            end: 900_000,
+        };
+        writes.begin(range).expect("write");
+        writes.finish(range, AwayAction::Rest, Err(RequestCoreError::Timeout));
+        assert!(writes.failure.is_some());
     }
 }

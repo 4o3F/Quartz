@@ -2,7 +2,7 @@
 
 use super::{
     BRIDGE_CAPACITY, Command, ConnectionState, InitialConnection, LinkEvent, Reply,
-    RequestCoreError, StartCoreError, TopicChange, UiClosed,
+    RequestCoreError, SendUiEventError, StartCoreError, TopicChange,
 };
 use crate::failure::Failure;
 use quartz_pipe::{AsyncCoreClient, CallCoreError, IncomingFrame, PipeClient, RESPONSE_TIMEOUT};
@@ -23,22 +23,32 @@ struct Pending {
     completion: Completion,
 }
 enum Completion {
-    Request(Reply),
+    Request {
+        op: Op,
+        reply: Reply,
+    },
     Topics {
         change: TopicChange,
         topics: Vec<Topic>,
         reply: Reply,
     },
+    DaySubscribed {
+        generation: super::DayGeneration,
+    },
+    ReconcileDays,
     FirstFrame,
     Hidden,
 }
 impl Completion {
     fn fail(self, error: RequestCoreError) {
         match self {
-            Self::Request(reply) | Self::Topics { reply, .. } => {
+            Self::Request { reply, .. } | Self::Topics { reply, .. } => {
                 if reply.send(Err(error)).is_err() {
                     tracing::debug!("UI request cancelled before failure delivery");
                 }
+            }
+            Self::DaySubscribed { .. } | Self::ReconcileDays => {
+                tracing::warn!(%error, "could not reconcile day subscriptions")
             }
             Self::Hidden => tracing::warn!(%error, "could not notify core that UI is hidden"),
             Self::FirstFrame => tracing::warn!(%error, "could not acknowledge the UI frame"),
@@ -51,6 +61,23 @@ enum FrameStatus {
     Drawn,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HiddenNotice {
+    Idle,
+    Pending,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryVisibility {
+    Visible,
+    Hidden,
+}
+#[derive(Clone)]
+struct DayIntent {
+    request: super::DayRequest,
+    generation: super::DayGeneration,
+    mode: super::DayLoad,
+    link: super::Link,
+}
 pub(super) struct Worker {
     commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<LinkEvent>,
@@ -58,8 +85,12 @@ pub(super) struct Worker {
     hello_state: UiState,
     topics: Vec<Topic>,
     frame: FrameStatus,
+    hidden_notice: HiddenNotice,
+    query_visibility: QueryVisibility,
     pending: BTreeMap<RequestId, Pending>,
     day: Option<super::day::DayLoader>,
+    day_intent: Option<DayIntent>,
+    day_subscription: Option<super::DayGeneration>,
     details: Option<super::details::DetailLoader>,
     #[cfg(test)]
     pub(super) name: Option<quartz_pipe::PipeName>,
@@ -81,8 +112,12 @@ impl Worker {
             hello_state: UiState::Starting,
             topics: vec![Topic::State],
             frame: FrameStatus::Awaiting,
+            hidden_notice: HiddenNotice::Idle,
+            query_visibility: QueryVisibility::Visible,
             pending: BTreeMap::new(),
             day: None,
+            day_intent: None,
+            day_subscription: None,
             details: None,
             #[cfg(test)]
             name: None,
@@ -94,17 +129,22 @@ impl Worker {
     }
     pub(super) fn with_hello_state(mut self, state: UiState) -> Self {
         self.hello_state = state;
+        self.query_visibility = if state == UiState::Prewarming {
+            QueryVisibility::Hidden
+        } else {
+            QueryVisibility::Visible
+        };
         self
     }
     pub(super) async fn run(mut self) {
         let closed = self.events.clone();
         tokio::select! {
             () = closed.closed() => {},
-            result = self.run_inner() => { if let Err(UiClosed) = result { tracing::debug!("UI event receiver closed"); } },
+            result = self.run_inner() => { if let Err(SendUiEventError) = result { tracing::debug!("UI event receiver closed"); } },
         }
         self.fail_pending();
     }
-    async fn run_inner(&mut self) -> Result<(), UiClosed> {
+    async fn run_inner(&mut self) -> Result<(), SendUiEventError> {
         let mut client = match self.initial {
             InitialConnection::Connect => {
                 self.emit(LinkEvent::Connection(ConnectionState::Connecting))
@@ -180,7 +220,10 @@ impl Worker {
         }
         Ok(client)
     }
-    async fn handle_idle_command(&mut self, command: Command) -> Result<Option<Client>, UiClosed> {
+    async fn handle_idle_command(
+        &mut self,
+        command: Command,
+    ) -> Result<Option<Client>, SendUiEventError> {
         match command {
             Command::SelectDetails { reply, .. } => {
                 if reply.send(Err(RequestCoreError::Disconnected)).is_err() {
@@ -228,10 +271,11 @@ impl Worker {
                 }
             }
             Command::Request { reply, .. } => {
-                Completion::Request(reply).fail(RequestCoreError::Disconnected);
+                Self::reply_request(reply, Err(RequestCoreError::Disconnected));
                 Ok(None)
             }
             Command::Hidden => {
+                self.query_visibility = QueryVisibility::Hidden;
                 self.frame = FrameStatus::Awaiting;
                 tracing::warn!("discarded hidden notification while UI is disconnected");
                 Ok(None)
@@ -291,6 +335,14 @@ impl Worker {
     }
     async fn connected(&mut self, client: &mut Client) -> Result<(), CallCoreError> {
         loop {
+            if self.hidden_notice == HiddenNotice::Pending && self.pending.len() < BRIDGE_CAPACITY {
+                let body = (UiHiddenRequest {})
+                    .body()
+                    .map_err(|source| CallCoreError::EncodeBody { source })?;
+                self.hidden_notice = HiddenNotice::Idle;
+                self.submit(client, Op::UiHidden, body, Completion::Hidden)
+                    .await?;
+            }
             let deadline = self.pending.values().map(|pending| pending.deadline).min();
             tokio::select! {
                 command = self.commands.recv(), if self.pending.len() < BRIDGE_CAPACITY => {
@@ -298,7 +350,7 @@ impl Worker {
                     self.handle_command(client, command).await?;
                 }
                 incoming = client.receive() => self.handle_frame(incoming).await?,
-                () = Self::wait_deadline(deadline) => self.expire_requests(client),
+                () = Self::wait_deadline(deadline) => self.expire_requests(client).await?,
             }
         }
     }
@@ -331,26 +383,63 @@ impl Worker {
                 mode,
                 link,
             } => {
-                let loader = self
-                    .day
-                    .get_or_insert_with(|| super::day::DayLoader::start(link, self.events.clone()));
-                if let Err(source) = loader.send(super::day::DayCommand::Load {
+                if self.query_visibility == QueryVisibility::Hidden {
+                    return Ok(());
+                }
+                if self
+                    .day_intent
+                    .as_ref()
+                    .is_some_and(|intent| intent.generation > generation)
+                {
+                    return Ok(());
+                }
+                if self
+                    .day_intent
+                    .as_ref()
+                    .is_some_and(|intent| intent.request.date != request.date)
+                {
+                    self.day = None;
+                }
+                self.day_intent = Some(DayIntent {
                     request,
                     generation,
                     mode,
-                }) {
-                    let _ = self
-                        .emit(LinkEvent::DayLoaded {
-                            generation,
-                            result: Err(source.into()),
-                        })
-                        .await;
+                    link,
+                });
+                let previous: Vec<_> = self
+                    .topics
+                    .iter()
+                    .filter(|topic| matches!(topic, Topic::Day(date) if *date != request.date))
+                    .cloned()
+                    .collect();
+                self.remove_day_topics(client, previous).await?;
+                if self.topics.contains(&Topic::Day(request.date)) {
+                    if self.day_subscription.is_none() {
+                        self.send_day(self.day_intent.clone().expect("load intent"))
+                            .await;
+                    }
+                } else {
+                    let body = Subscribe {
+                        topics: vec![Topic::Day(request.date)],
+                    }
+                    .body()
+                    .map_err(|source| CallCoreError::EncodeBody { source })?;
+                    // Remember the intent before its response, so hide also removes in-flight subscriptions.
+                    self.topics.push(Topic::Day(request.date));
+                    self.day_subscription = Some(generation);
+                    self.submit(
+                        client,
+                        Op::Subscribe,
+                        body,
+                        Completion::DaySubscribed { generation },
+                    )
+                    .await?;
                 }
             }
             Command::Retry { reply } => Self::reply_retry(reply, Ok(())),
             Command::StartCore { reply } => Self::reply_start(reply, Ok(())),
             Command::Request { op, body, reply } => {
-                self.submit(client, op, body, Completion::Request(reply))
+                self.submit(client, op, body, Completion::Request { op, reply })
                     .await?
             }
             Command::Topics {
@@ -371,9 +460,12 @@ impl Worker {
                 let body = match body {
                     Ok(body) => body,
                     Err(source) => {
-                        Completion::Request(reply).fail(RequestCoreError::Call {
-                            source: CallCoreError::EncodeBody { source },
-                        });
+                        Self::reply_request(
+                            reply,
+                            Err(RequestCoreError::Call {
+                                source: CallCoreError::EncodeBody { source },
+                            }),
+                        );
                         return Ok(());
                     }
                 };
@@ -394,14 +486,36 @@ impl Worker {
                 .await?;
             }
             Command::Hidden => {
+                self.query_visibility = QueryVisibility::Hidden;
                 self.frame = FrameStatus::Awaiting;
                 self.day = None;
+                self.day_intent = None;
+                self.day_subscription = None;
                 self.details = None;
-                let body = (UiHiddenRequest {})
-                    .body()
-                    .map_err(|source| CallCoreError::EncodeBody { source })?;
-                self.submit(client, Op::UiHidden, body, Completion::Hidden)
-                    .await?;
+                let mut days: Vec<_> = self
+                    .topics
+                    .iter()
+                    .filter(|topic| matches!(topic, Topic::Day(_)))
+                    .cloned()
+                    .collect();
+                for pending in self.pending.values_mut() {
+                    if let Completion::Topics {
+                        change: TopicChange::Subscribe,
+                        topics,
+                        ..
+                    } = &mut pending.completion
+                    {
+                        for topic in topics.iter().filter(|topic| matches!(topic, Topic::Day(_))) {
+                            if !days.contains(topic) {
+                                days.push(topic.clone());
+                            }
+                        }
+                        // A late acknowledgement must not restore the removed dates locally.
+                        topics.retain(|topic| !matches!(topic, Topic::Day(_)));
+                    }
+                }
+                self.remove_day_topics(client, days).await?;
+                self.hidden_notice = HiddenNotice::Pending;
             }
             Command::FirstFrame => {
                 self.frame = FrameStatus::Drawn;
@@ -409,6 +523,46 @@ impl Worker {
             }
         }
         Ok(())
+    }
+    async fn send_day(&mut self, intent: DayIntent) {
+        let DayIntent {
+            request,
+            generation,
+            mode,
+            link,
+        } = intent;
+        let loader = self
+            .day
+            .get_or_insert_with(|| super::day::DayLoader::start(link, self.events.clone()));
+        if let Err(source) = loader.send(super::day::DayCommand::Load {
+            request,
+            generation,
+            mode,
+        }) {
+            let _ = self
+                .emit(LinkEvent::DayLoaded {
+                    generation,
+                    result: Err(source.into()),
+                })
+                .await;
+        }
+    }
+    async fn remove_day_topics(
+        &mut self,
+        client: &mut Client,
+        topics: Vec<Topic>,
+    ) -> Result<(), CallCoreError> {
+        if topics.is_empty() {
+            return Ok(());
+        }
+        let body = Unsubscribe {
+            topics: topics.clone(),
+        }
+        .body()
+        .map_err(|source| CallCoreError::EncodeBody { source })?;
+        self.update_topics(TopicChange::Unsubscribe, topics);
+        self.submit(client, Op::Unsubscribe, body, Completion::ReconcileDays)
+            .await
     }
     async fn first_frame(&mut self, client: &mut Client) -> Result<(), CallCoreError> {
         let body = match (UiFirstFrameRequest {}).body() {
@@ -436,7 +590,7 @@ impl Worker {
             }
         };
         match incoming {
-            IncomingFrame::Response(response) => self.handle_response(response),
+            IncomingFrame::Response(response) => self.handle_response(response).await?,
             IncomingFrame::Event(event) => {
                 let event = match event.topic {
                     Topic::State => serde_json::from_value(event.body).map(LinkEvent::State),
@@ -446,6 +600,15 @@ impl Worker {
                 };
                 match event {
                     Ok(event) => {
+                        if matches!(
+                            &event,
+                            LinkEvent::Control(
+                                quartz_protocol::ControlOp::UiShow
+                                    | quartz_protocol::ControlOp::UiActivate
+                            )
+                        ) {
+                            self.query_visibility = QueryVisibility::Visible;
+                        }
                         if let LinkEvent::Day(changed) = &event
                             && let Some(loader) = &self.day
                         {
@@ -466,14 +629,14 @@ impl Worker {
         }
         Ok(())
     }
-    fn handle_response(&mut self, response: Response) {
+    async fn handle_response(&mut self, response: Response) -> Result<(), CallCoreError> {
         let Some(id) = response.id else {
             tracing::warn!("discarded response without request identity");
-            return;
+            return Ok(());
         };
         let Some(pending) = self.pending.remove(&id) else {
             tracing::debug!(?id, "discarded response for retired UI request");
-            return;
+            return Ok(());
         };
         let result = match response.outcome {
             ResponseOutcome::Ok { body } => Ok(body),
@@ -481,8 +644,29 @@ impl Worker {
                 source: CallCoreError::Protocol { kind: error.kind },
             }),
         };
-        match pending.completion {
-            Completion::Request(reply) => Self::reply_request(reply, result),
+        self.complete(pending.completion, result).await
+    }
+    async fn complete(
+        &mut self,
+        completion: Completion,
+        result: Result<JsonValue, RequestCoreError>,
+    ) -> Result<(), CallCoreError> {
+        match completion {
+            Completion::Request { op, reply } => {
+                if result.is_ok()
+                    && matches!(
+                        op,
+                        Op::AnnotationsCreate
+                            | Op::AnnotationsUpdate
+                            | Op::AnnotationsDelete
+                            | Op::TrackingResume
+                    )
+                    && let Some(loader) = &self.day
+                {
+                    loader.invalidate();
+                }
+                Self::reply_request(reply, result);
+            }
             Completion::Topics {
                 change,
                 topics,
@@ -492,6 +676,32 @@ impl Worker {
                     self.update_topics(change, topics);
                 }
                 Self::reply_request(reply, result);
+            }
+            Completion::DaySubscribed { generation } => {
+                if self.day_subscription == Some(generation) {
+                    self.day_subscription = None;
+                    if let Some(intent) = self.day_intent.clone() {
+                        match result {
+                            Ok(_) => self.send_day(intent).await,
+                            Err(source) => {
+                                self.topics
+                                    .retain(|topic| *topic != Topic::Day(intent.request.date));
+                                let _ = self
+                                    .emit(LinkEvent::DayLoaded {
+                                        generation: intent.generation,
+                                        result: Err(source.into()),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+            Completion::ReconcileDays => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "could not remove day subscriptions; closing the pipe to release them");
+                    return Err(CallCoreError::DiscardConnection);
+                }
             }
             Completion::Hidden => {
                 if let Err(error) = result {
@@ -504,8 +714,9 @@ impl Worker {
                 }
             }
         }
+        Ok(())
     }
-    fn expire_requests(&mut self, client: &mut Client) {
+    async fn expire_requests(&mut self, client: &mut Client) -> Result<(), CallCoreError> {
         let now = Instant::now();
         let expired: Vec<_> = self
             .pending
@@ -519,8 +730,10 @@ impl Worker {
                 .remove(&id)
                 .expect("expired request is pending");
             client.retire_request(id);
-            pending.completion.fail(RequestCoreError::Timeout);
+            self.complete(pending.completion, Err(RequestCoreError::Timeout))
+                .await?;
         }
+        Ok(())
     }
     async fn wait_deadline(deadline: Option<Instant>) {
         match deadline {
@@ -536,7 +749,8 @@ impl Worker {
         completion: Completion,
     ) -> Result<(), CallCoreError> {
         if self.pending.len() == BRIDGE_CAPACITY {
-            completion.fail(RequestCoreError::Busy);
+            self.complete(completion, Err(RequestCoreError::Busy))
+                .await?;
             return Ok(());
         }
         match client.send_request(op, body).await {
@@ -555,7 +769,8 @@ impl Worker {
                 Err(error)
             }
             Err(error) => {
-                completion.fail(RequestCoreError::Call { source: error });
+                self.complete(completion, Err(RequestCoreError::Call { source: error }))
+                    .await?;
                 Ok(())
             }
         }
@@ -595,11 +810,11 @@ impl Worker {
             }
         }
     }
-    async fn report_failure(&self, failure: Failure) -> Result<(), UiClosed> {
+    async fn report_failure(&self, failure: Failure) -> Result<(), SendUiEventError> {
         self.emit(LinkEvent::Connection(ConnectionState::Failed(failure)))
             .await
     }
-    async fn emit(&self, event: LinkEvent) -> Result<(), UiClosed> {
-        self.events.send(event).await.map_err(|_| UiClosed)
+    async fn emit(&self, event: LinkEvent) -> Result<(), SendUiEventError> {
+        self.events.send(event).await.map_err(|_| SendUiEventError)
     }
 }

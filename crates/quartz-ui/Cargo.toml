@@ -36,7 +36,8 @@ tokio = { workspace = true, features = ["test-util"] }
 serde_json.workspace = true
 quartz-pipe = { workspace = true, features = ["test-util"] }
 strum.workspace = true
-jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform"] }
+# Native model tests resolve the core's named zones through the host database.
+jiff = { workspace = true, features = ["tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo"] }
 num-traits.workspace = true
 quartz-i18n.workspace = true
 quartz-protocol.workspace = true

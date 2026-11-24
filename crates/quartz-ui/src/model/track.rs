@@ -37,6 +37,10 @@ pub(crate) struct Lane {
 }
 
 impl Day {
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(super) fn compute_main_track(&self) -> Vec<MainBlock> {
         let mut items: Vec<MainBlock> = self
             .segments

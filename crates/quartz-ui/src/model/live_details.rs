@@ -362,9 +362,32 @@ mod tests {
         let formatter = Formatter::new(Language::English);
         let row = mapped.intervals.first().expect("interval");
         assert_eq!(row.duration, Duration::from_millis(75));
+        assert_eq!(
+            row.range,
+            UtcRange {
+                start: 100,
+                end: 200
+            }
+        );
+        assert_eq!(row.app.as_deref(), Some("Editor"));
+        assert_eq!(row.category.color, CategoryColor::Neutral);
         assert_eq!(row.title.as_deref(), Some("retained Full title"));
         assert_eq!(formatter.detail_source(&row.source), "Rule: Chosen rule");
         let entity = mapped.entity.expect("entity");
+        assert_eq!(entity.daily.len(), wire::ENTITY_DETAIL_DAYS);
+        let last_day = entity.daily.last().expect("last daily bucket");
+        assert_eq!(
+            last_day.date,
+            "2026-11-21".parse::<wire::LocalDate>().expect("date")
+        );
+        assert_eq!(last_day.duration, Duration::from_millis(1000));
+        assert_eq!(
+            entity.titles.first().expect("title").title,
+            "retained Full title"
+        );
+        let rule = entity.rules.first().expect("rule");
+        assert_eq!(formatter.rule_label(&rule.label), "Chosen rule");
+        assert_eq!(rule.category.color, CategoryColor::Neutral);
         assert_eq!(
             entity.titles.first().expect("title").duration,
             Duration::from_millis(600)

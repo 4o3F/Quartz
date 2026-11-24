@@ -24,6 +24,10 @@ pub(crate) enum RankingKind {
 
 /// The rankings that group segments by one key; `Mixed` is their union.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    all(not(test), not(feature = "preview")),
+    expect(dead_code, reason = "used by preview fixtures and their model tests")
+)]
 enum SingleRanking {
     Apps,
     Domains,
@@ -31,9 +35,17 @@ enum SingleRanking {
 }
 
 impl SingleRanking {
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     const ALL: [Self; 3] = [Self::Apps, Self::Domains, Self::Documents];
 
     /// The group key of `segment`; `None` when the segment has no such key.
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     fn key(self, segment: &Segment) -> Option<RankKey> {
         match self {
             Self::Apps => Some(RankKey::App(segment.app)),
@@ -47,7 +59,15 @@ impl SingleRanking {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum RankKey {
     App(AppId),
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     Domain(String),
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     Document(String),
 }
 
@@ -115,6 +135,10 @@ impl Rankings {
 }
 
 impl Day {
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     pub(super) fn compute_rankings(&self) -> Rankings {
         Rankings {
             apps: self.rank(RankingKind::Apps),
@@ -125,6 +149,10 @@ impl Day {
     }
 
     /// Ranking rows for a tab, longest first, ties by name.
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     fn rank(&self, kind: RankingKind) -> Vec<RankRow> {
         let singles: &[SingleRanking] = match kind {
             RankingKind::Apps => &[SingleRanking::Apps],
@@ -140,6 +168,10 @@ impl Day {
         rows
     }
 
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
     fn rank_single(&self, single: SingleRanking) -> Vec<RankRow> {
         let mut groups: BTreeMap<RankKey, Vec<&Segment>> = BTreeMap::new();
         for segment in &self.segments {
