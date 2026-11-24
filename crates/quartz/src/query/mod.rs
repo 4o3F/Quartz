@@ -172,7 +172,7 @@ impl QueryRequest {
         op: quartz_protocol::Op,
         body: serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
-        match op {
+        let request = match op {
             quartz_protocol::Op::QueryAnnotations => {
                 serde_json::from_value(body).map(Self::Annotations)
             }
@@ -195,6 +195,23 @@ impl QueryRequest {
             _ => Err(<serde_json::Error as serde::de::Error>::custom(
                 "operation has no implemented query decoder",
             )),
+        }?;
+        if let Some(cursor) = request.cursor() {
+            cursor.validate_query(&request.parameters())?;
+        }
+        Ok(request)
+    }
+    fn cursor(&self) -> Option<&quartz_protocol::QueryCursor> {
+        match self {
+            Self::Annotations(request) => request.cursor.as_ref(),
+            Self::Facts(request) => request.cursor.as_ref(),
+            Self::Day(request) => request.cursor.as_ref(),
+            Self::Unclassified(request) => request.cursor.as_ref(),
+            Self::Range(request) => request.cursor.as_ref(),
+            Self::PendingAway(request) => request.cursor.as_ref(),
+            Self::Timeline(request) => request.cursor.as_ref(),
+            Self::SegmentDetail(request) => request.cursor.as_ref(),
+            Self::EntityDetail(request) => request.cursor.as_ref(),
         }
     }
 
@@ -541,17 +558,7 @@ impl QueryJob {
             _ => None,
         };
         let parameters = request.parameters();
-        let cursor = match request {
-            QueryRequest::Annotations(request) => request.cursor.as_ref(),
-            QueryRequest::Unclassified(request) => request.cursor.as_ref(),
-            QueryRequest::Range(request) => request.cursor.as_ref(),
-            QueryRequest::Facts(facts) => facts.cursor.as_ref(),
-            QueryRequest::Day(day) => day.cursor.as_ref(),
-            QueryRequest::PendingAway(away) => away.cursor.as_ref(),
-            QueryRequest::Timeline(timeline) => timeline.cursor.as_ref(),
-            QueryRequest::SegmentDetail(detail) => detail.cursor.as_ref(),
-            QueryRequest::EntityDetail(detail) => detail.cursor.as_ref(),
-        };
+        let cursor = request.cursor();
         let position = if matches!(request, QueryRequest::Facts(_)) {
             // Raw run endpoints and timed policies are included after the staged scan.
             PagePosition::First

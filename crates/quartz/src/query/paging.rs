@@ -34,6 +34,7 @@ impl PagePosition {
         let Some(cursor) = cursor else {
             return Ok(PagePosition::First);
         };
+        let cursor = cursor.decode().map_err(|_| RunQueryError::InvalidCursor)?;
         if cursor.query() != query {
             return Err(RunQueryError::InvalidCursor);
         }
@@ -271,5 +272,48 @@ mod tests {
             second.next.expect("more documents"),
             next + second.second.len()
         );
+    }
+    #[test]
+    fn opaque_cursors_are_validated_at_the_core_paging_boundary() {
+        let versions = QueryVersions("v".into());
+        let query = CursorQuery::Day {
+            local_date: "2025-01-02".parse().expect("date"),
+        };
+        for wire in [
+            serde_json::json!({}),
+            serde_json::json!({"versions":"v","query":{"kind":"future"},"position":1}),
+            serde_json::json!({"versions":"v","query":{"kind":"day","local_date":"2025-01-02"},"position":-1}),
+        ] {
+            let cursor: QueryCursor =
+                serde_json::from_value(wire).expect("opaque object at client boundary");
+            assert!(matches!(
+                PagePosition::from_cursor(Some(&cursor), &versions, &query),
+                Err(RunQueryError::InvalidCursor)
+            ));
+        }
+        let cursor: QueryCursor = serde_json::from_value(serde_json::json!({
+            "versions":"v","query":{"kind":"day","local_date":"2025-01-02"},"position":1
+        }))
+        .expect("cursor");
+        assert_eq!(
+            PagePosition::from_cursor(Some(&cursor), &versions, &query)
+                .expect("valid cursor")
+                .index(),
+            1
+        );
+        assert!(matches!(
+            PagePosition::from_cursor(Some(&cursor), &QueryVersions("changed".into()), &query),
+            Err(RunQueryError::StaleCursor)
+        ));
+        assert!(matches!(
+            PagePosition::from_cursor(
+                Some(&cursor),
+                &versions,
+                &CursorQuery::PendingAway {
+                    local_date: "2025-01-02".parse().expect("date")
+                }
+            ),
+            Err(RunQueryError::InvalidCursor)
+        ));
     }
 }

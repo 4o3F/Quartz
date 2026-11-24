@@ -284,7 +284,9 @@ impl Failure {
                     }),
                 };
             }
-            CallCoreError::Protocol { .. } => FailureKind::HandshakeRejected,
+            CallCoreError::Protocol { .. } | CallCoreError::ConnectionProtocol { .. } => {
+                FailureKind::HandshakeRejected
+            }
             CallCoreError::HandshakeVersion {
                 received,
                 core_version,
@@ -304,7 +306,8 @@ impl Failure {
             | CallCoreError::Frame { .. }
             | CallCoreError::UnexpectedEnvelope
             | CallCoreError::ResponseIdMismatch { .. }
-            | CallCoreError::UnsolicitedResponse { .. } => FailureKind::InvalidResponse,
+            | CallCoreError::UnsolicitedResponse { .. }
+            | CallCoreError::DiscardConnection => FailureKind::InvalidResponse,
             CallCoreError::Runtime { .. }
             | CallCoreError::Encode { .. }
             | CallCoreError::EncodeBody { .. }

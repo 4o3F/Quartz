@@ -286,7 +286,10 @@ fn oversized_multibyte_label_and_note_reassemble_across_bounded_pages() {
         let Some(cursor) = page.next_cursor else {
             break;
         };
-        assert_eq!(cursor.query(), &CursorQuery::from(&request));
+        assert_eq!(
+            cursor.decode().expect("issued cursor").query(),
+            &CursorQuery::from(&request)
+        );
         request.cursor = Some(cursor);
     }
     assert!(pages > 1);

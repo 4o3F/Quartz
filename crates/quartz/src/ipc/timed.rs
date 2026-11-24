@@ -43,12 +43,11 @@ impl TimedCommand {
             Op::PrivacyModeSet => {
                 let request: PrivacyModeSetRequest =
                     serde_json::from_value(body).map_err(|_| invalid())?;
-                if request.enabled {
-                    Self::EnablePrivacy(TimedDeadline::UtcMillis(
-                        request.until_utc_ms.ok_or_else(invalid)?,
-                    ))
-                } else {
-                    Self::DisablePrivacy
+                match request {
+                    PrivacyModeSetRequest::Enable { until_utc_ms } => {
+                        Self::EnablePrivacy(TimedDeadline::UtcMillis(until_utc_ms))
+                    }
+                    PrivacyModeSetRequest::Disable => Self::DisablePrivacy,
                 }
             }
             _ => return Err(invalid()),

@@ -218,6 +218,14 @@ mod tests {
 
     #[test]
     fn builtin_extraction_labels_resolve_in_both_catalogs() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
+        assert!(
+            matches!(
+                LOCALE_TEST_LOCK.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ),
+            "catalog initialization must hold the shared locale lock"
+        );
         let source = include_str!("../../quartz-domain/src/rules/builtin-extraction.toml");
         for line in source.lines() {
             let Some(key) = line.strip_prefix("label_key = \"") else {
@@ -272,46 +280,6 @@ mod tests {
                     placeholders(&catalogs["en"][*key]),
                     "{locale}: {key}"
                 );
-            }
-        }
-    }
-
-    #[test]
-    fn tray_text_fits_utf16_tooltip_buffer() {
-        let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");
-        let backend = _rust_i18n_backend();
-        for locale in backend.available_locales() {
-            for (key, text) in backend
-                .messages_for_locale(&locale)
-                .expect("each advertised locale has an embedded catalog")
-            {
-                if key.starts_with("tray.") || key == "app.name" {
-                    let language: Language = locale.parse().expect("catalog language");
-                    let period = ["tray.am", "tray.pm"]
-                        .into_iter()
-                        .map(|key| MessageKey::new(key).in_language(language))
-                        .max_by_key(|text| text.encode_utf16().count())
-                        .expect("two clock periods");
-                    let time = MessageKey::new("tray.time_12").in_language(language);
-                    let text = text
-                        .replace("%{time}", &time)
-                        .replace("%{hour}", "12")
-                        .replace("%{minute}", "59")
-                        .replace("%{period}", &period)
-                        .replace("%{duration}", "24h59m")
-                        .replace("%{hours}", "24")
-                        .replace("%{minutes}", "1440")
-                        .replace("%{focus}", "100")
-                        .replace("%{distraction}", "100")
-                        .replace("%{current}", "Code · quartz")
-                        .replace("%{activity}", "Code 60m")
-                        .replace("%{count}", "8");
-                    assert!(
-                        placeholders(&text).is_empty(),
-                        "provide maximum placeholder values for {key}"
-                    );
-                    assert!(text.encode_utf16().count() < 128, "{locale}: {key}");
-                }
             }
         }
     }

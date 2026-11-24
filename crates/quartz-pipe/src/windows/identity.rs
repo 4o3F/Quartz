@@ -77,14 +77,24 @@ pub struct ProcessIdentity {
     session: u32,
     image: PathBuf,
 }
+#[cfg(test)]
+thread_local! {
+    static CURRENT_IDENTITY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 impl ProcessIdentity {
     /// Reads the current process token, session and image path.
     ///
     /// # Errors
     /// Returns a failed Windows query, SID conversion or path operation.
     pub fn current() -> Result<Self, CheckPeerError> {
+        #[cfg(test)]
+        CURRENT_IDENTITY_READS.update(|count| count + 1);
         // SAFETY: GetCurrentProcessId takes no pointers or ownership.
         Self::read(unsafe { Threading::GetCurrentProcessId() })
+    }
+    #[cfg(test)]
+    pub(super) fn current_identity_reads() -> usize {
+        CURRENT_IDENTITY_READS.get()
     }
     /// The canonical token user used by pipe naming and the explicit DACL.
     pub fn sid(&self) -> &UserSid {

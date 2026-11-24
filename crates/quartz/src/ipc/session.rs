@@ -989,4 +989,138 @@ mod tests {
             }
         ));
     }
+    struct CursorAdmissionCase {
+        op: Op,
+        body: serde_json::Value,
+        query: serde_json::Value,
+    }
+    impl CursorAdmissionCase {
+        fn all() -> Vec<Self> {
+            vec![
+                Self {
+                    op: Op::QueryFacts,
+                    body: serde_json::json!({"local_date":"2025-01-02"}),
+                    query: serde_json::json!({"kind":"facts","local_date":"2025-01-02"}),
+                },
+                Self {
+                    op: Op::QueryDay,
+                    body: serde_json::json!({"local_date":"2025-01-02"}),
+                    query: serde_json::json!({"kind":"day","local_date":"2025-01-02"}),
+                },
+                Self {
+                    op: Op::QueryPendingAway,
+                    body: serde_json::json!({"local_date":"2025-01-02"}),
+                    query: serde_json::json!({"kind":"pending_away","local_date":"2025-01-02"}),
+                },
+                Self {
+                    op: Op::QueryAnnotations,
+                    body: serde_json::json!({"start_utc_ms":0,"end_utc_ms":1}),
+                    query: serde_json::json!({"kind":"annotations","start_utc_ms":0,"end_utc_ms":1}),
+                },
+                Self {
+                    op: Op::QueryTimeline,
+                    body: serde_json::json!({"start_utc_ms":0,"end_utc_ms":1,"detail":"raw","ms_per_pixel":1}),
+                    query: serde_json::json!({"kind":"timeline","start_utc_ms":0,"end_utc_ms":1,"detail":"raw","ms_per_pixel":1}),
+                },
+                Self {
+                    op: Op::QueryRange,
+                    body: serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["app"]}),
+                    query: serde_json::json!({"kind":"range","start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["app"]}),
+                },
+                Self {
+                    op: Op::QueryUnclassified,
+                    body: serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":"app"}),
+                    query: serde_json::json!({"kind":"unclassified","start_date":"2025-01-02","end_date":"2025-01-03","group_by":"app"}),
+                },
+                Self {
+                    op: Op::QuerySegmentDetail,
+                    body: serde_json::json!({"start_utc_ms":0,"end_utc_ms":1}),
+                    query: serde_json::json!({"kind":"segment_detail","start_utc_ms":0,"end_utc_ms":1,"app":null,"window_instance":null}),
+                },
+                Self {
+                    op: Op::QueryEntityDetail,
+                    body: serde_json::json!({"entity":{"kind":"app","id":1},"local_date":"2025-01-02"}),
+                    query: serde_json::json!({"kind":"entity_detail","entity":{"kind":"app","id":1},"local_date":"2025-01-02"}),
+                },
+                Self {
+                    op: Op::RuleSetsTree,
+                    body: serde_json::json!({"kind":"privacy"}),
+                    query: serde_json::json!({"kind":"rule_sets_tree","rule_kind":"privacy"}),
+                },
+                Self {
+                    op: Op::RuleSetsGet,
+                    body: serde_json::json!({"key":"builtin.privacy","view":"own"}),
+                    query: serde_json::json!({"kind":"rule_sets_get","key":"builtin.privacy","version":null,"view":"own"}),
+                },
+                Self {
+                    op: Op::RuleSetsVersions,
+                    body: serde_json::json!({"key":"builtin.privacy"}),
+                    query: serde_json::json!({"kind":"rule_sets_versions","key":"builtin.privacy"}),
+                },
+                Self {
+                    op: Op::CategoriesList,
+                    body: serde_json::json!({}),
+                    query: serde_json::json!({"kind":"categories","include_archived":false}),
+                },
+            ]
+        }
+        fn session() -> ConnectionSession {
+            ConnectionSession {
+                state: State::Ready(ReadyRole::Ui {
+                    state: UiState::Visible,
+                }),
+                allowed: AllowedRoles::Quartz,
+            }
+        }
+    }
+    #[test]
+    fn forged_cursors_are_bad_request_before_worker_or_store_admission() {
+        let publisher = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(
+            "cursor-admission".into(),
+        ));
+        let status = publisher.subscribe();
+        for case in CursorAdmissionCase::all() {
+            for cursor in [
+                serde_json::json!({}),
+                serde_json::json!({"versions":"old","query":{"kind":"future"},"position":1}),
+                serde_json::json!({"versions":"old","query":case.query,"position":-1}),
+                serde_json::json!({"versions":"old","query":{"kind":"day","local_date":"2025-01-03"},"position":1}),
+                serde_json::json!({"versions":"old","query":{"kind":"day","local_date":17},"position":1}),
+                serde_json::json!({"versions":"old","query":case.query,"position":1,"extension":"x".repeat(quartz_protocol::MAX_FRAME_LEN)}),
+            ] {
+                let mut body = case.body.clone();
+                body["cursor"] = cursor;
+                assert_eq!(
+                    CursorAdmissionCase::session()
+                        .receive(request(1, case.op, body), &status.borrow().status)
+                        .reply()
+                        .outcome,
+                    ResponseOutcome::Err {
+                        error: ProtocolError::new(ErrorKind::BadRequest)
+                    },
+                    "{:?}",
+                    case.op
+                );
+            }
+        }
+    }
+    #[test]
+    fn valid_stale_cursor_versions_are_not_compared_during_admission() {
+        let publisher =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("cursor-stale".into()));
+        let status = publisher.subscribe();
+        for case in CursorAdmissionCase::all() {
+            let mut body = case.body;
+            body["cursor"] = serde_json::json!({"versions":"old","query":case.query,"position":1});
+            assert!(
+                matches!(
+                    CursorAdmissionCase::session()
+                        .receive(request(1, case.op, body), &status.borrow().status),
+                    Action::Query { .. } | Action::Rules { .. } | Action::Write { .. }
+                ),
+                "{:?}",
+                case.op
+            );
+        }
+    }
 }

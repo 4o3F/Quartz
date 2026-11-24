@@ -224,4 +224,32 @@ mod tests {
             assert!(text.contains("12:00"));
         }
     }
+    #[test]
+    fn every_tooltip_and_maximum_paused_clock_fit_in_every_language() {
+        use quartz_i18n::Language;
+        use quartz_protocol::HourCycle;
+        for &language in Language::ALL {
+            for &tooltip in TrayTooltip::ALL {
+                let text = tooltip.text(language);
+                TrayTooltipText::try_from(text.as_str())
+                    .expect("production tooltip fits shell buffer");
+            }
+            let tooltip = TrayTooltip::Paused {
+                until_utc_ms: 0,
+                hour_cycle: None,
+            };
+            for time in [
+                jiff::civil::time(0, 59, 59, 0),
+                jiff::civil::time(12, 59, 59, 0),
+                jiff::civil::time(23, 59, 59, 0),
+            ] {
+                for cycle in [Some(HourCycle::H12), Some(HourCycle::H24), None] {
+                    let text = tooltip.paused_text(language, time, cycle);
+                    assert!(!text.contains("%{"), "resolved placeholders for {language}");
+                    TrayTooltipText::try_from(text.as_str())
+                        .expect("maximum paused clock fits shell buffer");
+                }
+            }
+        }
+    }
 }

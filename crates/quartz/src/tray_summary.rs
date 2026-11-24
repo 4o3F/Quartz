@@ -288,4 +288,62 @@ mod tests {
             format!("{}…", "a".repeat(TOOLTIP_UNITS - 1))
         );
     }
+    #[test]
+    fn maximum_formatted_tooltips_fit_shell_buffer_in_every_language() {
+        use quartz_domain::capture::limits;
+        let mut maximum = summary();
+        maximum.metrics.active_ms = i64::MAX;
+        maximum.metrics.focus_ratio = 1.0;
+        maximum.metrics.distract_ratio = 1.0;
+        let maximum_minutes = i64::MAX / MINUTE_MS;
+        for &language in Language::ALL {
+            let duration = TrayText::duration(i64::MAX, language);
+            assert!(duration.contains(&(maximum_minutes / MINUTES_PER_HOUR).to_string()));
+            let summary = maximum.tooltip(None, i64::MAX, language);
+            assert!(summary.contains(&duration));
+            assert_eq!(summary.matches("100%").count(), 2);
+            crate::tray_tooltip::TrayTooltipText::try_from(summary.as_str())
+                .expect("maximum summary fits");
+            let short = ForegroundState {
+                app: Some(quartz_protocol::AppIdentity::Unresolved("App".into())),
+                title: None,
+                interval_start_utc_ms: i64::MIN,
+            };
+            let elapsed = maximum.tooltip(Some(&short), i64::MAX, language);
+            let current = MessageKey::new("tray.current")
+                .in_language(language)
+                .replace("%{current}", "App")
+                .replace("%{minutes}", &maximum_minutes.to_string());
+            assert!(
+                current.contains(&maximum_minutes.to_string()),
+                "maximum elapsed minutes for {language}"
+            );
+            let unbounded = format!("{summary}\n{current}");
+            if unbounded.encode_utf16().count() <= TOOLTIP_UNITS {
+                assert_eq!(elapsed, unbounded);
+            } else {
+                assert!(elapsed.ends_with('…'));
+                assert!(unbounded.starts_with(elapsed.trim_end_matches('…')));
+            }
+            crate::tray_tooltip::TrayTooltipText::try_from(elapsed.as_str())
+                .expect("maximum elapsed time fits");
+            for character in ['界', '😀'] {
+                let content = character
+                    .to_string()
+                    .repeat(limits::TITLE_UTF16_UNITS / character.len_utf16());
+                assert_eq!(content.encode_utf16().count(), limits::TITLE_UTF16_UNITS);
+                let foreground = ForegroundState {
+                    app: Some(quartz_protocol::AppIdentity::Unresolved(content.clone())),
+                    title: Some(content),
+                    interval_start_utc_ms: i64::MIN,
+                };
+                let text = maximum.tooltip(Some(&foreground), i64::MAX, language);
+                assert!(text.ends_with('…'), "long formatted content for {language}");
+                let units = text.encode_utf16().count();
+                assert!((TOOLTIP_UNITS - char::MAX.len_utf16()..=TOOLTIP_UNITS).contains(&units));
+                crate::tray_tooltip::TrayTooltipText::try_from(text.as_str())
+                    .expect("formatted tooltip fits");
+            }
+        }
+    }
 }

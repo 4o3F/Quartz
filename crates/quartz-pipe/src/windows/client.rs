@@ -39,9 +39,14 @@ impl PipeClient {
     /// # Errors
     /// Returns absent, busy, transport or server identity failures.
     pub async fn connect() -> Result<Self, OpenCorePipeError> {
+        Self::discover(ProcessIdentity::pipe_name).await
+    }
+    async fn discover(
+        name: impl FnOnce(&ProcessIdentity) -> PipeName,
+    ) -> Result<Self, OpenCorePipeError> {
         let owner =
             ProcessIdentity::current().context(open_core_pipe_error::ServerIdentitySnafu)?;
-        Self::open_named(&owner.pipe_name()).await
+        Self::open_as(&name(&owner), &owner).await
     }
     /// Opens a named endpoint with the same authentication and deadlines as discovery.
     ///
@@ -50,6 +55,9 @@ impl PipeClient {
     pub async fn open_named(name: &PipeName) -> Result<Self, OpenCorePipeError> {
         let owner =
             ProcessIdentity::current().context(open_core_pipe_error::ServerIdentitySnafu)?;
+        Self::open_as(name, &owner).await
+    }
+    async fn open_as(name: &PipeName, owner: &ProcessIdentity) -> Result<Self, OpenCorePipeError> {
         let pipe = tokio::time::timeout(CONNECT_TIMEOUT, async {
             loop {
                 match ClientOptions::new().open(name) {
@@ -176,5 +184,25 @@ mod tests {
         assert_eq!(started.elapsed(), CONNECT_TIMEOUT);
         drop(second);
         drop(first);
+    }
+    #[tokio::test]
+    async fn discovery_reads_identity_once_and_reuses_it_for_authentication() {
+        let name = PipeName::for_test(windows::core::GUID::new().expect("isolated pipe"));
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&name)
+            .expect("test pipe");
+        let reads = ProcessIdentity::current_identity_reads();
+        let client = PipeClient::discover(|_| name.clone())
+            .await
+            .expect("authenticated client");
+        server.connect().await.expect("connection");
+        assert_eq!(
+            ProcessIdentity::current_identity_reads(),
+            reads + 1,
+            "discovery and authentication must share one identity read"
+        );
+        drop(client);
     }
 }

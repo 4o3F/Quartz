@@ -161,4 +161,81 @@ mod tests {
             response
         );
     }
+    struct AdditiveFields;
+    impl AdditiveFields {
+        fn insert(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    for child in fields.values_mut() {
+                        Self::insert(child);
+                    }
+                    fields.insert(
+                        "future_field".into(),
+                        serde_json::json!({"nested":[1,true,null]}),
+                    );
+                }
+                serde_json::Value::Array(items) => {
+                    for child in items {
+                        Self::insert(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn response<R: CoreRequest>(fixture: &str) {
+            let mut wire = serde_json::from_str(fixture).expect("fixture JSON");
+            Self::insert(&mut wire);
+            assert!(R::response(wire).is_ok(), "additive fields for {:?}", R::OP);
+        }
+    }
+    #[test]
+    fn typed_responses_accept_additive_fields_at_every_nested_object() {
+        AdditiveFields::response::<crate::QueryAnnotationsRequest>(include_str!(
+            "../tests/fixtures/annotations-chunked.json"
+        ));
+        let mut categories: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/categories.json"))
+                .expect("categories");
+        AdditiveFields::insert(&mut categories);
+        assert!(
+            crate::CategoriesListRequest::response(categories["list_response"].clone()).is_ok()
+        );
+        assert!(
+            crate::CategoriesCreateRequest::response(categories["entity_response"].clone()).is_ok()
+        );
+        AdditiveFields::response::<QueryDayRequest>(include_str!(
+            "../tests/fixtures/document-day.json"
+        ));
+        AdditiveFields::response::<QueryTimelineRequest>(include_str!(
+            "../tests/fixtures/timeline-annotations.json"
+        ));
+        AdditiveFields::response::<QueryRangeRequest>(include_str!(
+            "../tests/fixtures/range-first.json"
+        ));
+        AdditiveFields::response::<QueryEntityDetailRequest>(include_str!(
+            "../tests/fixtures/document-entity.json"
+        ));
+        AdditiveFields::response::<QueryPendingAwayRequest>(include_str!(
+            "../tests/fixtures/pending-away.json"
+        ));
+        AdditiveFields::response::<QueryUnclassifiedRequest>(include_str!(
+            "../tests/fixtures/unclassified-document.json"
+        ));
+    }
+    #[test]
+    fn cursor_json_is_forwarded_unchanged_including_future_query_shapes() {
+        for query in [
+            serde_json::json!({"kind":"day","local_date":"2025-01-02","extra":{"id":18446744073709551615_u64}}),
+            serde_json::json!({"kind":"future_query","parameters":[null,true,"opaque"]}),
+        ] {
+            let cursor = serde_json::json!({"versions":"v","query":query,"position":3,"extension":{"nested":[1,2,3]}});
+            let wire = serde_json::json!({"metrics":null,"hours":null,"applications":[],"domains":[],"documents":[],"versions":"v","next_cursor":cursor});
+            let response = QueryDayRequest::response(wire).expect("opaque cursor response");
+            let request = QueryDayRequest {
+                local_date: "2025-01-02".parse().expect("date"),
+                cursor: response.next_cursor,
+            };
+            assert_eq!(request.body().expect("forward cursor")["cursor"], cursor);
+        }
+    }
 }

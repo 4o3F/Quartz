@@ -7,7 +7,7 @@ use crate::ProtoRange;
 /// A persisted rule-set version used for optimistic concurrency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct RuleSetVersion(pub u64);
+pub struct RuleSetVersion(pub u32);
 
 /// Typed error fields serialized flat beside the `code` discriminator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +40,8 @@ pub enum ErrorKind {
     StaleDocumentRef,
     /// The submitted base version differs from the current rule-set version.
     RuleSetStale {
+        /// Conflicting rule-set identity.
+        key: String,
         /// Current version to read before resubmitting a change.
         current_version: RuleSetVersion,
     },
@@ -118,12 +120,14 @@ mod tests {
             "forbidden",
             "invalid_range",
             "stale_cursor",
+            "stale_document_ref",
             "rule_set_stale",
+            "rule_set_not_found",
             "core_offline",
             "internal",
             "busy",
         ] {
-            let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "core_version": "test-core"});
+            let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "key": "user.local", "version": null, "core_version": "test-core"});
             let kind: ErrorKind = serde_json::from_value(wire).expect("known error kind");
             assert_eq!(kind.code(), name);
             assert_eq!(
@@ -165,9 +169,11 @@ mod tests {
             "core_version is required before protocol release"
         );
         let stale = ProtocolError::new(ErrorKind::RuleSetStale {
+            key: "user.local".into(),
             current_version: RuleSetVersion(7),
         });
-        let wire = serde_json::json!({"code":"rule_set_stale","current_version":7});
+        let wire =
+            serde_json::json!({"code":"rule_set_stale","key":"user.local","current_version":7});
         assert_eq!(serde_json::to_value(&stale).expect("serialize"), wire);
         assert_eq!(
             serde_json::from_value::<ProtocolError>(wire).expect("deserialize"),
@@ -185,5 +191,35 @@ mod tests {
         assert_eq!(unknown.kind.code(), "unknown");
         assert_eq!(unknown.msg.as_deref(), Some("diagnostic"));
         assert!(serde_json::to_value(&unknown).is_err());
+    }
+    #[test]
+    fn stale_rule_set_error_requires_key_and_u32_revision() {
+        for version in [0, u32::MAX] {
+            let wire = serde_json::json!({"code":"rule_set_stale","key":"user.local","current_version":version});
+            let error: ProtocolError =
+                serde_json::from_value(wire.clone()).expect("valid boundary");
+            assert_eq!(serde_json::to_value(error).expect("snapshot"), wire);
+        }
+        for version in [
+            serde_json::json!(-1),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+            serde_json::json!(1.5),
+            serde_json::json!(true),
+        ] {
+            assert!(
+                serde_json::from_value::<ProtocolError>(serde_json::json!({
+                    "code":"rule_set_stale","key":"user.local","current_version":version
+                }))
+                .is_err(),
+                "invalid version: {version}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<ProtocolError>(serde_json::json!({
+                "code":"rule_set_stale","current_version":1
+            }))
+            .is_err(),
+            "key is required"
+        );
     }
 }

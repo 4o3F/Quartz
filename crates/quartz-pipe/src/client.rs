@@ -47,6 +47,12 @@ pub enum CallCoreError {
     },
     #[snafu(display("core rejected the request: {}", kind.code()))]
     Protocol { kind: ErrorKind },
+    #[snafu(display("core ended the connection: {}", kind.code()))]
+    ConnectionProtocol { kind: ErrorKind },
+    #[snafu(display(
+        "core connection must be discarded after an interrupted send or connection error"
+    ))]
+    DiscardConnection,
     #[snafu(display("could not exchange core IPC frame"))]
     Io { source: io::Error },
     #[snafu(display("core response deadline expired"))]
@@ -101,7 +107,11 @@ impl CallCoreError {
     /// Whether framing or transport must be discarded before another call (04 §2–§4).
     pub fn ends_connection(&self) -> bool {
         match self {
-            Self::Io { .. } | Self::Frame { .. } | Self::WriteTimeout { .. } => true,
+            Self::Io { .. }
+            | Self::Frame { .. }
+            | Self::WriteTimeout { .. }
+            | Self::ConnectionProtocol { .. }
+            | Self::DiscardConnection => true,
             Self::Runtime { .. }
             | Self::HandshakeVersion { .. }
             | Self::Protocol { .. }
@@ -128,21 +138,40 @@ pub enum IncomingFrame {
     Event(Event),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionState {
+    Ready,
+    Discard,
+}
+
 /// Owns cancellation-safe receive buffering and the outstanding request identities.
 #[derive(Debug)]
 pub struct AsyncCoreClient<T> {
     transport: T,
+    state: ConnectionState,
     codec: LengthDelimitedCodec,
     buffer: BytesMut,
     next_id: RequestId,
     pending: BTreeSet<RequestId>,
     events: VecDeque<Event>,
 }
+/// Retires a sequential call on completion, early return, or future cancellation.
+struct PendingRequest<'client, T> {
+    client: &'client mut AsyncCoreClient<T>,
+    id: RequestId,
+}
+impl<T> Drop for PendingRequest<'_, T> {
+    fn drop(&mut self) {
+        self.client.pending.remove(&self.id);
+    }
+}
+
 impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
     /// Wraps a transport; the caller must perform the handshake before other requests.
     pub fn new(transport: T) -> Self {
         Self {
             transport,
+            state: ConnectionState::Ready,
             codec: frame_codec(),
             buffer: BytesMut::new(),
             next_id: RequestId(1),
@@ -185,12 +214,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
     /// Sends one request without waiting; `receive` correlates its eventual response.
     ///
     /// # Errors
-    /// Returns encoding, write or deadline failures; discard the connection on write failure.
+    /// Returns encoding, write or deadline failures. Writing and flushing share one deadline.
+    /// Cancelling during either step leaves the client unusable; subsequent sends and receives
+    /// return [`CallCoreError::DiscardConnection`]. Drop the client and reconnect.
     pub async fn send_request(
         &mut self,
         op: Op,
         body: JsonValue,
     ) -> Result<RequestId, CallCoreError> {
+        self.ensure_connected()?;
         let id = self.next_id;
         self.next_id = RequestId(
             id.0.checked_add(1)
@@ -202,10 +234,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
         self.codec
             .encode(payload.as_slice(), &mut wire)
             .context(call_core_error::FrameSnafu)?;
-        tokio::time::timeout(RESPONSE_TIMEOUT, self.transport.write_all(&wire))
-            .await
-            .context(call_core_error::WriteTimeoutSnafu)?
-            .context(call_core_error::IoSnafu)?;
+        // Keep the connection unusable until the entire frame has been flushed, including
+        // when the send future is dropped before it can report an error.
+        self.state = ConnectionState::Discard;
+        tokio::time::timeout(RESPONSE_TIMEOUT, async {
+            self.transport.write_all(&wire).await?;
+            self.transport.flush().await
+        })
+        .await
+        .context(call_core_error::WriteTimeoutSnafu)?
+        .context(call_core_error::IoSnafu)?;
+        self.state = ConnectionState::Ready;
         self.pending.insert(id);
         Ok(id)
     }
@@ -214,6 +253,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
     /// # Errors
     /// Rejects unknown response identities, malformed frames and disconnected transports.
     pub async fn receive(&mut self) -> Result<IncomingFrame, CallCoreError> {
+        self.ensure_connected()?;
         if let Some(event) = self.events.pop_front() {
             return Ok(IncomingFrame::Event(event));
         }
@@ -224,13 +264,28 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
         self.pending.remove(&id);
     }
 
+    fn ensure_connected(&self) -> Result<(), CallCoreError> {
+        match self.state {
+            ConnectionState::Ready => Ok(()),
+            ConnectionState::Discard => Err(CallCoreError::DiscardConnection),
+        }
+    }
     async fn read_incoming(&mut self) -> Result<IncomingFrame, CallCoreError> {
+        self.ensure_connected()?;
         loop {
             match self.read_envelope_unbounded().await? {
                 Envelope::Event(event) => return Ok(IncomingFrame::Event(event)),
                 Envelope::Response(response) => {
                     let Some(id) = response.id else {
-                        return Err(CallCoreError::UnsolicitedResponse { received: None });
+                        self.state = ConnectionState::Discard;
+                        return match response.outcome {
+                            ResponseOutcome::Err { error } => {
+                                Err(CallCoreError::ConnectionProtocol { kind: error.kind })
+                            }
+                            ResponseOutcome::Ok { .. } => {
+                                Err(CallCoreError::UnsolicitedResponse { received: None })
+                            }
+                        };
                     };
                     if self.pending.remove(&id) {
                         return Ok(IncomingFrame::Response(response));
@@ -258,16 +313,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
     ///
     /// # Errors
     /// Returns correlation, protocol, deadline or bounded-backlog errors.
+    /// Cancelling after the send completes retires the request; late responses are discarded.
+    /// Cancelling during the send requires discarding the connection (see [`Self::send_request`]).
     pub async fn request(&mut self, op: Op, body: &JsonValue) -> Result<JsonValue, CallCoreError> {
         let id = self.send_request(op, body.clone()).await?;
-        let result = tokio::time::timeout(RESPONSE_TIMEOUT, async {
+        let pending = PendingRequest { client: self, id };
+        tokio::time::timeout(RESPONSE_TIMEOUT, async {
             loop {
-                match self.read_incoming().await? {
+                match pending.client.read_incoming().await? {
                     IncomingFrame::Event(event) => {
-                        if self.events.len() == EVENT_CAPACITY {
+                        if pending.client.events.len() == EVENT_CAPACITY {
                             return Err(CallCoreError::EventOverflow);
                         }
-                        self.events.push_back(event);
+                        pending.client.events.push_back(event);
                     }
                     IncomingFrame::Response(response) => {
                         if response.id != Some(id) {
@@ -281,11 +339,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
                 }
             }
         })
-        .await;
-        if result.is_err() {
-            self.retire_request(id);
-        }
-        result.context(call_core_error::ResponseTimeoutSnafu)?
+        .await
+        .context(call_core_error::ResponseTimeoutSnafu)?
     }
     /// Extracts a successful body while preserving structured protocol failures.
     pub fn response_body(response: Response) -> Result<JsonValue, CallCoreError> {
@@ -296,19 +351,22 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
     }
     async fn read_envelope_unbounded(&mut self) -> Result<Envelope, CallCoreError> {
         loop {
-            if let Some(payload) = self
-                .codec
-                .decode(&mut self.buffer)
-                .context(call_core_error::FrameSnafu)?
-            {
+            if let Some(payload) = self.codec.decode(&mut self.buffer).map_err(|source| {
+                self.state = ConnectionState::Discard;
+                CallCoreError::Frame { source }
+            })? {
                 return decode_json(&payload).map_err(CallCoreError::decode);
             }
             let read = self
                 .transport
                 .read_buf(&mut self.buffer)
                 .await
-                .context(call_core_error::IoSnafu)?;
+                .map_err(|source| {
+                    self.state = ConnectionState::Discard;
+                    CallCoreError::Io { source }
+                })?;
             if read == 0 {
+                self.state = ConnectionState::Discard;
                 return Err(CallCoreError::Io {
                     source: io::ErrorKind::UnexpectedEof.into(),
                 });
@@ -624,5 +682,286 @@ mod tests {
             client.receive().await,
             Ok(IncomingFrame::Event(_))
         ));
+    }
+    struct WireFrames;
+    impl WireFrames {
+        fn encode(values: impl IntoIterator<Item = serde_json::Value>) -> BytesMut {
+            let mut wire = BytesMut::new();
+            for value in values {
+                frame_codec()
+                    .encode(encode_json(&value).expect("JSON").as_slice(), &mut wire)
+                    .expect("frame");
+            }
+            wire
+        }
+        fn response(id: u64) -> serde_json::Value {
+            serde_json::json!({"t":"res","id":id,"ok":true,"body":{"accepted":true}})
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_sequential_request_retires_id_and_discards_late_response() {
+        const BUFFER_BYTES: usize = 4096;
+        let (stream, mut peer) = tokio::io::duplex(BUFFER_BYTES);
+        let mut client = AsyncCoreClient::new(stream);
+        let body = serde_json::json!({});
+        {
+            let request = client.request(Op::UiOpen, &body);
+            tokio::pin!(request);
+            let mut sent = [0; BUFFER_BYTES];
+            tokio::select! {
+                result = &mut request => panic!("request completed before its response: {result:?}"),
+                result = peer.read(&mut sent) => assert!(result.expect("sent frame") > 0),
+            }
+        }
+        peer.write_all(&WireFrames::encode([
+            WireFrames::response(1),
+            WireFrames::response(2),
+        ]))
+        .await
+        .expect("late and current responses");
+        assert_eq!(
+            client
+                .open_ui()
+                .await
+                .expect("next call ignores late response"),
+            AcceptedBody
+        );
+        assert!(client.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn event_overflow_retires_request_before_the_next_sequential_call() {
+        const BUFFER_BYTES: usize = 16384;
+        let (stream, mut peer) = tokio::io::duplex(BUFFER_BYTES);
+        let mut client = AsyncCoreClient::new(stream);
+        let events = (0..=EVENT_CAPACITY).map(|seq| {
+            serde_json::json!({
+                "t":"evt","topic":"control","seq":seq,"body":{"op":"ui.show"}
+            })
+        });
+        peer.write_all(&WireFrames::encode(events))
+            .await
+            .expect("events");
+        assert!(matches!(
+            client.open_ui().await,
+            Err(CallCoreError::EventOverflow)
+        ));
+        peer.write_all(&WireFrames::encode([
+            WireFrames::response(1),
+            WireFrames::response(2),
+        ]))
+        .await
+        .expect("late and current responses");
+        assert_eq!(client.open_ui().await.expect("next response"), AcceptedBody);
+        assert!(client.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn null_id_errors_preserve_the_code_and_end_the_connection() {
+        for kind in [
+            ErrorKind::BadRequest,
+            ErrorKind::FrameTooLarge,
+            ErrorKind::Unknown,
+        ] {
+            const BUFFER_BYTES: usize = 4096;
+            let (stream, mut peer) = tokio::io::duplex(BUFFER_BYTES);
+            let mut client = AsyncCoreClient::new(stream);
+            let code = if kind == ErrorKind::Unknown {
+                "future_error"
+            } else {
+                kind.code()
+            };
+            peer.write_all(&WireFrames::encode([serde_json::json!({
+                "t":"res","id":null,"ok":false,"err":{"code":code}
+            })]))
+            .await
+            .expect("connection error");
+            let error = client.receive().await.expect_err("connection ended");
+            assert!(error.ends_connection(), "{error:?}");
+            assert!(
+                matches!(error, CallCoreError::ConnectionProtocol { kind: received } if received == kind)
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn buffered_transport_flushes_the_request_before_waiting_for_a_response() {
+        const BUFFER_BYTES: usize = 4096;
+        let (stream, peer) = tokio::io::duplex(BUFFER_BYTES);
+        let mut client = AsyncCoreClient::new(tokio::io::BufStream::new(stream));
+        let server = tokio::spawn(async move {
+            let mut peer = AsyncCoreClient::new(peer);
+            let envelope = peer.read_envelope().await.expect("flushed request");
+            assert!(matches!(envelope, Envelope::Request(_)));
+            peer.transport
+                .write_all(&WireFrames::encode([WireFrames::response(1)]))
+                .await
+                .expect("response");
+        });
+        assert_eq!(
+            client.open_ui().await.expect("buffered response"),
+            AcceptedBody
+        );
+        server.await.expect("server task");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_partial_send_prevents_further_transport_use() {
+        const BUFFER_BYTES: usize = 1;
+        let (stream, mut peer) = tokio::io::duplex(BUFFER_BYTES);
+        let mut client = AsyncCoreClient::new(stream);
+        {
+            let send = client.send_request(Op::UiOpen, serde_json::json!({}));
+            tokio::pin!(send);
+            let mut prefix = [0; BUFFER_BYTES];
+            tokio::select! {
+                result = &mut send => panic!("partial frame unexpectedly completed: {result:?}"),
+                result = peer.read_exact(&mut prefix) => { result.expect("partial frame"); },
+            }
+        }
+        let error = client
+            .send_request(Op::UiOpen, serde_json::json!({}))
+            .await
+            .expect_err("cancelled send poisons client");
+        assert!(matches!(error, CallCoreError::DiscardConnection));
+        assert!(error.ends_connection());
+        assert!(
+            tokio::time::timeout(RESPONSE_TIMEOUT, client.receive())
+                .await
+                .expect("receive rejects immediately")
+                .expect_err("receive also rejects disposed connection")
+                .ends_connection()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_shares_the_send_deadline_and_failure_poisoning() {
+        const BUFFER_BYTES: usize = 1;
+        let (stream, _peer) = tokio::io::duplex(BUFFER_BYTES);
+        let mut client = AsyncCoreClient::new(tokio::io::BufStream::new(stream));
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            client.send_request(Op::UiOpen, serde_json::json!({})).await,
+            Err(CallCoreError::WriteTimeout { .. })
+        ));
+        assert_eq!(started.elapsed(), RESPONSE_TIMEOUT);
+        assert!(
+            tokio::time::timeout(RESPONSE_TIMEOUT, client.receive())
+                .await
+                .expect("receive rejects immediately")
+                .expect_err("failed send poisons client")
+                .ends_connection()
+        );
+    }
+    struct FailRead;
+    impl AsyncRead for FailRead {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            _buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
+        }
+    }
+    impl AsyncWrite for FailRead {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            std::task::Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+    impl WireFrames {
+        async fn assert_discarded<T: AsyncRead + AsyncWrite + Unpin>(
+            client: &mut AsyncCoreClient<T>,
+        ) {
+            assert!(matches!(
+                client.send_request(Op::UiOpen, serde_json::json!({})).await,
+                Err(CallCoreError::DiscardConnection)
+            ));
+            assert!(matches!(
+                client.receive().await,
+                Err(CallCoreError::DiscardConnection)
+            ));
+        }
+    }
+    #[tokio::test]
+    async fn read_io_error_poisons_subsequent_send_and_receive() {
+        let mut client = AsyncCoreClient::new(FailRead);
+        assert!(matches!(
+            client.receive().await,
+            Err(CallCoreError::Io { .. })
+        ));
+        WireFrames::assert_discarded(&mut client).await;
+    }
+    #[tokio::test]
+    async fn read_eof_poisons_subsequent_send_and_receive() {
+        const BUFFER_BYTES: usize = 4096;
+        let (stream, peer) = tokio::io::duplex(BUFFER_BYTES);
+        let mut client = AsyncCoreClient::new(stream);
+        drop(peer);
+        assert!(matches!(
+            client.receive().await,
+            Err(CallCoreError::Io { .. })
+        ));
+        WireFrames::assert_discarded(&mut client).await;
+    }
+    #[tokio::test]
+    async fn oversized_frame_poisons_subsequent_send_and_receive() {
+        const BUFFER_BYTES: usize = 4096;
+        let (stream, mut peer) = tokio::io::duplex(BUFFER_BYTES);
+        peer.write_all(
+            &u32::try_from(quartz_protocol::MAX_FRAME_LEN + 1)
+                .expect("frame length")
+                .to_le_bytes(),
+        )
+        .await
+        .expect("oversized frame header");
+        let mut client = AsyncCoreClient::new(stream);
+        assert!(matches!(
+            client.receive().await,
+            Err(CallCoreError::Frame { .. })
+        ));
+        WireFrames::assert_discarded(&mut client).await;
+    }
+    #[tokio::test(start_paused = true)]
+    async fn response_timeout_retires_id_and_preserves_connection_for_the_next_call() {
+        const BUFFER_BYTES: usize = 4096;
+        let (stream, mut peer) = tokio::io::duplex(BUFFER_BYTES);
+        let mut client = AsyncCoreClient::new(stream);
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            client.open_ui().await,
+            Err(CallCoreError::ResponseTimeout { .. })
+        ));
+        assert_eq!(started.elapsed(), RESPONSE_TIMEOUT);
+        assert!(client.pending.is_empty());
+        let mut buffer = [0; BUFFER_BYTES];
+        assert!(peer.read(&mut buffer).await.expect("fully sent request") > 0);
+        peer.write_all(&WireFrames::encode([
+            WireFrames::response(1),
+            WireFrames::response(2),
+        ]))
+        .await
+        .expect("late and next responses");
+        assert_eq!(
+            client.open_ui().await.expect("next call remains usable"),
+            AcceptedBody
+        );
+        assert!(client.pending.is_empty());
     }
 }

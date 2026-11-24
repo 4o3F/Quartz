@@ -55,7 +55,6 @@ pub enum RuleSetSource {
 }
 /// Entry counts authored directly in this set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleSetCounts {
     pub added: usize,
     pub overridden: usize,
@@ -71,14 +70,12 @@ pub enum RuleWarningCode {
 }
 /// An overlay warning and its qualified ancestor target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleSetWarning {
     pub code: RuleWarningCode,
     pub target: String,
 }
 /// One current tree node, in sibling-order and key preorder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleSetNode {
     pub key: String,
     pub parent: Option<String>,
@@ -91,7 +88,6 @@ pub struct RuleSetNode {
 }
 /// A family tree page; privacy effective_version is the historical deletion scope hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleSetsTreeResponse {
     pub kind: RuleKind,
     pub effective_version: String,
@@ -118,7 +114,6 @@ pub enum RuleEntryState {
 }
 /// A defining or replacing revision, ordered from definition to latest overlay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleProvenance {
     pub key: String,
     pub version: u32,
@@ -193,7 +188,6 @@ pub enum RuleField {
 }
 /// Canonical format condition; category values remain stored UUID text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleCondition {
     pub field: RuleField,
     pub op: RuleOperator,
@@ -203,7 +197,6 @@ pub struct RuleCondition {
 }
 /// Rule-format fields shared by definitions, overrides, and disable directives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleEntryContent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -247,7 +240,6 @@ pub enum RuleApp {
 }
 /// Canonical entry with final state and definition/replacement chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleSetEntry {
     pub entry_kind: RuleEntryKind,
     pub content: RuleEntryContent,
@@ -256,7 +248,6 @@ pub struct RuleSetEntry {
 }
 /// Contents page bound to every registry and metadata input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleSetsGetResponse {
     pub key: String,
     pub version: u32,
@@ -267,7 +258,6 @@ pub struct RuleSetsGetResponse {
 }
 /// Immutable saved revision metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleSetRevision {
     pub version: u32,
     pub parent_version: Option<u32>,
@@ -276,7 +266,6 @@ pub struct RuleSetRevision {
 }
 /// Revision page in descending version order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuleSetsVersionsResponse {
     pub revisions: Vec<RuleSetRevision>,
     pub versions: QueryVersions,

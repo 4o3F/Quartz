@@ -22,7 +22,7 @@ impl WriteRequest {
         op: quartz_protocol::Op,
         body: serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
-        match op {
+        let request = match op {
             quartz_protocol::Op::CategoriesList => serde_json::from_value(body)
                 .map(CategoryRequest::List)
                 .map(Self::Categories),
@@ -53,7 +53,15 @@ impl WriteRequest {
             }
             quartz_protocol::Op::SettingsSet => serde_json::from_value(body).map(Self::SettingsSet),
             _ => unreachable!("write decoding follows implemented operation dispatch"),
+        }?;
+        if let Self::Categories(CategoryRequest::List(body)) = &request
+            && let Some(cursor) = &body.cursor
+        {
+            cursor.validate_query(&quartz_protocol::CursorQuery::Categories {
+                include_archived: body.include_archived,
+            })?;
         }
+        Ok(request)
     }
     pub(crate) fn execute(
         self,

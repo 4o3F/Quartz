@@ -20,15 +20,52 @@ pub struct TrackingKeepAliveRequest {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackingResumeRequest {}
-/// Global privacy mode request; enabling requires a future deadline.
+/// Installs a timed private policy or cancels the current policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PrivacyModeSetRequest {
-    /// Whether to install or cancel private mode.
-    pub enabled: bool,
-    /// Required when enabled.
-    pub until_utc_ms: Option<i64>,
+#[serde(try_from = "PrivacyModeSetWire", into = "PrivacyModeSetWire")]
+pub enum PrivacyModeSetRequest {
+    /// Enabling requires a deadline; the core checks that it is in the future.
+    Enable { until_utc_ms: i64 },
+    /// Cancel the active private policy.
+    Disable,
 }
+/// Boolean fields exist only at the documented JSON boundary.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivacyModeSetWire {
+    enabled: bool,
+    until_utc_ms: Option<i64>,
+}
+impl TryFrom<PrivacyModeSetWire> for PrivacyModeSetRequest {
+    type Error = ParsePrivacyModeRequestError;
+    fn try_from(wire: PrivacyModeSetWire) -> Result<Self, Self::Error> {
+        match wire.enabled {
+            true => wire
+                .until_utc_ms
+                .map(|until_utc_ms| Self::Enable { until_utc_ms })
+                .ok_or(ParsePrivacyModeRequestError),
+            false => Ok(Self::Disable),
+        }
+    }
+}
+impl From<PrivacyModeSetRequest> for PrivacyModeSetWire {
+    fn from(request: PrivacyModeSetRequest) -> Self {
+        match request {
+            PrivacyModeSetRequest::Enable { until_utc_ms } => Self {
+                enabled: true,
+                until_utc_ms: Some(until_utc_ms),
+            },
+            PrivacyModeSetRequest::Disable => Self {
+                enabled: false,
+                until_utc_ms: None,
+            },
+        }
+    }
+}
+/// Enabling private mode requires an integer UTC deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, snafu::Snafu)]
+#[snafu(display("enabling privacy mode requires until_utc_ms"))]
+pub struct ParsePrivacyModeRequestError;
 /// Privacy retention combination from 06 §2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,4 +114,56 @@ pub struct TimedPolicyResponse {
     pub accepted: crate::AcceptedBody,
     /// Domain-normalized requested state.
     pub requested: RequestedTimedState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn privacy_wire_requires_a_deadline_when_enabled_and_retains_boolean_json() {
+        for wire in [
+            serde_json::json!({"enabled":true}),
+            serde_json::json!({"enabled":true,"until_utc_ms":null}),
+            serde_json::json!({"enabled":"true","until_utc_ms":1}),
+            serde_json::json!({"until_utc_ms":1}),
+        ] {
+            assert!(
+                serde_json::from_value::<PrivacyModeSetRequest>(wire.clone()).is_err(),
+                "{wire}"
+            );
+        }
+        for wire in [
+            serde_json::json!({"enabled":true,"until_utc_ms":i64::MAX}),
+            serde_json::json!({"enabled":false,"until_utc_ms":null}),
+        ] {
+            let request: PrivacyModeSetRequest =
+                serde_json::from_value(wire.clone()).expect("valid wire");
+            assert_eq!(serde_json::to_value(request).expect("wire snapshot"), wire);
+        }
+    }
+    #[test]
+    fn timed_requests_reject_unknown_fields() {
+        assert!(
+            serde_json::from_value::<TrackingPauseRequest>(
+                serde_json::json!({"until_utc_ms":1,"extra":true})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TrackingKeepAliveRequest>(
+                serde_json::json!({"until_utc_ms":1,"extra":true})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TrackingResumeRequest>(serde_json::json!({"extra":true}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PrivacyModeSetRequest>(
+                serde_json::json!({"enabled":false,"extra":true})
+            )
+            .is_err()
+        );
+    }
 }

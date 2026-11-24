@@ -432,6 +432,38 @@ mod pipe {
     }
 
     #[tokio::test]
+    async fn connection_protocol_errors_deliver_disconnect_without_waiting_for_eof() {
+        for kind in [
+            quartz_protocol::ErrorKind::BadRequest,
+            quartz_protocol::ErrorKind::FrameTooLarge,
+        ] {
+            let listener = TestPipeServer::bind().expect("listener");
+            let mut ui = Harness::start(listener.name().clone());
+            ui.connecting().await;
+            let mut core = Core::accept(listener).await;
+            core.handshake().await;
+            ui.connected().await;
+            core.peer
+                .send(Envelope::Response(Response {
+                    id: None,
+                    outcome: ResponseOutcome::Err {
+                        error: ProtocolError::new(kind),
+                    },
+                }))
+                .await
+                .expect("connection-level rejection");
+            let event = tokio::time::timeout(RESPONSE_TIMEOUT, ui.events.recv())
+                .await
+                .expect("connection error immediately ends worker")
+                .expect("disconnect event");
+            assert!(matches!(event, LinkEvent::Disconnected));
+            assert!(event.exits_ui());
+            ui.worker.await.expect("typed disconnect ends worker");
+            drop(core);
+        }
+    }
+
+    #[tokio::test]
     async fn a_request_timeout_keeps_other_requests_events_and_late_response_correlation() {
         let listener = TestPipeServer::bind().expect("listener");
         let mut ui = Harness::start(listener.name().clone());

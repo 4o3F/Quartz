@@ -28,10 +28,27 @@ impl std::fmt::Debug for DocumentRef {
 }
 /// Half-open UTC range whose inputs determine a document reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReferenceRange {
     pub start_utc_ms: i64,
     pub end_utc_ms: i64,
+}
+impl ReferenceRange {
+    fn deserialize_request<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Self>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RequestRange {
+            start_utc_ms: i64,
+            end_utc_ms: i64,
+        }
+        Option::<RequestRange>::deserialize(deserializer).map(|range| {
+            range.map(|range| Self {
+                start_utc_ms: range.start_utc_ms,
+                end_utc_ms: range.end_utc_ms,
+            })
+        })
+    }
 }
 /// Extraction outcome, independent of display language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -53,28 +70,114 @@ pub struct TitleExtraction {
     pub extractor_rule: Option<String>,
     pub status: Option<ExtractionStatus>,
 }
-/// Opaque continuation value; clients preserve and return its JSON object unchanged.
+/// Maximum encoded cursor JSON size, including all nested string escaping.
+/// Document-detail cursors carry a complete document reference, while rule cursors carry
+/// keys with no smaller protocol limit; use the 256 KiB frame ceiling for both.
+pub const MAX_CURSOR_BYTES: usize = crate::MAX_FRAME_LEN;
+
+/// Counts encoded bytes without allocating a second copy of the cursor JSON.
+struct CursorByteBudget {
+    remaining: usize,
+}
+impl std::io::Write for CursorByteBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(std::io::ErrorKind::FileTooLarge.into());
+        }
+        self.remaining -= bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Opaque continuation object; clients return all JSON fields unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "serde_json::Value")]
+pub struct QueryCursor(serde_json::Value);
+impl QueryCursor {
+    /// Issues a continuation at the next list item using the core's current schema.
+    pub fn new(versions: QueryVersions, query: CursorQuery, position: usize) -> Self {
+        Self(
+            serde_json::to_value(CursorPosition {
+                versions,
+                query,
+                position,
+            })
+            .expect("typed cursor fields serialize to JSON"),
+        )
+    }
+    /// Validates the core's cursor schema when admitting a continuation request.
+    ///
+    /// # Errors
+    /// Returns an error for oversized JSON, malformed fields, or unknown fields and query kinds.
+    pub fn decode(&self) -> Result<CursorPosition, serde_json::Error> {
+        self.check_size().map_err(serde::de::Error::custom)?;
+        CursorPosition::deserialize(&self.0)
+    }
+    /// Checks query parameters before the core admits database or scan work.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid cursor schema or parameters from another query.
+    pub fn validate_query(&self, expected: &CursorQuery) -> Result<(), serde_json::Error> {
+        if self.decode()?.query() != expected {
+            return Err(serde::de::Error::custom(
+                "cursor parameters do not match the request",
+            ));
+        }
+        Ok(())
+    }
+    fn check_size(&self) -> Result<(), ParseQueryCursorError> {
+        serde_json::to_writer(
+            CursorByteBudget {
+                remaining: MAX_CURSOR_BYTES,
+            },
+            &self.0,
+        )
+        .map_err(|_| ParseQueryCursorError)
+    }
+}
+impl Serialize for QueryCursor {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+impl TryFrom<serde_json::Value> for QueryCursor {
+    type Error = ParseQueryCursorError;
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        if !value.is_object() {
+            return Err(ParseQueryCursorError);
+        }
+        let cursor = Self(value);
+        cursor.check_size()?;
+        Ok(cursor)
+    }
+}
+impl From<QueryCursor> for serde_json::Value {
+    fn from(cursor: QueryCursor) -> Self {
+        cursor.0
+    }
+}
+/// A continuation must be a JSON object within the cursor byte limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, snafu::Snafu)]
+#[snafu(display("query cursor must be a JSON object of at most {MAX_CURSOR_BYTES} bytes"))]
+pub struct ParseQueryCursorError;
+
+/// Core-validated continuation parameters, separate from the client's opaque JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct QueryCursor {
+pub struct CursorPosition {
     versions: QueryVersions,
     query: CursorQuery,
     position: usize,
 }
-impl QueryCursor {
-    /// Issues a continuation at the next list item.
-    pub fn new(versions: QueryVersions, query: CursorQuery, position: usize) -> Self {
-        Self {
-            versions,
-            query,
-            position,
-        }
-    }
-    /// Returns the input versions to validate against the current snapshot.
+impl CursorPosition {
+    /// Returns the input versions to compare with the current snapshot.
     pub fn versions(&self) -> &QueryVersions {
         &self.versions
     }
-    /// Returns the typed query parameters, excluding the cursor itself.
+    /// Returns the query parameters bound to this continuation.
     pub fn query(&self) -> &CursorQuery {
         &self.query
     }
@@ -118,7 +221,11 @@ pub enum CursorQuery {
     EntityDetail {
         entity: DetailEntity,
         local_date: LocalDate,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "ReferenceRange::deserialize_request"
+        )]
         reference_range: Option<ReferenceRange>,
     },
     /// Grouped unclassified work in a logical-date range.
@@ -383,7 +490,11 @@ pub enum DetailEntity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryEntityDetailRequest {
     pub entity: DetailEntity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "ReferenceRange::deserialize_request"
+    )]
     pub reference_range: Option<ReferenceRange>,
     pub local_date: LocalDate,
     #[serde(default)]
@@ -885,8 +996,11 @@ mod tests {
                 wire
             );
             if let Some(cursor) = response.next_cursor {
-                assert_eq!(cursor.query(), &CursorQuery::from(&request));
-                assert_eq!(cursor.position(), 1);
+                assert_eq!(
+                    cursor.decode().expect("issued cursor").query(),
+                    &CursorQuery::from(&request)
+                );
+                assert_eq!(cursor.decode().expect("issued cursor").position(), 1);
             }
         }
         let mut invalid = request_wire;
@@ -925,8 +1039,11 @@ mod tests {
                 serde_json::from_value(expected.clone()).expect("response");
             assert_eq!(serde_json::to_value(&response).expect("encode"), expected);
             if let Some(cursor) = &response.next_cursor {
-                assert_eq!(cursor.query(), &CursorQuery::from(&request));
-                assert_eq!(cursor.position(), 2);
+                assert_eq!(
+                    cursor.decode().expect("issued cursor").query(),
+                    &CursorQuery::from(&request)
+                );
+                assert_eq!(cursor.decode().expect("issued cursor").position(), 2);
                 assert_eq!(response.buckets[0].active_ms, Some(1000));
                 assert!(matches!(
                     response.buckets[0].groups[0].entity,
@@ -1255,8 +1372,11 @@ mod tests {
         let decoded: QueryCursor =
             serde_json::from_value(serde_json::to_value(&cursor).expect("timeline cursor"))
                 .expect("typed timeline cursor");
-        assert_eq!(decoded.query(), &CursorQuery::from(&request));
-        assert_eq!(decoded.position(), 10);
+        assert_eq!(
+            decoded.decode().expect("issued cursor").query(),
+            &CursorQuery::from(&request)
+        );
+        assert_eq!(decoded.decode().expect("issued cursor").position(), 10);
     }
     #[test]
     fn category_metadata_and_revision_qualified_sources_round_trip() {
@@ -1340,6 +1460,75 @@ mod tests {
         assert_eq!(
             serde_json::to_value(crate::Capability::QueryDocumentsV1).expect("capability"),
             "query.documents.v1"
+        );
+    }
+    #[test]
+    fn reference_range_is_strict_in_requests_and_extensible_in_responses() {
+        let range = serde_json::json!({"start_utc_ms":0,"end_utc_ms":1,"extra":true});
+        assert!(serde_json::from_value::<ReferenceRange>(range.clone()).is_ok());
+        assert!(serde_json::from_value::<QueryEntityDetailRequest>(serde_json::json!({
+            "entity":{"kind":"document","document_ref":"opaque"},"local_date":"2025-01-02","reference_range":range
+        })).is_err());
+    }
+    #[test]
+    fn cursor_json_has_a_frame_sized_byte_limit_even_outside_transport() {
+        let wire = serde_json::json!({"extension":"x".repeat(crate::MAX_FRAME_LEN)});
+        assert!(QueryCursor::try_from(wire).is_err());
+    }
+    #[test]
+    fn cursor_byte_limit_counts_utf8_and_json_escaping_at_the_exact_boundary() {
+        let empty = serde_json::json!({"extension":""});
+        let overhead = serde_json::to_vec(&empty).expect("empty cursor JSON").len();
+        let mut at_limit = empty;
+        at_limit["extension"] = serde_json::json!("x".repeat(MAX_CURSOR_BYTES - overhead));
+        assert_eq!(
+            serde_json::to_vec(&at_limit).expect("boundary JSON").len(),
+            MAX_CURSOR_BYTES
+        );
+        assert!(QueryCursor::try_from(at_limit.clone()).is_ok());
+        at_limit["extension"] = serde_json::json!("x".repeat(MAX_CURSOR_BYTES - overhead + 1));
+        assert!(QueryCursor::try_from(at_limit).is_err());
+        for text in [
+            "😀".repeat(MAX_CURSOR_BYTES / '😀'.len_utf8()),
+            "\0".repeat(MAX_CURSOR_BYTES),
+        ] {
+            assert!(QueryCursor::try_from(serde_json::json!({"extension":text})).is_err());
+        }
+        let empty_rule = QueryCursor::new(
+            QueryVersions("v".into()),
+            CursorQuery::RuleSetsGet {
+                key: String::new(),
+                version: None,
+                view: crate::RuleView::Own,
+            },
+            usize::MAX,
+        );
+        let overhead = serde_json::to_vec(&empty_rule).expect("rule cursor").len();
+        let largest_rule = QueryCursor::new(
+            QueryVersions("v".into()),
+            CursorQuery::RuleSetsGet {
+                key: "x".repeat(MAX_CURSOR_BYTES - overhead),
+                version: None,
+                view: crate::RuleView::Own,
+            },
+            usize::MAX,
+        );
+        assert!(
+            largest_rule.decode().is_ok(),
+            "full-width rule keys remain supported"
+        );
+        let oversized_rule = QueryCursor::new(
+            QueryVersions("v".into()),
+            CursorQuery::RuleSetsGet {
+                key: "x".repeat(MAX_CURSOR_BYTES),
+                version: None,
+                view: crate::RuleView::Own,
+            },
+            usize::MAX,
+        );
+        assert!(
+            oversized_rule.decode().is_err(),
+            "admission bounds internally constructed cursors too"
         );
     }
 }

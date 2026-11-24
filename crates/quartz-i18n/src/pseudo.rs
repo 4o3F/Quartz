@@ -2,10 +2,6 @@
 
 use std::borrow::Cow;
 
-mod catalog {
-    rust_i18n::i18n!("locales", fallback = "en");
-}
-
 /// Generates expanded translations for the debug pseudo-locale.
 #[derive(Debug)]
 pub(super) struct Backend;
@@ -19,7 +15,8 @@ impl rust_i18n::Backend for Backend {
         if locale != "en-XA" {
             return None;
         }
-        catalog::_rust_i18n_backend()
+        // English bypasses this extension, so the shared backend does not recurse.
+        super::translations::_rust_i18n_backend()
             .translate("en", key)
             .map(|text| Cow::Owned(expand(&text)))
     }
@@ -43,7 +40,7 @@ impl Backend {
         if locale != "en-XA" {
             return None;
         }
-        catalog::_rust_i18n_backend()
+        super::translations::_rust_i18n_backend()
             .messages_for_locale("en")
             .map(|messages| {
                 messages

@@ -27,7 +27,7 @@ impl AnnotationKind {
 
 /// Category lookup accepted by annotation writes; responses use the durable UUID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AnnotationCategory {
     Uuid { uuid: Uuid },
     Builtin { key: BuiltinCategory },
@@ -47,6 +47,7 @@ pub struct AnnotationValues {
 }
 /// One entity in an atomic create request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "AnnotationRequestWire<AnnotationKind>")]
 pub struct CreateAnnotation {
     pub uuid: AnnotationId,
     pub kind: AnnotationKind,
@@ -55,6 +56,7 @@ pub struct CreateAnnotation {
 }
 /// One entity in an atomic final-value update request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "AnnotationRequestWire<Option<AnnotationKind>>")]
 pub struct UpdateAnnotation {
     pub uuid: AnnotationId,
     /// Optional assertion of the stored kind; changing it is rejected.
@@ -62,6 +64,59 @@ pub struct UpdateAnnotation {
     pub kind: Option<AnnotationKind>,
     #[serde(flatten)]
     pub values: AnnotationValues,
+}
+#[derive(Deserialize)]
+struct AnnotationRequestWire<Kind> {
+    uuid: AnnotationId,
+    kind: Kind,
+    #[serde(flatten)]
+    values: AnnotationRequestValues,
+}
+#[derive(Deserialize)]
+struct AnnotationRequestValues {
+    start_utc_ms: i64,
+    end_utc_ms: i64,
+    category: Option<RequestAnnotationCategory>,
+    label: Option<String>,
+    note: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RequestAnnotationCategory {
+    Uuid { uuid: Uuid },
+    Builtin { key: BuiltinCategory },
+}
+impl From<AnnotationRequestValues> for AnnotationValues {
+    fn from(values: AnnotationRequestValues) -> Self {
+        Self {
+            start_utc_ms: values.start_utc_ms,
+            end_utc_ms: values.end_utc_ms,
+            category: values.category.map(|category| match category {
+                RequestAnnotationCategory::Uuid { uuid } => AnnotationCategory::Uuid { uuid },
+                RequestAnnotationCategory::Builtin { key } => AnnotationCategory::Builtin { key },
+            }),
+            label: values.label,
+            note: values.note,
+        }
+    }
+}
+impl From<AnnotationRequestWire<AnnotationKind>> for CreateAnnotation {
+    fn from(wire: AnnotationRequestWire<AnnotationKind>) -> Self {
+        Self {
+            uuid: wire.uuid,
+            kind: wire.kind,
+            values: wire.values.into(),
+        }
+    }
+}
+impl From<AnnotationRequestWire<Option<AnnotationKind>>> for UpdateAnnotation {
+    fn from(wire: AnnotationRequestWire<Option<AnnotationKind>>) -> Self {
+        Self {
+            uuid: wire.uuid,
+            kind: wire.kind,
+            values: wire.values.into(),
+        }
+    }
 }
 /// Creates entities in one transaction, returning existing entities for UUID retries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,7 +177,6 @@ pub enum AnnotationText {
 
 /// Text fragment; `complete` marks the end of this field's stored value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AnnotationTextChunk {
     pub text: String,
     pub offset_utf8: usize,
@@ -131,7 +185,6 @@ pub struct AnnotationTextChunk {
 
 /// Stored endpoints and final editing values, repeated unchanged around text fragments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SavedAnnotation {
     pub uuid: AnnotationId,
     pub kind: AnnotationKind,
@@ -146,7 +199,6 @@ pub struct SavedAnnotation {
 
 /// Saved annotations ordered by start UTC, end UTC, then UUID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct QueryAnnotationsResponse {
     pub entities: Vec<SavedAnnotation>,
     pub versions: crate::QueryVersions,
@@ -180,23 +232,24 @@ mod tests {
             let response = QueryAnnotationsRequest::response(wire.clone()).expect("typed page");
             assert_eq!(serde_json::to_value(&response).expect("encode page"), wire);
             if let Some(cursor) = &response.next_cursor {
-                assert_eq!(cursor.query(), &CursorQuery::from(&request));
+                assert_eq!(
+                    cursor.decode().expect("issued cursor").query(),
+                    &CursorQuery::from(&request)
+                );
             }
         }
     }
 
     #[test]
-    fn saved_annotation_schemas_reject_unknown_fields_and_malformed_values() {
+    fn saved_annotation_schemas_ignore_additive_fields_and_reject_malformed_values() {
         for invalid in [
             serde_json::json!({"start_utc_ms":0,"end_utc_ms":1,"unexpected":true}),
             serde_json::json!({"start_utc_ms":0}),
             serde_json::json!({"start_utc_ms":0.5,"end_utc_ms":1}),
-            serde_json::json!({"start_utc_ms":0,"end_utc_ms":1,"cursor":{"versions":"v","query":{"kind":"annotations","start_utc_ms":0,"end_utc_ms":1,"unknown":0},"position":1}}),
         ] {
             assert!(serde_json::from_value::<QueryAnnotationsRequest>(invalid).is_err());
         }
         for invalid in [
-            serde_json::json!({"text":"x","offset_utf8":0,"complete":true,"unexpected":0}),
             serde_json::json!({"text":"x","offset_utf8":-1,"complete":true}),
             serde_json::json!({"text":"x","offset_utf8":0.5,"complete":true}),
             serde_json::json!({"text":"x","offset_utf8":0}),
@@ -210,13 +263,13 @@ mod tests {
                 .expect("normal page");
         let mut unknown_page = normal.clone();
         unknown_page["unknown"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<QueryAnnotationsResponse>(unknown_page).is_err());
+        assert!(serde_json::from_value::<QueryAnnotationsResponse>(unknown_page).is_ok());
         let mut unknown_entity = normal.clone();
         unknown_entity["entities"][0]["unknown"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<QueryAnnotationsResponse>(unknown_entity).is_err());
+        assert!(serde_json::from_value::<QueryAnnotationsResponse>(unknown_entity).is_ok());
         let mut unknown_category = normal.clone();
         unknown_category["entities"][0]["category"]["unknown"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<QueryAnnotationsResponse>(unknown_category).is_err());
+        assert!(serde_json::from_value::<QueryAnnotationsResponse>(unknown_category).is_ok());
         for invalid in ["unknown", "NOTE"] {
             let mut page = normal.clone();
             page["entities"][0]["kind"] = serde_json::json!(invalid);
@@ -253,5 +306,13 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<AnnotationsDeleteRequest>(invalid).is_err());
         }
+    }
+    #[test]
+    fn annotation_category_rejects_unknown_request_fields_but_accepts_response_fields() {
+        let category = serde_json::json!({"kind":"builtin","key":"communication","future":true});
+        assert!(serde_json::from_value::<AnnotationCategory>(category.clone()).is_ok());
+        let entity = serde_json::json!({"uuid":"abcdef00-0000-4000-8000-000000000001","kind":"note","start_utc_ms":0,"end_utc_ms":1,"category":category});
+        assert!(serde_json::from_value::<CreateAnnotation>(entity.clone()).is_err());
+        assert!(serde_json::from_value::<UpdateAnnotation>(entity).is_err());
     }
 }

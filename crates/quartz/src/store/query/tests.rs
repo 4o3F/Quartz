@@ -324,8 +324,8 @@ fn typed_cursor_rejects_parameter_mismatch_and_out_of_range_positions() {
     for position in [count, usize::MAX] {
         let mut invalid = request.clone();
         invalid.cursor = Some(QueryCursor::new(
-            cursor.versions().clone(),
-            cursor.query().clone(),
+            cursor.decode().expect("issued cursor").versions().clone(),
+            cursor.decode().expect("issued cursor").query().clone(),
             position,
         ));
         assert_eq!(
@@ -1043,11 +1043,11 @@ fn facts_pages_reassemble_dump_range_and_reject_stale_and_mismatched_cursors() {
     assert_eq!(all, expected);
     let cursor = first_cursor.expect("continuation");
     request.cursor = Some(QueryCursor::new(
-        cursor.versions().clone(),
+        cursor.decode().expect("issued cursor").versions().clone(),
         CursorQuery::Day {
             local_date: request.local_date,
         },
-        cursor.position(),
+        cursor.decode().expect("issued cursor").position(),
     ));
     assert!(matches!(
         fixture.run(QueryRequest::Facts(request.clone())),

@@ -78,7 +78,6 @@ pub struct CategoriesArchiveRequest {
 }
 /// Stored category metadata for editing; database row identifiers stay private.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EditableCategory {
     pub uuid: Uuid,
     pub builtin_key: Option<BuiltinCategory>,
@@ -91,13 +90,11 @@ pub struct EditableCategory {
 }
 /// Stored entity returned after create, update, or archive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CategoryResponse {
     pub entity: EditableCategory,
 }
 /// Hierarchy preorder page bound to the current metadata version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CategoriesListResponse {
     pub entities: Vec<EditableCategory>,
     pub versions: QueryVersions,
@@ -204,7 +201,14 @@ mod tests {
         let mut body = wire["list"].clone();
         body["cursor"] = wire["list_response"]["next_cursor"].clone();
         body["cursor"]["query"]["extra"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<CategoriesListRequest>(body).is_err());
+        assert!(
+            serde_json::from_value::<CategoriesListRequest>(body)
+                .expect("opaque cursor")
+                .cursor
+                .expect("cursor")
+                .decode()
+                .is_err()
+        );
         assert_eq!(
             serde_json::from_value::<Op>(serde_json::json!("categories.delete"))
                 .expect("obsolete op"),

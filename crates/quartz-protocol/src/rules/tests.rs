@@ -84,10 +84,10 @@ fn requests_reject_unknown_fields_invalid_enums_and_invalid_revision_numbers() {
     );
 }
 #[test]
-fn entries_reject_unknown_fields_names_and_non_uuid_category_references() {
+fn entries_ignore_additive_fields_and_reject_invalid_names_and_category_references() {
     let mut unknown = WireSnapshot::rule();
     unknown["content"]["extra"] = json!(true);
-    assert!(serde_json::from_value::<RuleSetEntry>(unknown).is_err());
+    assert!(serde_json::from_value::<RuleSetEntry>(unknown).is_ok());
     let mut category = WireSnapshot::rule();
     category["content"]["category"] = json!("builtin:learning");
     assert!(serde_json::from_value::<RuleSetEntry>(category).is_err());

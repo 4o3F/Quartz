@@ -95,10 +95,18 @@ impl DocumentDuration {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ReferenceRange", deny_unknown_fields)]
+struct DocumentReferenceRange {
+    start_utc_ms: i64,
+    end_utc_ms: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DocumentReference {
     pub(super) identity: DocumentIdentity,
+    #[serde(with = "DocumentReferenceRange")]
     range: ReferenceRange,
     versions: QueryVersions,
 }
@@ -452,6 +460,67 @@ mod tests {
         assert_ne!(
             reference,
             DocumentReference::issue(identity, different_range, versions).expect("range reference")
+        );
+    }
+    #[test]
+    fn maximum_escaped_document_detail_cursor_fits_the_named_limit() {
+        use quartz_domain::capture::limits;
+        use quartz_protocol::{CursorQuery, DetailEntity, MAX_CURSOR_BYTES, QueryCursor};
+        /// A SHA-256 query digest uses two hexadecimal digits per byte.
+        const QUERY_DIGEST_HEX_DIGITS: usize = 64;
+        let maximum = "\0".repeat(limits::TITLE_UTF16_UNITS);
+        let identity = DocumentIdentity {
+            app: ApplicationId(i64::MAX),
+            document: maximum.clone(),
+            project: Some(maximum.clone()),
+            profile: Some(maximum),
+        };
+        let versions = QueryVersions("f".repeat(QUERY_DIGEST_HEX_DIGITS));
+        let range = ReferenceRange {
+            start_utc_ms: 0,
+            end_utc_ms: 1,
+        };
+        let reference =
+            DocumentReference::issue(identity, range, versions.clone()).expect("maximum reference");
+        let cursor = QueryCursor::new(
+            versions,
+            CursorQuery::EntityDetail {
+                entity: DetailEntity::Document {
+                    document_ref: reference,
+                },
+                local_date: "2025-01-02".parse().expect("date"),
+                reference_range: Some(range),
+            },
+            usize::MAX,
+        );
+        let encoded = serde_json::to_vec(&cursor).expect("document cursor JSON");
+        assert!(
+            encoded.len() <= MAX_CURSOR_BYTES,
+            "largest escaped document fields fit: {}",
+            encoded.len()
+        );
+        assert!(cursor.decode().is_ok());
+    }
+    #[test]
+    fn document_reference_payload_keeps_range_fields_strict() {
+        let range = ReferenceRange {
+            start_utc_ms: 0,
+            end_utc_ms: 1,
+        };
+        let versions = QueryVersions("v".into());
+        let payload =
+            serde_json::json!({"identity":{"app":1,"document":"doc","project":null,"profile":null},
+            "range":{"start_utc_ms":0,"end_utc_ms":1,"extra":true},"versions":"v"})
+            .to_string();
+        let reference = DocumentRef::from_encoded(format!(
+            "{REFERENCE_PREFIX}{}:{payload}",
+            DocumentReference::checksum(&payload)
+        ));
+        assert_eq!(
+            DocumentReference::validate(&reference, range, &versions)
+                .expect_err("strict embedded range")
+                .kind(),
+            quartz_protocol::ErrorKind::BadRequest
         );
     }
 }

@@ -45,14 +45,40 @@ pub(crate) enum ReadResponse {
 }
 impl ReadRequest {
     pub(crate) fn decode(op: wire::Op, body: serde_json::Value) -> Result<Self, serde_json::Error> {
-        match op {
+        let request = match op {
             wire::Op::RuleSetsTree => serde_json::from_value(body).map(Self::Tree),
             wire::Op::RuleSetsGet => serde_json::from_value(body).map(Self::Get),
             wire::Op::RuleSetsVersions => serde_json::from_value(body).map(Self::Versions),
             _ => Err(<serde_json::Error as serde::de::Error>::custom(
                 "operation has no rule read decoder",
             )),
+        }?;
+        match &request {
+            Self::Tree(body) => {
+                if let Some(cursor) = &body.cursor {
+                    cursor.validate_query(&wire::CursorQuery::RuleSetsTree {
+                        rule_kind: body.kind,
+                    })?;
+                }
+            }
+            Self::Get(body) => {
+                if let Some(cursor) = &body.cursor {
+                    cursor.validate_query(&wire::CursorQuery::RuleSetsGet {
+                        key: body.key.clone(),
+                        version: body.version,
+                        view: body.view,
+                    })?;
+                }
+            }
+            Self::Versions(body) => {
+                if let Some(cursor) = &body.cursor {
+                    cursor.validate_query(&wire::CursorQuery::RuleSetsVersions {
+                        key: body.key.clone(),
+                    })?;
+                }
+            }
         }
+        Ok(request)
     }
     pub(crate) fn execute(self, inputs: ReadInputs) -> Result<ReadResponse, ProtocolError> {
         let versions = inputs.versions();
