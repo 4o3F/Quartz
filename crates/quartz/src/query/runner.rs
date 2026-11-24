@@ -8,8 +8,32 @@ pub(crate) struct QueryRunner {
     running: Option<RunningQuery>,
 }
 struct RunningQuery {
-    job: QueryJob,
+    job: RunningJob,
+    control: super::control::QueryControl,
     reply: tokio::sync::oneshot::Sender<Result<QueryResponse, ProtocolError>>,
+}
+struct StartedQuery {
+    result: Result<RunningJob, RunQueryError>,
+    reply: tokio::sync::oneshot::Sender<Result<QueryResponse, ProtocolError>>,
+    control: super::control::QueryControl,
+}
+enum RunningJob {
+    Query(Box<QueryJob>),
+    Preview(Box<super::preview::PreviewJob>),
+}
+impl RunningJob {
+    fn advance(&mut self) -> Result<Option<QueryResponse>, RunQueryError> {
+        match self {
+            Self::Query(job) => job.advance(),
+            Self::Preview(job) => job.advance(),
+        }
+    }
+    fn finish(self) -> Result<crate::store::ReadOnlyStore, RunQueryError> {
+        match self {
+            Self::Query(job) => job.finish(),
+            Self::Preview(job) => job.finish(),
+        }
+    }
 }
 impl QueryRunner {
     pub(crate) fn is_running(&self) -> bool {
@@ -19,10 +43,22 @@ impl QueryRunner {
         &mut self,
         store: &mut Store,
         command: QueryCommand,
-        rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
+        registry: &crate::rules::registry::RegistryShell,
     ) -> Result<(), RunQueryError> {
-        let QueryCommand::Query { request, reply } = command else {
-            if let QueryCommand::RuleInputs { reply } = command {
+        if command.reply_is_closed() {
+            return Ok(());
+        }
+        let rules = registry.snapshots().load();
+        let mut reader = store.take_query_reader();
+        let StartedQuery {
+            result,
+            reply,
+            control,
+        } = match command {
+            QueryCommand::RuleInputs { reply } => {
+                if let Some(reader) = reader {
+                    store.return_query_reader(reader);
+                }
                 let result = store
                     .rule_read_metadata()
                     .map(|metadata_version| crate::rules::read::ReadInputs {
@@ -31,20 +67,55 @@ impl QueryRunner {
                     })
                     .map_err(|_| ProtocolError::new(ErrorKind::Internal));
                 let _ = reply.send(result);
+                return Ok(());
             }
-            return Ok(());
+            QueryCommand::Query { request, reply } => {
+                let result = QueryJob::start(&mut reader, request, rules)
+                    .map(|job| RunningJob::Query(Box::new(job)));
+                StartedQuery {
+                    result,
+                    reply,
+                    control: Default::default(),
+                }
+            }
+            QueryCommand::Controlled {
+                request,
+                reply,
+                control,
+            } => {
+                let result = control
+                    .check()
+                    .and_then(|()| QueryJob::start(&mut reader, request, rules))
+                    .map(|job| RunningJob::Query(Box::new(job)));
+                StartedQuery {
+                    result,
+                    reply,
+                    control,
+                }
+            }
+            QueryCommand::Preview { request, reply } => {
+                let control = request.control.clone();
+                let result = super::preview::PreviewJob::start(&mut reader, request, registry)
+                    .map(|job| RunningJob::Preview(Box::new(job)));
+                StartedQuery {
+                    result,
+                    reply,
+                    control,
+                }
+            }
         };
-        if reply.is_closed() {
-            return Ok(());
-        }
-        let mut reader = store.take_query_reader();
-        match QueryJob::start(&mut reader, request, rules) {
-            Ok(job) => self.running = Some(RunningQuery { job, reply }),
+        match result {
+            Ok(job) => {
+                self.running = Some(RunningQuery {
+                    job,
+                    reply,
+                    control,
+                })
+            }
             Err(error) => {
                 if let Some(reader) = reader {
                     store.return_query_reader(reader);
                 }
-                tracing::warn!(%error, "could not start query");
                 let _ = reply.send(Err(ProtocolError::new(error.kind())));
                 match error {
                     RunQueryError::Cleanup { .. } => return Err(error.recover_reader(store)),
@@ -62,8 +133,14 @@ impl QueryRunner {
         let result = if active.reply.is_closed() {
             Some(Err(ProtocolError::new(ErrorKind::Internal)))
         } else {
-            match active.job.advance() {
-                Ok(Some(response)) => Some(Ok(response)),
+            match active.control.check().and_then(|()| active.job.advance()) {
+                Ok(Some(response)) => Some(
+                    active
+                        .control
+                        .check()
+                        .map(|()| response)
+                        .map_err(|error| ProtocolError::new(error.kind())),
+                ),
                 Ok(None) => None,
                 Err(error) => {
                     tracing::warn!(%error, "could not compute query");

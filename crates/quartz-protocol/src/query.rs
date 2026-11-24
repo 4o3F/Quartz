@@ -231,6 +231,24 @@ impl CursorPosition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CursorQuery {
+    /// Editor draft digest and exact preview inputs; position spans all result lists.
+    RulesPreview {
+        mutation_digest: String,
+        start_date: LocalDate,
+        end_date: LocalDate,
+        expected_versions: QueryVersions,
+        deadline_ms: crate::PreviewDeadlineMs,
+        sample_limit: crate::PreviewSampleLimit,
+    },
+    /// Import draft digest and exact preview inputs, distinct from the editor operation.
+    RulesTextPreview {
+        mutation_digest: String,
+        start_date: LocalDate,
+        end_date: LocalDate,
+        expected_versions: QueryVersions,
+        deadline_ms: crate::PreviewDeadlineMs,
+        sample_limit: crate::PreviewSampleLimit,
+    },
     /// Rule family tree inputs.
     RuleSetsTree { rule_kind: crate::rules::RuleKind },
     /// Exact set revision and projection inputs.

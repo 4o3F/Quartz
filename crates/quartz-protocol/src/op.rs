@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 /// Permission families matching operation prefixes in 04 §5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpFamily {
+    /// Connection-local cancellation of read-only requests.
+    Requests,
     /// The `hello` operation family.
     Hello,
     /// The `subscribe` operation family.
@@ -51,6 +53,9 @@ pub enum OpFamily {
 /// Core-to-client pushes are represented separately by [`ControlOp`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::VariantArray)]
 pub enum Op {
+    /// Cancels a read-only request on this connection.
+    #[serde(rename = "requests.cancel")]
+    RequestsCancel,
     /// The `hello` request.
     #[serde(rename = "hello")]
     Hello,
@@ -232,6 +237,7 @@ impl Op {
     #[must_use]
     pub const fn family(self) -> OpFamily {
         match self {
+            Self::RequestsCancel => OpFamily::Requests,
             Self::Hello => OpFamily::Hello,
             Self::Subscribe | Self::Unsubscribe => OpFamily::Subscribe,
             Self::CoreStatus => OpFamily::Core,

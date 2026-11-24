@@ -205,9 +205,13 @@ impl Classifier {
             category,
         }
     }
+    pub(super) fn accepts_extraction(row: &Foreground) -> bool {
+        row.capture_level() == CaptureLevel::Full
+            && matches!(row.kind, ForegroundKind::Window)
+            && row.visible_app().is_some()
+    }
     pub(super) fn extract(&mut self, row: &Foreground) -> Option<Arc<ExtractedTitle>> {
-        if row.capture_level() != CaptureLevel::Full || !matches!(row.kind, ForegroundKind::Window)
-        {
+        if !Self::accepts_extraction(row) {
             return None;
         }
         let app = row.visible_app()?.id;
@@ -238,9 +242,7 @@ impl Classifier {
         row: &Foreground,
         extraction: Option<&ExtractedTitle>,
     ) -> ClassificationId {
-        if row.capture_level() == CaptureLevel::Excluded
-            || !matches!(row.kind, ForegroundKind::Window)
-        {
+        if !row.is_retained_window() {
             return ClassificationId::UNCLASSIFIED;
         }
         let app = row.visible_app().map(|app| app.id);

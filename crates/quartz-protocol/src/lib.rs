@@ -45,15 +45,23 @@ pub use handshake::{
 pub use op::{ControlBody, ControlOp, Op, OpFamily};
 pub use role::{AuthorizeOpError, Role};
 pub use rules::{
-    MAX_RULE_DIAGNOSTICS, MAX_RULE_TEXT_BYTES, MutatedRuleSet, RuleAction, RuleApp, RuleCondition,
-    RuleDiagnostic, RuleDiagnosticLocation, RuleEntryContent, RuleEntryKind, RuleEntryState,
-    RuleField, RuleKind, RuleMatch, RuleOperator, RuleProvenance, RuleSetCounts, RuleSetEntry,
+    FurtherHidden, MAX_RULE_DIAGNOSTICS, MAX_RULE_TEXT_BYTES, MutatedRuleSet,
+    PREVIEW_DEFAULT_DEADLINE_MS, PREVIEW_MAX_DAYS, PREVIEW_MAX_DEADLINE_MS, PREVIEW_MAX_SAMPLES,
+    ParsePreviewDeadlineError, ParsePreviewSampleLimitError, PreviewCategoryRank,
+    PreviewDeadlineMs, PreviewDelete, PreviewReorder, PreviewRevert, PreviewSampleLimit,
+    PreviewSetEnabled, RuleAction, RuleApp, RuleCondition, RuleConditionMatch, RuleDiagnostic,
+    RuleDiagnosticLocation, RuleEffectiveContribution, RuleEntryContent, RuleEntryKind,
+    RuleEntryState, RuleField, RuleKind, RuleMatch, RuleOperator, RulePreviewMutation,
+    RulePreviewOutput, RulePreviewRequest, RulePreviewSample, RulePreviewSideTotals,
+    RulePreviewStatistics, RulePreviewTotals, RuleProvenance, RuleSetCounts, RuleSetEntry,
     RuleSetIdentityField, RuleSetNode, RuleSetRevision, RuleSetSibling, RuleSetSource,
     RuleSetWarning, RuleSetsDeleteRequest, RuleSetsEditRequest, RuleSetsGetRequest,
     RuleSetsGetResponse, RuleSetsReorderRequest, RuleSetsRevertRequest, RuleSetsSetEnabledRequest,
     RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsVersionsRequest, RuleSetsVersionsResponse,
-    RuleSetsWriteResponse, RuleView, RuleWarningCode, RuleWebAction, RulesTextExportRequest,
-    RulesTextExportResponse, RulesTextValidateRequest, RulesTextValidateResponse,
+    RuleSetsWriteResponse, RuleView, RuleWarningCode, RuleWebAction, RulesPreviewRequest,
+    RulesPreviewResponse, RulesTextExportRequest, RulesTextExportResponse,
+    RulesTextPreviewMutation, RulesTextPreviewRequest, RulesTextPreviewResponse,
+    RulesTextValidateRequest, RulesTextValidateResponse, ValidatePreviewDatesError,
 };
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};
 pub use topic::{LocalDate, ParseTopicError, Subscribe, SubscribeResponse, Topic, Unsubscribe};
@@ -98,3 +106,10 @@ pub use settings::{
     PrewarmSettings, PrewarmUpdate, ResidentEnabled, ResidentSettings, ResidentUpdate,
     SettingsGetRequest, SettingsResponse, SettingsSetRequest, UiLanguageSetting, UiSettings,
 };
+
+/// Cancels a read-only request belonging to the current connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelRequest {
+    pub request_id: RequestId,
+}

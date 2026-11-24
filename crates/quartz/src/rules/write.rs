@@ -17,7 +17,7 @@ use quartz_domain::{
 };
 use quartz_protocol::{self as wire, ErrorKind, ProtocolError};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum RuleMutation {
     Edit(wire::RuleSetsEditRequest),
     SetEnabled(wire::RuleSetsSetEnabledRequest),
@@ -37,7 +37,68 @@ struct MutationTargets {
     keys: Vec<domain::RuleSetKey>,
     historical_version: Option<u32>,
 }
+impl From<wire::RulePreviewMutation> for RuleMutation {
+    fn from(mutation: wire::RulePreviewMutation) -> Self {
+        match mutation {
+            wire::RulePreviewMutation::Edit(request) => Self::Edit(wire::RuleSetsEditRequest {
+                key: request.key,
+                base_version: request.base_version,
+                text: request.text,
+                preview_receipt: None,
+            }),
+            wire::RulePreviewMutation::SetEnabled(request) => {
+                Self::SetEnabled(wire::RuleSetsSetEnabledRequest {
+                    key: request.key,
+                    base_version: request.base_version,
+                    enabled: request.enabled,
+                    preview_receipt: None,
+                })
+            }
+            wire::RulePreviewMutation::Reorder(request) => {
+                Self::Reorder(wire::RuleSetsReorderRequest {
+                    siblings: request.siblings,
+                    preview_receipt: None,
+                })
+            }
+            wire::RulePreviewMutation::Delete(request) => {
+                Self::Delete(wire::RuleSetsDeleteRequest {
+                    key: request.key,
+                    base_version: request.base_version,
+                    preview_receipt: None,
+                })
+            }
+            wire::RulePreviewMutation::Revert(request) => {
+                Self::Revert(wire::RuleSetsRevertRequest {
+                    key: request.key,
+                    base_version: request.base_version,
+                    version: request.version,
+                    preview_receipt: None,
+                })
+            }
+        }
+    }
+}
+impl From<wire::RulesTextPreviewMutation> for RuleMutation {
+    fn from(mutation: wire::RulesTextPreviewMutation) -> Self {
+        let wire::RulesTextPreviewMutation::Import(request) = mutation;
+        wire::RulePreviewMutation::Edit(request).into()
+    }
+}
 impl RuleMutation {
+    pub(crate) fn target_key(&self) -> Result<&str, ProtocolError> {
+        match self {
+            Self::Edit(request) => Ok(&request.key),
+            Self::SetEnabled(request) => Ok(&request.key),
+            Self::Delete(request) => Ok(&request.key),
+            Self::Revert(request) => Ok(&request.key),
+            Self::Reorder(request) => request
+                .siblings
+                .first()
+                .map(|sibling| sibling.key.as_str())
+                .ok_or_else(|| ProtocolError::new(ErrorKind::BadRequest)),
+        }
+    }
+
     pub(crate) fn execute(
         self,
         registry: &mut RegistryShell,
@@ -79,17 +140,22 @@ impl RuleMutation {
         request: wire::RulesTextValidateRequest,
         registry: &RegistryShell,
     ) -> Result<wire::RulesTextValidateResponse, ProtocolError> {
-        let prepared = Self::Edit(wire::RuleSetsEditRequest {
+        let builtin = request.key.starts_with("builtin.");
+        let mutation = Self::Edit(wire::RuleSetsEditRequest {
             key: request.key,
             base_version: request.base_version,
             text: request.text,
             preview_receipt: None,
-        })
-        .prepare(TargetAccess::Validate(registry))?;
-        match registry
-            .validate(prepared.command)
-            .map_err(|error| prepared.targets.targets_error(error))
-        {
+        });
+        let result = if builtin {
+            let prepared = mutation.prepare(TargetAccess::Validate(registry))?;
+            registry
+                .validate(prepared.command)
+                .map_err(|error| prepared.targets.targets_error(error))
+        } else {
+            mutation.draft(registry).map(|_| ())
+        };
+        match result {
             Ok(()) => Ok(wire::RulesTextValidateResponse {
                 valid: true,
                 diagnostics: Vec::new(),
@@ -109,6 +175,16 @@ impl RuleMutation {
             }),
             Err(error) => Err(error),
         }
+    }
+    pub(crate) fn draft(
+        self,
+        registry: &RegistryShell,
+    ) -> Result<std::sync::Arc<domain::registry::RuleSnapshot>, ProtocolError> {
+        let prepared = self.prepare(TargetAccess::Write)?;
+        prepared.targets.check_response_budget()?;
+        registry
+            .draft(prepared.command)
+            .map_err(|error| prepared.targets.targets_error(error))
     }
     fn prepare(self, access: TargetAccess<'_>) -> Result<PreparedMutation, ProtocolError> {
         let mut keys = Vec::new();
@@ -999,5 +1075,235 @@ mod tests {
             );
             assert_eq!(actual.kind, expected.kind);
         }
+    }
+    impl ValidationFixture {
+        fn draft_mutation(body: serde_json::Value) -> RuleMutation {
+            let mutation: wire::RulePreviewMutation =
+                serde_json::from_value(body).expect("typed draft mutation");
+            mutation.into()
+        }
+        fn assert_unchanged(&mut self, before: &std::sync::Arc<domain::registry::RuleSnapshot>) {
+            assert!(std::sync::Arc::ptr_eq(
+                before,
+                &self.registry.snapshots().load()
+            ));
+            let stored = self.store.rule_sets().load().expect("persisted state");
+            assert_eq!(stored.sets.len(), before.state().sets.len());
+            for (key, entry) in &before.state().sets {
+                assert_eq!(stored.sets[key].versions, entry.versions);
+                assert_eq!(stored.sets[key].deletion, entry.deletion);
+            }
+        }
+    }
+    #[test]
+    fn draft_compiles_every_rule_family_without_persistence_or_publication() {
+        let mut fixture = ValidationFixture::new();
+        let before = fixture.registry.snapshots().load();
+        for kind in ["classification", "extraction", "privacy"] {
+            let body = match kind {
+                "classification" => {
+                    "category='builtin:learning'\nwhen=[{field='app.exe_name',op='equals',value='draft.exe'}]\n"
+                }
+                "extraction" => {
+                    "app=[{field='app.exe_name',op='equals',value='draft.exe'}]\npattern='(?P<document>.+)'\n"
+                }
+                "privacy" => {
+                    "preset='title_hidden'\nwhen=[{field='app.exe_name',op='equals',value='draft.exe'}]\n"
+                }
+                _ => unreachable!("fixture families"),
+            };
+            let text = format!(
+                "format='quartz-rules/1'\n[set]\nkey='user.draft'\nkind='{kind}'\nname='Draft'\n[[rule]]\nid='one'\nlabel='Draft'\n{body}"
+            );
+            let mutation = serde_json::json!({"op":"rule_sets.edit","body":{"key":"user.draft","base_version":0,"text":text}});
+            let draft = ValidationFixture::draft_mutation(mutation)
+                .draft(&fixture.registry)
+                .expect("compiled draft");
+            let mut fields = domain::FieldSnapshot::default();
+            fields.text.insert(
+                domain::Field::ExeName,
+                quartz_domain::text::NfcText::new("draft.exe"),
+            );
+            fields.text.insert(
+                domain::Field::RawTitle,
+                quartz_domain::text::NfcText::new("draft document"),
+            );
+            match kind {
+                "classification" => assert_eq!(
+                    draft
+                        .classification()
+                        .classify(&fields)
+                        .expect("draft classification")
+                        .rule
+                        .as_str(),
+                    "user.draft/one@1"
+                ),
+                "extraction" => assert_eq!(
+                    draft
+                        .extraction()
+                        .evaluate(&fields)
+                        .extraction
+                        .expect("draft extraction")
+                        .document
+                        .as_deref(),
+                    Some("draft document")
+                ),
+                "privacy" => assert_eq!(
+                    draft.privacy().evaluate(&fields).privacy.window_title,
+                    domain::Action::Drop
+                ),
+                _ => unreachable!("fixture families"),
+            }
+            fixture.assert_unchanged(&before);
+        }
+    }
+    #[test]
+    fn every_rule_set_draft_matches_the_corresponding_committed_snapshot() {
+        let text = "format='quartz-rules/1'\n[set]\nkey='user.draft'\nkind='classification'\nname='Draft'\n";
+        for op in [
+            "rule_sets.edit",
+            "rule_sets.set_enabled",
+            "rule_sets.reorder",
+            "rule_sets.delete",
+            "rule_sets.revert",
+        ] {
+            let mut fixture = ValidationFixture::new();
+            fixture.edit("user.draft", 0, text);
+            let body = match op {
+                "rule_sets.edit" => {
+                    serde_json::json!({"key":"user.draft","base_version":1,"text":text.replace("name='Draft'", "name='Changed'")})
+                }
+                "rule_sets.set_enabled" => {
+                    serde_json::json!({"key":"user.draft","base_version":1,"enabled":false})
+                }
+                "rule_sets.reorder" => {
+                    serde_json::json!({"siblings":[{"key":"user.draft","base_version":1}]})
+                }
+                "rule_sets.delete" => serde_json::json!({"key":"user.draft","base_version":1}),
+                "rule_sets.revert" => {
+                    serde_json::json!({"key":"user.draft","base_version":1,"version":1})
+                }
+                _ => unreachable!("fixture operations"),
+            };
+            let mutation = serde_json::json!({"op":op,"body":body});
+            let before = fixture.registry.snapshots().load();
+            let draft = ValidationFixture::draft_mutation(mutation.clone())
+                .draft(&fixture.registry)
+                .expect("draft");
+            fixture.assert_unchanged(&before);
+            ValidationFixture::draft_mutation(mutation)
+                .execute(
+                    &mut fixture.registry,
+                    &mut fixture.store,
+                    UtcInstant::try_from(0).expect("UTC"),
+                )
+                .expect("same write");
+            let committed = fixture.registry.snapshots().load();
+            assert_eq!(draft.hashes(), committed.hashes(), "{op}");
+            for (key, entry) in &draft.state().sets {
+                assert_eq!(
+                    entry.current.set.canonical_text(),
+                    committed.state().sets[key].current.set.canonical_text(),
+                    "{op}"
+                );
+                assert_eq!(entry.deletion, committed.state().sets[key].deletion, "{op}");
+            }
+        }
+    }
+    #[test]
+    fn draft_rejections_preserve_write_preconditions_and_error_details() {
+        let mut fixture = ValidationFixture::new();
+        let text = "format='quartz-rules/1'\n[set]\nkey='user.draft'\nkind='classification'\nname='Draft'\n";
+        fixture.edit("user.draft", 0, text);
+        let before = fixture.registry.snapshots().load();
+        for body in [
+            serde_json::json!({"op":"rule_sets.edit","body":{"key":"builtin.classification","base_version":0,"text":"invalid"}}),
+            serde_json::json!({"op":"rule_sets.edit","body":{"key":"user.draft","base_version":0,"text":"invalid"}}),
+            serde_json::json!({"op":"rule_sets.edit","body":{"key":"user.draft","base_version":1,"text":text.replace("classification", "privacy")}}),
+            serde_json::json!({"op":"rule_sets.edit","body":{"key":"user.draft","base_version":1,"text":format!("{text}parent='builtin.classification'\n")}}),
+            serde_json::json!({"op":"rule_sets.edit","body":{"key":"user.draft","base_version":1,"text":"invalid"}}),
+            serde_json::json!({"op":"rule_sets.edit","body":{"key":"user.large","base_version":0,"text":"x".repeat(wire::MAX_RULE_TEXT_BYTES+1)}}),
+            serde_json::json!({"op":"rule_sets.reorder","body":{"siblings":[]}}),
+            serde_json::json!({"op":"rule_sets.revert","body":{"key":"user.draft","base_version":1,"version":2}}),
+        ] {
+            let actual = ValidationFixture::draft_mutation(body.clone())
+                .draft(&fixture.registry)
+                .expect_err("draft rejection");
+            let expected = ValidationFixture::draft_mutation(body)
+                .execute(
+                    &mut fixture.registry,
+                    &mut fixture.store,
+                    UtcInstant::try_from(0).expect("UTC"),
+                )
+                .expect_err("write rejection");
+            assert_eq!(actual, expected);
+            fixture.assert_unchanged(&before);
+        }
+    }
+    #[test]
+    fn privacy_import_draft_is_allowed_while_saving_still_requires_a_receipt() {
+        let mut fixture = ValidationFixture::new();
+        let text =
+            "format='quartz-rules/1'\n[set]\nkey='user.private'\nkind='privacy'\nname='Private'\n";
+        let mutation: wire::RulesTextPreviewMutation = serde_json::from_value(serde_json::json!({"op":"rules_text.import","body":{"key":"user.private","base_version":0,"text":text}})).expect("import preview");
+        let before = fixture.registry.snapshots().load();
+        let draft = RuleMutation::from(mutation.clone())
+            .draft(&fixture.registry)
+            .expect("privacy draft");
+        assert!(
+            draft
+                .state()
+                .sets
+                .contains_key(&"user.private".parse().expect("key"))
+        );
+        let error = RuleMutation::from(mutation)
+            .execute(
+                &mut fixture.registry,
+                &mut fixture.store,
+                UtcInstant::try_from(0).expect("UTC"),
+            )
+            .expect_err("privacy gate");
+        assert_eq!(error.kind, ErrorKind::PreviewRequired);
+        fixture.assert_unchanged(&before);
+    }
+    #[test]
+    fn identity_draft_matches_query_day_totals_with_inactive_facts() {
+        use crate::query::{QueryJob, QueryResponse};
+        let mut fixture = crate::store::query::test_support::QueryFixture::new(4);
+        fixture.mask_idle(1000, 2000);
+        let request = fixture.request_day();
+        let before = fixture.run(request.clone()).expect("production day");
+        let registry =
+            RegistryShell::open(&mut fixture.store, UtcInstant::try_from(0).expect("UTC"))
+                .expect("registry");
+        let mutation = serde_json::json!({"op":"rule_sets.edit","body":{"key":"user.identity","base_version":0,"text":"format='quartz-rules/1'\n[set]\nkey='user.identity'\nkind='classification'\nname='Identity'\n"}});
+        let draft = ValidationFixture::draft_mutation(mutation)
+            .draft(&registry)
+            .expect("identity draft");
+        let mut reader = fixture.store.take_query_reader();
+        let completed = QueryJob::start(&mut reader, request, draft)
+            .expect("draft day")
+            .run_measured()
+            .expect("draft query pipeline");
+        fixture.store.return_query_reader(completed.reader);
+        let QueryResponse::Day(before) = before else {
+            panic!("production day response")
+        };
+        let QueryResponse::Day(after) = completed.response else {
+            panic!("draft day response")
+        };
+        assert_eq!(before.metrics, after.metrics);
+        assert_eq!(before.hours, after.hours);
+        assert_eq!(before.applications, after.applications);
+        assert_eq!(before.documents, after.documents);
+        assert_eq!(after.metrics.expect("metrics").active_ms, 3000);
+        assert!(
+            !registry
+                .snapshots()
+                .load()
+                .state()
+                .sets
+                .contains_key(&"user.identity".parse().expect("key"))
+        );
     }
 }

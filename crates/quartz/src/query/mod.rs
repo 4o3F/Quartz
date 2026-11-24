@@ -3,12 +3,14 @@
 mod annotations;
 pub(crate) mod calendar;
 pub(crate) mod classification;
+pub(crate) mod control;
 mod day_walker;
 mod details;
 #[cfg(any(windows, test))]
 pub(crate) mod dispatch;
 pub(crate) mod documents;
 mod facts;
+pub(crate) mod preview;
 #[cfg(test)]
 pub(crate) use facts::FINALIZE_BATCH_RECORDS;
 pub(crate) mod input;
@@ -55,6 +57,14 @@ const MAX_DOCUMENT_REFERENCE_MS: i64 =
 pub(crate) enum RunQueryError {
     #[snafu(display("invalid query range"))]
     InvalidRange,
+    #[snafu(display("read-only query was cancelled"))]
+    Cancelled,
+    #[snafu(display("read-only query exceeded its deadline"))]
+    DeadlineExceeded,
+    #[snafu(display("preview request was rejected"))]
+    Preview {
+        error: quartz_protocol::ProtocolError,
+    },
     #[snafu(display("segment detail range exceeds its bound or has invalid endpoints"))]
     InvalidDetailRange,
     #[snafu(display("invalid unclassified query dates or search length"))]
@@ -134,6 +144,9 @@ impl RunQueryError {
     }
     pub(crate) fn kind(&self) -> ErrorKind {
         match self {
+            Self::Cancelled => ErrorKind::Cancelled,
+            Self::DeadlineExceeded => ErrorKind::DeadlineExceeded,
+            Self::Preview { error } => error.kind.clone(),
             Self::InvalidRange | Self::Calendar { .. } => ErrorKind::InvalidRange,
             Self::InvalidCursor
             | Self::InvalidDetailRange
@@ -235,6 +248,7 @@ impl QueryRequest {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum QueryResponse {
+    Preview(quartz_protocol::RulesPreviewResponse),
     Annotations(quartz_protocol::QueryAnnotationsResponse),
     Facts(QueryFactsResponse),
     Day(QueryDayResponse),
@@ -966,7 +980,8 @@ impl QueryJob {
                 });
             }
 
-            QueryResponse::Annotations(_)
+            QueryResponse::Preview(_)
+            | QueryResponse::Annotations(_)
             | QueryResponse::Day(_)
             | QueryResponse::Unclassified(_)
             | QueryResponse::Range(_) => {}

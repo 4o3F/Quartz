@@ -221,6 +221,21 @@ impl Default for PrivacyAction {
     }
 }
 impl PrivacyAction {
+    /// Applies dependencies of privacy conditions and returns the normalized field actions.
+    pub fn for_conditions(mut self, conditions: &[Condition]) -> Self {
+        if self.window_title == Action::Drop
+            && conditions.iter().any(|condition| {
+                matches!(
+                    condition.field,
+                    Field::Domain | Field::TabTitle | Field::BrowserProfile
+                )
+            })
+        {
+            self.web = self.web.max(WebAction::DomainOnly);
+        }
+        Self::default().merge(self)
+    }
+
     /// Takes the most restrictive retention for each field.
     pub fn merge(self, other: Self) -> Self {
         let mut merged = Self {

@@ -279,6 +279,12 @@ pub struct Hello {
 /// Optional protocol features reported by the core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Capability {
+    /// Connection-local cancellation of read-only requests.
+    #[serde(rename = "requests.cancel.v1")]
+    RequestsCancelV1,
+    /// Rule previews and privacy-save receipt verification; advertised after M4-E2.
+    #[serde(rename = "rules.preview.v1")]
+    RulesPreviewV1,
     /// Browser activity reporting version 1.
     #[serde(rename = "browser.v1")]
     BrowserV1,

@@ -135,6 +135,10 @@ impl Foreground {
             content,
         }
     }
+    /// Whether this fact retains foreground window fields for rule evaluation.
+    pub fn is_retained_window(&self) -> bool {
+        self.level != CaptureLevel::Excluded && matches!(self.kind, ForegroundKind::Window)
+    }
     /// Returns the persisted capture level for activity and cache identity.
     pub fn capture_level(&self) -> CaptureLevel {
         self.level

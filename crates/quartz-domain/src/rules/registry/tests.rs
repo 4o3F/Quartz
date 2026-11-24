@@ -975,3 +975,71 @@ fn new_and_restored_sets_reject_invalid_ancestry_with_located_parent_diagnostics
         }
     }
 }
+
+#[test]
+fn disposable_candidate_matches_a_committed_snapshot_without_publication() {
+    let mut fixture = Fixture::new();
+    let before = fixture.core.snapshots().load();
+    let draft = fixture
+        .core
+        .decide(apply("user.test", "Draft", 0))
+        .into_draft()
+        .expect("privacy draft");
+    assert!(Arc::ptr_eq(&before, &fixture.core.snapshots().load()));
+    assert!(fixture.core.state().sets.is_empty());
+    assert_eq!(draft.writes.len(), 1);
+    fixture
+        .commit(apply("user.test", "Draft", 0))
+        .expect("same command");
+    let committed = fixture.core.snapshots().load();
+    assert_eq!(draft.snapshot.hashes(), committed.hashes());
+    assert_eq!(draft.snapshot.epoch(), committed.epoch());
+    let key = "user.test".parse().expect("key");
+    assert_eq!(
+        draft.snapshot.state().sets[&key].versions,
+        committed.state().sets[&key].versions
+    );
+}
+
+#[test]
+fn disposable_candidate_keeps_write_rejections_and_does_not_publish() {
+    let mut fixture = Fixture::new();
+    fixture
+        .commit(apply("user.test", "Installed", 0))
+        .expect("installed");
+    let before = fixture.core.snapshots().load();
+    let error = fixture
+        .core
+        .decide(apply("user.test", "Stale", 0))
+        .into_draft()
+        .expect_err("stale draft");
+    assert!(matches!(
+        error,
+        DecideRegistryCommandError::Stale {
+            current_version: Some(1),
+            ..
+        }
+    ));
+    assert!(Arc::ptr_eq(&before, &fixture.core.snapshots().load()));
+    let no_change = fixture.core.decide(RegistryCommand::InstallBuiltin {
+        set: builtin("Builtin"),
+        revision: 1,
+    });
+    let parts = no_change.into_parts();
+    fixture
+        .core
+        .committed(parts.outcome.expect("builtin install"))
+        .expect("commit builtin");
+    let before = fixture.core.snapshots().load();
+    let draft = fixture
+        .core
+        .decide(RegistryCommand::InstallBuiltin {
+            set: builtin("Builtin"),
+            revision: 1,
+        })
+        .into_draft()
+        .expect("unchanged builtin");
+    assert!(draft.writes.is_empty());
+    assert!(Arc::ptr_eq(&before, &draft.snapshot));
+    assert!(Arc::ptr_eq(&before, &fixture.core.snapshots().load()));
+}

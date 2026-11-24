@@ -218,7 +218,7 @@ impl DatabaseLoop {
                 }
                 DatabaseInput::Query(command) => {
                     self.runner
-                        .start(&mut self.store, command, self.registry.snapshots().load())
+                        .start(&mut self.store, command, &self.registry)
                         .map_err(|source| RunDatabaseLoopError::Query { source })?;
                 }
                 DatabaseInput::Versions(command) => self.versions.receive(command),
@@ -863,7 +863,7 @@ mod tests {
             .start(
                 &mut fixture.database.store,
                 command,
-                fixture.database.registry.snapshots().load(),
+                &fixture.database.registry,
             )
             .expect("service read");
         let runtime = tokio::runtime::Builder::new_current_thread()

@@ -157,10 +157,23 @@ impl RegistryShell {
             .map(|entry| entry.origin)
     }
     pub(crate) fn validate(&self, command: RegistryCommand) -> Result<(), RunRegistryCommandError> {
-        let parts = self.registry.decide_validation(command).into_parts();
-        parts.reply.context(run_error::DecideSnafu)?;
-        Self::check_text_budget(&parts.writes)?;
+        Self::checked_draft(self.registry.decide_validation(command))?;
         Ok(())
+    }
+    pub(crate) fn draft(
+        &self,
+        command: RegistryCommand,
+    ) -> Result<std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>, RunRegistryCommandError>
+    {
+        Self::checked_draft(self.registry.decide(command))
+    }
+    fn checked_draft(
+        decision: quartz_domain::rules::registry::Decision,
+    ) -> Result<std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>, RunRegistryCommandError>
+    {
+        let draft = decision.into_draft().context(run_error::DecideSnafu)?;
+        Self::check_text_budget(&draft.writes)?;
+        Ok(draft.snapshot)
     }
     pub(crate) fn run(
         &mut self,

@@ -141,12 +141,16 @@ pub(crate) struct DocumentReference {
     range: ReferenceRange,
     versions: QueryVersions,
 }
+#[cfg(test)]
+std::thread_local! { pub(super) static ISSUED_DOCUMENT_REFERENCES: std::cell::Cell<usize> = const {std::cell::Cell::new(0)}; }
 impl DocumentReference {
     pub(super) fn issue(
         identity: DocumentIdentity,
         range: ReferenceRange,
         versions: QueryVersions,
     ) -> Result<DocumentRef, RunQueryError> {
+        #[cfg(test)]
+        ISSUED_DOCUMENT_REFERENCES.update(|count| count + 1);
         let payload = serde_json::to_string(&Self {
             identity,
             range,

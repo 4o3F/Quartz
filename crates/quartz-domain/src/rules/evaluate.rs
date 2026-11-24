@@ -940,20 +940,8 @@ impl CompiledRules {
             let matched = matches && pattern_matched.unwrap_or(true);
             let status = if !matched {
                 RuleStatus::DidNotMatch
-            } else if let RuleBody::Privacy { action, .. } = entry.rule.body {
-                let mut action = action;
-                if let RuleBody::Privacy { when, .. } = &entry.rule.body
-                    && action.window_title == super::Action::Drop
-                    && when.iter().any(|condition| {
-                        matches!(
-                            condition.field,
-                            Field::Domain | Field::TabTitle | Field::BrowserProfile
-                        )
-                    })
-                {
-                    action.web = action.web.max(super::WebAction::DomainOnly);
-                }
-                action = PrivacyAction::default().merge(action);
+            } else if let RuleBody::Privacy { action, when, .. } = &entry.rule.body {
+                let action = action.for_conditions(when);
                 privacy_matches.push(PrivacyMatch { index, action });
                 result.privacy = result.privacy.merge(action);
                 RuleStatus::Merged

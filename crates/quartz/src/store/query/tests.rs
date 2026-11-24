@@ -3769,7 +3769,11 @@ fn reject_snapshot_rollback(reader: &mut ReadOnlyStore) {
 fn preparation_rollback_failure_returns_error_to_owner_and_recovers_reader() {
     use crate::query::{dispatch::QueryCommand, runner::QueryRunner};
     let mut fixture = QueryFixture::new(1);
-    let rules = fixture.rules();
+    let rules = crate::rules::registry::RegistryShell::open(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+    )
+    .expect("registry");
     reject_snapshot_rollback(fixture.store.reader.as_mut().expect("resident reader"));
     let (reply, mut received) = tokio::sync::oneshot::channel();
     let mut runner = QueryRunner::default();
@@ -3783,7 +3787,7 @@ fn preparation_rollback_failure_returns_error_to_owner_and_recovers_reader() {
             }),
             reply,
         },
-        rules,
+        &rules,
     );
     assert!(
         matches!(result, Err(RunQueryError::Cleanup { .. })),
@@ -3810,7 +3814,11 @@ fn preparation_rollback_failure_returns_error_to_owner_and_recovers_reader() {
 fn running_query_rollback_failure_recovers_reader() {
     use crate::query::{dispatch::QueryCommand, runner::QueryRunner};
     let mut fixture = QueryFixture::new(1);
-    let rules = fixture.rules();
+    let rules = crate::rules::registry::RegistryShell::open(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+    )
+    .expect("registry");
     let request = fixture.request_day();
     reject_snapshot_rollback(fixture.store.reader.as_mut().expect("resident reader"));
     let (reply, received) = tokio::sync::oneshot::channel();
@@ -3818,7 +3826,7 @@ fn running_query_rollback_failure_recovers_reader() {
     let result = runner.start(
         &mut fixture.store,
         QueryCommand::Query { request, reply },
-        rules,
+        &rules,
     );
     result.expect("start query");
     drop(received);
@@ -3840,7 +3848,11 @@ fn rollback_and_reopen_failure_reports_recover_reader_without_retrying() {
     use crate::query::{dispatch::QueryCommand, runner::QueryRunner};
     use crate::store::{OpenStoreError, query_error::ReadQueryError};
     let mut fixture = QueryFixture::new(1);
-    let rules = fixture.rules();
+    let rules = crate::rules::registry::RegistryShell::open(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+    )
+    .expect("registry");
     let request = fixture.request_day();
     reject_snapshot_rollback(fixture.store.reader.as_mut().expect("resident reader"));
     let original_path = fixture.store.path.clone();
@@ -3851,7 +3863,7 @@ fn rollback_and_reopen_failure_reports_recover_reader_without_retrying() {
         .start(
             &mut fixture.store,
             QueryCommand::Query { request, reply },
-            rules.clone(),
+            &rules,
         )
         .expect("start query before rollback");
     let error = loop {
@@ -3893,7 +3905,7 @@ fn rollback_and_reopen_failure_reports_recover_reader_without_retrying() {
             runner.start(
                 &mut fixture.store,
                 QueryCommand::Query { request, reply },
-                rules
+                &rules
             ),
             Err(RunQueryError::ReaderUnavailable)
         ),
@@ -4809,4 +4821,79 @@ fn committed_rule_mutations_stale_issued_rule_and_day_page_cursors() {
         panic!("tree response")
     };
     assert_eq!(continued.versions, first_tree.versions);
+}
+
+#[test]
+fn abandoned_queries_do_not_take_the_reader_or_read_rule_metadata() {
+    use crate::query::{control::QueryControl, dispatch::QueryCommand, runner::QueryRunner};
+    use diesel::{Connection, connection::InstrumentationEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let mut fixture = QueryFixture::new(1);
+    let registry = crate::rules::registry::RegistryShell::open(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+    )
+    .expect("registry");
+    let reader = fixture.store.take_query_reader().expect("resident reader");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    fixture
+        .store
+        .writer
+        .set_instrumentation(move |event: InstrumentationEvent<'_>| {
+            if matches!(event, InstrumentationEvent::StartQuery { .. }) {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    let mut runner = QueryRunner::default();
+    let (reply, received) = tokio::sync::oneshot::channel();
+    drop(received);
+    runner
+        .start(
+            &mut fixture.store,
+            QueryCommand::RuleInputs { reply },
+            &registry,
+        )
+        .expect("abandoned metadata read");
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    let (reply, received) = tokio::sync::oneshot::channel();
+    drop(received);
+    let request = fixture.request_day();
+    runner
+        .start(
+            &mut fixture.store,
+            QueryCommand::Query { request, reply },
+            &registry,
+        )
+        .expect("abandoned query");
+    let (reply, received) = tokio::sync::oneshot::channel();
+    drop(received);
+    let request = fixture.request_day();
+    runner
+        .start(
+            &mut fixture.store,
+            QueryCommand::Controlled {
+                request,
+                reply,
+                control: QueryControl::default(),
+            },
+            &registry,
+        )
+        .expect("abandoned controlled query");
+    let request=crate::query::preview::PreviewRequest::decode(quartz_protocol::Op::RulesPreview,serde_json::json!({"mutation":{"op":"rule_sets.edit","body":{"key":"user.closed","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":"opaque"})).expect("preview request");
+    let (reply, received) = tokio::sync::oneshot::channel();
+    drop(received);
+    runner
+        .start(
+            &mut fixture.store,
+            QueryCommand::Preview { request, reply },
+            &registry,
+        )
+        .expect("abandoned preview");
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(!runner.is_running());
+    fixture.store.return_query_reader(reader);
 }

@@ -346,11 +346,19 @@ tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树�
 `rules.preview`（UI）和 `rules_text.preview`（UI、CLI）共用请求 `{mutation, start_date, end_date, expected_versions, deadline_ms?, sample_limit?, cursor?}`。日期为 1–7 个逻辑日，界面默认截至所选日的 7 日；`expected_versions` 取同范围 `query.range` 的摘要。`mutation = {op, body}` 为拟提交写操作的完整内容，省略 `preview_receipt`；rules.preview 接受 rule_sets 写操作，rules_text.preview 接受 rules_text.import。预览在临时规则快照上求值，不保存草稿。
 
 - `deadline_ms` 为核心接纳请求起的相对期限，默认 30,000，范围 1–120,000；同样用于 `rules_text.diff` 和 `data.delete.preview`。这些请求的客户端等待上限为 deadline_ms + 500 ms，连接发现仍限 2 秒。每个分页请求重新计时；超时、取消不返回部分成功或有效回执。
-- `requests.cancel {request_id}` 取消本连接的在途只读请求，返回 `{accepted:true}`；目标已结束或不存在也成功，在途只读目标以 `cancelled` 结束；指向在途写操作返回 `bad_request`。断开连接取消其只读工作，草稿变更主动取消旧代次。计算至少每 5,000 个片段检查取消与期限并让出给采集写入；单个长任务也必须检查期限。已接纳的删除任务按第 6.3.4 节继续执行。
+- `requests.cancel {request_id}` 取消本连接的在途只读请求，返回 `{accepted:true}`；目标已结束或不存在也成功，在途只读目标以 `cancelled` 结束；`rules_text.validate`、`settings.get`、`categories.list` 按只读请求处理，其内部使用写入队列不改变取消语义；指向在途写操作返回 `bad_request`。断开连接取消其只读工作，草稿变更主动取消旧代次。计算至少每 5,000 个片段检查取消与期限并让出给采集写入；单个长任务也必须检查期限。已接纳的删除任务按第 6.3.4 节继续执行。
 - 初次请求的输入摘要变化返回 `stale_inputs`；翻页变化返回 `stale_cursor`。请求字段、草稿、范围和版本均进入游标；预览与正常页面共用提取、分类、活动和标注口径。
-- 响应为 `{rules, totals?, further_hidden?, samples, versions, next_cursor, preview_receipt?, expires_utc_ms?}`；全局 further_hidden 与 totals 的 active_ms 只在第一页返回，分组可续页。rules 每项含规则引用、`condition_match:{segments,duration_ms}`、`effective_contribution:{segments,active_ms}`；前者累计条件成立的保留事实切片（包括 idle、被其他规则遮蔽的切片），后者对分类规则只累计最终提供分类且未被标注覆盖的活跃切片；提取规则累计被选中提取结果的活跃切片；隐私规则累计其动作参与最终进一步降级的活跃切片，同一切片可有多条隐私来源。`totals:{before,after}` 各含 `active_ms`、`categories:[{category,active_ms}]`、`applications`、`documents`，使用与 query.day 相同的排行行形状，按各自排序完整分页。after 使用草稿快照的最终结果，等于同输入与规则快照的今天页/排行口径，包含人工标注与离线活动。
+- 响应为 `{rules, totals?, further_hidden?, samples, versions, next_cursor, preview_receipt?, expires_utc_ms?}`；全局 further_hidden 与 totals 的 active_ms 只在第一页返回，分组可续页。rules 每项含规则引用、`condition_match:{segments,duration_ms}`、`effective_contribution:{segments,active_ms}`；前者累计条件成立的保留事实切片（包括 idle、被其他规则遮蔽的切片），后者对分类规则只累计最终提供分类且未被标注覆盖的活跃切片；提取规则累计被选中提取结果的活跃切片；隐私规则累计其动作参与最终进一步降级的活跃采集窗口切片（`active` 或 `active_override`），同一切片可有多条隐私来源。`totals:{before,after}` 各含 `active_ms`、`categories:[{category,active_ms}]`、`applications`、`documents`，使用与 query.day 相同的排行行形状，按各自排序完整分页。after 使用草稿快照的最终结果，等于同输入与规则快照的今天页/排行口径，包含人工标注与离线活动。
 - 提取预览的 samples 附 `before` / `after` 提取输出；隐私预览另返全局及逐规则 `further_hidden:{segments,fields,duration_ms}`，只计现存事实中将进一步降级的范围，包含非活跃事实。segments 是去重后的受影响切片数，fields 按 app/window_title/web 字段动作计数；时长按切片累计一次。
 - `sample_limit` 默认且最多 50，可为 0。样本为 `{start_utc_ms,end_utc_ms,clock_segment_id,rule,before,after}`，before/after 只含该 kind 的允许字段；先按 UTC、时钟段、事实主键、规则引用选取前 N 项，再分页，翻页不补选更多；单页含规则统计和样本的总编码不超过 200 KiB。只展示当前与草稿都允许显示的字段，隐私预览不借样本暴露将隐藏的原文。全部统计完成后才签发回执，第一页返回回执与到期时刻。
+
+E1 提供两个预览操作和 `requests.cancel`，声明 `requests.cancel.v1`。`rules.preview.v1` 还覆盖隐私保存回执校验，须在 E2 完成后声明；E1 响应省略 `preview_receipt` 与 `expires_utc_ms`。规则命令行接线安排在 E5。
+
+`expected_versions` 使用同日期范围、`bucket="day"` 的 `query.range` 摘要，dimensions 不影响该摘要。受理后先在只读事务中检查输入摘要与游标，再通过实际写入的决策路径编译草稿。游标绑定预览操作、完整 mutation 的 SHA-256 摘要、日期、expected_versions、期限、样本数量和输入版本；正文按原始字符串字节参与摘要。任何规则集新修订均使游标过期，包括生效内容未变化的修订。两个快照共享一次数据库只读事务，各逻辑日使用相同事实、活动与标注边界，批次最多 256 行或片段，批次间由现有数据库循环优先处理采集写入。分页编码与跳过续页项也按最多 256 项一批执行，文档引用仅对当页候选项生成。
+
+rules 列出草稿中该类型的生效规则，保留零命中项。规则预览以保留的窗口字段为输入，Excluded 与 NoForeground 不进入规则求值，提取另要求 Full；TitleHidden 的分类与隐私条件使用仍保留的字段。分类与提取中因匹配顺序被遮蔽的规则仍计条件命中。隐私 further_hidden 对照事实实际保留的字段计算；逐规则只计该规则动作参与最终降级的字段，相同字段可以有多条规则来源，全局切片与时长去重。totals 与相同角色、相同规则快照下的 query.day 保持一致，仅读取事实已经保存的采集保留级别；查询时不重新应用隐私规则。隐私草稿影响保存后的未来采集，以及 G 步骤中明确执行的历史清理，预览中不改变 totals 的字段保留或时长；进一步隐藏的影响计于 further_hidden。文档排行引用使用所选末日 query.day 的七日详情范围与对应侧的版本摘要；这些引用依赖也进入预览游标版本。
+
+样本 before/after 按类型分别为 `{category}`、`{extraction}` 或 `{app,window_title,web}`；隐私样本中的三项为保留动作。提取输出同时受事实已保存的保留级别、当前隐私规则和草稿隐私规则约束，任一方隐藏应用或标题时，两侧提取输出全部置空；任一方隐藏应用时，两侧分类样本返回未分类。样本不携带窗口标题原文。排序键中的事实主键由核心内部保留，响应不增加该字段。全局统计与前 N 项样本选择完成后才开始分页，续页不增加样本。
 
 隐私保存回执为不透明字符串，有效期 5 分钟；每连接最多保留 8 份，超出逐出最旧项，断开或核心重启即失效。回执绑定角色与连接、确切 mutation（包括原始文本字节或编辑内容、目标 key、操作与 base_version）、父链版本、三类规则输入、元数据、事实/标注版本和日期范围。提交时原子复核；缺失、过期或任一依赖变化分别返回 `preview_required`、`preview_expired`、`preview_mismatch`。保存成功消费回执；成功响应丢失后先读取当前版本，不能凭旧回执新增版本。CLI 预览可用于诊断，但 CLI 没有保存权限。
 

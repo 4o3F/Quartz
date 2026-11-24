@@ -120,6 +120,14 @@ pub(crate) enum Action {
         id: RequestId,
         request: crate::rules::read::ReadRequest,
     },
+    Preview {
+        id: RequestId,
+        request: crate::query::preview::PreviewRequest,
+    },
+    Cancel {
+        id: RequestId,
+        request: quartz_protocol::CancelRequest,
+    },
     Query {
         id: RequestId,
         request: crate::query::QueryRequest,
@@ -225,6 +233,7 @@ impl ConnectionSession {
                         instance_id: status.instance_id.clone(),
                         core_version: status.core_version.clone(),
                         capabilities: vec![
+                            quartz_protocol::Capability::RequestsCancelV1,
                             quartz_protocol::Capability::CategoriesV1,
                             quartz_protocol::Capability::QueryDocumentsV1,
                             quartz_protocol::Capability::QueryUnclassifiedV1,
@@ -303,6 +312,19 @@ impl ConnectionSession {
                             Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
                         }
                     }
+                    Op::RulesPreview | Op::RulesTextPreview => {
+                        match crate::query::preview::PreviewRequest::decode(
+                            request.op,
+                            request.body,
+                        ) {
+                            Ok(request) => Action::Preview { id, request },
+                            Err(error) => Action::Reply(Action::error_response(Some(id), error)),
+                        }
+                    }
+                    Op::RequestsCancel => match serde_json::from_value(request.body) {
+                        Ok(request) => Action::Cancel { id, request },
+                        Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
+                    },
                     Op::QueryFacts
                     | Op::QueryDay
                     | Op::QueryTimeline
@@ -340,9 +362,7 @@ impl ConnectionSession {
                         }
                     }
                     Op::Hello => Action::error(Some(id), ErrorKind::BadRequest),
-                    Op::RulesPreview
-                    | Op::RulesExplain
-                    | Op::RulesTextPreview
+                    Op::RulesExplain
                     | Op::RulesTextDiff
                     | Op::RulesTextImport
                     | Op::DataDelete
@@ -816,6 +836,7 @@ mod tests {
         assert_eq!(
             hello.capabilities,
             vec![
+                quartz_protocol::Capability::RequestsCancelV1,
                 quartz_protocol::Capability::CategoriesV1,
                 quartz_protocol::Capability::QueryDocumentsV1,
                 quartz_protocol::Capability::QueryUnclassifiedV1,
@@ -1269,6 +1290,59 @@ mod tests {
                     error: ProtocolError::new(ErrorKind::BadRequest)
                 }
             );
+        }
+    }
+    #[test]
+    fn preview_roles_and_nested_bodies_are_checked_before_worker_admission() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("preview-roles".into()));
+        for role in [
+            ReadyRole::Ui {
+                state: UiState::Visible,
+            },
+            ReadyRole::Cli,
+            ReadyRole::Host,
+        ] {
+            for op in [Op::RulesPreview, Op::RulesTextPreview] {
+                let mut session = ConnectionSession {
+                    state: State::Ready(role),
+                    allowed: AllowedRoles::Quartz,
+                };
+                let mutation_op = if op == Op::RulesPreview {
+                    "rule_sets.edit"
+                } else {
+                    "rules_text.import"
+                };
+                let body = serde_json::json!({"mutation":{"op":mutation_op,"body":{"key":"user.preview","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":"opaque"});
+                let allowed = role.role().authorize(op).is_ok();
+                let action = session.receive(
+                    request(2, op, body.clone()),
+                    &status.subscribe().borrow().status,
+                );
+                if allowed {
+                    assert!(matches!(action, Action::Preview { .. }));
+                } else {
+                    assert_eq!(
+                        action.reply().outcome,
+                        ResponseOutcome::Err {
+                            error: ProtocolError::new(ErrorKind::Forbidden)
+                        }
+                    );
+                }
+                if allowed {
+                    let mut invalid = body;
+                    invalid["mutation"]["body"]["preview_receipt"] = serde_json::json!("forbidden");
+                    assert_eq!(
+                        session
+                            .receive(request(3, op, invalid), &status.subscribe().borrow().status)
+                            .reply()
+                            .outcome,
+                        ResponseOutcome::Err {
+                            error: ProtocolError::new(ErrorKind::BadRequest)
+                        }
+                    );
+                }
+            }
         }
     }
 }

@@ -56,6 +56,9 @@ pub(crate) enum Activity {
     },
 }
 impl Activity {
+    pub(super) fn is_captured_active(&self) -> bool {
+        matches!(self, Self::Active | Self::ActiveOverride(_))
+    }
     pub(super) fn is_active(&self) -> bool {
         matches!(
             self,
@@ -76,6 +79,7 @@ pub(crate) struct DerivedSegment {
     pub span: SpanDuration,
     pub clock_segment_id: Option<ClockSegmentId>,
     foreground: Option<ForegroundIndex>,
+    retained_foreground: Option<ForegroundIndex>,
     classification: ClassificationId,
     pub activity: Activity,
     category_source: CategorySource,
@@ -130,6 +134,34 @@ impl SegmentFacts {
             CategorySource::Annotation(_) | CategorySource::Unclassified => None,
         }
     }
+    pub(super) fn provides_category(&self, segment: &DerivedSegment, rule: &str) -> bool {
+        matches!(&segment.category_source, CategorySource::Rule(source) if source.as_str() == rule)
+    }
+    pub(super) fn preview_fields(
+        &self,
+        segment: &DerivedSegment,
+        rules: &quartz_domain::rules::CompiledRules,
+    ) -> quartz_domain::rules::FieldSnapshot {
+        let Some(row) = self.retained_foreground(segment) else {
+            return Default::default();
+        };
+        let extraction = segment
+            .retained_foreground
+            .and_then(|index| self.rows[index.0].extraction.as_deref());
+        quartz_domain::rules::FieldSnapshot::from_foreground(
+            row,
+            rules.fields(),
+            extraction.map(|value| &value.fields),
+        )
+    }
+    pub(super) fn retained_foreground(&self, segment: &DerivedSegment) -> Option<&Foreground> {
+        segment
+            .retained_foreground
+            .map(|index| match &self.rows[index.0].input {
+                InputRow::Foreground(row) => row,
+                _ => unreachable!("retained index references a foreground fact"),
+            })
+    }
     fn foreground(&self, segment: &DerivedSegment) -> Option<&Foreground> {
         segment
             .foreground
@@ -141,7 +173,7 @@ impl SegmentFacts {
     pub(super) fn category(&self, segment: &DerivedSegment) -> &CategoryRef {
         &self.classifier.result(segment.classification).category
     }
-    fn extraction(&self, segment: &DerivedSegment) -> quartz_protocol::TitleExtraction {
+    pub(super) fn extraction(&self, segment: &DerivedSegment) -> quartz_protocol::TitleExtraction {
         let Some(index) = segment.foreground else {
             return Default::default();
         };
@@ -290,7 +322,7 @@ impl Pipeline {
             .map(|input| self.classified(input))
             .collect()
     }
-    fn classified(&mut self, input: InputRow) -> ClassifiedInput {
+    pub(super) fn classified(&mut self, input: InputRow) -> ClassifiedInput {
         let extraction = match &input {
             InputRow::Foreground(row) => self.classifier.extract(row),
             _ => None,
@@ -453,6 +485,7 @@ impl Pipeline {
             },
             clock_segment_id: None,
             foreground: None,
+            retained_foreground: None,
             classification: ClassificationId::UNCLASSIFIED,
             activity: Activity::CoreOffline,
             category_source: CategorySource::Unclassified,
@@ -627,6 +660,7 @@ impl Pipeline {
             },
             clock_segment_id: (!outside_clock).then_some(sweep.clock.id),
             foreground: foreground_index,
+            retained_foreground: foreground_index,
             classification,
             activity,
             category_source: foreground_index.map_or(CategorySource::Unclassified, |index| {

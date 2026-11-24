@@ -9,6 +9,15 @@ use tokio::sync::oneshot;
 pub(crate) const QUERY_CHANNEL_CAPACITY: usize = 8;
 #[derive(Debug)]
 pub(crate) enum QueryCommand {
+    Preview {
+        request: super::preview::PreviewRequest,
+        reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
+    },
+    Controlled {
+        request: QueryRequest,
+        control: super::control::QueryControl,
+        reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
+    },
     Query {
         request: QueryRequest,
         reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
@@ -16,6 +25,16 @@ pub(crate) enum QueryCommand {
     RuleInputs {
         reply: oneshot::Sender<Result<crate::rules::read::ReadInputs, ProtocolError>>,
     },
+}
+impl QueryCommand {
+    pub(super) fn reply_is_closed(&self) -> bool {
+        match self {
+            Self::Query { reply, .. }
+            | Self::Controlled { reply, .. }
+            | Self::Preview { reply, .. } => reply.is_closed(),
+            Self::RuleInputs { reply } => reply.is_closed(),
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub(crate) struct QueryPort {
@@ -50,6 +69,36 @@ impl RuleReadReply {
     }
 }
 impl QueryPort {
+    pub(crate) fn submit_preview(
+        &self,
+        request: super::preview::PreviewRequest,
+    ) -> Result<oneshot::Receiver<Result<QueryResponse, ProtocolError>>, ProtocolError> {
+        let (reply, received) = oneshot::channel();
+        self.send(QueryCommand::Preview { request, reply })?;
+        Ok(received)
+    }
+    pub(crate) fn submit_controlled(
+        &self,
+        request: QueryRequest,
+        control: super::control::QueryControl,
+    ) -> Result<oneshot::Receiver<Result<QueryResponse, ProtocolError>>, ProtocolError> {
+        let (reply, received) = oneshot::channel();
+        self.send(QueryCommand::Controlled {
+            request,
+            control,
+            reply,
+        })?;
+        Ok(received)
+    }
+    fn send(&self, command: QueryCommand) -> Result<(), ProtocolError> {
+        self.sender.try_send(command).map_err(|error| {
+            ProtocolError::new(match error {
+                crossbeam_channel::TrySendError::Full(_) => ErrorKind::Busy,
+                crossbeam_channel::TrySendError::Disconnected(_) => ErrorKind::Internal,
+            })
+        })
+    }
+
     /// Admits the input read before any asynchronous reply wait.
     pub(crate) fn submit_rule_read(
         &self,

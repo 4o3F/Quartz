@@ -314,6 +314,16 @@ pub struct Decision {
     writes: Vec<RuleSetWrite>,
     reply: RegistryReply,
     outcome: Option<CommitOutcome>,
+    draft: Option<std::sync::Arc<RuleSnapshot>>,
+}
+/// Disposable compiled candidate from the same decision used by a real write.
+/// It owns no persistence effect or publication token.
+#[derive(Debug)]
+pub struct RuleDraft {
+    /// Writes used only to check the same limits as the real operation.
+    pub writes: Vec<RuleSetWrite>,
+    /// Compiled candidate, evaluated without publishing it.
+    pub snapshot: std::sync::Arc<RuleSnapshot>,
 }
 /// Named outputs of a registry decision, consumed by the persistence shell.
 #[derive(Debug)]
@@ -326,6 +336,19 @@ pub struct DecisionParts {
     pub outcome: Option<CommitOutcome>,
 }
 impl Decision {
+    /// Discards the commit token and returns the already compiled candidate.
+    ///
+    /// # Errors
+    /// Returns the original write decision error, with identical preconditions.
+    pub fn into_draft(self) -> Result<RuleDraft, DecideRegistryCommandError> {
+        self.reply?;
+        Ok(RuleDraft {
+            writes: self.writes,
+            snapshot: self
+                .draft
+                .expect("successful decision retains its candidate"),
+        })
+    }
     /// Borrows the exact writes that must succeed in one transaction.
     pub fn writes(&self) -> &[RuleSetWrite] {
         &self.writes
@@ -469,6 +492,7 @@ impl RuleRegistry {
                 writes: Vec::new(),
                 reply: Err(error),
                 outcome: None,
+                draft: None,
             },
         }
     }
@@ -724,6 +748,7 @@ impl RuleRegistry {
                                 upstream_changes: current.upstream_changes().to_vec(),
                             }),
                             outcome: None,
+                            draft: Some(current.clone()),
                         });
                     }
                 }
@@ -768,6 +793,7 @@ impl RuleRegistry {
                 state,
                 base_epoch: current.epoch(),
             }),
+            draft: Some(std::sync::Arc::new(candidate)),
         })
     }
 }

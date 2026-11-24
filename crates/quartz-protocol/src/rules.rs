@@ -4,6 +4,18 @@ use crate::{QueryCursor, QueryVersions, Uuid};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 
+mod preview;
+pub use preview::{
+    FurtherHidden, PREVIEW_DEFAULT_DEADLINE_MS, PREVIEW_MAX_DAYS, PREVIEW_MAX_DEADLINE_MS,
+    PREVIEW_MAX_SAMPLES, ParsePreviewDeadlineError, ParsePreviewSampleLimitError,
+    PreviewCategoryRank, PreviewDeadlineMs, PreviewDelete, PreviewReorder, PreviewRevert,
+    PreviewSampleLimit, PreviewSetEnabled, RuleConditionMatch, RuleEffectiveContribution,
+    RulePreviewMutation, RulePreviewOutput, RulePreviewRequest, RulePreviewSample,
+    RulePreviewSideTotals, RulePreviewStatistics, RulePreviewTotals, RulesPreviewRequest,
+    RulesPreviewResponse, RulesTextPreviewMutation, RulesTextPreviewRequest,
+    RulesTextPreviewResponse, ValidatePreviewDatesError,
+};
+
 /// Rule families available to the M4 editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
