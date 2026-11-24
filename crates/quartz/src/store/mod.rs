@@ -10,6 +10,7 @@ mod migrations;
 pub(crate) mod query;
 pub(crate) mod query_error;
 mod raw;
+mod restore;
 mod rows;
 pub(crate) mod rules;
 mod schema;
@@ -83,6 +84,7 @@ impl OpenStoreError {
 
 /// Owns both connections on the database thread.
 pub(crate) struct Store {
+    path: PathBuf,
     writer: SqliteConnection,
     reader: Option<ReadOnlyStore>,
     pending_effects: versions::TxEffects,
@@ -223,6 +225,7 @@ impl Store {
         }
         let reader = ReadOnlyStore::connect(&path)?;
         Ok(Self {
+            path,
             writer,
             reader: Some(reader),
             pending_effects: versions::TxEffects::default(),
@@ -465,6 +468,10 @@ pub(crate) enum RestoreBackupError {
     Corrupt,
     #[snafu(display("database is busy; close other database connections before restoring"))]
     Busy,
+    #[snafu(display("could not prepare live database for restore: {source}"))]
+    Prepare {
+        source: restore::PrepareRestoreError,
+    },
     #[snafu(display("could not replace database"))]
     Replace { source: std::io::Error },
 }
@@ -508,21 +515,25 @@ impl DataDirectory {
             .context(ReplaceSnafu)?;
         let database = self.database();
         if database.exists() {
-            let mut current = SqliteConnection::establish(
-                database
-                    .to_str()
-                    .context(InvalidPathSnafu)
-                    .context(OpenSnafu)?,
-            )
-            .context(ConnectSnafu)
-            .context(OpenSnafu)?;
-            snafu::ensure!(
-                ConnectionSql::new(&mut current)
-                    .checkpoint()
-                    .context(ValidateSnafu)?,
-                BusySnafu
-            );
+            let current = restore::RestoreDatabase::prepare(&database).map_err(|error| {
+                if error.is_busy() {
+                    RestoreBackupError::Busy
+                } else {
+                    RestoreBackupError::Prepare { source: error }
+                }
+            })?;
+            // SQLite's Windows handles must close before deleting sidecars or replacing the file.
+            // The caller retains the data-directory lock throughout this operation.
             drop(current);
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = database.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            match fs::remove_file(PathBuf::from(sidecar)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => return Err(RestoreBackupError::Replace { source }),
+            }
         }
         // rename replaces the destination atomically on both Windows and Unix.
         fs::rename(&staged, &database).context(ReplaceSnafu)?;

@@ -8,7 +8,7 @@ use super::{
     schema::data_day_versions,
     settings::Settings,
 };
-use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
+use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper};
 use quartz_domain::{capture::limits::UTC_DAY_MS, facts::QueryRange};
 use std::{collections::BTreeMap, ops::RangeInclusive};
 
@@ -24,8 +24,12 @@ pub(crate) enum TestCommit {
 pub(crate) enum BumpVersionError {
     #[snafu(display("could not write query version"))]
     Database { source: diesel::result::Error },
-    #[snafu(display("version range ends before it starts"))]
+    #[snafu(display("version range is reversed or exceeds the annotation span limit"))]
     InvalidRange,
+    #[snafu(display("day version counter overflowed"))]
+    DayVersion,
+    #[snafu(display("annotation day-version work exceeds the transaction limit"))]
+    AnnotationWork,
     #[snafu(display("could not access metadata version"))]
     Setting {
         source: crate::store::settings::AccessSettingError,
@@ -159,6 +163,7 @@ impl ReadSnapshot {
 pub(crate) struct TxEffects {
     pub days: BTreeMap<VersionKey, i64>,
     pub metadata: Option<i64>,
+    annotation_day_writes: i64,
 }
 impl TxEffects {
     pub(super) fn merge(&mut self, changes: Self) {
@@ -177,18 +182,42 @@ impl TxEffects {
             return Err(BumpVersionError::InvalidRange);
         }
         let days = UtcDays::covering(range);
+        if source == DataSource::Annotations {
+            if range
+                .end
+                .checked_sub(range.start)
+                .is_none_or(|duration| duration > crate::query::MAX_QUERY_RANGE_MS)
+            {
+                return Err(BumpVersionError::InvalidRange);
+            }
+            let work = days.end().0 - days.start().0 + 1;
+            self.annotation_day_writes = self
+                .annotation_day_writes
+                .checked_add(work)
+                .filter(|total| *total <= super::annotations::MAX_ANNOTATION_DAY_WRITES)
+                .ok_or(BumpVersionError::AnnotationWork)?;
+        }
         for day in days.start().0..=days.end().0 {
-            let version = diesel::insert_into(data_day_versions::table)
+            let previous = data_day_versions::table
+                .filter(data_day_versions::source.eq(source))
+                .filter(data_day_versions::utc_date.eq(day))
+                .select(data_day_versions::version)
+                .first::<i64>(connection)
+                .optional()?;
+            let version = match previous {
+                Some(version) => version.checked_add(1).ok_or(BumpVersionError::DayVersion)?,
+                None => 1,
+            };
+            diesel::insert_into(data_day_versions::table)
                 .values((
                     data_day_versions::source.eq(source),
                     data_day_versions::utc_date.eq(day),
-                    data_day_versions::version.eq(1_i64),
+                    data_day_versions::version.eq(version),
                 ))
                 .on_conflict((data_day_versions::source, data_day_versions::utc_date))
                 .do_update()
-                .set(data_day_versions::version.eq(data_day_versions::version + 1_i64))
-                .returning(data_day_versions::version)
-                .get_result(connection)?;
+                .set(data_day_versions::version.eq(version))
+                .execute(connection)?;
             self.days.insert(
                 VersionKey {
                     source: VersionSource(source.code()),
@@ -389,5 +418,148 @@ mod tests {
             store.version_state(),
             Err(ReadQueryError::ReaderUnavailable)
         ));
+    }
+    #[test]
+    fn day_counter_overflow_rolls_back_rows_and_effects() {
+        let directory = tempfile::tempdir().expect("isolated versions");
+        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
+        diesel::insert_into(data_day_versions::table)
+            .values(DataDayVersionsRow {
+                source: DataSource::Annotations,
+                utc_date: 1,
+                version: i64::MAX,
+            })
+            .execute(&mut store.writer)
+            .expect("maximum valid counter");
+        let result = store.write(|tx| {
+            tx.effects.bump_metadata(tx.connection)?;
+            tx.effects.bump_days(
+                tx.connection,
+                DataSource::Annotations,
+                QueryRange {
+                    start: 0,
+                    end: 2 * UTC_DAY_MS,
+                },
+            )
+        });
+        assert!(
+            matches!(result, Err(BumpVersionError::DayVersion)),
+            "overflow must reject the transaction"
+        );
+        let rows = data_day_versions::table
+            .select(DataDayVersionsRow::as_select())
+            .load::<DataDayVersionsRow>(&mut store.writer)
+            .expect("versions");
+        assert_eq!(rows.len(), 1, "first day's insertion must roll back");
+        assert_eq!(rows[0].version, i64::MAX);
+        let effects = store.take_committed_versions();
+        assert!(effects.facts.is_empty());
+        assert_eq!(effects.metadata_version, None);
+        assert_eq!(store.rule_read_metadata().expect("metadata"), 0);
+    }
+
+    #[test]
+    fn day_bumps_reject_unbounded_work_before_sql() {
+        use diesel::connection::SimpleConnection;
+        let directory = tempfile::tempdir().expect("isolated versions");
+        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
+        store
+            .writer
+            .batch_execute("PRAGMA query_only = ON")
+            .expect("deny writes");
+        let mut effects = TxEffects::default();
+        let result = effects.bump_days(
+            &mut store.writer,
+            DataSource::Annotations,
+            QueryRange {
+                start: 0,
+                end: i64::MAX,
+            },
+        );
+        assert!(matches!(result, Err(BumpVersionError::InvalidRange)));
+        assert!(store.take_committed_versions().facts.is_empty());
+    }
+    #[test]
+    fn capture_day_bumps_allow_ranges_longer_than_one_year() {
+        let directory = tempfile::tempdir().expect("isolated capture versions");
+        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
+        let range = QueryRange {
+            start: -1,
+            end: crate::query::MAX_QUERY_RANGE_MS + UTC_DAY_MS,
+        };
+        let days = UtcDays::covering(range);
+        for source in [
+            DataSource::Intervals,
+            DataSource::Availability,
+            DataSource::Web,
+            DataSource::Gaps,
+        ] {
+            store
+                .write::<_, BumpVersionError>(|tx| {
+                    tx.effects.bump_days(tx.connection, source, range)
+                })
+                .expect("long capture range");
+            let effects = store.take_committed_versions();
+            assert_eq!(
+                i64::try_from(effects.facts.len()).expect("day count"),
+                days.end().0 - days.start().0 + 1
+            );
+            for fact in effects.facts {
+                assert_eq!(fact.key.source, VersionSource(source.code()));
+                assert_eq!(fact.version, 1);
+                assert!(days.contains(&fact.key.day));
+            }
+        }
+        let before = store.version_state().expect("capture versions").days;
+        assert!(matches!(
+            store.write(|tx| tx
+                .effects
+                .bump_days(tx.connection, DataSource::Annotations, range)),
+            Err(BumpVersionError::InvalidRange)
+        ));
+        assert_eq!(
+            store
+                .version_state()
+                .expect("unchanged capture versions")
+                .days,
+            before
+        );
+        assert!(store.take_committed_versions().facts.is_empty());
+    }
+
+    #[test]
+    fn annotation_work_across_day_bumps_rolls_back_the_transaction() {
+        let directory = tempfile::tempdir().expect("isolated annotation work");
+        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
+        let days_per_call = crate::query::MAX_QUERY_RANGE_MS / UTC_DAY_MS;
+        let calls = super::super::annotations::MAX_ANNOTATION_DAY_WRITES / days_per_call + 1;
+        let mut successful_calls = 0;
+        let result = store.write::<_, BumpVersionError>(|tx| {
+            tx.effects.bump_metadata(tx.connection)?;
+            for _ in 0..calls {
+                tx.effects.bump_days(
+                    tx.connection,
+                    DataSource::Annotations,
+                    QueryRange {
+                        start: 0,
+                        end: crate::query::MAX_QUERY_RANGE_MS,
+                    },
+                )?;
+                successful_calls += 1;
+            }
+            Ok(())
+        });
+        assert!(matches!(result, Err(BumpVersionError::AnnotationWork)));
+        assert_eq!(
+            successful_calls,
+            calls - 1,
+            "earlier increments must have reached SQLite"
+        );
+        let stored = store.version_state().expect("rolled back state");
+        assert!(stored.days.is_empty());
+        assert_eq!(stored.settings.metadata_version, 0);
+        let effects = store.take_committed_versions();
+        assert!(effects.facts.is_empty());
+        assert_eq!(effects.metadata_version, None);
     }
 }

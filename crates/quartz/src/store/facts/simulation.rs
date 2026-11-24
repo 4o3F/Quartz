@@ -76,6 +76,7 @@ impl Store {
         ApplyMigrationError::from_result(writer.run_pending_migrations(Migrations))
             .context(LoadMigrationsSnafu)?;
         Ok(Self {
+            path: path.to_path_buf(),
             writer,
             reader: Some(ReadOnlyStore::connect(path)?),
             pending_effects: TxEffects::default(),

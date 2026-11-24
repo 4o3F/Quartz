@@ -9,15 +9,68 @@ use super::{
     schema::{annotations, categories},
     versions::BumpVersionError,
 };
+use crate::query::MAX_QUERY_RANGE_MS;
 use clipping::{Remainders, SplitIdentity};
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper};
-use quartz_domain::{capture::UtcInstant, facts::QueryRange};
+use quartz_domain::{
+    capture::{UtcInstant, limits::UTC_DAY_MS},
+    facts::QueryRange,
+};
 use quartz_protocol::{
     Annotation, AnnotationCategory, AnnotationId, AnnotationKind, AnnotationValues,
     AnnotationsCreateRequest, AnnotationsDeleteRequest, AnnotationsResponse,
     AnnotationsUpdateRequest,
 };
 use std::collections::BTreeSet;
+
+/// A maximum-length range can intersect one additional UTC date.
+const MAX_ANNOTATION_REQUEST_DAYS: i64 = MAX_QUERY_RANGE_MS / UTC_DAY_MS + 1;
+/// Bounds old/new version increments, including clipping remainders, in one annotation write.
+pub(super) const MAX_ANNOTATION_DAY_WRITES: i64 = 4096;
+
+struct AnnotationWork {
+    days: i64,
+    limit: i64,
+}
+impl AnnotationWork {
+    fn request() -> Self {
+        Self {
+            days: 0,
+            limit: MAX_ANNOTATION_REQUEST_DAYS,
+        }
+    }
+    fn mutations() -> Self {
+        Self {
+            days: 0,
+            limit: MAX_ANNOTATION_DAY_WRITES,
+        }
+    }
+    fn include_values(
+        &mut self,
+        values: &AnnotationValues,
+    ) -> Result<(), ExecuteAnnotationWritesError> {
+        self.include_range(QueryRange {
+            start: values.start_utc_ms,
+            end: values.end_utc_ms,
+        })
+    }
+    fn include_range(&mut self, range: QueryRange) -> Result<(), ExecuteAnnotationWritesError> {
+        range
+            .end
+            .checked_sub(range.start)
+            .filter(|duration| *duration > 0 && *duration <= MAX_QUERY_RANGE_MS)
+            .ok_or(ExecuteAnnotationWritesError::InvalidRange)?;
+        UtcInstant::try_from(range.start)
+            .map_err(|_| ExecuteAnnotationWritesError::InvalidRange)?;
+        UtcInstant::try_from(range.end).map_err(|_| ExecuteAnnotationWritesError::InvalidRange)?;
+        let days = super::versions::UtcDays::covering(range);
+        self.days += days.end().0 - days.start().0 + 1;
+        if self.days > self.limit {
+            return Err(ExecuteAnnotationWritesError::InvalidRange);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module)]
@@ -66,6 +119,10 @@ impl Store {
         request: AnnotationsCreateRequest,
         now: UtcInstant,
     ) -> Result<AnnotationsResponse, ExecuteAnnotationWritesError> {
+        let mut work = AnnotationWork::request();
+        for entity in &request.entities {
+            work.include_values(&entity.values)?;
+        }
         self.write(|tx| {
             let mut plan = Vec::with_capacity(request.entities.len());
             let mut ids = BTreeSet::new();
@@ -96,6 +153,10 @@ impl Store {
         request: AnnotationsUpdateRequest,
         now: UtcInstant,
     ) -> Result<AnnotationsResponse, ExecuteAnnotationWritesError> {
+        let mut work = AnnotationWork::request();
+        for entity in &request.entities {
+            work.include_values(&entity.values)?;
+        }
         self.write(|tx| {
             let mut plan = Vec::with_capacity(request.entities.len());
             let mut ids = BTreeSet::new();
@@ -132,11 +193,27 @@ impl Store {
         &mut self,
         request: AnnotationsDeleteRequest,
     ) -> Result<(), ExecuteAnnotationWritesError> {
+        if i64::try_from(request.uuids.len())
+            .map_err(|_| ExecuteAnnotationWritesError::InvalidRange)?
+            > MAX_ANNOTATION_REQUEST_DAYS
+        {
+            return Err(ExecuteAnnotationWritesError::InvalidRange);
+        }
         self.write(|tx| {
+            let mut work = AnnotationWork::mutations();
+            let mut rows = Vec::new();
+            let mut ids = BTreeSet::new();
             for uuid in request.uuids {
-                if let Some(row) = tx.annotation(&uuid)? {
-                    tx.remove_annotation(&row)?;
+                if !ids.insert(uuid.clone()) {
+                    continue;
                 }
+                if let Some(row) = tx.annotation(&uuid)? {
+                    work.include_range(row.range())?;
+                    rows.push(row);
+                }
+            }
+            for row in rows {
+                tx.remove_annotation(&row)?;
             }
             Ok(())
         })
@@ -246,6 +323,7 @@ impl WriteTx<'_> {
                 return Err(ExecuteAnnotationWritesError::InvalidRange);
             }
         }
+        self.check_annotation_work(&plan)?;
         for item in &plan {
             if item.mutation == Mutation::Write
                 && let Some(before) = &item.before
@@ -270,6 +348,61 @@ impl WriteTx<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(AnnotationsResponse { entities })
     }
+    fn check_annotation_work(
+        &mut self,
+        plan: &[PlannedAnnotation],
+    ) -> Result<(), ExecuteAnnotationWritesError> {
+        let mut work = AnnotationWork::mutations();
+        for item in plan.iter().filter(|item| item.mutation == Mutation::Write) {
+            if let Some(before) = &item.before {
+                work.include_range(before.range())?;
+            }
+            work.include_range(item.after.range())?;
+            if !AnnotationKind::from(item.after.kind).clips() {
+                continue;
+            }
+            for old in self.overlapping_annotations(&item.after)? {
+                if plan.iter().any(|entry| {
+                    entry.mutation == Mutation::Write
+                        && entry
+                            .before
+                            .as_ref()
+                            .is_some_and(|before| before.uuid == old.uuid)
+                }) {
+                    continue;
+                }
+                work.include_range(old.range())?;
+                let remainders = Remainders::subtract(old.range(), item.after.range());
+                if let Some(left) = remainders.left {
+                    work.include_range(left)?;
+                }
+                if let Some(right) = remainders.right {
+                    work.include_range(right)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn overlapping_annotations(
+        &mut self,
+        writing: &AnnotationsRow,
+    ) -> Result<Vec<AnnotationsRow>, ExecuteAnnotationWritesError> {
+        let overlaps = annotations::table
+            .filter(annotations::kind.eq(writing.kind))
+            .filter(annotations::uuid.ne(&writing.uuid))
+            .filter(annotations::start_utc_ms.lt(writing.end_utc_ms))
+            .filter(annotations::end_utc_ms.gt(writing.start_utc_ms))
+            .order(annotations::uuid)
+            .select(AnnotationsRow::as_select())
+            .limit(MAX_ANNOTATION_DAY_WRITES + 1)
+            .load::<AnnotationsRow>(self.connection)?;
+        if i64::try_from(overlaps.len()).map_err(|_| ExecuteAnnotationWritesError::InvalidRange)?
+            > MAX_ANNOTATION_DAY_WRITES
+        {
+            return Err(ExecuteAnnotationWritesError::InvalidRange);
+        }
+        Ok(overlaps)
+    }
     fn clip_annotations(
         &mut self,
         writing: &AnnotationsRow,
@@ -278,14 +411,7 @@ impl WriteTx<'_> {
         if !AnnotationKind::from(writing.kind).clips() {
             return Ok(());
         }
-        let overlaps = annotations::table
-            .filter(annotations::kind.eq(writing.kind))
-            .filter(annotations::uuid.ne(&writing.uuid))
-            .filter(annotations::start_utc_ms.lt(writing.end_utc_ms))
-            .filter(annotations::end_utc_ms.gt(writing.start_utc_ms))
-            .order(annotations::uuid)
-            .select(AnnotationsRow::as_select())
-            .load::<AnnotationsRow>(self.connection)?;
+        let overlaps = self.overlapping_annotations(writing)?;
         for old in overlaps {
             let remainders = Remainders::subtract(old.range(), writing.range());
             self.remove_annotation(&old)?;

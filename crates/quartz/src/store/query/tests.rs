@@ -3735,3 +3735,207 @@ fn owning_clock_lookups_cache_one_statement_for_all_batch_widths() {
         );
     }
 }
+
+fn reject_snapshot_rollback(reader: &mut ReadOnlyStore) {
+    use libsqlite3_sys as sqlite;
+    unsafe extern "C" fn authorize(
+        _context: *mut std::ffi::c_void,
+        action: std::ffi::c_int,
+        argument: *const std::ffi::c_char,
+        _second: *const std::ffi::c_char,
+        _database: *const std::ffi::c_char,
+        _trigger: *const std::ffi::c_char,
+    ) -> std::ffi::c_int {
+        if action == sqlite::SQLITE_TRANSACTION && !argument.is_null() {
+            // SAFETY: SQLite supplies a valid C string for the duration of this callback.
+            let operation = unsafe { std::ffi::CStr::from_ptr(argument) };
+            if operation.to_bytes() == b"ROLLBACK" {
+                return sqlite::SQLITE_DENY;
+            }
+        }
+        sqlite::SQLITE_OK
+    }
+    // SAFETY: The callback has no borrowed state and changes no Diesel transaction or statement.
+    let status = unsafe {
+        reader.connection.with_raw_connection(|connection| {
+            sqlite::sqlite3_set_authorizer(connection, Some(authorize), std::ptr::null_mut())
+        })
+    };
+    assert_eq!(status, sqlite::SQLITE_OK, "install rollback failure");
+}
+
+#[test]
+fn preparation_rollback_failure_returns_error_to_owner_and_recovers_reader() {
+    use crate::query::{dispatch::QueryCommand, runner::QueryRunner};
+    let mut fixture = QueryFixture::new(1);
+    let rules = fixture.rules();
+    reject_snapshot_rollback(fixture.store.reader.as_mut().expect("resident reader"));
+    let (reply, mut received) = tokio::sync::oneshot::channel();
+    let mut runner = QueryRunner::default();
+    let result = runner.start(
+        &mut fixture.store,
+        QueryCommand::Query {
+            request: QueryRequest::Annotations(quartz_protocol::QueryAnnotationsRequest {
+                start_utc_ms: 1,
+                end_utc_ms: 0,
+                cursor: None,
+            }),
+            reply,
+        },
+        rules,
+    );
+    assert!(
+        matches!(result, Err(RunQueryError::Cleanup { .. })),
+        "cleanup error reaches database owner"
+    );
+    assert_eq!(
+        received
+            .try_recv()
+            .expect("query reply")
+            .expect_err("cleanup failure")
+            .kind,
+        ErrorKind::Internal
+    );
+    assert!(
+        fixture.store.reader.is_some(),
+        "failed preparation must restore the resident reader"
+    );
+    fixture
+        .run(fixture.request_day())
+        .expect("subsequent query succeeds");
+}
+
+#[test]
+fn running_query_rollback_failure_recovers_reader() {
+    use crate::query::{dispatch::QueryCommand, runner::QueryRunner};
+    let mut fixture = QueryFixture::new(1);
+    let rules = fixture.rules();
+    let request = fixture.request_day();
+    reject_snapshot_rollback(fixture.store.reader.as_mut().expect("resident reader"));
+    let (reply, received) = tokio::sync::oneshot::channel();
+    let mut runner = QueryRunner::default();
+    let result = runner.start(
+        &mut fixture.store,
+        QueryCommand::Query { request, reply },
+        rules,
+    );
+    result.expect("start query");
+    drop(received);
+    assert!(
+        runner.step(&mut fixture.store).is_err(),
+        "cleanup error reaches database owner"
+    );
+    assert!(
+        fixture.store.reader.is_some(),
+        "failed cleanup must restore the resident reader"
+    );
+    fixture
+        .run(fixture.request_day())
+        .expect("subsequent query succeeds");
+}
+
+#[test]
+fn rollback_and_reopen_failure_reports_recover_reader_without_retrying() {
+    use crate::query::{dispatch::QueryCommand, runner::QueryRunner};
+    use crate::store::{OpenStoreError, query_error::ReadQueryError};
+    let mut fixture = QueryFixture::new(1);
+    let rules = fixture.rules();
+    let request = fixture.request_day();
+    reject_snapshot_rollback(fixture.store.reader.as_mut().expect("resident reader"));
+    let original_path = fixture.store.path.clone();
+    fixture.store.path = fixture.directory.path().join("missing-reader.db");
+    let (reply, mut received) = tokio::sync::oneshot::channel();
+    let mut runner = QueryRunner::default();
+    runner
+        .start(
+            &mut fixture.store,
+            QueryCommand::Query { request, reply },
+            rules.clone(),
+        )
+        .expect("start query before rollback");
+    let error = loop {
+        if let Err(error) = runner.step(&mut fixture.store) {
+            break error;
+        }
+        assert!(runner.is_running(), "query must fail during cleanup");
+    };
+    let RunQueryError::RecoverReader { source, cleanup } = error else {
+        panic!("rollback and reopen failures must both reach the owner");
+    };
+    assert!(matches!(
+        source,
+        ReadQueryError::Reopen {
+            source: OpenStoreError::Connect { .. }
+        }
+    ));
+    assert!(matches!(
+        *cleanup,
+        RunQueryError::Read {
+            source: ReadQueryError::Read { .. }
+        }
+    ));
+    assert_eq!(
+        received
+            .try_recv()
+            .expect("first reply")
+            .expect_err("cleanup failure")
+            .kind,
+        ErrorKind::Internal
+    );
+    assert!(fixture.store.reader.is_none());
+    assert!(!runner.is_running());
+    fixture.store.path = original_path;
+    let request = fixture.request_day();
+    let (reply, mut received) = tokio::sync::oneshot::channel();
+    assert!(
+        matches!(
+            runner.start(
+                &mut fixture.store,
+                QueryCommand::Query { request, reply },
+                rules
+            ),
+            Err(RunQueryError::ReaderUnavailable)
+        ),
+        "the next request must report the absent reader without retrying"
+    );
+    assert_eq!(
+        received
+            .try_recv()
+            .expect("second reply")
+            .expect_err("unavailable reader")
+            .kind,
+        ErrorKind::Internal
+    );
+    assert!(
+        fixture.store.reader.is_none(),
+        "restoring the path must not trigger an implicit reopen loop"
+    );
+    assert!(!runner.is_running());
+    runner
+        .step(&mut fixture.store)
+        .expect("no work queued for retry");
+}
+
+#[test]
+fn snapshot_finish_does_not_retry_or_log_failed_rollback() {
+    let mut fixture = QueryFixture::new(1);
+    let mut reader = fixture.store.take_query_reader().expect("resident reader");
+    reject_snapshot_rollback(&mut reader);
+    let mut snapshot = reader.snapshot();
+    snapshot.begin().expect("read transaction");
+    let log = tempfile::NamedTempFile::new().expect("isolated snapshot log");
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
+        .with_writer(std::sync::Mutex::new(log.reopen().expect("log writer")))
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, || snapshot.finish());
+    assert!(
+        matches!(result, Err(ReadQueryError::Read { .. })),
+        "finish must report rollback failure"
+    );
+    assert_eq!(
+        log.as_file().metadata().expect("log size").len(),
+        0,
+        "Drop must not retry cleanup and log a duplicate failure"
+    );
+}

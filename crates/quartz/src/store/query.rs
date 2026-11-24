@@ -57,6 +57,13 @@ impl Store {
     pub(crate) fn return_query_reader(&mut self, reader: ReadOnlyStore) {
         self.reader = Some(reader);
     }
+    pub(crate) fn reopen_query_reader(&mut self) -> Result<(), ReadQueryError> {
+        self.reader = Some(
+            ReadOnlyStore::connect(&self.path)
+                .map_err(|source| ReadQueryError::Reopen { source })?,
+        );
+        Ok(())
+    }
 }
 /// Owns the read transaction across DB-loop turns, rolling it back on every exit path.
 pub(crate) struct ReadSnapshot {
@@ -285,8 +292,8 @@ impl ReadSnapshot {
     }
     pub(crate) fn finish(mut self) -> Result<ReadOnlyStore, ReadQueryError> {
         if self.transaction == SnapshotTransaction::Started {
-            AnsiTransactionManager::rollback_transaction(self.connection())?;
             self.transaction = SnapshotTransaction::Pending;
+            AnsiTransactionManager::rollback_transaction(self.connection())?;
         }
         Ok(self
             .reader

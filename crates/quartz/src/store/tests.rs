@@ -582,3 +582,211 @@ fn startup_failure_exposes_only_recovery_classification_and_backup() {
         StartupStoreFailure::Other
     ));
 }
+
+struct RestoreFixture {
+    directory: DataDirectory,
+    backup: PathBuf,
+    _temporary: tempfile::TempDir,
+}
+impl RestoreFixture {
+    fn new() -> Self {
+        let temporary = tempfile::tempdir().expect("isolated restore");
+        let directory = DataDirectory::new(temporary.path());
+        let backup = temporary.path().join("backup.db");
+        let mut store = Store::open(&directory).expect("live store");
+        store
+            .test_metadata_write(versions::TestCommit::Commit)
+            .expect("backup marker");
+        ConnectionSql::new(&mut store.writer)
+            .backup(backup.to_str().expect("backup path"))
+            .expect("independent backup");
+        drop(store.reader.take());
+        assert!(
+            ConnectionSql::new(&mut store.writer)
+                .checkpoint()
+                .expect("checkpoint fixture")
+        );
+        drop(store);
+        Self {
+            directory,
+            backup,
+            _temporary: temporary,
+        }
+    }
+    fn assert_restored(&self) {
+        let mut restored = Store::open(&self.directory).expect("restored store");
+        assert_eq!(restored.rule_read_metadata().expect("backup marker"), 1);
+        assert!(
+            ConnectionSql::new(&mut restored.writer)
+                .is_healthy()
+                .expect("integrity")
+        );
+    }
+    fn sidecar(&self, suffix: &str) -> PathBuf {
+        let mut path = self.directory.database().into_os_string();
+        path.push(suffix);
+        PathBuf::from(path)
+    }
+}
+
+#[test]
+fn restore_replaces_not_a_database() {
+    let fixture = RestoreFixture::new();
+    fs::write(fixture.directory.database(), b"not a database").expect("corrupt file");
+    fixture
+        .directory
+        .restore_backup(&fixture.backup)
+        .expect("restore invalid header");
+    fixture.assert_restored();
+}
+
+#[test]
+fn restore_replaces_corrupt_btree() {
+    let fixture = RestoreFixture::new();
+    let mut bytes = fs::read(fixture.directory.database()).expect("database bytes");
+    // The first b-tree page starts after SQLite's 100-byte database header.
+    const FIRST_BTREE_HEADER: usize = 100;
+    bytes[FIRST_BTREE_HEADER] = 0;
+    fs::write(fixture.directory.database(), bytes).expect("corrupt b-tree");
+    fixture
+        .directory
+        .restore_backup(&fixture.backup)
+        .expect("restore corrupt b-tree");
+    fixture.assert_restored();
+}
+
+#[test]
+fn restore_removes_surviving_committed_wal_when_main_is_missing() {
+    let fixture = RestoreFixture::new();
+    let mut live = Store::open(&fixture.directory).expect("live store");
+    live.test_metadata_write(versions::TestCommit::Commit)
+        .expect("newer marker in WAL");
+    let wal = fs::read(fixture.sidecar("-wal")).expect("committed WAL");
+    let shm = fs::read(fixture.sidecar("-shm")).expect("shared memory");
+    drop(live);
+    fs::remove_file(fixture.directory.database()).expect("missing main");
+    fs::write(fixture.sidecar("-wal"), wal).expect("surviving WAL");
+    fs::write(fixture.sidecar("-shm"), shm).expect("surviving SHM");
+    fixture
+        .directory
+        .restore_backup(&fixture.backup)
+        .expect("restore without main");
+    assert!(
+        !fixture.sidecar("-wal").exists(),
+        "old WAL must be gone before opening the replacement"
+    );
+    assert!(
+        !fixture.sidecar("-shm").exists(),
+        "old SHM must be gone before opening the replacement"
+    );
+    fixture.assert_restored();
+}
+
+#[test]
+fn restore_refuses_busy_live_database_and_keeps_committed_data() {
+    let fixture = RestoreFixture::new();
+    let mut live = Store::open(&fixture.directory).expect("live store");
+    let mut snapshot = live.take_query_reader().expect("reader").snapshot();
+    snapshot.begin().expect("hold read lock");
+    live.test_metadata_write(versions::TestCommit::Commit)
+        .expect("new live data");
+    assert!(matches!(
+        fixture.directory.restore_backup(&fixture.backup),
+        Err(RestoreBackupError::Busy)
+    ));
+    assert!(fixture.directory.database().exists());
+    assert_eq!(live.rule_read_metadata().expect("live data retained"), 2);
+    snapshot.finish().expect("release reader");
+}
+
+#[test]
+fn restore_refuses_idle_wal_connection_and_keeps_live_database() {
+    let fixture = RestoreFixture::new();
+    let mut live = Store::open(&fixture.directory).expect("live connection");
+    live.test_metadata_write(versions::TestCommit::Commit)
+        .expect("newer live data");
+    assert!(matches!(
+        fixture.directory.restore_backup(&fixture.backup),
+        Err(RestoreBackupError::Busy)
+    ));
+    assert_eq!(live.rule_read_metadata().expect("live data"), 2);
+}
+
+#[test]
+fn restore_refuses_locked_corrupt_database() {
+    let fixture = RestoreFixture::new();
+    let corrupt = b"not a SQLite database";
+    fs::write(fixture.directory.database(), corrupt).expect("corrupt live database");
+    let locked = restore::RestoreDatabase::prepare(&fixture.directory.database())
+        .expect("hold corrupt file lock");
+    assert!(matches!(
+        fixture.directory.restore_backup(&fixture.backup),
+        Err(RestoreBackupError::Busy)
+    ));
+    assert!(
+        fs::read(fixture.directory.database()).expect("original file retained") == corrupt,
+        "busy restore must retain corrupt file"
+    );
+    drop(locked);
+    fixture
+        .directory
+        .restore_backup(&fixture.backup)
+        .expect("restore after lock released");
+    fixture.assert_restored();
+}
+
+#[test]
+fn restore_sidecar_cleanup_failure_keeps_old_and_staged_database() {
+    let fixture = RestoreFixture::new();
+    let original = fs::read(fixture.directory.database()).expect("original database");
+    // A directory at the sidecar path makes removal fail on both Windows and Unix.
+    fs::create_dir(fixture.sidecar("-wal")).expect("block sidecar deletion");
+    assert!(fixture.directory.restore_backup(&fixture.backup).is_err());
+    assert!(
+        fs::read(fixture.directory.database()).expect("original database retained") == original,
+        "failed restore must retain original file"
+    );
+    assert!(
+        fixture.directory.staged_restore().is_file(),
+        "synced replacement remains available"
+    );
+}
+
+#[test]
+fn restore_removes_surviving_hot_journal_when_main_is_missing() {
+    const FIXTURE_ROWS: usize = 16;
+    const PAYLOAD_BYTES: usize = 4096;
+    const CACHE_PAGES: usize = 1;
+    const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
+    let fixture = RestoreFixture::new();
+    let mut live =
+        SqliteConnection::establish(fixture.directory.database().to_str().expect("live path"))
+            .expect("rollback-mode database");
+    live.batch_execute(&format!("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; PRAGMA cache_size = {CACHE_PAGES}; PRAGMA cache_spill = ON; CREATE TABLE journal_fixture (payload BLOB NOT NULL)")).expect("rollback journal setup");
+    for _ in 0..FIXTURE_ROWS {
+        live.batch_execute(&format!(
+            "INSERT INTO journal_fixture VALUES (zeroblob({PAYLOAD_BYTES}))"
+        ))
+        .expect("pages to spill");
+    }
+    live.batch_execute(&format!("BEGIN IMMEDIATE; UPDATE settings SET value = '2' WHERE key = 'metadata_version'; UPDATE journal_fixture SET payload = randomblob({PAYLOAD_BYTES})")).expect("spill uncommitted pages and sync journal");
+    let journal = fs::read(fixture.sidecar("-journal")).expect("hot rollback journal");
+    assert!(
+        journal.starts_with(&JOURNAL_MAGIC),
+        "fixture must have a synced hot journal header"
+    );
+    live.batch_execute("ROLLBACK")
+        .expect("release fixture connection");
+    drop(live);
+    fs::remove_file(fixture.directory.database()).expect("missing main database");
+    fs::write(fixture.sidecar("-journal"), journal).expect("surviving hot journal");
+    fixture
+        .directory
+        .restore_backup(&fixture.backup)
+        .expect("restore without main");
+    assert!(
+        !fixture.sidecar("-journal").exists(),
+        "stale rollback journal must be removed before opening the replacement"
+    );
+    fixture.assert_restored();
+}

@@ -43,7 +43,7 @@ use unclassified::UnclassifiedAccumulator;
 /// Increment whenever matching, slicing, duration, aggregation, or projection semantics change.
 pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 8;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
-const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
+pub(crate) const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
 /// A 366-logical-day reference can include a backward UTC offset change of up to one day.
 const MAX_DOCUMENT_REFERENCE_MS: i64 =
     MAX_QUERY_RANGE_MS + quartz_domain::capture::limits::UTC_DAY_MS;
@@ -72,6 +72,13 @@ pub(crate) enum RunQueryError {
     InvalidDayOffset,
     #[snafu(display("query reader is unavailable"))]
     ReaderUnavailable,
+    #[snafu(display("could not finish query preparation: {source}"))]
+    Cleanup { source: ReadQueryError },
+    #[snafu(display("could not reopen query reader after cleanup failed ({cleanup}): {source}"))]
+    RecoverReader {
+        source: ReadQueryError,
+        cleanup: Box<RunQueryError>,
+    },
     #[snafu(display("could not derive query segments: {source}"))]
     Derive {
         source: pipeline::DeriveSegmentsError,
@@ -135,6 +142,8 @@ impl RunQueryError {
             Self::ReadFirstWeekdayError
             | Self::InvalidDayOffset
             | Self::ReaderUnavailable
+            | Self::Cleanup { .. }
+            | Self::RecoverReader { .. }
             | Self::Derive { .. }
             | Self::PageTooLarge
             | Self::InvalidRuleEntry
@@ -321,7 +330,11 @@ impl QueryJob {
                 request,
             }),
             Err(error) => {
-                *reader = Some(snapshot.finish()?);
+                *reader = Some(
+                    snapshot
+                        .finish()
+                        .map_err(|source| RunQueryError::Cleanup { source })?,
+                );
                 Err(error)
             }
         }

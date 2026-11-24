@@ -219,6 +219,7 @@ impl DatabaseLoop {
                 DatabaseInput::Query(command) => {
                     self.runner
                         .start(&mut self.store, command, self.registry.snapshots().load())
+                        .map_err(|source| RunDatabaseLoopError::Query { source })?;
                 }
                 DatabaseInput::Versions(command) => self.versions.receive(command),
                 DatabaseInput::UserWrite(command) => self.write_command(command)?,

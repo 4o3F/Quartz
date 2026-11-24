@@ -295,10 +295,10 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 - `annotations.create` 使用上面的 `entities` 数组，每个实体必须提供 `uuid`、`kind` 和开始、结束 UTC 毫秒数。分类引用为 `{ "kind": "uuid", "uuid": "..." }` 或 `{ "kind": "builtin", "key": "communication" }`，内置键为 `development`、`learning`、`communication`、`entertainment`、`system`。
 - `annotations.update` 也使用 `entities` 数组，每项提供 `uuid` 和新的范围、分类、标签、备注；省略可选字段即清空。类型保持原值；允许附带 `kind` 断言，值与已存类型不同时返回 `bad_request`。不存在的 UUID 返回 `bad_request`。同一实体的最终值未变时返回当前实体。
-- 创建、更新成功返回 `{ "entities": [...] }`，每项包含 `uuid`、`kind`、范围、分类、标签、备注、`created_utc_ms` 和 `updated_utc_ms`，按请求顺序排列。分类统一返回 UUID 引用；响应仅包含请求实体，裁剪其他行产生的剩余片段不在响应中。创建遇到已有 UUID 时返回当前已有实体，并跳过该实体的字段校验和裁剪。
+- 创建、更新成功返回 `{ "entities": [...] }`，每项包含 `uuid`、`kind`、范围、分类、标签、备注、`created_utc_ms` 和 `updated_utc_ms`，按请求顺序排列。分类统一返回 UUID 引用；响应仅包含请求实体，裁剪其他行产生的剩余片段不在响应中。创建遇到已有 UUID 时，先检查提交范围和请求工作量，再返回当前已有实体，跳过其他字段校验和裁剪。
 - `annotations.delete` 使用 `{ "uuids": ["..."] }`，成功返回 `{ "accepted": true }`；不存在的 UUID 也成功，删除不恢复此前裁剪的范围。
 - 每个请求中的 UUID 必须是规范 UUID 文本，接受大写并统一为小写。同一创建或更新请求重复提交同一 UUID 返回 `bad_request`。空数组成功且不改变数据库。
-- 范围必须满足 `end_utc_ms > start_utc_ms`；同一请求中同一裁剪类型的最终范围不得重叠，违反时返回 `invalid_range`。创建重试的最终范围取已有实体。note 允许重叠，不同类型允许重叠。整个请求及其对其他行的裁剪在一个事务中完成，任一项失败全部回滚。
+- 创建和更新的每个提交范围必须使用有效 UTC 端点，满足 `end_utc_ms > start_utc_ms`，时长最多 366 × 24 小时，与 `query.annotations` 共用范围上限。一个请求中，各提交范围所覆盖的 UTC 日期数量之和最多 367；每个范围单独计数，即使日期重叠也累计。超限在打开写事务前返回 `invalid_range`。删除请求最多包含 367 个 UUID。包含旧行、新行和裁剪剩余片段的日版本递增工作量，每个请求最多 4,096 次；修改任何行之前计算并检查，超限返回 `invalid_range`。同一请求中同一裁剪类型的最终范围不得重叠，违反时返回 `invalid_range`。创建重试的最终范围取已有实体。note 允许重叠，不同类型允许重叠。整个请求及其对其他行的裁剪在一个事务中完成，任一项失败全部回滚。
 - `category_override` 必须有分类；`offline_activity`、`active_override` 的分类可选；`dismissed_away` 不允许分类、标签或备注；`note` 的标签或备注至少一个包含非空白文本。分类不存在或已归档、字段不符合类型要求时返回 `bad_request`。当前 `bad_request` 是无附加结构字段的错误类型。
 - 写通道已满时返回 `busy`。数据库循环先提交待写采集事实，再处理标注事务；提交后发布受影响 UTC 日的版本，随后回复，`day:` 订阅据此推送变化。
 
