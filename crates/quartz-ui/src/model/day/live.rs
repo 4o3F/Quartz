@@ -530,6 +530,115 @@ mod tests {
         }
     }
     #[test]
+    fn multicolored_rollback_hour_preserves_all_categories_and_exact_labels() {
+        let mut data = data();
+        let hour = data.hours.first_mut().expect("hour");
+        hour.categories
+            .first_mut()
+            .expect("development")
+            .duration_ms = 3_600_000;
+        hour.categories
+            .get_mut(1)
+            .expect("second category")
+            .duration_ms = 1_800_000;
+        hour.categories.push(wire::CategoryDuration {
+            category: wire::CategoryRef::Unclassified,
+            duration_ms: 0,
+        });
+        let day = Day::from_protocol(data).expect("day");
+        let bar = day.hourly().first().expect("hour");
+        let scale = bar.chart_scale(Duration::from_hours(1));
+        assert_eq!(scale, Duration::from_mins(90));
+        let shares: Vec<_> = bar
+            .visible_parts()
+            .map(|part| part.chart_share(scale).fraction())
+            .collect();
+        assert_eq!(shares.len(), 2);
+        assert!((shares.first().expect("first") - 2. / 3.).abs() < f32::EPSILON);
+        assert!((shares.get(1).expect("second") - 1. / 3.).abs() < f32::EPSILON);
+        assert!((shares.iter().sum::<f32>() - 1.).abs() < f32::EPSILON);
+        let formatter = Formatter::new(Language::English);
+        let label = formatter.hourly_bar(bar, &day).expect("active hour label");
+        assert!(
+            label.contains(&formatter.detail_duration(Duration::from_hours(1))),
+            "{label}"
+        );
+        assert!(
+            label.contains(&formatter.detail_duration(Duration::from_mins(30))),
+            "{label}"
+        );
+        assert_eq!(
+            label.matches(';').count(),
+            1,
+            "zero placeholders are absent: {label}"
+        );
+    }
+    #[test]
+    fn empty_hour_has_no_meter_label_or_visible_parts() {
+        let mut data = data();
+        for part in &mut data.hours.first_mut().expect("hour").categories {
+            part.duration_ms = 0;
+        }
+        let day = Day::from_protocol(data).expect("empty hour");
+        let formatter = Formatter::new(Language::English);
+        let bar = day.hourly().first().expect("hour");
+        assert!(bar.visible_parts().next().is_none());
+        assert_eq!(formatter.hourly_bar(bar, &day), None);
+        let bar = HourlyBar {
+            hour: 10,
+            parts: Vec::new(),
+        };
+        assert_eq!(formatter.hourly_bar(&bar, &day), None);
+    }
+    #[test]
+    fn partial_hour_keeps_one_hour_chart_scale() {
+        let day = Day::from_protocol(data()).expect("partial hour");
+        let bar = day.hourly().first().expect("hour");
+        assert_eq!(
+            bar.chart_scale(Duration::from_hours(1)),
+            Duration::from_hours(1)
+        );
+    }
+    #[test]
+    fn rollback_hour_saturates_chart_and_preserves_exact_accessible_duration() {
+        const HOUR_MS: i64 = 3_600_000;
+        let mut data = data();
+        let mut first = data.raw.first().expect("foreground").clone();
+        first.start_utc_ms = 0;
+        first.end_utc_ms = HOUR_MS;
+        first.duration_ms = HOUR_MS;
+        first.clock_segment_id = Some(wire::ClockSegmentId(1));
+        let mut repeated = first.clone();
+        repeated.end_utc_ms = HOUR_MS / 2;
+        repeated.duration_ms = HOUR_MS / 2;
+        repeated.clock_segment_id = Some(wire::ClockSegmentId(2));
+        data.raw = vec![first.clone(), repeated];
+        data.categories = data.raw.clone();
+        let total = data.raw.iter().map(|segment| segment.duration_ms).sum();
+        data.metrics.active_ms = total;
+        data.hours = vec![wire::HourStack {
+            start_utc_ms: 0,
+            end_utc_ms: HOUR_MS,
+            local_start: "1970-01-01T00:00:00+00:00[UTC]".into(),
+            categories: vec![wire::CategoryDuration {
+                category: first.category,
+                duration_ms: total,
+            }],
+        }];
+        let day = Day::from_protocol(data).expect("rollback day");
+        let bar = day.hourly().first().expect("hour");
+        let part = bar.parts.first().expect("category");
+        assert_eq!(part.chart_share(Duration::from_hours(1)).fraction(), 1.);
+        assert_eq!(part.total, Duration::from_mins(90));
+        let formatter = Formatter::new(Language::English);
+        let label =
+            formatter.hourly_category(bar.hour, &day.category(part.category).name, part.total);
+        assert!(
+            label.contains(&formatter.detail_duration(Duration::from_mins(90))),
+            "{label}"
+        );
+    }
+    #[test]
     fn authoritative_aggregates_builtin_names_unclassified_and_annotation_states() {
         let day = Day::from_protocol(data()).expect("mapped day");
         assert_eq!(day.summary().active, Duration::from_millis(4000));

@@ -2069,3 +2069,33 @@ fn unclassified_sample_selection_orders_utc_before_clock_identity() {
         Some(quartz_protocol::ClockSegmentId(2))
     );
 }
+
+#[test]
+fn system_timezone_acquisition_failure_is_internal_for_a_valid_day_request() {
+    let mut fixture = crate::store::query::test_support::QueryFixture::new(0);
+    let request = fixture.request_day();
+    let rules = fixture.rules();
+    let mut reader = fixture.store.take_query_reader();
+    let error = QueryJob::start_reading_zone(&mut reader, request, rules, || {
+        Err(jiff::tz::TimeZone::get("Invalid/InjectedFailure").expect_err("injected zone failure"))
+    })
+    .expect_err("system zone unavailable");
+    assert!(matches!(
+        error,
+        RunQueryError::ReadSystemTimeZoneError { .. }
+    ));
+    assert_eq!(error.kind(), ErrorKind::Internal);
+    fixture
+        .store
+        .return_query_reader(reader.expect("reader retained"));
+}
+
+#[test]
+fn timezone_encoding_error_maps_to_internal() {
+    let source =
+        jiff::tz::TimeZone::get("Invalid/InjectedFailure").expect_err("injected encoding error");
+    assert_eq!(
+        RunQueryError::EncodeTimeZoneError { source }.kind(),
+        ErrorKind::Internal
+    );
+}

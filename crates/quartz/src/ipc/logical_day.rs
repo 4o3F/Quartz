@@ -20,7 +20,14 @@ pub(crate) struct LogicalDay {
 }
 impl LogicalDay {
     pub(crate) fn new(now: Timestamp, offset: DayStartOffset) -> Result<Self, RunQueryError> {
-        Self::in_zone(now, offset, TimeZone::try_system()?)
+        Self::new_reading_zone(now, offset, TimeZone::try_system)
+    }
+    fn new_reading_zone(
+        now: Timestamp,
+        offset: DayStartOffset,
+        read: impl FnOnce() -> Result<TimeZone, jiff::Error>,
+    ) -> Result<Self, RunQueryError> {
+        Self::in_zone(now, offset, RunQueryError::system_time_zone(read)?)
     }
     pub(super) fn in_zone(
         now: Timestamp,
@@ -69,4 +76,22 @@ pub(super) enum RefreshLogicalDayError {
     ReadClock { source: ReadClockError },
     #[snafu(display("could not resolve logical day: {source}"))]
     ResolveCalendar { source: RunQueryError },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn logical_day_timezone_acquisition_failure_is_internal() {
+        let error =
+            LogicalDay::new_reading_zone(Timestamp::UNIX_EPOCH, DayStartOffset::MIDNIGHT, || {
+                Err(TimeZone::get("Invalid/InjectedFailure").expect_err("injected zone error"))
+            })
+            .expect_err("zone unavailable");
+        assert_eq!(error.kind(), quartz_protocol::ErrorKind::Internal);
+        assert!(matches!(
+            error,
+            RunQueryError::ReadSystemTimeZoneError { .. }
+        ));
+    }
 }

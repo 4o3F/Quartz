@@ -98,6 +98,23 @@ pub(crate) struct HourlyBar {
     pub(crate) parts: Vec<CategoryTotal>,
 }
 
+impl HourlyBar {
+    /// Normal hours use the fixed axis scale; repeated hours keep every category visible.
+    pub(crate) fn chart_scale(&self, scale: Duration) -> Duration {
+        total(self.parts.iter().map(|part| part.total)).max(scale)
+    }
+    pub(crate) fn visible_parts(&self) -> impl Iterator<Item = &CategoryTotal> {
+        self.parts.iter().filter(|part| !part.total.is_zero())
+    }
+}
+
+impl CategoryTotal {
+    /// Saturates the visual height while retaining the measured duration.
+    pub(crate) fn chart_share(self, scale: Duration) -> Share {
+        Share::of(self.total.min(scale), scale)
+    }
+}
+
 /// Sum of durations.
 #[must_use]
 pub(crate) fn total(durations: impl IntoIterator<Item = Duration>) -> Duration {

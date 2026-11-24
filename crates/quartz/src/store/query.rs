@@ -5,7 +5,7 @@ use super::{
     enums::{self, IntegerCode},
     query_error::ReadQueryError,
     rows::{
-        AnnotationsRow, ApplicationsRow, AvailabilityIntervalsRow, CaptureGapsRow, CaptureRunsRow,
+        AnnotationsRow, ApplicationsRow, AvailabilityIntervalsRow, CaptureGapsRow,
         ClockSegmentsRow, IntervalsRow,
     },
     schema::{
@@ -46,6 +46,7 @@ impl ReadOnlyStore {
             transaction: SnapshotTransaction::Pending,
             cursor: ScanCursor::initial(),
             applications: BTreeMap::new(),
+            clocks: BTreeSet::new(),
         }
     }
 }
@@ -63,6 +64,7 @@ pub(crate) struct ReadSnapshot {
     transaction: SnapshotTransaction,
     cursor: ScanCursor,
     applications: BTreeMap<ApplicationId, Arc<ApplicationRef>>,
+    clocks: BTreeSet<ClockSegmentId>,
 }
 impl std::fmt::Debug for ReadSnapshot {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -150,11 +152,6 @@ impl ScanCursor {
     }
 }
 #[derive(Debug, diesel::Queryable)]
-struct ClockDetails {
-    clock: ClockSegmentsRow,
-    run: CaptureRunsRow,
-}
-#[derive(Debug, diesel::Queryable)]
 struct ForegroundDetails {
     fact: IntervalsRow,
     title: Option<String>,
@@ -191,6 +188,40 @@ impl ApplicationLookup {
                     .or(applications::id.eq(self.ids[7].0)),
             )
             .select(ApplicationsRow::as_select())
+            .load(connection)
+    }
+}
+
+/// Clock lookups use the same padded width across all snapshot batches.
+const CLOCK_LOOKUP_ARITY: usize = 8;
+
+struct ClockLookup {
+    ids: [ClockSegmentId; CLOCK_LOOKUP_ARITY],
+}
+impl ClockLookup {
+    fn new(ids: &[ClockSegmentId]) -> Self {
+        let first = *ids.first().expect("clock lookup chunks are nonempty");
+        let mut bound = [first; CLOCK_LOOKUP_ARITY];
+        bound[..ids.len()].copy_from_slice(ids);
+        Self { ids: bound }
+    }
+    fn load(
+        &self,
+        connection: &mut diesel::SqliteConnection,
+    ) -> diesel::QueryResult<Vec<ClockSegmentsRow>> {
+        clock_segments::table
+            .filter(
+                clock_segments::id
+                    .eq(self.ids[0].0)
+                    .or(clock_segments::id.eq(self.ids[1].0))
+                    .or(clock_segments::id.eq(self.ids[2].0))
+                    .or(clock_segments::id.eq(self.ids[3].0))
+                    .or(clock_segments::id.eq(self.ids[4].0))
+                    .or(clock_segments::id.eq(self.ids[5].0))
+                    .or(clock_segments::id.eq(self.ids[6].0))
+                    .or(clock_segments::id.eq(self.ids[7].0)),
+            )
+            .select(ClockSegmentsRow::as_select())
             .load(connection)
     }
 }
@@ -267,6 +298,7 @@ impl ReadSnapshot {
         self.cursor = ScanCursor::initial();
         // This dictionary belongs to the snapshot, not the resident read connection.
         self.applications.clear();
+        self.clocks.clear();
     }
     /// Every SQL fact scan returns at most READ_BATCH_ROWS rows before yielding to writes.
     pub(crate) fn read_batch(
@@ -316,7 +348,36 @@ impl ReadSnapshot {
         if result.len() < READ_BATCH_ROWS {
             self.cursor = self.cursor.next();
         }
-        Ok(Some(result))
+        self.load_owning_clocks(result).map(Some)
+    }
+    /// Facts can extend beyond their clock's monotonic coverage during suspension.
+    fn load_owning_clocks(&mut self, rows: Vec<InputRow>) -> Result<Vec<InputRow>, ReadQueryError> {
+        for row in &rows {
+            if let InputRow::Clock(clock) = row {
+                self.clocks.insert(clock.id);
+            }
+        }
+        let missing: BTreeSet<_> = rows
+            .iter()
+            .filter_map(InputRow::span)
+            .map(|span| span.segment)
+            .filter(|id| !self.clocks.contains(id))
+            .collect();
+        if missing.is_empty() {
+            return Ok(rows);
+        }
+        let missing: Vec<_> = missing.into_iter().collect();
+        let mut stored = Vec::with_capacity(missing.len());
+        for chunk in missing.chunks(CLOCK_LOOKUP_ARITY) {
+            stored.extend(ClockLookup::new(chunk).load(self.connection())?);
+        }
+        if stored.len() != missing.len() {
+            return Err(ReadQueryError::InvalidFacts);
+        }
+        let mut result = Self::decode_clock(stored)?;
+        self.clocks.extend(missing);
+        result.extend(rows);
+        Ok(result)
     }
     pub(crate) fn read_fact_batch(
         &mut self,
@@ -377,19 +438,18 @@ impl ReadSnapshot {
         }
         Ok(result)
     }
-    fn decode_clock(rows: Vec<ClockDetails>) -> Result<Vec<InputRow>, ReadQueryError> {
+    fn decode_clock(rows: Vec<ClockSegmentsRow>) -> Result<Vec<InputRow>, ReadQueryError> {
         let mut result = Vec::with_capacity(rows.len());
-        for details in rows {
-            let row = details.clock;
-            let run_end = Self::endpoint(details.run.ended_utc_ms, details.run.confirmed_utc_ms)?;
+        for row in rows {
+            let end_utc_ms = Self::endpoint(row.end_utc_ms, row.confirmed_utc_ms)?;
+            let end_mono_ms = Self::endpoint(row.end_mono_ms, row.confirmed_mono_ms)?;
             let id = row.id.ok_or(ReadQueryError::InvalidFacts)?;
             result.push(InputRow::Clock(ClockSegment {
                 id: ClockSegmentId(id),
                 start_utc_ms: row.start_utc_ms,
-                end_utc_ms: Self::endpoint(row.end_utc_ms, row.confirmed_utc_ms)?.min(run_end),
+                end_utc_ms,
                 start_mono_ms: row.start_mono_ms,
-                end_mono_ms: Self::endpoint(row.end_mono_ms, row.confirmed_mono_ms)?
-                    .min(row.start_mono_ms + run_end - row.start_utc_ms),
+                end_mono_ms,
             }));
         }
 
@@ -517,15 +577,12 @@ impl ScanCursor {
         connection: &mut diesel::SqliteConnection,
         range: QueryRange,
         cursor: StartCursor<ClockSegmentId>,
-    ) -> Result<Vec<ClockDetails>, super::facts::ReadFactsError> {
+    ) -> Result<Vec<ClockSegmentsRow>, super::facts::ReadFactsError> {
         let limit = i64::try_from(READ_BATCH_ROWS).expect("batch limit fits i64");
         let after_start = cursor.start_utc_ms;
         let after_id = cursor.id.0;
 
         let rows = clock_segments::table
-            .inner_join(
-                capture_runs::table.on(clock_segments::run_id.nullable().eq(capture_runs::id)),
-            )
             .filter(clock_segments::start_utc_ms.lt(range.end))
             .filter(
                 clock_segments::end_utc_ms
@@ -541,16 +598,14 @@ impl ScanCursor {
             )
             .order((clock_segments::start_utc_ms, clock_segments::id))
             .limit(limit)
-            .select((ClockSegmentsRow::as_select(), CaptureRunsRow::as_select()))
-            .load::<ClockDetails>(connection)?;
+            .select(ClockSegmentsRow::as_select())
+            .load::<ClockSegmentsRow>(connection)?;
         if let Some(row) = rows.last() {
             *self = Self::Clock(StartCursor {
-                start_utc_ms: row.clock.start_utc_ms,
-                id: ClockSegmentId(row.clock.id.ok_or(
-                    super::facts::ReadFactsError::MissingId {
-                        kind: super::facts::FactKind::ClockSegment,
-                    },
-                )?),
+                start_utc_ms: row.start_utc_ms,
+                id: ClockSegmentId(row.id.ok_or(super::facts::ReadFactsError::MissingId {
+                    kind: super::facts::FactKind::ClockSegment,
+                })?),
             });
         }
         Ok(rows)

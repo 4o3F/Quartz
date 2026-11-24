@@ -58,6 +58,14 @@ impl UtcDays {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct VersionSource(pub i32);
+impl VersionSource {
+    pub(crate) fn all() -> impl Iterator<Item = Self> {
+        use strum::VariantArray;
+        DataSource::VARIANTS
+            .iter()
+            .map(|source| Self(source.code()))
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct VersionKey {
     pub source: VersionSource,

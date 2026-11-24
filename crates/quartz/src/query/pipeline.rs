@@ -220,6 +220,12 @@ struct Sweep {
     previous: Option<i64>,
 }
 impl Sweep {
+    fn range(&self) -> Option<QueryRange> {
+        Some(QueryRange {
+            start: *self.boundaries.first_key_value()?.0,
+            end: *self.boundaries.last_key_value()?.0,
+        })
+    }
     fn insert(&mut self, at: i64, row: usize, edge: BoundaryEdge) {
         let boundary = self.boundaries.entry(at).or_insert_with(|| Boundary {
             at,
@@ -299,11 +305,8 @@ impl Pipeline {
             }
             let start = self.range.start.max(clock.start_utc_ms);
             let end = self.range.end.min(clock.end_utc_ms);
-            if end <= start {
-                return Ok(());
-            }
             let mut boundaries = BTreeMap::new();
-            for at in [start, end] {
+            for at in [start, end].into_iter().filter(|_| start < end) {
                 boundaries.insert(
                     at,
                     Boundary {
@@ -313,10 +316,12 @@ impl Pipeline {
                     },
                 );
             }
-            self.coverage
-                .entry(clock.start_utc_ms.max(self.range.start))
-                .and_modify(|until| *until = (*until).max(clock.end_utc_ms.min(self.range.end)))
-                .or_insert(clock.end_utc_ms.min(self.range.end));
+            if start < end {
+                self.coverage
+                    .entry(start)
+                    .and_modify(|until| *until = (*until).max(end))
+                    .or_insert(end);
+            }
             self.clock_order.insert(ClockOrder {
                 start: clock.start_utc_ms,
                 id: clock.id,
@@ -338,16 +343,11 @@ impl Pipeline {
             }
             let index = self.rows.len();
             for sweep in self.clocks.values_mut() {
-                let start = annotation
-                    .range
-                    .start
-                    .max(sweep.clock.start_utc_ms)
-                    .max(self.range.start);
-                let end = annotation
-                    .range
-                    .end
-                    .min(sweep.clock.end_utc_ms)
-                    .min(self.range.end);
+                let Some(coverage) = sweep.range() else {
+                    continue;
+                };
+                let start = annotation.range.start.max(coverage.start);
+                let end = annotation.range.end.min(coverage.end);
                 if start < end {
                     sweep.insert(start, index, BoundaryEdge::Start);
                     sweep.insert(end, index, BoundaryEdge::End);
@@ -368,16 +368,35 @@ impl Pipeline {
                 .clocks
                 .get_mut(&span.segment)
                 .ok_or(DeriveSegmentsError::MissingClock)?;
-            let start = span
-                .start_utc_ms
-                .max(sweep.clock.start_utc_ms)
-                .max(self.range.start);
-            let end = span
-                .end_utc_ms
-                .min(sweep.clock.end_utc_ms)
-                .min(self.range.end);
+            // Resume closes every active availability row at resume UTC, beyond the old clock.
+            let availability = matches!(&row.input, InputRow::Availability { .. });
+            let range = if availability {
+                QueryRange {
+                    start: span.start_utc_ms.max(self.range.start),
+                    end: span.end_utc_ms.min(self.range.end),
+                }
+            } else {
+                QueryRange {
+                    start: span
+                        .start_utc_ms
+                        .max(sweep.clock.start_utc_ms)
+                        .max(self.range.start),
+                    end: span
+                        .end_utc_ms
+                        .min(sweep.clock.end_utc_ms)
+                        .min(self.range.end),
+                }
+            };
+            let start = range.start;
+            let end = range.end;
             if end <= start {
                 return Ok(());
+            }
+            if availability {
+                self.coverage
+                    .entry(start)
+                    .and_modify(|until| *until = (*until).max(end))
+                    .or_insert(end);
             }
             let index = self.rows.len();
             sweep.insert(start, index, BoundaryEdge::Start);
@@ -566,12 +585,18 @@ impl Pipeline {
             }
         };
         let range = QueryRange { start, end };
-        let duration_ms = match gap_span
-            .or(stopped_span)
-            .or_else(|| foreground.map(|row| &row.span))
-        {
-            Some(span) => span.duration_within(range),
-            None => sweep.clock.duration_within(range),
+        let outside_clock = start >= sweep.clock.end_utc_ms || end <= sweep.clock.start_utc_ms;
+        // Unbiased monotonic time excludes suspension; its wall-time extension uses UTC.
+        let duration_ms = if outside_clock {
+            end - start
+        } else if matches!(&activity, Activity::Stopped { .. }) {
+            // Resume and midnight splitting can extend availability rows beyond monotonic coverage.
+            sweep.clock.duration_within(range)
+        } else {
+            match gap_span.or_else(|| foreground.map(|row| &row.span)) {
+                Some(span) => span.duration_within(range),
+                None => sweep.clock.duration_within(range),
+            }
         };
         let mut segment = DerivedSegment {
             span: SpanDuration {
@@ -579,7 +604,7 @@ impl Pipeline {
                 end_utc_ms: end,
                 duration_ms,
             },
-            clock_segment_id: Some(sweep.clock.id),
+            clock_segment_id: (!outside_clock).then_some(sweep.clock.id),
             foreground: foreground_index,
             classification,
             activity,

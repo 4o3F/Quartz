@@ -3541,3 +3541,197 @@ fn resident_reader_reuses_fixed_statements_for_varying_lookup_widths_and_queries
         );
     }
 }
+
+#[derive(diesel::QueryableByName)]
+struct ClockQueryPlan {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    detail: String,
+}
+
+struct ClockHistoryBenchmark {
+    fixture: test_support::QueryFixture,
+}
+impl ClockHistoryBenchmark {
+    const HISTORY_ROWS: i64 = 100_000;
+    const HOUR_MS: i64 = 3_600_000;
+    // The predicates, ordering and page bound mirror ScanCursor::load_clock.
+    const SCAN: &str = "SELECT * FROM clock_segments WHERE start_utc_ms < ? AND (end_utc_ms > ? OR confirmed_utc_ms > ?) AND (start_utc_ms > ? OR (start_utc_ms = ? AND id > ?)) ORDER BY start_utc_ms, id LIMIT ?";
+    fn new() -> Self {
+        Self {
+            fixture: test_support::QueryFixture::new(0),
+        }
+    }
+    fn index(&mut self) {
+        use diesel::connection::SimpleConnection;
+        self.fixture
+            .store
+            .writer
+            .batch_execute("CREATE INDEX measure_clock_start ON clock_segments(start_utc_ms, id);")
+            .expect("temporary database index");
+    }
+    fn insert_history(&mut self) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        diesel::sql_query("WITH RECURSIVE history(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM history WHERE n < ?) INSERT INTO clock_segments(run_id, start_utc_ms, start_mono_ms, end_utc_ms, end_mono_ms, end_reason) SELECT 1, ? - n * ?, 0, ? - (n - 1) * ?, ?, ? FROM history")
+            .bind::<diesel::sql_types::BigInt, _>(Self::HISTORY_ROWS)
+            .bind::<diesel::sql_types::BigInt, _>(self.fixture.start)
+            .bind::<diesel::sql_types::BigInt, _>(Self::HOUR_MS)
+            .bind::<diesel::sql_types::BigInt, _>(self.fixture.start)
+            .bind::<diesel::sql_types::BigInt, _>(Self::HOUR_MS)
+            .bind::<diesel::sql_types::BigInt, _>(Self::HOUR_MS)
+            .bind::<diesel::sql_types::Integer, _>(crate::store::enums::ClockEndReason::RunEnd.code())
+            .execute(&mut self.fixture.store.writer).expect("synthetic closed clocks");
+        started.elapsed()
+    }
+    fn plan(&mut self) -> Vec<String> {
+        let start = self.fixture.start - UTC_DAY_MS;
+        diesel::sql_query(format!("EXPLAIN QUERY PLAN {}", Self::SCAN))
+            .bind::<diesel::sql_types::BigInt, _>(self.fixture.start)
+            .bind::<diesel::sql_types::BigInt, _>(start)
+            .bind::<diesel::sql_types::BigInt, _>(start)
+            .bind::<diesel::sql_types::BigInt, _>(i64::MIN)
+            .bind::<diesel::sql_types::BigInt, _>(i64::MIN)
+            .bind::<diesel::sql_types::BigInt, _>(i64::MIN)
+            .bind::<diesel::sql_types::BigInt, _>(
+                i64::try_from(READ_BATCH_ROWS).expect("batch limit"),
+            )
+            .load::<ClockQueryPlan>(&mut self.fixture.store.writer)
+            .expect("clock query plan")
+            .into_iter()
+            .map(|row| row.detail)
+            .collect()
+    }
+    fn scan_days(&mut self, days: i64) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        for day in 1..=days {
+            let range = QueryRange {
+                start: self.fixture.start - day * UTC_DAY_MS,
+                end: self.fixture.start - (day - 1) * UTC_DAY_MS,
+            };
+            let mut cursor = ScanCursor::initial();
+            let rows = cursor
+                .load_clock(
+                    &mut self.fixture.store.writer,
+                    range,
+                    StartCursor::initial(ClockSegmentId(i64::MIN)),
+                )
+                .expect("clock overlap scan");
+            assert_eq!(
+                rows.len(),
+                usize::try_from(UTC_DAY_MS / Self::HOUR_MS).expect("hours")
+            );
+        }
+        started.elapsed()
+    }
+    fn median_scan(&mut self, days: i64) -> std::time::Duration {
+        const SAMPLES: usize = 9;
+        let mut samples: Vec<_> = (0..SAMPLES).map(|_| self.scan_days(days)).collect();
+        samples.sort();
+        samples[SAMPLES / 2]
+    }
+}
+
+#[test]
+#[ignore = "synthetic history measurement; creates indexes only in disposable test databases"]
+fn clock_overlap_history_plan_and_index_benchmark() {
+    let mut baseline = ClockHistoryBenchmark::new();
+    let mut indexed = ClockHistoryBenchmark::new();
+    indexed.index();
+    let baseline_write = baseline.insert_history();
+    let indexed_write = indexed.insert_history();
+    let baseline_plan = baseline.plan();
+    let indexed_plan = indexed.plan();
+    assert!(
+        baseline_plan
+            .iter()
+            .any(|line| line.contains("TEMP B-TREE")),
+        "{baseline_plan:?}"
+    );
+    assert!(
+        indexed_plan
+            .iter()
+            .any(|line| line.contains("measure_clock_start")),
+        "{indexed_plan:?}"
+    );
+    println!(
+        "clock history rows={}, write baseline={baseline_write:?} indexed={indexed_write:?}, baseline plan={baseline_plan:?}, indexed plan={indexed_plan:?}",
+        ClockHistoryBenchmark::HISTORY_ROWS
+    );
+    for days in [1, 7, 366] {
+        println!(
+            "clock scans days={days}: baseline={:?}, indexed={:?}",
+            baseline.median_scan(days),
+            indexed.median_scan(days)
+        );
+    }
+}
+
+#[test]
+fn owning_clock_lookups_cache_one_statement_for_all_batch_widths() {
+    use diesel::{Connection, connection::InstrumentationEvent};
+    use std::sync::{Arc, Mutex};
+    let mut fixture = QueryFixture::new(0);
+    let clock = clock_segments::table
+        .select(ClockSegmentsRow::as_select())
+        .first::<ClockSegmentsRow>(&mut fixture.store.writer)
+        .expect("fixture clock");
+    for id in 2..=i64::try_from(READ_BATCH_ROWS).expect("batch") {
+        let mut clock = clock.clone();
+        clock.id = Some(id);
+        diesel::insert_into(clock_segments::table)
+            .values(clock)
+            .execute(&mut fixture.store.writer)
+            .expect("clock");
+    }
+    let rows: Vec<_> = (1..=READ_BATCH_ROWS)
+        .map(|id| InputRow::Availability {
+            span: FactSpan {
+                id: FactId(i64::try_from(id).expect("id")),
+                segment: ClockSegmentId(i64::try_from(id).expect("clock id")),
+                start_utc_ms: fixture.start,
+                end_utc_ms: fixture.start + 1,
+                start_mono_ms: 0,
+                end_mono_ms: 1,
+            },
+            state: Availability::Stopped(StopReason::Suspended),
+        })
+        .collect();
+    let cached = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed = cached.clone();
+    let mut reader = fixture.store.take_query_reader().expect("resident reader");
+    reader
+        .connection
+        .set_instrumentation(move |event: InstrumentationEvent<'_>| {
+            if let InstrumentationEvent::CacheQuery { sql, .. } = event
+                && sql.contains("FROM `clock_segments`")
+            {
+                observed.lock().expect("cached SQL").push(sql.to_owned());
+            }
+        });
+    for width in 1..=READ_BATCH_ROWS {
+        let mut snapshot = reader.snapshot();
+        snapshot.begin().expect("snapshot");
+        let loaded = snapshot
+            .load_owning_clocks(rows[..width].to_vec())
+            .expect("owning clocks");
+        assert_eq!(
+            loaded
+                .iter()
+                .filter(|row| matches!(row, InputRow::Clock(_)))
+                .count(),
+            width,
+            "width {width}"
+        );
+        assert_eq!(loaded.len(), width * 2);
+        let repeated = snapshot
+            .load_owning_clocks(rows[..width].to_vec())
+            .expect("already loaded clocks");
+        assert_eq!(repeated.len(), width);
+        reader = snapshot.finish().expect("resident reader");
+        let statements = cached.lock().expect("cached SQL");
+        assert_eq!(statements.len(), 1, "one reusable lookup for width {width}");
+        assert_eq!(
+            statements.first().expect("lookup").matches('?').count(),
+            APPLICATION_LOOKUP_ARITY
+        );
+    }
+}

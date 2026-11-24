@@ -42,7 +42,11 @@ impl DayCalendar {
         now: jiff::Timestamp,
         offset: DayStartOffset,
     ) -> Result<LocalDate, RunQueryError> {
-        Self::current_date_in_zone(now, offset, TimeZone::try_system()?)
+        Self::current_date_in_zone(
+            now,
+            offset,
+            RunQueryError::system_time_zone(TimeZone::try_system)?,
+        )
     }
     pub(crate) fn current_date_in_zone(
         now: jiff::Timestamp,
@@ -61,7 +65,11 @@ impl DayCalendar {
         now: jiff::Timestamp,
         offset: DayStartOffset,
     ) -> Result<i64, RunQueryError> {
-        Self::next_start_in_zone(now, offset, TimeZone::try_system()?)
+        Self::next_start_in_zone(
+            now,
+            offset,
+            RunQueryError::system_time_zone(TimeZone::try_system)?,
+        )
     }
     pub(crate) fn next_start_in_zone(
         now: jiff::Timestamp,
@@ -77,7 +85,11 @@ impl DayCalendar {
         }
     }
     pub(crate) fn new(date: LocalDate, offset: DayStartOffset) -> Result<Self, RunQueryError> {
-        Self::in_zone(date, offset, TimeZone::try_system()?)
+        Self::in_zone(
+            date,
+            offset,
+            RunQueryError::system_time_zone(TimeZone::try_system)?,
+        )
     }
     pub(crate) fn in_zone(
         date: LocalDate,

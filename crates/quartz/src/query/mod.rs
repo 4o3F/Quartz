@@ -41,7 +41,7 @@ use timing::{QueryStage, QueryTimer, QueryTimings};
 use unclassified::UnclassifiedAccumulator;
 
 /// Increment whenever matching, slicing, duration, aggregation, or projection semantics change.
-pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 6;
+pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 8;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
 const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
 /// A 366-logical-day reference can include a backward UTC offset change of up to one day.
@@ -84,6 +84,10 @@ pub(crate) enum RunQueryError {
     Read { source: ReadQueryError },
     #[snafu(display("could not interpret query calendar: {source}"))]
     Calendar { source: jiff::Error },
+    #[snafu(display("could not read system time zone: {source}"))]
+    ReadSystemTimeZoneError { source: jiff::Error },
+    #[snafu(display("could not encode time zone: {source}"))]
+    EncodeTimeZoneError { source: jiff::Error },
     #[snafu(display("could not encode query result: {source}"))]
     Encode { source: serde_json::Error },
 }
@@ -113,6 +117,11 @@ impl From<serde_json::Error> for RunQueryError {
     }
 }
 impl RunQueryError {
+    pub(crate) fn system_time_zone(
+        read: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
+    ) -> Result<jiff::tz::TimeZone, Self> {
+        read().map_err(|source| Self::ReadSystemTimeZoneError { source })
+    }
     pub(crate) fn kind(&self) -> ErrorKind {
         match self {
             Self::InvalidRange | Self::Calendar { .. } => ErrorKind::InvalidRange,
@@ -123,7 +132,16 @@ impl RunQueryError {
             | Self::InvalidRangeRequest => ErrorKind::BadRequest,
             Self::StaleDocumentRef => ErrorKind::StaleDocumentRef,
             Self::StaleCursor => ErrorKind::StaleCursor,
-            _ => ErrorKind::Internal,
+            Self::ReadFirstWeekdayError
+            | Self::InvalidDayOffset
+            | Self::ReaderUnavailable
+            | Self::Derive { .. }
+            | Self::PageTooLarge
+            | Self::InvalidRuleEntry
+            | Self::Read { .. }
+            | Self::ReadSystemTimeZoneError { .. }
+            | Self::EncodeTimeZoneError { .. }
+            | Self::Encode { .. } => ErrorKind::Internal,
         }
     }
 }
@@ -245,7 +263,20 @@ impl QueryJob {
         request: QueryRequest,
         rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
     ) -> Result<Self, RunQueryError> {
-        Self::start_in_zone(reader, request, rules, jiff::tz::TimeZone::try_system()?)
+        Self::start_reading_zone(reader, request, rules, jiff::tz::TimeZone::try_system)
+    }
+    fn start_reading_zone(
+        reader: &mut Option<ReadOnlyStore>,
+        request: QueryRequest,
+        rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
+        read: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
+    ) -> Result<Self, RunQueryError> {
+        Self::start_in_zone(
+            reader,
+            request,
+            rules,
+            RunQueryError::system_time_zone(read)?,
+        )
     }
     pub(crate) fn start_in_zone(
         reader: &mut Option<ReadOnlyStore>,
@@ -471,7 +502,7 @@ impl QueryJob {
             rule_hashes: rule_hashes.clone(),
             time_zone: zone.clone(),
         }
-        .digest(reference_range);
+        .digest(reference_range)?;
         let reference_versions = versions.clone();
         let versions = match first_weekday {
             Some(first) => first.bind_versions(&versions),

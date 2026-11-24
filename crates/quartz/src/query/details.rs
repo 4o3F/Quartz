@@ -27,9 +27,6 @@ pub(super) struct EntityCalendar {
     pub(super) range: QueryRange,
 }
 impl EntityCalendar {
-    pub(super) fn new(date: LocalDate, offset: DayStartOffset) -> Result<Self, RunQueryError> {
-        Self::in_zone(date, offset, jiff::tz::TimeZone::try_system()?)
-    }
     pub(super) fn in_zone(
         date: LocalDate,
         offset: DayStartOffset,

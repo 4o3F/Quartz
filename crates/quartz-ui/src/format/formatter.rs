@@ -51,6 +51,36 @@ pub(crate) enum SourceText<'a> {
 }
 
 impl Formatter {
+    /// Text for the nonempty hourly categories, retaining their measured durations.
+    pub(crate) fn hourly_bar(self, bar: &crate::model::HourlyBar, day: &Day) -> Option<String> {
+        let label = bar
+            .visible_parts()
+            .map(|part| {
+                self.hourly_category(bar.hour, &day.category(part.category).name, part.total)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        (!label.is_empty()).then_some(label)
+    }
+    /// An hourly category label retains the complete measured duration.
+    pub(crate) fn hourly_category(
+        self,
+        hour: u32,
+        category: &CategoryName,
+        duration: Duration,
+    ) -> String {
+        format!(
+            "{} · {}",
+            self.hour_tick(hour),
+            self.text_with(
+                Msg::LegendItem,
+                &[
+                    Arg::Name.with(&self.category_name(category)),
+                    Arg::Duration.with(&self.detail_duration(duration)),
+                ]
+            )
+        )
+    }
     /// Raw intervals retain seconds and milliseconds instead of rounding short facts to minutes.
     pub(crate) fn detail_duration(self, duration: Duration) -> String {
         let seconds_per_minute = u64::from(crate::model::SECONDS_PER_MINUTE);

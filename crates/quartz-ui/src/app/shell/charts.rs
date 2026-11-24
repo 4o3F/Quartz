@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyElement, Context, Div, IntoElement, ParentElement as _, Styled as _, div,
-    prelude::FluentBuilder as _, px, relative,
+    AnyElement, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _, Role,
+    StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _, px, relative,
 };
 
 use super::{AppShell, Frame, LayerCx};
@@ -193,7 +193,9 @@ impl AppShell {
                                 .flex()
                                 .child(
                                     div().flex().flex_row().flex_1().h_full().children(
-                                        bars.iter().map(|bar| self.hourly_column(ui, bar)),
+                                        bars.iter()
+                                            .enumerate()
+                                            .map(|(index, bar)| self.hourly_column(ui, index, bar)),
                                     ),
                                 ),
                         ),
@@ -307,27 +309,33 @@ impl AppShell {
     }
 
     /// One hour's stacked bar, categories bottom to top in category order.
-    fn hourly_column(&self, ui: &Widgets<'_>, bar: &HourlyBar) -> Div {
+    fn hourly_column(&self, ui: &Widgets<'_>, index: usize, bar: &HourlyBar) -> impl IntoElement {
+        let label = self.formatter.hourly_bar(bar, &self.day);
+        let scale = bar.chart_scale(CHART_SCALE);
         let stack = div()
             .flex()
             .flex_col_reverse()
             .gap(ui.metrics.timeline.block_gap)
             .w_full()
+            .max_h(px(CHART_HEIGHT))
             .rounded_t(ui.metrics.timeline.block_radius)
             .overflow_hidden()
-            .children(bar.parts.iter().map(|part| {
+            .children(bar.visible_parts().map(|part| {
                 let category = self.day.category(part.category);
                 ui.category_mark(
                     div()
                         .w_full()
-                        .h(px(
-                            Share::of(part.total, CHART_SCALE).fraction() * CHART_HEIGHT
-                        ))
-                        .flex_shrink_0(),
+                        .h(px(part.chart_share(scale).fraction() * CHART_HEIGHT))
+                        .min_h(px(0.))
+                        .flex_shrink_1(),
                     category.color,
                 )
             }));
         div()
+            .id(format!("hourly-{index}"))
+            .when_some(label, |column, label| {
+                column.role(Role::Meter).aria_label(label)
+            })
             .flex()
             .flex_col()
             .justify_end()

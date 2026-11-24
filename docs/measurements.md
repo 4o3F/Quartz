@@ -926,3 +926,16 @@ cargo test --workspace --all-features --target-dir target/windows
 验证命令 `cargo fmt --all`、工作区全特性及默认特性的两次 Clippy（`--all-targets -- -D warnings`）、`cargo test --workspace --all-features --target-dir target/windows` 和 `cargo doc -p quartz-protocol --no-deps --target-dir target/windows` 均通过。工作区 792 项测试通过，3 项忽略，其中 1 项为本节显式执行的范围基准，另 2 项为原有忽略测试。测试覆盖三维与逐日指标和排行的等价性、周日首日与首尾裁剪、夏令时及 240 分钟日起点、重复 UTC 和单调时长变化、离线活动、隐私、分页、过期游标、UI 与 CLI 管道读取，以及 366 个逻辑日跨夏令时的文档引用回传。新增测试检查日切换释放提取结果、匹配计划和分类结果，全年扫描时已完成桶释放文档身份，以及跨桶分页总时长只返回一次。
 
 文档引用的正时长 UTC 上限统一为 367 × 24 小时，日期范围沿用 1–366 个逻辑日。新增能力 `query.range.v1`；协议版本和查询语义版本分别保持 1 和 6。08 的基准说明位于第 2.1 节，本次在该节补充范围查询入口与测量方法。
+
+## 时钟重叠扫描的索引测量（2026-11-23）
+
+运行 `cargo.exe test -p quartz --all-features --target-dir target/windows clock_overlap_history_plan_and_index_benchmark -- --ignored --nocapture`。测试在两个临时数据库中分别保留无索引状态和创建 `(start_utc_ms, id)` 索引，每库写入 100,000 条一小时的闭合时钟段，按生产读取路径逐逻辑日重复重叠扫描。扫描耗时取九次中位数，批量插入耗时各测一次；采用 Windows 开发测试构建。
+
+| 操作 | 无索引 | 开始时间与 ID 索引 |
+|---|---:|---:|
+| 插入 100,000 条 | 71.09 ms | 287.76 ms |
+| 1 日扫描 | 8.59 ms | 33.75 ms |
+| 7 日扫描 | 59.03 ms | 235.57 ms |
+| 366 日扫描 | 3,093.23 ms | 11,913.44 ms |
+
+无索引计划为 `SCAN clock_segments` 加 `USE TEMP B-TREE FOR ORDER BY`。候选索引计划为 `MULTI-INDEX OR`，两个分支分别搜索开始时间范围和相同开始时间下的 ID，仍需 `USE TEMP B-TREE FOR ORDER BY`。本次候选索引使扫描和写入都变慢，因此保留现有 schema。历史重复扫描的成本需要结合范围谓词、分页和索引共同优化；上表测量的是时钟读取阶段，完整查询的 P95 目标见 08 第 1.4 节。

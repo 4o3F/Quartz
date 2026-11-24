@@ -1,7 +1,7 @@
 //! Version inputs shared by snapshot cursors and day-topic invalidations.
 
 use super::{RunQueryError, details::EntityCalendar, input::QueryRange};
-use crate::store::versions::{QuerySettings, StoredVersions, UtcDays, VersionKey};
+use crate::store::versions::{QuerySettings, StoredVersions, UtcDays, VersionKey, VersionSource};
 use quartz_domain::rules::registry::SnapshotHashes;
 use quartz_protocol::{DayChanged, LocalDate, QueryVersions};
 use sha2::{Digest, Sha256};
@@ -14,6 +14,11 @@ pub(crate) struct VersionState {
     pub rule_hashes: SnapshotHashes,
     pub time_zone: jiff::tz::TimeZone,
 }
+struct VersionDigest {
+    versions: QueryVersions,
+    #[cfg(test)]
+    visited_entries: usize,
+}
 impl VersionState {
     pub(crate) fn from_stored(
         stored: StoredVersions,
@@ -23,11 +28,41 @@ impl VersionState {
             days: stored.days,
             settings: stored.settings,
             rule_hashes,
-            time_zone: jiff::tz::TimeZone::try_system()?,
+            time_zone: RunQueryError::system_time_zone(jiff::tz::TimeZone::try_system)?,
         })
     }
 
-    pub(crate) fn digest(&self, range: QueryRange) -> QueryVersions {
+    pub(crate) fn digest(&self, range: QueryRange) -> Result<QueryVersions, RunQueryError> {
+        self.digest_in_zone(range, &self.time_zone)
+    }
+    fn digest_in_zone(
+        &self,
+        range: QueryRange,
+        zone: &jiff::tz::TimeZone,
+    ) -> Result<QueryVersions, RunQueryError> {
+        self.digest_entries(range, zone, self.entries(range))
+            .map(|digest| digest.versions)
+    }
+    fn entries(&self, range: QueryRange) -> impl Iterator<Item = (&VersionKey, &i64)> {
+        let days = UtcDays::covering(range);
+        VersionSource::all().flat_map(move |source| {
+            self.days.range(
+                VersionKey {
+                    source,
+                    day: *days.start(),
+                }..=VersionKey {
+                    source,
+                    day: *days.end(),
+                },
+            )
+        })
+    }
+    fn digest_entries<'a>(
+        &self,
+        range: QueryRange,
+        zone: &jiff::tz::TimeZone,
+        entries: impl Iterator<Item = (&'a VersionKey, &'a i64)>,
+    ) -> Result<VersionDigest, RunQueryError> {
         let mut digest = Sha256::new();
         digest.update(super::QUERY_SEMANTICS_VERSION.to_le_bytes());
         digest.update(self.settings.metadata_version.to_le_bytes());
@@ -38,22 +73,43 @@ impl VersionState {
         digest.update(self.rule_hashes.extraction.as_str().as_bytes());
         digest.update(self.rule_hashes.privacy.as_str().as_bytes());
         digest.update(self.settings.stats_policy_version.to_le_bytes());
-        digest.update(format!("{:?}", self.time_zone).as_bytes());
+        let zone = jiff::fmt::temporal::DateTimePrinter::new()
+            .time_zone_to_string(zone)
+            .map_err(|source| RunQueryError::EncodeTimeZoneError { source })?;
+        digest.update(zone.as_bytes());
         let days = UtcDays::covering(range);
-        for (key, version) in &self.days {
-            if days.contains(&key.day) {
-                digest.update(key.source.0.to_le_bytes());
-                digest.update(key.day.0.to_le_bytes());
-                digest.update(version.to_le_bytes());
+        #[cfg(test)]
+        let mut visited_entries = 0;
+        for (key, version) in entries {
+            #[cfg(test)]
+            {
+                visited_entries += 1;
             }
+            if !days.contains(&key.day) {
+                continue;
+            }
+            digest.update(key.source.0.to_le_bytes());
+            digest.update(key.day.0.to_le_bytes());
+            digest.update(version.to_le_bytes());
         }
-        QueryVersions(quartz_domain::text::encode_hex(&digest.finalize()))
+        Ok(VersionDigest {
+            versions: QueryVersions(quartz_domain::text::encode_hex(&digest.finalize())),
+            #[cfg(test)]
+            visited_entries,
+        })
     }
     pub(crate) fn day(&self, date: LocalDate) -> Result<DayChanged, RunQueryError> {
-        let calendar = EntityCalendar::new(date, self.settings.day_start_offset)?;
+        self.day_in_zone(date, &self.time_zone)
+    }
+    fn day_in_zone(
+        &self,
+        date: LocalDate,
+        zone: &jiff::tz::TimeZone,
+    ) -> Result<DayChanged, RunQueryError> {
+        let calendar = EntityCalendar::in_zone(date, self.settings.day_start_offset, zone.clone())?;
         Ok(DayChanged {
             date,
-            versions: self.digest(calendar.range),
+            versions: self.digest_in_zone(calendar.range, zone)?,
         })
     }
 }
@@ -89,37 +145,39 @@ mod tests {
             },
             time_zone: jiff::tz::TimeZone::UTC,
         };
-        let initial = state.digest(range);
+        let initial = state.digest(range).expect("digest");
         let mut changed = state.clone();
         changed.rule_hashes.extraction = ContentHash::of("changed");
-        assert_ne!(initial, changed.digest(range));
+        assert_ne!(initial, changed.digest(range).expect("digest"));
         changed = state.clone();
         changed.rule_hashes.privacy = ContentHash::of("changed");
-        assert_ne!(initial, changed.digest(range));
+        assert_ne!(initial, changed.digest(range).expect("digest"));
         changed = state.clone();
         changed.rule_hashes.classification = ContentHash::of("changed");
-        assert_ne!(initial, changed.digest(range));
+        assert_ne!(initial, changed.digest(range).expect("digest"));
         changed = state.clone();
         changed.settings.metadata_version += 1;
-        assert_ne!(initial, changed.digest(range));
+        assert_ne!(initial, changed.digest(range).expect("digest"));
         changed = state.clone();
         changed.settings.stats_policy_version += 1;
-        assert_ne!(initial, changed.digest(range));
+        assert_ne!(initial, changed.digest(range).expect("digest"));
         changed = state.clone();
         changed.settings.day_start_offset =
             super::super::calendar::DayStartOffset::try_from(60).expect("offset");
-        assert_ne!(initial, changed.digest(range));
+        assert_ne!(initial, changed.digest(range).expect("digest"));
         changed = state.clone();
         changed.time_zone = jiff::tz::TimeZone::get("Asia/Shanghai").expect("zone");
-        assert_ne!(initial, changed.digest(range));
+        assert_ne!(initial, changed.digest(range).expect("digest"));
         assert_ne!(
             initial,
-            state.digest(QueryRange {
-                end: 60_001,
-                ..range
-            })
+            state
+                .digest(QueryRange {
+                    end: 60_001,
+                    ..range
+                })
+                .expect("digest")
         );
-        for source in [VersionSource(1), VersionSource(2), VersionSource(3)] {
+        for source in VersionSource::all() {
             changed = state.clone();
             changed.days.insert(
                 VersionKey {
@@ -130,7 +188,7 @@ mod tests {
             );
             assert_eq!(
                 initial,
-                changed.digest(range),
+                changed.digest(range).expect("digest"),
                 "unrelated dates retain references"
             );
             changed.days.insert(
@@ -142,7 +200,7 @@ mod tests {
             );
             assert_ne!(
                 initial,
-                changed.digest(range),
+                changed.digest(range).expect("digest"),
                 "every intersecting source invalidates references"
             );
         }

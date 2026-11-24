@@ -24,7 +24,7 @@ impl ScanCursor {
             Self::Clock(cursor) => self
                 .load_clock(connection, range, cursor)?
                 .into_iter()
-                .map(|row| row.clock.into_fact())
+                .map(|row| row.into_fact())
                 .collect(),
             Self::ForegroundClosed(cursor) => {
                 let rows = self.load_foreground_closed(connection, range, cursor)?;

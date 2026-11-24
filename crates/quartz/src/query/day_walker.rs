@@ -29,6 +29,17 @@ impl DayWalker {
         offset: DayStartOffset,
         zone: TimeZone,
     ) -> Result<Self, RunQueryError> {
+        Self::new_encoding_zone(start_date, end_date, offset, zone, |zone| {
+            jiff::fmt::temporal::DateTimePrinter::new().time_zone_to_string(zone)
+        })
+    }
+    fn new_encoding_zone(
+        start_date: quartz_protocol::LocalDate,
+        end_date: quartz_protocol::LocalDate,
+        offset: DayStartOffset,
+        zone: TimeZone,
+        encode: impl FnOnce(&TimeZone) -> Result<String, jiff::Error>,
+    ) -> Result<Self, RunQueryError> {
         if start_date >= end_date {
             return Err(RunQueryError::InvalidRangeRequest);
         }
@@ -54,9 +65,8 @@ impl DayWalker {
         };
         Ok(Self {
             range,
-            time_zone: jiff::fmt::temporal::DateTimePrinter::new()
-                .time_zone_to_string(&zone)
-                .map_err(|source| RunQueryError::Calendar { source })?,
+            time_zone: encode(&zone)
+                .map_err(|source| RunQueryError::EncodeTimeZoneError { source })?,
             offset,
             days,
             date: start_date,
@@ -72,6 +82,31 @@ impl DayWalker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn zone_encoding_failure_is_internal_for_valid_dates() {
+        let error = DayWalker::new_encoding_zone(
+            "2025-01-02".parse().expect("start"),
+            "2025-01-03".parse().expect("end"),
+            DayStartOffset::MIDNIGHT,
+            TimeZone::UTC,
+            |_| Err(TimeZone::get("Invalid/InjectedFailure").expect_err("injected encoding error")),
+        )
+        .expect_err("unencodable time zone");
+        assert_eq!(error.kind(), quartz_protocol::ErrorKind::Internal);
+        assert!(matches!(error, RunQueryError::EncodeTimeZoneError { .. }));
+    }
+    #[test]
+    fn posix_timezone_has_a_stable_encodable_identifier() {
+        let name = "EST5EDT,M3.2.0,M11.1.0";
+        let walker = DayWalker::new(
+            "2025-01-02".parse().expect("start"),
+            "2025-01-03".parse().expect("end"),
+            DayStartOffset::MIDNIGHT,
+            TimeZone::posix(name).expect("POSIX zone"),
+        )
+        .expect("encodable POSIX zone");
+        assert_eq!(walker.time_zone, name);
+    }
     #[test]
     fn validates_logical_dates_and_follows_dst_with_offsets() {
         struct Case {

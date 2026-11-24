@@ -1708,7 +1708,8 @@ fn clock_confirmation_invalidates_query_versions_before_first_foreground_fact() 
         },
     )
     .expect("version state")
-    .digest(range);
+    .digest(range)
+    .expect("digest");
     let after = crate::query::versions::VersionState::from_stored(
         after,
         quartz_domain::rules::registry::SnapshotHashes {
@@ -1718,7 +1719,8 @@ fn clock_confirmation_invalidates_query_versions_before_first_foreground_fact() 
         },
     )
     .expect("version state")
-    .digest(range);
+    .digest(range)
+    .expect("digest");
     assert_ne!(
         before, after,
         "clock-only coverage changes invalidate cursors and day subscriptions"
@@ -1898,4 +1900,447 @@ fn uninitialized_startup_discard_repairs_only_the_uncommitted_range() {
             Some(i64::try_from(settled_at.mono).expect("settled boundary"))
         );
     }
+}
+
+impl Fixture {
+    fn query_utc(&mut self, request: crate::query::QueryRequest) -> crate::query::QueryResponse {
+        let mut reader = self.store.take_query_reader();
+        let mut job = crate::query::QueryJob::start_in_zone(
+            &mut reader,
+            request,
+            self.rules.clone(),
+            jiff::tz::TimeZone::UTC,
+        )
+        .expect("start UTC query");
+        let response = loop {
+            if let Some(response) = job.advance().expect("derive persisted capture") {
+                break response;
+            }
+        };
+        self.store
+            .return_query_reader(job.finish().expect("finish query"));
+        response
+    }
+    fn query_day_utc(&mut self, date: &str) -> quartz_protocol::QueryDayResponse {
+        let response = self.query_utc(crate::query::QueryRequest::Day(
+            quartz_protocol::QueryDayRequest {
+                local_date: date.parse().expect("date"),
+                cursor: None,
+            },
+        ));
+        let crate::query::QueryResponse::Day(day) = response else {
+            panic!("day response")
+        };
+        day
+    }
+}
+
+fn sampled(utc: &str, mono: u64) -> Timestamp {
+    Timestamp {
+        utc: UtcInstant::try_from(
+            utc.parse::<jiff::Timestamp>()
+                .expect("UTC")
+                .as_millisecond(),
+        )
+        .expect("capture UTC"),
+        mono: MonoInstant::from_millis(mono),
+    }
+}
+
+#[test]
+fn backward_jump_query_preserves_closed_segments_and_repeated_hour_totals() {
+    const HOUR_MS: u64 = 3_600_000;
+    let start = sampled("2025-01-02T10:00:00Z", 0);
+    let mut fixture = Fixture::new(start);
+    fixture.ready(start);
+    let rollback = sampled("2025-01-02T09:30:00Z", HOUR_MS);
+    fixture.persist(
+        rollback,
+        CaptureEvent::ClockChanged(ClockChange::TimeChange),
+    );
+    fixture.persist(rollback, foreground(1, "after rollback"));
+    fixture.persist(
+        sampled("2025-01-02T10:30:00Z", HOUR_MS * 2),
+        CaptureEvent::Shutdown,
+    );
+    let day = fixture.query_day_utc("2025-01-02");
+    assert_eq!(
+        day.metrics.expect("metrics").active_ms,
+        i64::try_from(HOUR_MS * 2).expect("duration")
+    );
+    let repeated = day
+        .hours
+        .expect("hours")
+        .into_iter()
+        .find(|hour| hour.local_start.starts_with("2025-01-02T10:"))
+        .expect("repeated hour");
+    assert_eq!(
+        repeated
+            .categories
+            .iter()
+            .map(|part| part.duration_ms)
+            .sum::<i64>(),
+        i64::try_from(HOUR_MS + HOUR_MS / 2).expect("duration")
+    );
+}
+
+#[test]
+fn suspended_intervening_day_loads_owning_clock_and_counts_offline_wall_time() {
+    const HOUR_MS: u64 = 3_600_000;
+    let start = sampled("2025-01-01T22:00:00Z", 0);
+    let mut fixture = Fixture::new(start);
+    fixture.ready(start);
+    fixture.persist(
+        sampled("2025-01-01T23:00:00Z", HOUR_MS),
+        CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
+    );
+    fixture.persist(
+        sampled("2025-01-01T23:00:00Z", HOUR_MS),
+        CaptureEvent::Stop(StopChange::Begin(StopReason::Suspended)),
+    );
+    let resume = sampled("2025-01-03T07:00:00Z", HOUR_MS);
+    fixture.persist(resume, CaptureEvent::ClockChanged(ClockChange::Resume));
+    fixture.persist(
+        resume,
+        CaptureEvent::Stop(StopChange::End(StopReason::Suspended)),
+    );
+    fixture.persist(
+        resume,
+        CaptureEvent::Stop(StopChange::End(StopReason::Locked)),
+    );
+    fixture.persist(resume, foreground(1, "resumed"));
+    fixture.persist(
+        sampled("2025-01-03T08:00:00Z", HOUR_MS * 2),
+        CaptureEvent::Shutdown,
+    );
+    fixture
+        .store
+        .create_annotations(
+            quartz_protocol::AnnotationsCreateRequest {
+                entities: vec![quartz_protocol::CreateAnnotation {
+                    uuid: quartz_protocol::AnnotationId(
+                        "abcdef00-0000-4000-8000-000000000001"
+                            .parse()
+                            .expect("UUID"),
+                    ),
+                    kind: quartz_protocol::AnnotationKind::OfflineActivity,
+                    values: quartz_protocol::AnnotationValues {
+                        start_utc_ms: sampled("2025-01-02T12:00:00Z", 0)
+                            .utc
+                            .get()
+                            .as_millisecond(),
+                        end_utc_ms: sampled("2025-01-02T14:00:00Z", 0)
+                            .utc
+                            .get()
+                            .as_millisecond(),
+                        category: None,
+                        label: None,
+                        note: None,
+                    },
+                }],
+            },
+            resume.utc,
+        )
+        .expect("offline activity");
+    let day = fixture.query_day_utc("2025-01-02");
+    assert_eq!(
+        day.metrics.expect("metrics").active_ms,
+        i64::try_from(HOUR_MS * 2).expect("duration")
+    );
+    let response = fixture.query_utc(crate::query::QueryRequest::SegmentDetail(
+        quartz_protocol::QuerySegmentDetailRequest {
+            start_utc_ms: sampled("2025-01-01T22:00:00Z", 0)
+                .utc
+                .get()
+                .as_millisecond(),
+            end_utc_ms: sampled("2025-01-03T08:00:00Z", 0)
+                .utc
+                .get()
+                .as_millisecond(),
+            app: None,
+            window_instance: None,
+            cursor: None,
+        },
+    ));
+    let crate::query::QueryResponse::SegmentDetail(detail) = response else {
+        panic!("detail response")
+    };
+    assert!(detail.intervals.iter().any(|segment| matches!(&segment.activity, quartz_protocol::Activity::Stopped { reasons } if reasons.contains(&quartz_protocol::QueryStopReason::Suspended) && reasons.contains(&quartz_protocol::QueryStopReason::Locked))));
+    assert_eq!(
+        detail
+            .intervals
+            .iter()
+            .filter(|segment| matches!(
+                segment.activity,
+                quartz_protocol::Activity::OfflineActivity { .. }
+            ))
+            .map(|segment| segment.duration_ms)
+            .sum::<i64>(),
+        i64::try_from(HOUR_MS * 2).expect("wall duration")
+    );
+}
+
+#[test]
+fn backward_jump_before_old_segment_start_remains_queryable() {
+    const HOUR_MS: u64 = 3_600_000;
+    let start = sampled("2025-01-02T10:00:00Z", 0);
+    let mut fixture = Fixture::new(start);
+    fixture.ready(start);
+    let rollback = sampled("2025-01-02T09:00:00Z", HOUR_MS);
+    fixture.persist(
+        rollback,
+        CaptureEvent::ClockChanged(ClockChange::TimeChange),
+    );
+    fixture.persist(rollback, foreground(1, "after rollback"));
+    fixture.persist(
+        sampled("2025-01-02T09:30:00Z", HOUR_MS + HOUR_MS / 2),
+        CaptureEvent::Shutdown,
+    );
+    let day = fixture.query_day_utc("2025-01-02");
+    assert_eq!(
+        day.metrics.expect("metrics").active_ms,
+        i64::try_from(HOUR_MS + HOUR_MS / 2).expect("duration")
+    );
+    let response = fixture.query_utc(crate::query::QueryRequest::SegmentDetail(
+        quartz_protocol::QuerySegmentDetailRequest {
+            start_utc_ms: start.utc.get().as_millisecond(),
+            end_utc_ms: sampled("2025-01-02T11:00:00Z", 0)
+                .utc
+                .get()
+                .as_millisecond(),
+            app: None,
+            window_instance: None,
+            cursor: None,
+        },
+    ));
+    let crate::query::QueryResponse::SegmentDetail(detail) = response else {
+        panic!("detail response")
+    };
+    let active: Vec<_> = detail
+        .intervals
+        .iter()
+        .filter(|segment| segment.activity == quartz_protocol::Activity::Active)
+        .collect();
+    assert_eq!(active.len(), 1);
+    let old = active.first().expect("old segment");
+    assert_eq!(
+        old.clock_segment_id,
+        Some(quartz_protocol::ClockSegmentId(1))
+    );
+    assert_eq!(old.duration_ms, i64::try_from(HOUR_MS).expect("hour"));
+}
+
+struct LockBeforeSleep {
+    start: &'static str,
+    locked: &'static str,
+    suspended: &'static str,
+    resumed: &'static str,
+    shutdown: &'static str,
+}
+impl LockBeforeSleep {
+    const HALF_HOUR_MS: u64 = 30 * 60 * 1000;
+    fn assert_exact_durations(self) {
+        use quartz_protocol::{Activity, QueryStopReason, TimelineSegment};
+        let start = sampled(self.start, 0);
+        let locked = sampled(self.locked, Self::HALF_HOUR_MS);
+        let suspended = sampled(self.suspended, Self::HALF_HOUR_MS * 2);
+        let resumed = sampled(self.resumed, Self::HALF_HOUR_MS * 2);
+        let shutdown = sampled(self.shutdown, Self::HALF_HOUR_MS * 3);
+        let mut fixture = Fixture::new(start);
+        fixture.ready(start);
+        fixture.persist(
+            locked,
+            CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
+        );
+        fixture.persist(
+            suspended,
+            CaptureEvent::Stop(StopChange::Begin(StopReason::Suspended)),
+        );
+        fixture.persist(resumed, CaptureEvent::ClockChanged(ClockChange::Resume));
+        fixture.persist(
+            resumed,
+            CaptureEvent::Stop(StopChange::End(StopReason::Suspended)),
+        );
+        fixture.persist(
+            resumed,
+            CaptureEvent::Stop(StopChange::End(StopReason::Locked)),
+        );
+        fixture.persist(resumed, foreground(1, "resumed"));
+        fixture.persist(shutdown, CaptureEvent::Shutdown);
+        let request =
+            crate::query::QueryRequest::SegmentDetail(quartz_protocol::QuerySegmentDetailRequest {
+                start_utc_ms: start.utc.get().as_millisecond(),
+                end_utc_ms: shutdown.utc.get().as_millisecond(),
+                app: None,
+                window_instance: None,
+                cursor: None,
+            });
+        let crate::query::QueryResponse::SegmentDetail(stopped) =
+            fixture.query_utc(request.clone())
+        else {
+            panic!("detail")
+        };
+        let pre_sleep = stopped
+            .intervals
+            .iter()
+            .find(|segment| {
+                segment.start_utc_ms == locked.utc.get().as_millisecond()
+                    && segment.end_utc_ms == suspended.utc.get().as_millisecond()
+            })
+            .expect("pre-sleep locked slice");
+        assert_eq!(
+            pre_sleep.activity,
+            Activity::Stopped {
+                reasons: vec![QueryStopReason::Locked]
+            }
+        );
+        let half_hour = i64::try_from(Self::HALF_HOUR_MS).expect("duration");
+        assert_eq!(
+            pre_sleep.duration_ms, half_hour,
+            "pre-sleep lock retains monotonic duration"
+        );
+        let sleeping: Vec<&TimelineSegment> = stopped.intervals.iter().filter(|segment| matches!(&segment.activity, Activity::Stopped { reasons } if reasons.contains(&QueryStopReason::Suspended))).collect();
+        let sleep_ms = resumed.utc.get().as_millisecond() - suspended.utc.get().as_millisecond();
+        assert_eq!(
+            sleeping
+                .iter()
+                .map(|segment| segment.duration_ms)
+                .sum::<i64>(),
+            sleep_ms
+        );
+        assert!(sleeping.iter().all(|segment| matches!(&segment.activity, Activity::Stopped { reasons } if reasons.contains(&QueryStopReason::Locked))));
+        let wall_ms = shutdown.utc.get().as_millisecond() - start.utc.get().as_millisecond();
+        assert_eq!(
+            stopped
+                .intervals
+                .iter()
+                .map(|segment| segment.duration_ms)
+                .sum::<i64>(),
+            wall_ms,
+            "unannotated duration conservation"
+        );
+        fixture
+            .store
+            .create_annotations(
+                quartz_protocol::AnnotationsCreateRequest {
+                    entities: vec![quartz_protocol::CreateAnnotation {
+                        uuid: quartz_protocol::AnnotationId(
+                            "abcdef00-0000-4000-8000-000000000002"
+                                .parse()
+                                .expect("UUID"),
+                        ),
+                        kind: quartz_protocol::AnnotationKind::OfflineActivity,
+                        values: quartz_protocol::AnnotationValues {
+                            start_utc_ms: locked.utc.get().as_millisecond(),
+                            end_utc_ms: resumed.utc.get().as_millisecond(),
+                            category: None,
+                            label: None,
+                            note: None,
+                        },
+                    }],
+                },
+                resumed.utc,
+            )
+            .expect("offline activity covering lock and sleep");
+        let crate::query::QueryResponse::SegmentDetail(annotated) = fixture.query_utc(request)
+        else {
+            panic!("detail")
+        };
+        let offline: Vec<_> = annotated
+            .intervals
+            .iter()
+            .filter(|segment| matches!(segment.activity, Activity::OfflineActivity { .. }))
+            .collect();
+        assert_eq!(
+            offline
+                .iter()
+                .map(|segment| segment.duration_ms)
+                .sum::<i64>(),
+            half_hour + sleep_ms
+        );
+        assert_eq!(
+            offline
+                .iter()
+                .filter(|segment| segment.clock_segment_id.is_some())
+                .map(|segment| segment.duration_ms)
+                .sum::<i64>(),
+            half_hour
+        );
+        assert_eq!(
+            annotated
+                .intervals
+                .iter()
+                .map(|segment| segment.duration_ms)
+                .sum::<i64>(),
+            wall_ms,
+            "annotated duration conservation"
+        );
+        let start_date = start
+            .utc
+            .get()
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date();
+        let end_date = shutdown
+            .utc
+            .get()
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date();
+        let mut date = start_date;
+        let mut active_ms = 0;
+        loop {
+            let calendar = crate::query::calendar::DayCalendar::in_zone(
+                date,
+                crate::query::calendar::DayStartOffset::MIDNIGHT,
+                jiff::tz::TimeZone::UTC,
+            )
+            .expect("calendar");
+            let expected = calendar.range.end.min(shutdown.utc.get().as_millisecond())
+                - calendar.range.start.max(start.utc.get().as_millisecond());
+            let day = fixture.query_day_utc(&date.to_string());
+            let metrics = day.metrics.expect("metrics");
+            assert_eq!(metrics.active_ms, expected, "day {date}");
+            assert_eq!(
+                day.hours
+                    .expect("hours")
+                    .iter()
+                    .flat_map(|hour| &hour.categories)
+                    .map(|part| part.duration_ms)
+                    .sum::<i64>(),
+                expected
+            );
+            active_ms += metrics.active_ms;
+            if date == end_date {
+                break;
+            }
+            date = date.tomorrow().expect("next date");
+        }
+        assert_eq!(
+            active_ms, wall_ms,
+            "daily aggregates conserve the complete run"
+        );
+    }
+}
+
+#[test]
+fn lock_before_sleep_same_day_conserves_stopped_and_offline_durations() {
+    LockBeforeSleep {
+        start: "2025-01-02T10:00:00Z",
+        locked: "2025-01-02T10:30:00Z",
+        suspended: "2025-01-02T11:00:00Z",
+        resumed: "2025-01-02T15:00:00Z",
+        shutdown: "2025-01-02T15:30:00Z",
+    }
+    .assert_exact_durations();
+}
+
+#[test]
+fn lock_before_sleep_across_midnight_conserves_stopped_and_offline_durations() {
+    LockBeforeSleep {
+        start: "2025-01-01T22:30:00Z",
+        locked: "2025-01-01T23:00:00Z",
+        suspended: "2025-01-01T23:30:00Z",
+        resumed: "2025-01-02T07:30:00Z",
+        shutdown: "2025-01-02T08:00:00Z",
+    }
+    .assert_exact_durations();
 }
