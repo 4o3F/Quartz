@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueryStage {
     Read,
     Slice,
@@ -31,6 +31,8 @@ impl QueryTimings {
 pub(super) struct QueryTimer<'timings> {
     timings: Option<&'timings mut QueryTimings>,
 }
+#[cfg(test)]
+std::thread_local! { pub(super) static MEASURED_STAGES: std::cell::RefCell<Vec<QueryStage>> = const { std::cell::RefCell::new(Vec::new()) }; }
 impl<'timings> QueryTimer<'timings> {
     pub(super) fn disabled() -> Self {
         Self { timings: None }
@@ -41,6 +43,8 @@ impl<'timings> QueryTimer<'timings> {
         }
     }
     pub(super) fn measure<T>(&mut self, stage: QueryStage, operation: impl FnOnce() -> T) -> T {
+        #[cfg(test)]
+        MEASURED_STAGES.with_borrow_mut(|stages| stages.push(stage));
         let Some(timings) = &mut self.timings else {
             return operation();
         };

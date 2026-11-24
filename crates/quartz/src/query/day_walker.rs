@@ -51,9 +51,8 @@ impl DayWalker {
             }
             days.push_back(LogicalDay {
                 date,
-                range: DayCalendar::in_zone(date, offset, zone.clone())
-                    .map_err(|_| RunQueryError::InvalidRangeRequest)?
-                    .range,
+                range: DayCalendar::range_in_zone(date, offset, zone.clone())
+                    .map_err(|_| RunQueryError::InvalidRangeRequest)?,
             });
             date = date
                 .tomorrow()

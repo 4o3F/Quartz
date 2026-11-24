@@ -3,6 +3,8 @@
 #[cfg(any(windows, test))]
 mod categories;
 #[cfg(any(windows, test))]
+mod diagnostics;
+#[cfg(any(windows, test))]
 pub(crate) mod dispatch;
 mod queue;
 use queue::TransactionPlan;
@@ -66,7 +68,7 @@ pub(crate) enum FlushProgress {
 }
 #[derive(Debug, snafu::Snafu)]
 #[snafu(display("capture flush retained buffered commands without making progress"))]
-pub(crate) struct FlushStalledError;
+pub(crate) struct FlushWritesError;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CommittedCheckpoint {
@@ -143,6 +145,11 @@ pub(crate) struct Persistence {
     metadata: RunMetadata,
 }
 impl Persistence {
+    #[cfg(test)]
+    pub(crate) fn segment_count(&self) -> usize {
+        self.keys.segment_count()
+    }
+
     pub(crate) fn state(&self) -> PersistenceState {
         self.queue.state()
     }
@@ -234,6 +241,7 @@ impl Persistence {
             return result;
         }
         self.queue.committed(&prepared.plan);
+        self.queue.retire_segments(&mut self.keys);
         if checkpoints == CheckpointCollection::Collect {
             result.checkpoints = prepared.plan.checkpoints().collect();
         }

@@ -1,6 +1,6 @@
 //! Category wire conversion and database-actor execution.
 
-use super::dispatch::WriteResponse;
+use super::{diagnostics::WriteFailure, dispatch::WriteResponse};
 use crate::{
     query::paging::{PageBudget, PagePosition},
     store::{Store, categories::ExecuteCategoryCommandError},
@@ -26,12 +26,7 @@ impl CategoryRequest {
             Self::Create(request) => {
                 let uuid = domain::CategoryUuid(request.entity.uuid.to_string());
                 // Preserve UUID retry semantics before validating replacement values.
-                if let Some(entity) = store
-                    .list_categories(IncludeArchivedCategories::Include)
-                    .map_err(Self::store_error)?
-                    .into_iter()
-                    .find(|entity| entity.uuid == uuid)
-                {
+                if let Some(entity) = store.category(&uuid).map_err(Self::store_error)? {
                     return Self::response(entity);
                 }
                 let values = Self::values(request.entity.into())?;
@@ -98,7 +93,7 @@ impl CategoryRequest {
                 .uuid
                 .0
                 .parse()
-                .map_err(|_| ProtocolError::new(ErrorKind::Internal))?,
+                .map_err(|_| WriteFailure::Identity.into_protocol_error())?,
             builtin_key: entity.builtin_key.map(|builtin| match builtin {
                 domain::BuiltinCategory::Development => wire::BuiltinCategory::Development,
                 domain::BuiltinCategory::Learning => wire::BuiltinCategory::Learning,
@@ -111,7 +106,7 @@ impl CategoryRequest {
                 .parent_uuid
                 .map(|uuid| uuid.0.parse())
                 .transpose()
-                .map_err(|_| ProtocolError::new(ErrorKind::Internal))?,
+                .map_err(|_| WriteFailure::Identity.into_protocol_error())?,
             name: entity.values.name.map(String::from),
             color: entity.values.color.to_string(),
             tendency: match entity.values.tendency {
@@ -141,9 +136,15 @@ impl CategoryRequest {
                 | domain::EditCategoryError::ReorderSetMismatch
                 | domain::EditCategoryError::OrderOverflow => ErrorKind::BadRequest,
             },
-            ExecuteCategoryCommandError::Database { .. }
-            | ExecuteCategoryCommandError::Version { .. }
-            | ExecuteCategoryCommandError::InvalidStoredCategory => ErrorKind::Internal,
+            ExecuteCategoryCommandError::Database { source } => {
+                return WriteFailure::database(&source).into_protocol_error();
+            }
+            ExecuteCategoryCommandError::Version { source } => {
+                return WriteFailure::version(&source).into_protocol_error();
+            }
+            ExecuteCategoryCommandError::InvalidStoredCategory => {
+                return WriteFailure::StoredCategory.into_protocol_error();
+            }
         };
         ProtocolError::new(kind)
     }

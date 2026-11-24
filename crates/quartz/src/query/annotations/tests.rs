@@ -536,3 +536,122 @@ fn annotation_range_requires_valid_endpoints_and_at_most_366_utc_days() {
         );
     }
 }
+
+#[test]
+fn fragment_resume_skips_without_materializing_earlier_text() {
+    let entity = SavedAnnotation {
+        uuid: AnnotationId(
+            "abcdef00-0000-4000-8000-000000000001"
+                .parse()
+                .expect("UUID"),
+        ),
+        kind: AnnotationKind::Note,
+        start_utc_ms: 0,
+        end_utc_ms: 1,
+        category: None,
+        label: Some(AnnotationText::Complete("short label".into())),
+        note: Some(AnnotationText::Complete("🦀\n".repeat(40_000))),
+        created_utc_ms: 0,
+        updated_utc_ms: 0,
+    };
+    let bytes = serde_json::to_vec(&entity).expect("wire entity").len();
+    assert!(bytes > QUERY_PAGE_BYTES && bytes < quartz_protocol::MAX_FRAME_LEN);
+    let budget = PageBudget::new(&()).expect("budget");
+    let mut whole = EntityChunks::new(entity.clone(), &budget).expect("fragment");
+    let mut expected = Vec::new();
+    while let Some(fragment) = whole.next() {
+        expected.push(fragment);
+    }
+    assert!(expected.len() > 3);
+    let mut resumed = EntityChunks::new(entity.clone(), &budget).expect("fragment");
+    MATERIALIZED_FRAGMENTS.set(0);
+    resumed.seek(3).expect("resume fourth fragment");
+    assert_eq!(MATERIALIZED_FRAGMENTS.get(), 0);
+    assert_eq!(resumed.next(), Some(expected[3].clone()));
+    assert_eq!(MATERIALIZED_FRAGMENTS.get(), 1);
+    let mut invalid = EntityChunks::new(entity, &budget).expect("fragment");
+    assert!(matches!(
+        invalid.seek(usize::MAX),
+        Err(RunQueryError::InvalidCursor)
+    ));
+}
+
+#[test]
+fn annotation_page_reserves_maximal_resume_for_entities_and_fragments() {
+    let versions = QueryVersions("v".repeat(64));
+    let parameters = CursorQuery::Annotations {
+        start_utc_ms: i64::MIN,
+        end_utc_ms: i64::MAX,
+    };
+    let resume = quartz_protocol::AnnotationResume {
+        start_utc_ms: i64::MIN,
+        end_utc_ms: i64::MIN,
+        uuid: AnnotationId(
+            "ffffffff-ffff-ffff-ffff-ffffffffffff"
+                .parse()
+                .expect("maximum-width UUID"),
+        ),
+        chunk: usize::MAX,
+    };
+    let mut page = AnnotationPage::new(
+        versions.clone(),
+        parameters.clone(),
+        PagePosition::First,
+        None,
+    )
+    .expect("page");
+    let expected = PageBudget::new(&page.response)
+        .expect("response budget")
+        .with_cursor(&QueryCursor::new_annotation(
+            versions,
+            parameters,
+            resume.clone(),
+        ))
+        .expect("maximal cursor");
+    let available = page.budget.remaining_bytes();
+    let mut entity = SavedAnnotation {
+        uuid: resume.uuid.clone(),
+        kind: AnnotationKind::Note,
+        start_utc_ms: i64::MIN,
+        end_utc_ms: i64::MAX,
+        category: None,
+        label: None,
+        note: Some(AnnotationText::Complete(String::new())),
+        created_utc_ms: i64::MIN,
+        updated_utc_ms: i64::MIN,
+    };
+    let entity_bytes = serde_json::to_vec(&entity).expect("empty note").len() + 1;
+    entity.note = Some(AnnotationText::Complete(
+        "x".repeat(available - entity_bytes),
+    ));
+    assert!(page.budget.admit(&entity).expect("full-page entity"));
+    assert_eq!(page.budget.remaining_bytes(), 0);
+    page.response.entities.push(entity.clone());
+    let response = page.finish(Some(resume));
+    assert!(
+        serde_json::to_vec(&response)
+            .expect("full page with maximal cursor")
+            .len()
+            <= QUERY_PAGE_BYTES
+    );
+    assert_eq!(
+        available,
+        expected.remaining_bytes(),
+        "reserve the emitted cursor shape"
+    );
+    let empty = QueryAnnotationsResponse {
+        entities: Vec::new(),
+        versions: response.versions,
+        next_cursor: None,
+    };
+    entity.note = None;
+    let actual = AnnotationPage::budget(&empty, &page.parameters).expect("fragment budget");
+    assert_eq!(
+        actual
+            .annotation_chunk_bytes(&entity)
+            .expect("fragment capacity"),
+        expected
+            .annotation_chunk_bytes(&entity)
+            .expect("expected fragment capacity")
+    );
+}

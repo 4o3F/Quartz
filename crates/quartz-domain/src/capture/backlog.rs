@@ -164,6 +164,24 @@ impl WriteBacklog {
             .min();
         retention.into_iter().chain(confirmation).min()
     }
+    /// Oldest clock mapping that queued writes or future gap repair can still reference.
+    /// Segment identifiers are run-local and increase within a run. The persistence shell uses this minimum
+    /// after startup recovery has removed other runs' mappings.
+    pub fn oldest_referenced_segment(&self) -> Option<super::SegmentId> {
+        self.queue
+            .iter()
+            .flat_map(|queued| {
+                queued
+                    .batch
+                    .coverage
+                    .iter()
+                    .map(|range| range.segment)
+                    .chain(queued.batch.writes.iter().filter_map(CaptureWrite::segment))
+            })
+            .chain(self.gaps.iter().map(|stored| stored.gap.segment))
+            .chain(self.structural.iter().filter_map(CaptureWrite::segment))
+            .min()
+    }
     /// Borrows retained batches in order, after all pending gaps have been persisted.
     pub fn batches(&self) -> impl Iterator<Item = &WriteBatch> {
         self.queue

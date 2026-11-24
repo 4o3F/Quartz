@@ -51,6 +51,8 @@ pub enum ErrorKind {
     CoreOffline,
     /// The core could not complete the request because of an internal failure.
     Internal,
+    /// A persisted counter cannot be incremented; the transaction was rolled back.
+    VersionExhausted,
     /// The bounded query queue is full; retry later.
     Busy,
     /// An unrecognized future code; additional fields are ignored by this client.
@@ -78,6 +80,7 @@ impl ErrorKind {
             Self::CoreOffline => "core_offline",
             Self::Internal => "internal",
             Self::Busy => "busy",
+            Self::VersionExhausted => "version_exhausted",
             Self::Unknown => "unknown",
         }
     }
@@ -125,6 +128,7 @@ mod tests {
             "rule_set_not_found",
             "core_offline",
             "internal",
+            "version_exhausted",
             "busy",
         ] {
             let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "key": "user.local", "version": null, "core_version": "test-core"});

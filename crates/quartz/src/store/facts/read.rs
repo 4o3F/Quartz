@@ -216,7 +216,7 @@ impl CaptureGapsRow {
         fact.segment_id = Some(self.clock_segment_id);
         fact.start_mono_ms = Some(self.start_mono_ms);
         fact.end_mono_ms = Some(self.end_mono_ms);
-        fact.duration_ms = Some(self.end_mono_ms - self.start_mono_ms);
+        fact.duration_ms = Some(fact.monotonic_duration()?);
         fact.reason = Some(FactReason::Gap(self.reason));
         Ok(fact)
     }

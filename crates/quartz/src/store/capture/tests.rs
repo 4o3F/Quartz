@@ -2344,3 +2344,97 @@ fn lock_before_sleep_across_midnight_conserves_stopped_and_offline_durations() {
     }
     .assert_exact_durations();
 }
+
+#[test]
+fn confirmations_only_invalidate_new_availability_coverage() {
+    use crate::store::versions::{UtcDay, VersionKey, VersionSource};
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    fixture.persist(
+        at(10),
+        CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
+    );
+    const DAY: u64 = 86_400_000;
+    fixture.persist(at(DAY + 10), CaptureEvent::Wake);
+    fixture.store.take_committed_versions();
+    fixture.persist(at(2 * DAY + 10), CaptureEvent::Wake);
+    let changes = fixture.store.take_committed_versions();
+    let historical = VersionKey {
+        source: VersionSource(enums::DataSource::Availability.code()),
+        day: UtcDay(0),
+    };
+    assert!(
+        !changes
+            .facts
+            .iter()
+            .any(|version| version.key == historical),
+        "already confirmed day remains valid"
+    );
+    assert!(
+        changes
+            .facts
+            .iter()
+            .any(|version| version.key.day == UtcDay(1) && version.key.source == historical.source)
+    );
+    assert!(
+        changes
+            .facts
+            .iter()
+            .any(|version| version.key.day == UtcDay(2) && version.key.source == historical.source)
+    );
+}
+
+#[test]
+fn closed_segment_mappings_are_retired_after_backlog_repair() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    for boundary in 1..=128 {
+        fixture.persist(
+            at(boundary * 1000),
+            CaptureEvent::ClockChanged(ClockChange::Resume),
+        );
+        assert!(
+            fixture.shell.segment_count() <= 1,
+            "closed mappings must not grow with residence"
+        );
+    }
+    let mut inspection = Inspection::open(fixture._directory.path());
+    inspection.inject_write_failure();
+    let parts = fixture.step(at(130_000), CaptureEvent::ClockChanged(ClockChange::Resume));
+    let _ = fixture.shell.accept(parts, at(130_000));
+    let failed = fixture
+        .shell
+        .flush(&mut fixture.store, at(130_000), CheckpointCollection::Skip);
+    assert!(failed.failure().is_some());
+    assert_eq!(
+        fixture.shell.segment_count(),
+        1,
+        "failed mapping changes roll back"
+    );
+    let parts = fixture.step(at(131_000), CaptureEvent::ClockChanged(ClockChange::Resume));
+    let _ = fixture.shell.accept(parts, at(131_000));
+    use diesel::connection::SimpleConnection;
+    fixture.store.writer.batch_execute("CREATE TRIGGER fail_repair BEFORE INSERT ON capture_gaps BEGIN SELECT RAISE(ABORT, 'injected gap failure'); END;").expect("fail repair");
+    let failed = fixture
+        .shell
+        .flush(&mut fixture.store, at(800_000), CheckpointCollection::Skip);
+    assert!(failed.failure().is_some());
+    inspection.restore_writes();
+    fixture
+        .store
+        .writer
+        .batch_execute("DROP TRIGGER fail_repair;")
+        .expect("restore repair");
+    for _ in 0..10 {
+        let repaired =
+            fixture
+                .shell
+                .flush(&mut fixture.store, at(800_000), CheckpointCollection::Skip);
+        assert!(repaired.failure().is_none(), "{:?}", repaired.failure());
+        if matches!(fixture.shell.state(), PersistenceState::Ready) {
+            break;
+        }
+    }
+    assert!(matches!(fixture.shell.state(), PersistenceState::Ready));
+    assert!(fixture.shell.segment_count() <= 1);
+}

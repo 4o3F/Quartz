@@ -20,7 +20,7 @@ use quartz_protocol::{
 };
 
 pub(crate) const FIXTURE_DATE: &str = "2025-01-02";
-const FACT_MS: i64 = 1000;
+pub(super) const FACT_MS: i64 = 1000;
 const FIXTURE_TITLE: &str = "private title fixture";
 pub(crate) struct QueryFixture {
     pub store: Store,

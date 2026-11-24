@@ -3939,3 +3939,727 @@ fn snapshot_finish_does_not_retry_or_log_failed_rollback() {
         "Drop must not retry cleanup and log a duplicate failure"
     );
 }
+
+#[test]
+fn raw_foreground_uses_one_joined_scan_per_partition() {
+    use diesel::{Connection, connection::InstrumentationEvent};
+    use std::sync::{Arc, Mutex};
+    let fixture = QueryFixture::new(3);
+    let mut reader = ReadOnlyStore::open_facts(
+        &crate::data_directory::DataDirectory::new(fixture.directory.path()).database(),
+    )
+    .expect("reader");
+    let statements = Arc::new(Mutex::new(Vec::new()));
+    let observed = statements.clone();
+    reader
+        .connection
+        .set_instrumentation(move |event: InstrumentationEvent<'_>| {
+            if let InstrumentationEvent::StartQuery { query, .. } = event {
+                observed.lock().expect("statements").push(query.to_string());
+            }
+        });
+    let facts = reader
+        .dump_range(fixture.start, fixture.start + 10_000)
+        .expect("raw facts");
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| fact.kind == crate::store::facts::FactKind::Foreground)
+            .count(),
+        3
+    );
+    let statements = statements.lock().expect("statements");
+    let foreground: Vec<_> = statements
+        .iter()
+        .filter(|sql| sql.starts_with("SELECT") && sql.contains("`intervals`"))
+        .collect();
+    assert_eq!(foreground.len(), 2, "closed and open scans: {foreground:?}");
+    assert!(
+        foreground
+            .iter()
+            .all(|sql| sql.contains("`titles`") && sql.contains("`applications`"))
+    );
+}
+
+#[test]
+fn range_stops_reading_after_its_first_full_bucket() {
+    use diesel::{Connection, connection::InstrumentationEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let mut fixture = QueryFixture::new(3000);
+    let statements = Arc::new(AtomicUsize::new(0));
+    let observed = statements.clone();
+    let mut reader = fixture.store.take_query_reader().expect("reader");
+    reader
+        .connection
+        .set_instrumentation(move |event: InstrumentationEvent<'_>| {
+            if let InstrumentationEvent::StartQuery { query, .. } = event
+                && query.to_string().contains("FROM `clock_segments`")
+            {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    fixture.store.return_query_reader(reader);
+    let short = fixture.range_request(quartz_protocol::RangeBucket::Day);
+    let first = fixture.range_page(short.clone());
+    assert!(first.next_cursor.is_some(), "fixture fills a page");
+    let first_scans = statements.swap(0, Ordering::Relaxed);
+    let mut long = short;
+    long.end_date = long
+        .end_date
+        .checked_add(jiff::Span::new().days(20))
+        .expect("later end");
+    let page = fixture.range_page(long);
+    assert!(page.next_cursor.is_some());
+    assert_eq!(
+        statements.load(Ordering::Relaxed),
+        first_scans,
+        "later dates must not be scanned after continuation is established"
+    );
+}
+
+#[test]
+fn facts_convert_a_bounded_batch_per_turn() {
+    let mut fixture = QueryFixture::new(1000);
+    let mut job = fixture.start(QueryRequest::Facts(quartz_protocol::QueryFactsRequest {
+        local_date: FIXTURE_DATE.parse().expect("date"),
+        cursor: None,
+    }));
+    let mut conversions = 0;
+    loop {
+        crate::store::facts::work::RECORDS.set(0);
+        let response = job.advance().expect("advance");
+        let count = crate::store::facts::work::RECORDS.get();
+        assert!(
+            count <= crate::query::FINALIZE_BATCH_RECORDS,
+            "one turn converted {count} records"
+        );
+        conversions += count;
+        if response.is_some() {
+            break;
+        }
+    }
+    assert!(conversions >= 1000);
+    fixture
+        .store
+        .return_query_reader(job.finish().expect("finish"));
+}
+
+#[test]
+fn annotation_pages_join_categories_and_resume_without_prefix_reads() {
+    use diesel::{Connection, connection::InstrumentationEvent};
+    use std::sync::{Arc, Mutex};
+    let mut fixture = QueryFixture::new(0);
+    let entities = (0..30)
+        .map(|id| quartz_protocol::CreateAnnotation {
+            uuid: quartz_protocol::AnnotationId(
+                format!("abcdef00-0000-4000-8000-{id:012x}")
+                    .parse()
+                    .expect("UUID"),
+            ),
+            kind: quartz_protocol::AnnotationKind::Note,
+            values: quartz_protocol::AnnotationValues {
+                start_utc_ms: fixture.start,
+                end_utc_ms: fixture.start + 100,
+                category: Some(quartz_protocol::AnnotationCategory::Builtin {
+                    key: quartz_protocol::BuiltinCategory::Learning,
+                }),
+                label: None,
+                note: Some("x".repeat(30_000)),
+            },
+        })
+        .collect();
+    fixture
+        .store
+        .create_annotations(
+            quartz_protocol::AnnotationsCreateRequest { entities },
+            quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        )
+        .expect("notes");
+    let statements = Arc::new(Mutex::new(Vec::new()));
+    let observed = statements.clone();
+    let mut reader = fixture.store.take_query_reader().expect("reader");
+    reader
+        .connection
+        .set_instrumentation(move |event: InstrumentationEvent<'_>| {
+            if let InstrumentationEvent::StartQuery { query, .. } = event {
+                observed.lock().expect("SQL").push(query.to_string());
+            }
+        });
+    fixture.store.return_query_reader(reader);
+    let mut request = quartz_protocol::QueryAnnotationsRequest {
+        start_utc_ms: fixture.start,
+        end_utc_ms: fixture.start + 100,
+        cursor: None,
+    };
+    let QueryResponse::Annotations(first) = fixture
+        .run(QueryRequest::Annotations(request.clone()))
+        .expect("first")
+    else {
+        panic!("annotations")
+    };
+    request.cursor = first.next_cursor;
+    assert!(request.cursor.is_some());
+    let first_statements = std::mem::take(&mut *statements.lock().expect("SQL"));
+    let first_reads = first_statements
+        .iter()
+        .filter(|sql| sql.contains("FROM `annotations`"))
+        .count();
+    let QueryResponse::Annotations(second) = fixture
+        .run(QueryRequest::Annotations(request))
+        .expect("second")
+    else {
+        panic!("annotations")
+    };
+    let second_statements = statements.lock().expect("SQL");
+    let second_reads = second_statements
+        .iter()
+        .filter(|sql| sql.contains("FROM `annotations`"))
+        .count();
+    assert!(
+        second_reads <= first_reads,
+        "first {first_reads}, second {second_reads}: previously returned rows must not be read again"
+    );
+    assert!(
+        first_statements
+            .iter()
+            .chain(second_statements.iter())
+            .all(|sql| !sql.contains("FROM `categories`")),
+        "category identity comes from the annotation join"
+    );
+    assert!(!second.entities.is_empty());
+    assert!(
+        second
+            .entities
+            .iter()
+            .all(|entity| entity.category.is_some())
+    );
+}
+
+#[test]
+fn write_exhaustion_returns_documented_code_and_rolls_back() {
+    use crate::persistence::dispatch::WriteRequest;
+    use crate::store::schema::{data_day_versions, settings};
+    use quartz_protocol::{
+        AnnotationId, AnnotationKind, AnnotationValues, AnnotationsCreateRequest, CreateAnnotation,
+    };
+    let mut fixture = QueryFixture::new(0);
+    let uuid = AnnotationId(
+        "abcdef00-0000-4000-8000-000000000001"
+            .parse()
+            .expect("UUID"),
+    );
+    let request = AnnotationsCreateRequest {
+        entities: vec![CreateAnnotation {
+            uuid,
+            kind: AnnotationKind::Note,
+            values: AnnotationValues {
+                start_utc_ms: fixture.start,
+                end_utc_ms: fixture.start + 1,
+                category: None,
+                label: None,
+                note: Some("private note".into()),
+            },
+        }],
+    };
+    diesel::insert_into(data_day_versions::table)
+        .values(crate::store::rows::DataDayVersionsRow {
+            source: enums::DataSource::Annotations,
+            utc_date: fixture.start.div_euclid(UTC_DAY_MS),
+            version: i64::MAX,
+        })
+        .execute(&mut fixture.store.writer)
+        .expect("exhaust day");
+    let error = WriteRequest::decode(
+        quartz_protocol::Op::AnnotationsCreate,
+        serde_json::to_value(request).expect("body"),
+    )
+    .expect("decode")
+    .execute(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        None,
+    )
+    .expect_err("exhaustion");
+    assert_eq!(error.kind.code(), "version_exhausted");
+    assert_eq!(
+        annotations::table
+            .count()
+            .get_result::<i64>(&mut fixture.store.writer)
+            .expect("rows"),
+        0
+    );
+    diesel::update(settings::table.filter(settings::key.eq("metadata_version")))
+        .set(settings::value.eq(i64::MAX.to_string()))
+        .execute(&mut fixture.store.writer)
+        .expect("exhaust metadata");
+    let request = quartz_protocol::CategoriesCreateRequest {
+        entity: quartz_protocol::NewCategory {
+            uuid: "abcdef00-0000-4000-8000-000000000002"
+                .parse()
+                .expect("UUID"),
+            parent_uuid: None,
+            name: Some("Private category".into()),
+            color: "neutral".into(),
+            tendency: quartz_protocol::CategoryTendency::Neutral,
+        },
+    };
+    let error = WriteRequest::decode(
+        quartz_protocol::Op::CategoriesCreate,
+        serde_json::to_value(request).expect("body"),
+    )
+    .expect("decode")
+    .execute(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        None,
+    )
+    .expect_err("exhaustion");
+    assert_eq!(error.kind.code(), "version_exhausted");
+    assert_eq!(
+        crate::store::schema::categories::table
+            .count()
+            .get_result::<i64>(&mut fixture.store.writer)
+            .expect("categories"),
+        5
+    );
+}
+
+#[test]
+fn write_failures_log_typed_causes_without_user_content() {
+    use crate::persistence::dispatch::WriteRequest;
+    use diesel::connection::SimpleConnection;
+    use std::io::{Read, Seek};
+    let mut fixture = QueryFixture::new(0);
+    fixture.store.writer.batch_execute("CREATE TRIGGER reject_note BEFORE INSERT ON annotations BEGIN SELECT RAISE(ABORT, 'private user content'); END; CREATE TRIGGER reject_category BEFORE INSERT ON categories BEGIN SELECT RAISE(ABORT, 'private user content'); END;").expect("inject failures");
+    let mut log = tempfile::tempfile().expect("log");
+    let subscriber = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(log.try_clone().expect("writer")))
+            .finish(),
+    );
+    let bodies = [
+        (
+            quartz_protocol::Op::AnnotationsCreate,
+            serde_json::json!({"entities":[{"uuid":"abcdef00-0000-4000-8000-000000000001","kind":"note","start_utc_ms":fixture.start,"end_utc_ms":fixture.start+1,"note":"private user content"}]}),
+        ),
+        (
+            quartz_protocol::Op::CategoriesCreate,
+            serde_json::json!({"entity":{"uuid":"abcdef00-0000-4000-8000-000000000002","name":"private user content","color":"neutral","tendency":"neutral"}}),
+        ),
+    ];
+    for (op, body) in bodies {
+        let error = tracing::dispatcher::with_default(&subscriber, || {
+            WriteRequest::decode(op, body).expect("decode").execute(
+                &mut fixture.store,
+                quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+                None,
+            )
+        })
+        .expect_err("injected failure");
+        assert_eq!(error.kind, ErrorKind::Internal);
+    }
+    log.rewind().expect("rewind");
+    let mut text = String::new();
+    log.read_to_string(&mut text).expect("log text");
+    assert_eq!(
+        text.lines().count(),
+        2,
+        "each failed write logs one safe diagnostic: {text}"
+    );
+    assert!(text.contains("Database"), "typed database cause: {text}");
+    assert!(!text.contains("private user content"));
+}
+
+#[test]
+fn annotation_write_response_joins_category_identities_once() {
+    use diesel::{Connection, connection::InstrumentationEvent};
+    use std::sync::{Arc, Mutex};
+    let mut fixture = QueryFixture::new(0);
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let observed = queries.clone();
+    fixture
+        .store
+        .writer
+        .set_instrumentation(move |event: InstrumentationEvent<'_>| {
+            if let InstrumentationEvent::StartQuery { query, .. } = event {
+                observed.lock().expect("queries").push(query.to_string());
+            }
+        });
+    let entities = (0..2)
+        .map(|id| quartz_protocol::CreateAnnotation {
+            uuid: quartz_protocol::AnnotationId(
+                format!("abcdef00-0000-4000-8000-{id:012x}")
+                    .parse()
+                    .expect("UUID"),
+            ),
+            kind: quartz_protocol::AnnotationKind::Note,
+            values: quartz_protocol::AnnotationValues {
+                start_utc_ms: fixture.start,
+                end_utc_ms: fixture.start + 1,
+                category: Some(quartz_protocol::AnnotationCategory::Builtin {
+                    key: quartz_protocol::BuiltinCategory::Learning,
+                }),
+                label: None,
+                note: Some("note".into()),
+            },
+        })
+        .collect();
+    let response = fixture
+        .store
+        .create_annotations(
+            quartz_protocol::AnnotationsCreateRequest { entities },
+            quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        )
+        .expect("annotations");
+    assert_eq!(response.entities.len(), 2);
+    assert!(response.entities.iter().all(|entity| matches!(
+        entity.values.category,
+        Some(quartz_protocol::AnnotationCategory::Uuid { .. })
+    )));
+    let queries = queries.lock().expect("queries");
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.contains("FROM `categories`"))
+            .count(),
+        2,
+        "only category validation looks up categories separately"
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("SELECT") && sql.contains("LEFT OUTER JOIN `categories`"))
+            .count(),
+        1,
+        "response identities share one joined statement"
+    );
+}
+
+#[test]
+fn broken_annotation_storage_invariants_return_internal_and_log_safe_causes() {
+    use crate::persistence::dispatch::WriteRequest;
+    use diesel::connection::SimpleConnection;
+    use std::io::{Read, Seek};
+    enum Fault {
+        DanglingCategory,
+        MissingWrittenRow,
+    }
+    for fault in [Fault::DanglingCategory, Fault::MissingWrittenRow] {
+        let mut fixture = QueryFixture::new(0);
+        let request = quartz_protocol::AnnotationsCreateRequest {
+            entities: vec![quartz_protocol::CreateAnnotation {
+                uuid: quartz_protocol::AnnotationId(
+                    "abcdef00-0000-4000-8000-000000000001"
+                        .parse()
+                        .expect("UUID"),
+                ),
+                kind: quartz_protocol::AnnotationKind::Note,
+                values: quartz_protocol::AnnotationValues {
+                    start_utc_ms: fixture.start,
+                    end_utc_ms: fixture.start + 1,
+                    category: None,
+                    label: None,
+                    note: Some("private invariant fixture".into()),
+                },
+            }],
+        };
+        let now = quartz_domain::capture::UtcInstant::try_from(0).expect("UTC");
+        let expected_rows = match fault {
+            Fault::DanglingCategory => {
+                fixture
+                    .store
+                    .create_annotations(request.clone(), now)
+                    .expect("existing annotation");
+                fixture.store.writer.batch_execute("PRAGMA foreign_keys=OFF; UPDATE annotations SET category_id=9223372036854775807; PRAGMA foreign_keys=ON;").expect("dangling category fixture");
+                1
+            }
+            Fault::MissingWrittenRow => {
+                fixture.store.writer.batch_execute("CREATE TRIGGER remove_written_annotation AFTER INSERT ON annotations BEGIN DELETE FROM annotations WHERE id=NEW.id; END;").expect("remove inserted row");
+                0
+            }
+        };
+        fixture.store.take_committed_versions();
+        let mut log = tempfile::tempfile().expect("isolated log");
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(log.try_clone().expect("writer")))
+            .finish();
+        let error = tracing::subscriber::with_default(subscriber, || {
+            WriteRequest::decode(
+                quartz_protocol::Op::AnnotationsCreate,
+                serde_json::to_value(request).expect("request"),
+            )
+            .expect("decode")
+            .execute(&mut fixture.store, now, None)
+        })
+        .expect_err("stored invariant");
+        assert_eq!(error.kind, ErrorKind::Internal);
+        assert_eq!(
+            annotations::table
+                .count()
+                .get_result::<i64>(&mut fixture.store.writer)
+                .expect("rows after rollback"),
+            expected_rows
+        );
+        let changes = fixture.store.take_committed_versions();
+        assert!(changes.facts.is_empty() && changes.metadata_version.is_none());
+        log.rewind().expect("rewind");
+        let mut text = String::new();
+        log.read_to_string(&mut text).expect("diagnostic");
+        assert_eq!(text.lines().count(), 1);
+        assert!(
+            text.contains("StoredAnnotation"),
+            "typed storage invariant diagnostic: {text}"
+        );
+        assert!(!text.contains("private invariant fixture"));
+    }
+}
+
+#[test]
+fn range_pages_match_full_scans_for_day_and_week_buckets() {
+    use quartz_protocol::{FirstDayOfWeekSetting, RangeBucket};
+    const ROWS_PER_DATE: i64 = 900;
+    const POPULATED_DATES: i64 = 3;
+    const WEEK_MS: i64 = 7 * UTC_DAY_MS;
+    let mut fixture = QueryFixture::new(ROWS_PER_DATE * POPULATED_DATES);
+    fixture.set_first_weekday(FirstDayOfWeekSetting::Monday);
+    let mut request = fixture.range_request(RangeBucket::Day);
+    request.end_date = request
+        .start_date
+        .checked_add(jiff::Span::new().days(21))
+        .expect("end");
+    let end = crate::query::calendar::DayCalendar::new(
+        request.end_date,
+        crate::query::calendar::DayStartOffset::MIDNIGHT,
+    )
+    .expect("end calendar")
+    .range
+    .start;
+    diesel::sql_query("UPDATE intervals SET start_utc_ms=?1+((id-1)/?2)*?3+((id-1)%?2)*duration_ms, end_utc_ms=?1+((id-1)/?2)*?3+((id-1)%?2+1)*duration_ms, start_mono_ms=((id-1)/?2)*?3+((id-1)%?2)*duration_ms, end_mono_ms=((id-1)/?2)*?3+((id-1)%?2+1)*duration_ms")
+        .bind::<diesel::sql_types::BigInt, _>(fixture.start)
+        .bind::<diesel::sql_types::BigInt, _>(ROWS_PER_DATE)
+        .bind::<diesel::sql_types::BigInt, _>(WEEK_MS)
+        .execute(&mut fixture.store.writer).expect("spread facts across weeks");
+    diesel::update(clock_segments::table)
+        .set((
+            clock_segments::end_utc_ms.eq(end),
+            clock_segments::end_mono_ms.eq(end - fixture.start),
+        ))
+        .execute(&mut fixture.store.writer)
+        .expect("clock coverage");
+    diesel::update(capture_runs::table)
+        .set(capture_runs::ended_utc_ms.eq(end))
+        .execute(&mut fixture.store.writer)
+        .expect("run coverage");
+    for bucket in [RangeBucket::Day, RangeBucket::Week] {
+        request.bucket = bucket;
+        request.cursor = None;
+        let mut pages = 0;
+        let mut total_active = 0;
+        loop {
+            let optimized = fixture.range_page(request.clone());
+            let mut reference = fixture.start(QueryRequest::Range(request.clone()));
+            reference.scan_entire_range();
+            let reference_page = loop {
+                if let Some(response) = reference.advance().expect("full scan") {
+                    let QueryResponse::Range(page) = response else {
+                        panic!("range response")
+                    };
+                    break page;
+                }
+            };
+            fixture
+                .store
+                .return_query_reader(reference.finish().expect("finish reference"));
+            assert_eq!(
+                optimized.buckets, reference_page.buckets,
+                "bucket {bucket:?}, page {pages}"
+            );
+            assert_eq!(
+                optimized.next_cursor, reference_page.next_cursor,
+                "cursor {bucket:?}, page {pages}"
+            );
+            assert_eq!(
+                optimized.versions, reference_page.versions,
+                "versions {bucket:?}, page {pages}"
+            );
+            assert_eq!(optimized, reference_page);
+            total_active += optimized
+                .buckets
+                .iter()
+                .filter_map(|bucket| bucket.active_ms)
+                .sum::<i64>();
+            pages += 1;
+            let Some(cursor) = optimized.next_cursor else {
+                break;
+            };
+            request.cursor = Some(cursor);
+        }
+        assert!(
+            pages > POPULATED_DATES,
+            "multiple pages cross populated bucket boundaries"
+        );
+        assert_eq!(
+            total_active,
+            ROWS_PER_DATE * POPULATED_DATES * test_support::FACT_MS
+        );
+    }
+}
+
+#[test]
+fn forged_annotation_resume_positions_are_invalid_and_old_versions_are_stale() {
+    let mut fixture = QueryFixture::new(0);
+    let entity = quartz_protocol::CreateAnnotation {
+        uuid: quartz_protocol::AnnotationId(
+            "abcdef00-0000-4000-8000-000000000001"
+                .parse()
+                .expect("UUID"),
+        ),
+        kind: quartz_protocol::AnnotationKind::Note,
+        values: quartz_protocol::AnnotationValues {
+            start_utc_ms: fixture.start,
+            end_utc_ms: fixture.start + 1,
+            category: None,
+            label: None,
+            note: Some("note".into()),
+        },
+    };
+    fixture
+        .store
+        .create_annotations(
+            quartz_protocol::AnnotationsCreateRequest {
+                entities: vec![entity.clone()],
+            },
+            quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        )
+        .expect("note");
+    let mut request = quartz_protocol::QueryAnnotationsRequest {
+        start_utc_ms: fixture.start,
+        end_utc_ms: fixture.start + 100,
+        cursor: None,
+    };
+    let QueryResponse::Annotations(first) = fixture
+        .run(QueryRequest::Annotations(request.clone()))
+        .expect("first")
+    else {
+        panic!("annotations")
+    };
+    let query = quartz_protocol::CursorQuery::Annotations {
+        start_utc_ms: request.start_utc_ms,
+        end_utc_ms: request.end_utc_ms,
+    };
+    let resume = quartz_protocol::AnnotationResume {
+        start_utc_ms: entity.values.start_utc_ms,
+        end_utc_ms: entity.values.end_utc_ms,
+        uuid: entity.uuid,
+        chunk: 0,
+    };
+    let valid = QueryCursor::new_annotation(first.versions, query.clone(), resume.clone());
+    request.cursor = Some(valid.clone());
+    let QueryResponse::Annotations(repeated) = fixture
+        .run(QueryRequest::Annotations(request.clone()))
+        .expect("valid row position")
+    else {
+        panic!("annotations")
+    };
+    assert_eq!(repeated.entities, first.entities);
+    enum Forgery {
+        MissingUuid,
+        WrongStart,
+        WrongEnd,
+        ChunkMismatch,
+        OutOfRangeChunk,
+    }
+    for forgery in [
+        Forgery::MissingUuid,
+        Forgery::WrongStart,
+        Forgery::WrongEnd,
+        Forgery::ChunkMismatch,
+        Forgery::OutOfRangeChunk,
+    ] {
+        let mut wire = serde_json::to_value(&valid).expect("cursor");
+        match forgery {
+            Forgery::MissingUuid => {
+                wire["annotation_resume"]["uuid"] =
+                    serde_json::json!("abcdef00-0000-4000-8000-000000000002")
+            }
+            Forgery::WrongStart => {
+                wire["annotation_resume"]["start_utc_ms"] =
+                    serde_json::json!(resume.start_utc_ms + 1)
+            }
+            Forgery::WrongEnd => {
+                wire["annotation_resume"]["end_utc_ms"] = serde_json::json!(resume.end_utc_ms + 1)
+            }
+            Forgery::ChunkMismatch => wire["position"] = serde_json::json!(1),
+            Forgery::OutOfRangeChunk => {
+                wire["position"] = serde_json::json!(usize::MAX);
+                wire["annotation_resume"]["chunk"] = serde_json::json!(usize::MAX);
+            }
+        }
+        request.cursor = Some(serde_json::from_value(wire).expect("opaque forged cursor"));
+        let error = fixture
+            .run(QueryRequest::Annotations(request.clone()))
+            .expect_err("invalid row or chunk");
+        assert!(matches!(error, RunQueryError::InvalidCursor));
+        assert_eq!(error.kind(), ErrorKind::BadRequest);
+    }
+    request.cursor = Some(QueryCursor::new(
+        quartz_protocol::QueryVersions("older semantics".into()),
+        query,
+        1,
+    ));
+    assert!(matches!(
+        fixture.run(QueryRequest::Annotations(request)),
+        Err(RunQueryError::StaleCursor)
+    ));
+}
+
+#[test]
+fn settings_metadata_exhaustion_returns_version_exhausted_and_rolls_back() {
+    use crate::persistence::dispatch::WriteRequest;
+    use crate::store::schema::settings;
+    let mut fixture = QueryFixture::new(0);
+    let original = fixture.store.ui_settings().expect("original settings");
+    diesel::update(settings::table.filter(settings::key.eq("metadata_version")))
+        .set(settings::value.eq(i64::MAX.to_string()))
+        .execute(&mut fixture.store.writer)
+        .expect("exhaust metadata");
+    fixture.store.take_committed_versions();
+    let system = quartz_protocol::EffectiveUiSettings {
+        resident: Default::default(),
+        prewarm: Default::default(),
+        ui_language: quartz_protocol::UiLanguage::English,
+        locale: None,
+    };
+    let error = WriteRequest::SettingsSet(quartz_protocol::SettingsSetRequest {
+        language: Some(quartz_protocol::UiLanguageSetting::En),
+        ..Default::default()
+    })
+    .execute(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        Some(system),
+    )
+    .expect_err("exhausted settings write");
+    assert_eq!(error.kind, ErrorKind::VersionExhausted);
+    assert_eq!(
+        fixture.store.ui_settings().expect("unchanged settings"),
+        original
+    );
+    assert_eq!(
+        settings::table
+            .filter(settings::key.eq("metadata_version"))
+            .select(settings::value)
+            .first::<String>(&mut fixture.store.writer)
+            .expect("metadata"),
+        i64::MAX.to_string()
+    );
+    let effects = fixture.store.take_committed_versions();
+    assert!(effects.facts.is_empty() && effects.metadata_version.is_none());
+}

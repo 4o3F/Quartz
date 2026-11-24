@@ -35,6 +35,8 @@ pub(crate) enum ReadFactsError {
     InvalidMonotonicEnd { kind: FactKind, id: i64 },
     #[snafu(display("invalid endpoint state in {kind} {id}"))]
     InvalidEnd { kind: FactKind, id: i64 },
+    #[snafu(display("invalid duration in {kind} {id}"))]
+    InvalidDuration { kind: FactKind, id: i64 },
     #[snafu(display("invalid reason for coverage in {kind}"))]
     InvalidCoverage { kind: FactKind },
     #[snafu(display("incomplete closed-run extent"))]
@@ -162,9 +164,15 @@ pub(crate) struct Fact {
     details: Option<FactDetails>,
     window: Option<WindowDetails>,
 }
+#[cfg(test)]
+pub(crate) mod work {
+    std::thread_local! { pub static RECORDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+}
 impl Fact {
     /// Reuses the existing stored-fact representation for the typed wire record.
     pub(crate) fn record(&self) -> Result<quartz_protocol::facts::FactRecord, serde_json::Error> {
+        #[cfg(test)]
+        work::RECORDS.update(|count| count + 1);
         serde_json::from_value(serde_json::to_value(self)?)
     }
 
@@ -173,6 +181,10 @@ impl Fact {
             .cmp(&other.start_utc_ms)
             .then_with(|| self.kind.label().cmp(other.kind.label()))
             .then_with(|| self.id.cmp(&other.id))
+    }
+
+    pub(in crate::store) fn set_window(&mut self, window: WindowDetails) {
+        self.window = Some(window);
     }
 
     fn new(
@@ -200,7 +212,12 @@ impl Fact {
             start_mono_ms: None,
             end_mono_ms: None,
             confirmed_mono_ms: None,
-            duration_ms: Some(end.at() - start),
+            duration_ms: Some(
+                end.at()
+                    .checked_sub(start)
+                    .filter(|duration| *duration >= 0)
+                    .ok_or(ReadFactsError::InvalidDuration { kind, id })?,
+            ),
             end_reason: None,
             reason: None,
             no_foreground_reason: None,
@@ -232,7 +249,12 @@ impl Fact {
                 });
             }
         };
-        Ok(end - start)
+        end.checked_sub(start)
+            .filter(|duration| *duration >= 0)
+            .ok_or(ReadFactsError::InvalidDuration {
+                kind: self.kind,
+                id: self.id,
+            })
     }
     pub(crate) fn endpoint(&self) -> i64 {
         self.end.at()
@@ -366,8 +388,8 @@ enum FactDetails {
     },
 }
 
-#[derive(Debug, Clone)]
-struct WindowDetails {
+#[derive(Debug, Clone, diesel::Queryable)]
+pub(in crate::store) struct WindowDetails {
     display_name: Option<String>,
     exe_path: Option<String>,
     exe_name: Option<String>,

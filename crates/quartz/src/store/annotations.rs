@@ -11,7 +11,10 @@ use super::{
 };
 use crate::query::MAX_QUERY_RANGE_MS;
 use clipping::{Remainders, SplitIdentity};
-use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper};
+use diesel::{
+    ExpressionMethods, JoinOnDsl, NullableExpressionMethods, OptionalExtension, QueryDsl,
+    RunQueryDsl, SelectableHelper,
+};
 use quartz_domain::{
     capture::{UtcInstant, limits::UTC_DAY_MS},
     facts::QueryRange,
@@ -21,7 +24,7 @@ use quartz_protocol::{
     AnnotationsCreateRequest, AnnotationsDeleteRequest, AnnotationsResponse,
     AnnotationsUpdateRequest,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A maximum-length range can intersect one additional UTC date.
 const MAX_ANNOTATION_REQUEST_DAYS: i64 = MAX_QUERY_RANGE_MS / UTC_DAY_MS + 1;
@@ -83,6 +86,8 @@ pub(crate) enum ExecuteAnnotationWritesError {
     InvalidCategory,
     #[snafu(display("annotation to update does not exist"))]
     MissingAnnotation,
+    #[snafu(display("stored annotation row or category reference is missing"))]
+    InvalidStoredAnnotation,
     #[snafu(display("annotation kind cannot change"))]
     ChangeKind,
     #[snafu(display("annotation UUID occurs more than once in the request"))]
@@ -342,9 +347,25 @@ impl WriteTx<'_> {
                 self.clip_annotations(&item.after, now)?;
             }
         }
-        let entities = plan
+        let identities: Vec<_> = plan.into_iter().map(|item| item.after.uuid).collect();
+        let mut joined = BTreeMap::new();
+        for chunk in identities.chunks(super::query::READ_BATCH_ROWS) {
+            let rows = annotations::table
+                .left_join(categories::table.on(annotations::category_id.eq(categories::id)))
+                .filter(annotations::uuid.eq_any(chunk))
+                .select((AnnotationsRow::as_select(), categories::uuid.nullable()))
+                .load::<AnnotationEntityRow>(self.connection)?;
+            for row in rows {
+                joined.insert(row.annotation.uuid.clone(), row.into_entity()?);
+            }
+        }
+        let entities = identities
             .into_iter()
-            .map(|item| self.annotation_entity(item.after))
+            .map(|uuid| {
+                joined
+                    .remove(&uuid)
+                    .ok_or(ExecuteAnnotationWritesError::InvalidStoredAnnotation)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(AnnotationsResponse { entities })
     }
@@ -468,17 +489,21 @@ impl WriteTx<'_> {
             .bump_days(self.connection, DataSource::Annotations, row.range())
             .map_err(|source| ExecuteAnnotationWritesError::Version { source })
     }
-    fn annotation_entity(
-        &mut self,
-        row: AnnotationsRow,
-    ) -> Result<Annotation, ExecuteAnnotationWritesError> {
-        let category = row
-            .category_id
-            .map(|id| {
-                let uuid = categories::table
-                    .filter(categories::id.eq(id))
-                    .select(categories::uuid)
-                    .first::<String>(self.connection)?;
+}
+#[derive(diesel::Queryable)]
+struct AnnotationEntityRow {
+    annotation: AnnotationsRow,
+    category_uuid: Option<String>,
+}
+impl AnnotationEntityRow {
+    fn into_entity(self) -> Result<Annotation, ExecuteAnnotationWritesError> {
+        let row = self.annotation;
+        if row.category_id.is_some() && self.category_uuid.is_none() {
+            return Err(ExecuteAnnotationWritesError::InvalidStoredAnnotation);
+        }
+        let category = self
+            .category_uuid
+            .map(|uuid| {
                 Ok::<_, ExecuteAnnotationWritesError>(AnnotationCategory::Uuid {
                     uuid: uuid
                         .parse()

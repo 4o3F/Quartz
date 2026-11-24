@@ -11,7 +11,7 @@ use quartz_protocol::{
     UNCLASSIFIED_MAX_SAMPLES, UnclassifiedGroupBy, UnclassifiedItem, UnclassifiedSampleRange,
     WorkEntity,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum GroupIdentity {
@@ -81,17 +81,25 @@ impl UnclassifiedGroup {
 pub(super) struct UnclassifiedAccumulator {
     group_by: UnclassifiedGroupBy,
     search: Option<FoldedKey>,
+    #[cfg(test)]
+    pub(super) search_evaluations: std::cell::Cell<usize>,
     groups: BTreeMap<GroupIdentity, UnclassifiedGroup>,
+    rejected: BTreeSet<GroupIdentity>,
 }
 impl UnclassifiedAccumulator {
     pub(super) fn new(request: &QueryUnclassifiedRequest) -> Self {
         Self {
+            #[cfg(test)]
+            search_evaluations: std::cell::Cell::new(0),
             group_by: request.group_by,
             search: request.search.as_deref().map(FoldedKey::new),
             groups: BTreeMap::new(),
+            rejected: BTreeSet::new(),
         }
     }
     fn matches(&self, text: &str) -> bool {
+        #[cfg(test)]
+        self.search_evaluations.update(|count| count + 1);
         self.search
             .as_ref()
             .is_none_or(|search| FoldedKey::new(text).contains(search))
@@ -123,6 +131,9 @@ impl UnclassifiedAccumulator {
             VisibleEntity::App(_) => GroupIdentity::App(ApplicationId(app.id.0)),
             VisibleEntity::Document(identity) => GroupIdentity::Document(identity.clone()),
         };
+        if self.rejected.contains(&identity) {
+            return;
+        }
         if let Some(group) = self.groups.get_mut(&identity) {
             group.push(segment);
             return;
@@ -147,6 +158,7 @@ impl UnclassifiedAccumulator {
             VisibleEntity::App(_) => false,
         };
         if !app_matches && !document_matches {
+            self.rejected.insert(identity);
             return;
         }
         let group = self

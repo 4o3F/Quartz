@@ -242,6 +242,9 @@ impl RangeAccumulator {
         }
         Ok(())
     }
+    pub(super) fn page_is_full(&self) -> bool {
+        self.page.as_ref().is_some_and(|page| page.next.is_some())
+    }
     pub(super) fn push(&mut self, segment: &DerivedSegment, facts: &SegmentFacts) {
         self.buckets[self.current].push(segment, facts, &self.dimensions);
     }
@@ -254,7 +257,7 @@ impl RangeAccumulator {
             .push_bucket(bucket, groups, &self.dimensions)
     }
     pub(super) fn finish(mut self) -> Result<RangePageOutput, RunQueryError> {
-        while self.current < self.buckets.len() {
+        while self.current < self.buckets.len() && !self.page_is_full() {
             self.finish_bucket()?;
             self.current += 1;
         }

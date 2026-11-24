@@ -28,7 +28,7 @@ use quartz_domain::{
     capture::{CaptureWrite, RowId, RunId, SegmentId, TimeRange, WindowId, WriteBatch},
     facts::QueryRange,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Windows session identity supplied by the platform shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +100,7 @@ pub(crate) struct CaptureKeys {
 #[derive(Debug, Clone, Default)]
 struct RunKeys {
     segments: BTreeMap<SegmentId, DbRowId>,
+    closed_segments: BTreeSet<SegmentId>,
     windows: BTreeMap<WindowId, DbRowId>,
     intervals: BTreeMap<RowId, DbRowId>,
     availability: BTreeMap<RowId, DbRowId>,
@@ -268,6 +269,24 @@ impl<'connection> Capture<'connection> {
 }
 
 impl CaptureKeys {
+    #[cfg(test)]
+    pub(crate) fn segment_count(&self) -> usize {
+        self.runs.values().map(|run| run.segments.len()).sum()
+    }
+
+    /// Retires committed closed mappings only after all buffered references have expired.
+    pub(crate) fn retire_segments(&mut self, oldest: Option<SegmentId>) {
+        for run in self.runs.values_mut() {
+            run.closed_segments.retain(|segment| {
+                if oldest.is_none_or(|oldest| *segment < oldest) {
+                    run.segments.remove(segment);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
     pub(super) fn begin(&mut self) {
         self.original_runs = Some(BTreeMap::new());
     }

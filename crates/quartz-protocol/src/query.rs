@@ -104,8 +104,25 @@ impl QueryCursor {
                 versions,
                 query,
                 position,
+                annotation_resume: None,
             })
             .expect("typed cursor fields serialize to JSON"),
+        )
+    }
+    /// Issues an annotation continuation at a stored row and text fragment.
+    pub fn new_annotation(
+        versions: QueryVersions,
+        query: CursorQuery,
+        resume: AnnotationResume,
+    ) -> Self {
+        Self(
+            serde_json::to_value(CursorPosition {
+                versions,
+                query,
+                position: resume.chunk,
+                annotation_resume: Some(resume),
+            })
+            .expect("typed annotation cursor serializes"),
         )
     }
     /// Validates the core's cursor schema when admitting a continuation request.
@@ -121,7 +138,15 @@ impl QueryCursor {
     /// # Errors
     /// Returns an error for an invalid cursor schema or parameters from another query.
     pub fn validate_query(&self, expected: &CursorQuery) -> Result<(), serde_json::Error> {
-        if self.decode()?.query() != expected {
+        let position = self.decode()?;
+        if position.annotation_resume().is_some()
+            && !matches!(position.query(), CursorQuery::Annotations { .. })
+        {
+            return Err(serde::de::Error::custom(
+                "annotation resume requires an annotation query",
+            ));
+        }
+        if position.query() != expected {
             return Err(serde::de::Error::custom(
                 "cursor parameters do not match the request",
             ));
@@ -171,8 +196,24 @@ pub struct CursorPosition {
     versions: QueryVersions,
     query: CursorQuery,
     position: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    annotation_resume: Option<AnnotationResume>,
+}
+/// Stored annotation ordering key and next fragment within that row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnnotationResume {
+    pub start_utc_ms: i64,
+    pub end_utc_ms: i64,
+    pub uuid: crate::AnnotationId,
+    pub chunk: usize,
 }
 impl CursorPosition {
+    /// Returns the annotation row and fragment retained by the core.
+    pub fn annotation_resume(&self) -> Option<&AnnotationResume> {
+        self.annotation_resume.as_ref()
+    }
+
     /// Returns the input versions to compare with the current snapshot.
     pub fn versions(&self) -> &QueryVersions {
         &self.versions
@@ -181,7 +222,7 @@ impl CursorPosition {
     pub fn query(&self) -> &CursorQuery {
         &self.query
     }
-    /// Returns the zero-based position of the next list item.
+    /// Returns the next list item index, or the fragment index for an annotation row.
     pub fn position(&self) -> usize {
         self.position
     }
@@ -1530,5 +1571,41 @@ mod tests {
             oversized_rule.decode().is_err(),
             "admission bounds internally constructed cursors too"
         );
+    }
+    #[test]
+    fn annotation_resume_is_rejected_on_other_query_kinds() {
+        let resume = AnnotationResume {
+            start_utc_ms: 0,
+            end_utc_ms: 1,
+            uuid: crate::AnnotationId(
+                "abcdef00-0000-4000-8000-000000000001"
+                    .parse()
+                    .expect("UUID"),
+            ),
+            chunk: 0,
+        };
+        let date = "2025-01-02".parse().expect("date");
+        for query in [
+            CursorQuery::Day { local_date: date },
+            CursorQuery::Facts { local_date: date },
+            CursorQuery::PendingAway { local_date: date },
+        ] {
+            let cursor = QueryCursor::new_annotation(
+                QueryVersions("v".into()),
+                query.clone(),
+                resume.clone(),
+            );
+            assert!(cursor.validate_query(&query).is_err());
+        }
+        let query = CursorQuery::Annotations {
+            start_utc_ms: 0,
+            end_utc_ms: 1,
+        };
+        QueryCursor::new_annotation(QueryVersions("v".into()), query.clone(), resume)
+            .validate_query(&query)
+            .expect("annotation resume");
+        QueryCursor::new(QueryVersions("older".into()), query.clone(), 1)
+            .validate_query(&query)
+            .expect("old annotation cursor reaches version validation");
     }
 }

@@ -49,8 +49,13 @@ pub(crate) struct PageBudget {
     remaining: usize,
 }
 impl PageBudget {
+    #[cfg(test)]
+    pub(super) fn remaining_bytes(&self) -> usize {
+        self.remaining
+    }
+
     pub(super) fn fits(&self, item: &impl Serialize) -> Result<bool, RunQueryError> {
-        Ok(serde_json::to_vec(item)?.len() < self.remaining)
+        Ok(JsonBytes::measure(item)? < self.remaining)
     }
     /// Reserves worst-case JSON escaping and metadata for both annotation text fields.
     pub(super) fn annotation_chunk_bytes(
@@ -59,7 +64,7 @@ impl PageBudget {
     ) -> Result<usize, RunQueryError> {
         let bytes = self
             .remaining
-            .checked_sub(serde_json::to_vec(metadata)?.len() + 1)
+            .checked_sub(JsonBytes::measure(metadata)? + 1)
             .ok_or(RunQueryError::PageTooLarge)?
             / (ANNOTATION_TEXT_FIELDS * MAX_JSON_BYTES_PER_TEXT_BYTE);
         if bytes < char::MAX.len_utf8() {
@@ -68,7 +73,7 @@ impl PageBudget {
         Ok(bytes)
     }
     pub(crate) fn new(fixed: &impl Serialize) -> Result<Self, RunQueryError> {
-        let fixed_bytes = serde_json::to_vec(fixed)?.len();
+        let fixed_bytes = JsonBytes::measure(fixed)?;
         Ok(Self {
             remaining: QUERY_PAGE_BYTES
                 .checked_sub(PAGE_ENVELOPE_BYTES + fixed_bytes)
@@ -78,7 +83,7 @@ impl PageBudget {
     pub(crate) fn with_cursor(mut self, cursor: &QueryCursor) -> Result<Self, RunQueryError> {
         self.remaining = self
             .remaining
-            .checked_sub(serde_json::to_vec(cursor)?.len())
+            .checked_sub(JsonBytes::measure(cursor)?)
             .ok_or(RunQueryError::PageTooLarge)?;
         Ok(self)
     }
@@ -170,7 +175,7 @@ impl PageBudget {
         }
     }
     pub(crate) fn admit(&mut self, item: &impl Serialize) -> Result<bool, RunQueryError> {
-        let bytes = serde_json::to_vec(item)?.len() + 1;
+        let bytes = JsonBytes::measure(item)? + 1;
         if bytes > QUERY_PAGE_BYTES - PAGE_ENVELOPE_BYTES {
             return Err(RunQueryError::PageTooLarge);
         }
@@ -179,6 +184,29 @@ impl PageBudget {
         }
         self.remaining -= bytes;
         Ok(true)
+    }
+}
+
+/// Counts encoded bytes without retaining a serialized copy.
+#[derive(Debug, Default)]
+struct JsonBytes(usize);
+impl JsonBytes {
+    fn measure(value: &impl Serialize) -> Result<usize, serde_json::Error> {
+        let mut writer = Self::default();
+        serde_json::to_writer(&mut writer, value)?;
+        Ok(writer.0)
+    }
+}
+impl std::io::Write for JsonBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("encoded JSON size overflow"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

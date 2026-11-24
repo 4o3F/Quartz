@@ -364,6 +364,28 @@ pub enum CaptureWrite {
     RecordGap(CaptureGap),
 }
 impl CaptureWrite {
+    /// Returns the logical clock mapping referenced directly by this write.
+    pub fn segment(&self) -> Option<SegmentId> {
+        match self {
+            Self::OpenClockSegment { segment, .. }
+            | Self::CloseClockSegment { segment, .. }
+            | Self::SettlePersistedRows { segment, .. } => Some(*segment),
+            Self::OpenInterval(row) => Some(row.segment),
+            Self::OpenAvailability(row) => Some(row.segment),
+            Self::Checkpoint(point) => Some(point.segment),
+            Self::RecordGap(gap) => Some(gap.segment),
+            Self::OpenRun { .. }
+            | Self::CloseRun { .. }
+            | Self::ObserveWindow { .. }
+            | Self::RetireWindow { .. }
+            | Self::CloseInterval { .. }
+            | Self::CloseAvailability { .. }
+            | Self::SetDeadline { .. }
+            | Self::SetTimedState(_)
+            | Self::ClearTimedPolicy(_)
+            | Self::ClearDeadline { .. } => None,
+        }
+    }
     /// Borrows the confirmation point carried by this write, when present.
     pub fn checkpoint(&self) -> Option<&Checkpoint> {
         match self {

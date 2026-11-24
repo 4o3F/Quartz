@@ -93,6 +93,9 @@ impl WriteQueue {
                 .next_deadline()
                 .is_some_and(|deadline| deadline <= now.mono)
     }
+    pub(super) fn retire_segments(&self, keys: &mut crate::store::capture::CaptureKeys) {
+        keys.retire_segments(self.lock().backlog.oldest_referenced_segment());
+    }
     pub(super) fn result(&self) -> PersistenceResult {
         self.lock().result()
     }

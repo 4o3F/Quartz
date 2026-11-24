@@ -5,7 +5,8 @@ use super::{
     schema::categories, versions::BumpVersionError,
 };
 use diesel::{
-    Connection, ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper, SqliteConnection,
+    Connection, ExpressionMethods, JoinOnDsl, NullableExpressionMethods, OptionalExtension,
+    QueryDsl, RunQueryDsl, SelectableHelper, SqliteConnection,
 };
 use quartz_domain::categories::{
     ArchiveCategory, BuiltinCategory, Category, CategoryArchiveState, CategoryEntity, CategoryId,
@@ -113,6 +114,7 @@ impl Store {
 
     /// Returns hierarchy preorder with siblings ordered by sort_order, then UUID.
     /// Filtering archives preserves active descendants of archived parents.
+    #[cfg(test)]
     pub(crate) fn list_categories(
         &mut self,
         archived: IncludeArchivedCategories,
@@ -121,16 +123,44 @@ impl Store {
             .transaction(|connection| CategoryTree::load(connection)?.list(archived))
     }
 
+    /// Resolves a UUID retry and its parent identity without loading unrelated categories.
+    pub(crate) fn category(
+        &mut self,
+        uuid: &CategoryUuid,
+    ) -> Result<Option<CategoryEntity>, ExecuteCategoryCommandError> {
+        Self::lookup_category(&mut self.writer, uuid)
+    }
+    fn lookup_category(
+        connection: &mut SqliteConnection,
+        uuid: &CategoryUuid,
+    ) -> Result<Option<CategoryEntity>, ExecuteCategoryCommandError> {
+        let parent = diesel::alias!(categories as parent_category);
+        categories::table
+            .left_join(parent.on(categories::parent_id.eq(parent.field(categories::id))))
+            .filter(categories::uuid.eq(&uuid.0))
+            .select((
+                CategoriesRow::as_select(),
+                parent.field(categories::uuid).nullable(),
+            ))
+            .first::<CategoryLookup>(connection)
+            .optional()?
+            .map(|lookup| {
+                if lookup.row.parent_id.is_some() && lookup.parent_uuid.is_none() {
+                    return Err(ExecuteCategoryCommandError::InvalidStoredCategory);
+                }
+                lookup.row.entity(lookup.parent_uuid.map(CategoryUuid))
+            })
+            .transpose()
+    }
     pub(crate) fn create_category(
         &mut self,
         command: CreateCategory,
     ) -> Result<CategoryEntity, ExecuteCategoryCommandError> {
         self.write(|tx| {
-            let tree = CategoryTree::load(tx.connection)?;
-            // UUID retries return before validating replacement values or parent references.
-            if let Some(row) = tree.find(&command.uuid) {
-                return tree.entity(row);
+            if let Some(entity) = Self::lookup_category(tx.connection, &command.uuid)? {
+                return Ok(entity);
             }
+            let tree = CategoryTree::load(tx.connection)?;
             if BuiltinCategory::ALL
                 .into_iter()
                 .any(|builtin| builtin.uuid() == command.uuid)
@@ -359,11 +389,6 @@ impl CategoryTree {
     }
     fn entity(&self, row: &CategoriesRow) -> Result<CategoryEntity, ExecuteCategoryCommandError> {
         let invalid = || ExecuteCategoryCommandError::InvalidStoredCategory;
-        let builtin_key = row
-            .builtin_key
-            .as_deref()
-            .map(|key| BuiltinCategory::from_key(key).ok_or_else(invalid))
-            .transpose()?;
         let parent_uuid = row
             .parent_id
             .map(|parent| {
@@ -374,36 +399,7 @@ impl CategoryTree {
                     .ok_or_else(invalid)
             })
             .transpose()?;
-        let values = CategoryValues {
-            parent_uuid,
-            name: row
-                .name
-                .as_deref()
-                .map(CategoryName::from_stored)
-                .transpose()
-                .map_err(|_| invalid())?,
-            color: row.color.parse().map_err(|_| invalid())?,
-            tendency: match row.tendency {
-                enums::CategoryTendency::Focus => CategoryTendency::Focus,
-                enums::CategoryTendency::Neutral => CategoryTendency::Neutral,
-                enums::CategoryTendency::Distraction => CategoryTendency::Distraction,
-            },
-        };
-        if values.name.is_none() && builtin_key.is_none() {
-            return Err(invalid());
-        }
-        Ok(CategoryEntity {
-            id: CategoryId(row.id.ok_or_else(invalid)?),
-            uuid: CategoryUuid(row.uuid.clone()),
-            builtin_key,
-            values,
-            sort_order: row.sort_order,
-            archive_state: match row.archived {
-                0 => CategoryArchiveState::Active,
-                1 => CategoryArchiveState::Archived,
-                _ => return Err(invalid()),
-            },
-        })
+        row.entity(parent_uuid)
     }
     fn list(
         &self,
@@ -435,6 +431,54 @@ impl CategoryTree {
             return Err(ExecuteCategoryCommandError::InvalidStoredCategory);
         }
         Ok(entities)
+    }
+}
+#[derive(diesel::Queryable)]
+struct CategoryLookup {
+    row: CategoriesRow,
+    parent_uuid: Option<String>,
+}
+impl CategoriesRow {
+    fn entity(
+        &self,
+        parent_uuid: Option<CategoryUuid>,
+    ) -> Result<CategoryEntity, ExecuteCategoryCommandError> {
+        let invalid = || ExecuteCategoryCommandError::InvalidStoredCategory;
+        let builtin_key = self
+            .builtin_key
+            .as_deref()
+            .map(|key| BuiltinCategory::from_key(key).ok_or_else(invalid))
+            .transpose()?;
+        let values = CategoryValues {
+            parent_uuid,
+            name: self
+                .name
+                .as_deref()
+                .map(CategoryName::from_stored)
+                .transpose()
+                .map_err(|_| invalid())?,
+            color: self.color.parse().map_err(|_| invalid())?,
+            tendency: match self.tendency {
+                enums::CategoryTendency::Focus => CategoryTendency::Focus,
+                enums::CategoryTendency::Neutral => CategoryTendency::Neutral,
+                enums::CategoryTendency::Distraction => CategoryTendency::Distraction,
+            },
+        };
+        if values.name.is_none() && builtin_key.is_none() {
+            return Err(invalid());
+        }
+        Ok(CategoryEntity {
+            id: CategoryId(self.id.ok_or_else(invalid)?),
+            uuid: CategoryUuid(self.uuid.clone()),
+            builtin_key,
+            values,
+            sort_order: self.sort_order,
+            archive_state: match self.archived {
+                0 => CategoryArchiveState::Active,
+                1 => CategoryArchiveState::Archived,
+                _ => return Err(invalid()),
+            },
+        })
     }
 }
 impl From<CategoryTendency> for enums::CategoryTendency {

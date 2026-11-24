@@ -9,7 +9,7 @@ use super::{
     pipeline::{DerivedSegment, SegmentFacts, TimelineProjection},
 };
 use quartz_protocol::{
-    Activity, ApplicationId, ClassificationRuleId, ENTITY_DETAIL_DAYS, ENTITY_DETAIL_TOP_TITLES,
+    ApplicationId, ClassificationRuleId, ENTITY_DETAIL_DAYS, ENTITY_DETAIL_TOP_TITLES,
     EntityClassificationRule, EntityDailyDuration, EntityTitleDuration, LocalDate,
     QueryEntityDetailResponse, QuerySegmentDetailRequest, QueryVersions, TimelineDetail,
     TimelineSegment,
@@ -38,9 +38,9 @@ impl EntityCalendar {
         }
         let mut days = Vec::with_capacity(ENTITY_DETAIL_DAYS);
         for local_date in dates.into_iter().rev() {
-            let calendar = DayCalendar::in_zone(local_date, offset, zone.clone())?;
+            let range = DayCalendar::range_in_zone(local_date, offset, zone.clone())?;
             days.push(EntityDay {
-                range: calendar.range,
+                range,
                 daily: EntityDailyDuration {
                     local_date,
                     active_ms: 0,
@@ -91,12 +91,10 @@ pub(super) enum EntitySelection {
     Document { identity: DocumentIdentity },
 }
 impl EntitySelection {
-    fn matches(&self, interval: &TimelineSegment) -> bool {
+    fn matches(&self, segment: &DerivedSegment, facts: &SegmentFacts) -> bool {
         match self {
-            Self::App { id } => interval.app.as_ref().is_some_and(|app| app.id == *id),
-            Self::Document { identity } => {
-                DocumentIdentity::from_segment(interval).as_ref() == Some(identity)
-            }
+            Self::App { id } => facts.app(segment).is_some_and(|app| app.id.0 == id.0),
+            Self::Document { identity } => facts.matches_document(segment, identity),
         }
     }
 }
@@ -119,14 +117,13 @@ impl EntityDetailAccumulator {
         }
     }
     pub(super) fn push(&mut self, segment: &DerivedSegment, facts: &SegmentFacts) {
-        let interval = TimelineProjection::project(segment, facts, TimelineDetail::Raw);
-        if !matches!(
-            interval.activity,
-            Activity::Active | Activity::ActiveOverride { .. }
-        ) || !self.entity.matches(&interval)
+        if !segment.activity.is_active()
+            || segment.span.duration_ms == 0
+            || !self.entity.matches(segment, facts)
         {
             return;
         }
+        let interval = TimelineProjection::project(segment, facts, TimelineDetail::Raw);
         for day in &mut self.calendar.days {
             let range = QueryRange {
                 start: interval.start_utc_ms.max(day.range.start),

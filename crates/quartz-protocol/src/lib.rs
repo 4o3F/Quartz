@@ -64,11 +64,11 @@ pub use status::{
 };
 
 pub use query::{
-    Activity, ApplicationId, ApplicationRank, ApplicationRef, BuiltinCategory, Category,
-    CategoryDuration, CategoryEntity, CategoryId, CategoryRef, CategorySource, CategoryTendency,
-    CategoryUuid, ClassificationRuleId, ClockSegmentId, CursorPosition, CursorQuery, DayChanged,
-    DayMetrics, DetailEntity, DocumentRank, DocumentRef, ENTITY_DETAIL_DAYS,
-    ENTITY_DETAIL_TOP_TITLES, EntityClassificationRule, EntityDailyDuration,
+    Activity, AnnotationResume, ApplicationId, ApplicationRank, ApplicationRef, BuiltinCategory,
+    Category, CategoryDuration, CategoryEntity, CategoryId, CategoryRef, CategorySource,
+    CategoryTendency, CategoryUuid, ClassificationRuleId, ClockSegmentId, CursorPosition,
+    CursorQuery, DayChanged, DayMetrics, DetailEntity, DocumentRank, DocumentRef,
+    ENTITY_DETAIL_DAYS, ENTITY_DETAIL_TOP_TITLES, EntityClassificationRule, EntityDailyDuration,
     EntityExtractionProvenance, EntityTitleDuration, ExtractionStatus, HourStack, MAX_CURSOR_BYTES,
     MillisecondsPerPixel, ParseClassificationRuleIdError, ParseQueryCursorError, PendingAway,
     QUERY_PAGE_BYTES, QueryCursor, QueryDayRequest, QueryDayResponse, QueryEntityDetailRequest,

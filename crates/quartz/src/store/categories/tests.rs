@@ -856,3 +856,70 @@ fn update_normalizes_a_stored_untrimmed_name_once() {
         .expect("normalized retry");
     fixture.no_effects();
 }
+
+#[test]
+fn create_uses_one_tree_load_and_retry_uses_no_tree_load() {
+    use crate::persistence::dispatch::WriteRequest;
+    use diesel::connection::InstrumentationEvent;
+    use std::sync::{Arc, Mutex};
+    let mut fixture = Fixture::new();
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let observed = queries.clone();
+    fixture
+        .store
+        .writer
+        .set_instrumentation(move |event: InstrumentationEvent<'_>| {
+            if let InstrumentationEvent::StartQuery { query, .. } = event {
+                observed.lock().expect("queries").push(query.to_string());
+            }
+        });
+    let entity = quartz_protocol::NewCategory {
+        uuid: "abcdef00-0000-4000-8000-000000000001"
+            .parse()
+            .expect("UUID"),
+        parent_uuid: None,
+        name: Some("New category".into()),
+        color: "neutral".into(),
+        tendency: quartz_protocol::CategoryTendency::Neutral,
+    };
+    WriteRequest::decode(
+        quartz_protocol::Op::CategoriesCreate,
+        serde_json::to_value(quartz_protocol::CategoriesCreateRequest {
+            entity: entity.clone(),
+        })
+        .expect("request"),
+    )
+    .expect("decode")
+    .execute(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        None,
+    )
+    .expect("create");
+    let created = std::mem::take(&mut *queries.lock().expect("queries"));
+    let tree_loads = |queries: &[String]| {
+        queries
+            .iter()
+            .filter(|sql| sql.contains("FROM `categories`") && !sql.contains("WHERE"))
+            .count()
+    };
+    assert_eq!(tree_loads(&created), 1);
+    let mut invalid_retry = entity;
+    invalid_retry.name = Some("builtin:reserved".into());
+    invalid_retry.color = "invalid".into();
+    WriteRequest::decode(
+        quartz_protocol::Op::CategoriesCreate,
+        serde_json::to_value(quartz_protocol::CategoriesCreateRequest {
+            entity: invalid_retry,
+        })
+        .expect("request"),
+    )
+    .expect("decode")
+    .execute(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        None,
+    )
+    .expect("UUID retry precedes value validation");
+    assert_eq!(tree_loads(&queries.lock().expect("queries")), 0);
+}

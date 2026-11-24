@@ -51,6 +51,37 @@ impl DocumentIdentity {
                 .map(|text| NfcText::new(text).into_string()),
         })
     }
+    pub(super) fn matches_extraction(
+        &self,
+        app: ApplicationId,
+        fields: &quartz_domain::rules::Extraction,
+    ) -> bool {
+        use quartz_domain::rules::ExtractionStatus;
+        self.app == app
+            && matches!(
+                fields.status,
+                ExtractionStatus::Extracted | ExtractionStatus::Fallback
+            )
+            && fields
+                .document
+                .as_deref()
+                .filter(|text| !text.is_empty())
+                .is_some_and(|text| NfcText::new(text).as_str() == self.document)
+            && fields
+                .project
+                .as_deref()
+                .map(NfcText::new)
+                .as_ref()
+                .map(NfcText::as_str)
+                == self.project.as_deref()
+            && fields
+                .profile
+                .as_deref()
+                .map(NfcText::new)
+                .as_ref()
+                .map(NfcText::as_str)
+                == self.profile.as_deref()
+    }
     fn is_canonical(&self) -> bool {
         !self.document.is_empty()
             && NfcText::new(&self.document).as_str() == self.document

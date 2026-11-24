@@ -7,7 +7,7 @@ use super::{
 use crate::{
     core::sources::{ClockReader, ReadClockError},
     persistence::{
-        CheckpointCollection, FlushProgress, FlushStalledError, Persistence, PersistenceOutcome,
+        CheckpointCollection, FlushProgress, FlushWritesError, Persistence, PersistenceOutcome,
         PersistenceResult, PersistenceState, QueueShutdown,
     },
     rules::registry::{RegistryResult, RegistryShell, RunRegistryCommandError},
@@ -39,7 +39,7 @@ pub(crate) enum RunDatabaseLoopError {
     #[snafu(display("capture feedback channel disconnected"))]
     Feedback,
     #[snafu(display("{source}"))]
-    Stalled { source: FlushStalledError },
+    Stalled { source: FlushWritesError },
     #[snafu(display("query connection could not be returned to the database loop"))]
     Query { source: crate::query::RunQueryError },
     #[snafu(display("could not shut down database worker"))]
@@ -68,7 +68,7 @@ pub(crate) enum ShutdownDatabaseError {
     #[snafu(display("database retained failed writes at shutdown"))]
     RetainedWrites,
     #[snafu(display("{source}"))]
-    Stalled { source: FlushStalledError },
+    Stalled { source: FlushWritesError },
     #[snafu(display("could not acknowledge database shutdown"))]
     Feedback,
 }
@@ -255,9 +255,9 @@ impl DatabaseLoop {
             .map_err(|source| RunDatabaseLoopError::Stalled { source })?;
         self.publish(result)
     }
-    fn ensure_progress(result: &PersistenceResult) -> Result<(), FlushStalledError> {
+    fn ensure_progress(result: &PersistenceResult) -> Result<(), FlushWritesError> {
         match (result.state(), result.progress) {
-            (PersistenceState::Buffered { .. }, FlushProgress::None) => Err(FlushStalledError),
+            (PersistenceState::Buffered { .. }, FlushProgress::None) => Err(FlushWritesError),
             _ => Ok(()),
         }
     }

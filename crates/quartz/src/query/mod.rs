@@ -8,6 +8,9 @@ mod details;
 #[cfg(any(windows, test))]
 pub(crate) mod dispatch;
 pub(crate) mod documents;
+mod facts;
+#[cfg(test)]
+pub(crate) use facts::FINALIZE_BATCH_RECORDS;
 pub(crate) mod input;
 pub(crate) mod paging;
 mod pending_away;
@@ -41,7 +44,7 @@ use timing::{QueryStage, QueryTimer, QueryTimings};
 use unclassified::UnclassifiedAccumulator;
 
 /// Increment whenever matching, slicing, duration, aggregation, or projection semantics change.
-pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 9;
+pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 10;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
 pub(crate) const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
 /// A 366-logical-day reference can include a backward UTC offset change of up to one day.
@@ -245,7 +248,8 @@ pub(crate) enum QueryResponse {
 #[derive(Debug)]
 enum Stage {
     Annotations(Box<annotations::AnnotationPage>),
-    Facts(Vec<crate::store::facts::Fact>),
+    Facts(facts::OrderedFacts),
+    FinalizeFacts(Box<facts::FinalizeFacts>),
     Read(Pipeline),
     Sweep(Pipeline),
     Aggregate {
@@ -265,9 +269,18 @@ enum Aggregation {
     SegmentDetail(SegmentDetailProjection),
     EntityDetail(EntityDetailAccumulator),
 }
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+enum RangeTraversal {
+    #[default]
+    Page,
+    EntireRange,
+}
 #[derive(Debug)]
 pub(crate) struct QueryJob {
     snapshot: ReadSnapshot,
+    #[cfg(test)]
+    range_traversal: RangeTraversal,
     request: QueryRequest,
     range: QueryRange,
     reference_range: QueryRange,
@@ -317,6 +330,8 @@ impl QueryJob {
         match Self::prepare(&mut snapshot, &request, rules.hashes(), zone) {
             Ok(prepared) => Ok(Self {
                 snapshot,
+                #[cfg(test)]
+                range_traversal: RangeTraversal::Page,
                 range: prepared.range,
                 reference_range: prepared.reference_range,
                 entity: prepared.entity,
@@ -337,7 +352,7 @@ impl QueryJob {
                 stage: if let Some(page) = prepared.annotations {
                     Stage::Annotations(Box::new(page))
                 } else if matches!(request, QueryRequest::Facts(_)) {
-                    Stage::Facts(Vec::new())
+                    Stage::Facts(facts::OrderedFacts::default())
                 } else {
                     Stage::Read(Pipeline::new(
                         prepared.scan_range,
@@ -362,6 +377,11 @@ impl QueryJob {
         rule_hashes: &quartz_domain::rules::registry::SnapshotHashes,
         zone: jiff::tz::TimeZone,
     ) -> Result<PreparedQuery, RunQueryError> {
+        if let Some(cursor) = request.cursor() {
+            cursor
+                .validate_query(&request.parameters())
+                .map_err(|_| RunQueryError::InvalidCursor)?;
+        }
         snapshot.begin()?;
         let settings = snapshot.settings()?;
         let calendar = match request {
@@ -371,11 +391,7 @@ impl QueryJob {
                 settings.day_start_offset,
                 zone.clone(),
             )?),
-            QueryRequest::PendingAway(away) => Some(DayCalendar::in_zone(
-                away.local_date,
-                settings.day_start_offset,
-                zone.clone(),
-            )?),
+            QueryRequest::PendingAway(_) => None,
             QueryRequest::Unclassified(_)
             | QueryRequest::Range(_)
             | QueryRequest::Timeline(_)
@@ -428,9 +444,12 @@ impl QueryJob {
             QueryRequest::Unclassified(_) | QueryRequest::Range(_) => {
                 day_walker.as_ref().expect("range calendar").range
             }
-            QueryRequest::Day(_) | QueryRequest::PendingAway(_) => {
-                calendar.as_ref().expect("day calendar").range
-            }
+            QueryRequest::Day(_) => calendar.as_ref().expect("day calendar").range,
+            QueryRequest::PendingAway(away) => DayCalendar::range_in_zone(
+                away.local_date,
+                settings.day_start_offset,
+                zone.clone(),
+            )?,
             QueryRequest::Facts(facts) => QueryRange {
                 start: facts
                     .local_date
@@ -591,6 +610,7 @@ impl QueryJob {
                 versions.clone(),
                 parameters.clone(),
                 position,
+                request.cursor(),
             )?),
             _ => None,
         };
@@ -618,6 +638,10 @@ impl QueryJob {
             calendar,
             entity_calendar,
         })
+    }
+    #[cfg(test)]
+    pub(crate) fn scan_entire_range(&mut self) {
+        self.range_traversal = RangeTraversal::EntireRange;
     }
     /// The shell services capture writes between these bounded read/sweep turns.
     pub(crate) fn advance(&mut self) -> Result<Option<QueryResponse>, RunQueryError> {
@@ -651,40 +675,36 @@ impl QueryJob {
                         Ok(None)
                     }
                     None => {
-                        facts.sort_by(crate::store::facts::Fact::chronological_cmp);
-                        let records = facts
-                            .iter()
-                            .map(crate::store::facts::Fact::record)
-                            .collect::<Result<Vec<_>, _>>()?;
-                        use sha2::{Digest, Sha256};
-                        let mut digest = Sha256::new();
-                        digest.update(self.versions.0.as_bytes());
-                        for record in &records {
-                            digest.update(serde_json::to_vec(record)?);
-                        }
-                        self.versions =
-                            QueryVersions(quartz_domain::text::encode_hex(&digest.finalize()));
-                        let QueryRequest::Facts(request) = &self.request else {
-                            unreachable!("facts stage")
-                        };
-                        self.position = PagePosition::from_cursor(
-                            request.cursor.as_ref(),
-                            &self.versions,
-                            &self.parameters,
-                        )?;
-                        timer
-                            .measure(QueryStage::PageEncode, || {
-                                self.page_response(QueryResponse::Facts(QueryFactsResponse {
-                                    facts: records,
-                                    versions: self.versions.clone(),
-                                    next_cursor: None,
-                                }))
-                            })
-                            .map(Some)
+                        self.stage = Stage::FinalizeFacts(Box::new(facts.finalize(&self.versions)));
+                        Ok(None)
                     }
                 }
             }
 
+            Stage::FinalizeFacts(mut finalizer) => {
+                if timer.measure(QueryStage::PageEncode, || finalizer.advance())?
+                    == facts::FinalizeProgress::More
+                {
+                    self.stage = Stage::FinalizeFacts(finalizer);
+                    return Ok(None);
+                }
+                let finalized = finalizer.finish();
+                self.versions = finalized.versions;
+                self.position = PagePosition::from_cursor(
+                    self.request.cursor(),
+                    &self.versions,
+                    &self.parameters,
+                )?;
+                timer
+                    .measure(QueryStage::PageEncode, || {
+                        self.page_response(QueryResponse::Facts(QueryFactsResponse {
+                            facts: finalized.records,
+                            versions: self.versions.clone(),
+                            next_cursor: None,
+                        }))
+                    })
+                    .map(Some)
+            }
             Stage::Read(mut pipeline) => {
                 match timer.measure(QueryStage::Read, || {
                     self.snapshot
@@ -802,6 +822,20 @@ impl QueryJob {
                         Aggregation::Range(mut groups) => {
                             timer
                                 .measure(QueryStage::Aggregate, || groups.next_day(walker.date))?;
+                            let page_is_full = groups.page_is_full();
+                            #[cfg(test)]
+                            let page_is_full =
+                                page_is_full && self.range_traversal == RangeTraversal::Page;
+                            if page_is_full {
+                                let response = timer.measure(QueryStage::Aggregate, || {
+                                    self.finish_aggregation(Aggregation::Range(groups))
+                                })?;
+                                return timer
+                                    .measure(QueryStage::PageEncode, || {
+                                        self.page_response(response)
+                                    })
+                                    .map(Some);
+                            }
                             self.range_accumulator = Some(groups);
                         }
                         _ => unreachable!("daily scan aggregation"),

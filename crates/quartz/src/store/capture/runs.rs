@@ -127,6 +127,7 @@ impl Capture<'_> {
         ))
         .execute(self.connection)?;
         id.require_open(clock_segments::table, count)?;
+        self.run_keys(run).closed_segments.insert(segment);
         self.bump_days(enums::DataSource::Intervals, TimeRange { start, end: at })
     }
 }

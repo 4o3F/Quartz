@@ -37,6 +37,8 @@ pub(crate) struct DayCalendar {
     pub range: QueryRange,
     pub hours: Vec<HourStack>,
 }
+#[cfg(test)]
+std::thread_local! { pub(super) static BUILT_HOURS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 impl DayCalendar {
     pub(crate) fn current_date(
         now: jiff::Timestamp,
@@ -54,8 +56,8 @@ impl DayCalendar {
         zone: TimeZone,
     ) -> Result<LocalDate, RunQueryError> {
         let date = now.to_zoned_datetime(zone.clone()).date();
-        let today = Self::in_zone(date, offset, zone)?;
-        Ok(if now.as_millisecond() < today.range.start {
+        let today = Self::range_in_zone(date, offset, zone)?;
+        Ok(if now.as_millisecond() < today.start {
             date.yesterday()?
         } else {
             date
@@ -77,11 +79,11 @@ impl DayCalendar {
         zone: TimeZone,
     ) -> Result<i64, RunQueryError> {
         let date = now.to_zoned_datetime(zone.clone()).date();
-        let today = Self::in_zone(date, offset, zone.clone())?;
-        if now.as_millisecond() < today.range.start {
-            Ok(Self::in_zone(date.yesterday()?, offset, zone)?.range.end)
+        let today = Self::range_in_zone(date, offset, zone.clone())?;
+        if now.as_millisecond() < today.start {
+            Ok(Self::range_in_zone(date.yesterday()?, offset, zone)?.end)
         } else {
-            Ok(today.range.end)
+            Ok(today.end)
         }
     }
     pub(crate) fn new(date: LocalDate, offset: DayStartOffset) -> Result<Self, RunQueryError> {
@@ -91,22 +93,38 @@ impl DayCalendar {
             RunQueryError::system_time_zone(TimeZone::try_system)?,
         )
     }
+    pub(crate) fn range_in_zone(
+        date: LocalDate,
+        offset: DayStartOffset,
+        zone: TimeZone,
+    ) -> Result<QueryRange, RunQueryError> {
+        let local_start = date.at(0, 0, 0, 0).checked_add(offset.span())?;
+        let local_end = date.tomorrow()?.at(0, 0, 0, 0).checked_add(offset.span())?;
+        Ok(QueryRange {
+            start: local_start
+                .to_zoned_datetime(zone.clone())?
+                .timestamp()
+                .as_millisecond(),
+            end: local_end
+                .to_zoned_datetime(zone)?
+                .timestamp()
+                .as_millisecond(),
+        })
+    }
     pub(crate) fn in_zone(
         date: LocalDate,
         offset: DayStartOffset,
         zone: TimeZone,
     ) -> Result<Self, RunQueryError> {
-        let local_start = date.at(0, 0, 0, 0).checked_add(offset.span())?;
-        let local_end = date.tomorrow()?.at(0, 0, 0, 0).checked_add(offset.span())?;
-        let mut at = local_start.to_zoned_datetime(zone.clone())?;
-        let end = local_end.to_zoned_datetime(zone)?;
-        let range = QueryRange {
-            start: at.timestamp().as_millisecond(),
-            end: end.timestamp().as_millisecond(),
-        };
+        let range = Self::range_in_zone(date, offset, zone.clone())?;
+        let mut at =
+            jiff::Timestamp::from_millisecond(range.start)?.to_zoned_datetime(zone.clone());
+        let end = jiff::Timestamp::from_millisecond(range.end)?.to_zoned_datetime(zone);
         let mut hours = Vec::new();
         while at < end {
             let next = at.checked_add(1.hours())?.min(end.clone());
+            #[cfg(test)]
+            BUILT_HOURS.update(|count| count + 1);
             hours.push(HourStack {
                 start_utc_ms: at.timestamp().as_millisecond(),
                 end_utc_ms: next.timestamp().as_millisecond(),
@@ -287,5 +305,39 @@ mod tests {
             end.as_millisecond()
         );
         assert!(DayStartOffset::try_from(-1).is_err());
+    }
+    #[test]
+    fn boundary_users_build_no_hour_stacks() {
+        let zone = TimeZone::get("America/Los_Angeles").expect("zone");
+        for date in ["2026-03-08", "2026-11-01"] {
+            for offset in [0, 240, 720] {
+                let date = date.parse().expect("date");
+                let offset = DayStartOffset::try_from(offset).expect("offset");
+                let full = DayCalendar::in_zone(date, offset, zone.clone()).expect("full calendar");
+                BUILT_HOURS.set(0);
+                let now = jiff::Timestamp::from_millisecond(full.range.start).expect("timestamp");
+                assert_eq!(
+                    DayCalendar::current_date_in_zone(now, offset, zone.clone()).expect("date"),
+                    date
+                );
+                assert_eq!(
+                    DayCalendar::next_start_in_zone(now, offset, zone.clone()).expect("end"),
+                    full.range.end
+                );
+                let mut walker = super::super::day_walker::DayWalker::new(
+                    date,
+                    date.tomorrow().expect("tomorrow"),
+                    offset,
+                    zone.clone(),
+                )
+                .expect("walker");
+                assert_eq!(walker.next_range(), Some(full.range));
+                assert_eq!(
+                    BUILT_HOURS.get(),
+                    0,
+                    "range-only callers must not construct hours"
+                );
+            }
+        }
     }
 }

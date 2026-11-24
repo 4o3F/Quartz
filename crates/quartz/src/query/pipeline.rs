@@ -172,6 +172,27 @@ impl SegmentFacts {
         self.foreground(segment)
             .and_then(|row| row.visible_app().map(std::convert::AsRef::as_ref))
     }
+    pub(super) fn matches_document(
+        &self,
+        segment: &DerivedSegment,
+        identity: &DocumentIdentity,
+    ) -> bool {
+        let Some(app) = self.app(segment) else {
+            return false;
+        };
+        if app.id.0 != identity.app.0 {
+            return false;
+        }
+        let Some(index) = segment.foreground else {
+            return false;
+        };
+        self.rows[index.0]
+            .extraction
+            .as_ref()
+            .is_some_and(|extracted| {
+                identity.matches_extraction(ApplicationId(app.id.0), &extracted.fields)
+            })
+    }
     pub(super) fn document_identity(&self, segment: &DerivedSegment) -> Option<DocumentIdentity> {
         DocumentIdentity::new(
             ApplicationId(self.app(segment)?.id.0),
@@ -863,12 +884,16 @@ pub(crate) struct TimelineProjection {
     last_identity: Option<DocumentIdentity>,
     last_title: Option<String>,
 }
+#[cfg(test)]
+std::thread_local! { pub(super) static PROJECTED_SEGMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 impl TimelineProjection {
     pub(crate) fn project(
         segment: &DerivedSegment,
         facts: &SegmentFacts,
         detail: TimelineDetail,
     ) -> TimelineSegment {
+        #[cfg(test)]
+        PROJECTED_SEGMENTS.update(|count| count + 1);
         TimelineSegment {
             extraction: (detail != TimelineDetail::Category).then(|| facts.extraction(segment)),
             document_ref: None,

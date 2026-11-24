@@ -75,11 +75,17 @@ impl Capture<'_> {
         for row in rows {
             let context = super::RowContext::new(row.id);
             let start = context.point(
-                row.start_utc_ms,
-                row.start_mono_ms,
+                context.required(
+                    row.confirmed_utc_ms,
+                    availability_intervals::confirmed_utc_ms,
+                )?,
+                context.required(
+                    row.confirmed_mono_ms,
+                    availability_intervals::confirmed_mono_ms,
+                )?,
                 TimeColumns::new(
-                    availability_intervals::start_utc_ms,
-                    availability_intervals::start_mono_ms,
+                    availability_intervals::confirmed_utc_ms,
+                    availability_intervals::confirmed_mono_ms,
                 ),
             )?;
             context.confirmation(
@@ -90,10 +96,12 @@ impl Capture<'_> {
                     availability_intervals::confirmed_mono_ms,
                 ),
             )?;
-            self.bump_days(
-                enums::DataSource::Availability,
-                TimeRange { start, end: at },
-            )?;
+            if start != at {
+                self.bump_days(
+                    enums::DataSource::Availability,
+                    TimeRange { start, end: at },
+                )?;
+            }
         }
         diesel::update(
             availability_intervals::table

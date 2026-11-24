@@ -1,6 +1,6 @@
 //! Bounded I/O and main-thread admission to the database writer.
 
-use super::categories::CategoryRequest;
+use super::{categories::CategoryRequest, diagnostics::WriteFailure};
 use crate::store::{Store, annotations::ExecuteAnnotationWritesError};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use quartz_domain::capture::UtcInstant;
@@ -85,10 +85,7 @@ impl WriteRequest {
                             effective: ui.resolve(system),
                         })
                     })
-                    .map_err(|error| {
-                        tracing::error!(%error, "could not access UI settings");
-                        ProtocolError::new(ErrorKind::Internal)
-                    });
+                    .map_err(|error| WriteFailure::setting(&error).into_protocol_error());
             }
             Self::Annotations(AnnotationWrite::Create(request)) => store
                 .create_annotations(request, now)
@@ -115,9 +112,18 @@ impl WriteRequest {
                 | ExecuteAnnotationWritesError::MissingAnnotation
                 | ExecuteAnnotationWritesError::ChangeKind
                 | ExecuteAnnotationWritesError::DuplicateIdentity => ErrorKind::BadRequest,
-                ExecuteAnnotationWritesError::Database { .. }
-                | ExecuteAnnotationWritesError::Version { .. }
-                | ExecuteAnnotationWritesError::Identity { .. } => ErrorKind::Internal,
+                ExecuteAnnotationWritesError::Database { source } => {
+                    return WriteFailure::database(&source).into_protocol_error();
+                }
+                ExecuteAnnotationWritesError::Version { source } => {
+                    return WriteFailure::version(&source).into_protocol_error();
+                }
+                ExecuteAnnotationWritesError::InvalidStoredAnnotation => {
+                    return WriteFailure::StoredAnnotation.into_protocol_error();
+                }
+                ExecuteAnnotationWritesError::Identity { .. } => {
+                    return WriteFailure::Identity.into_protocol_error();
+                }
             };
             ProtocolError::new(kind)
         })

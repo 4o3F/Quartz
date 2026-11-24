@@ -47,6 +47,7 @@ impl Store {
                 )
                 .set((
                     applications::identity_key.eq(format!("exe:{replacement}")),
+                    applications::exe_path.eq(&replacement),
                     applications::exe_name.eq(format!("{}.exe", mapping.replacement)),
                 ))
                 .execute(tx.connection)?;

@@ -85,7 +85,7 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 | `busy` | 核心暂时过载，客户端稍后重试 | 无 |
 | `internal` | 核心处理请求时发生内部错误 | 无 |
 
-结构化字段与 `code` 同级，放在 `err` 对象中。
+结构化字段与 `code` 同级，放在 `err` 对象中。协议版本 1 包含 `version_exhausted`；旧客户端将尚未识别的错误码解码为 `Unknown`。
 
 M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>` 交给 UI，核心随后返回失败退出码。当前稳定代码为 `newer_database`、`migration_failed`、`other_session`、`core_start_failed`。备份路径通过独立、可重复的 `--backup-path <路径>` 参数传递；`migration_failed` 必须带其迁移前备份路径。共享的 `CoreError` 使用 `code` 和 `backup_paths` 字段，后续管道沿用这些代码与字段。
 
@@ -207,7 +207,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 `query.entity_detail` 的实体枚举在 M3 仅含 `app`；`document` 在 M4、`domain` 在 M5 加入。它读取截至 `local_date` 当天的 7 个逻辑日（`ENTITY_DETAIL_DAYS`），各日都按当前系统时区和 `day.start_offset_min` 分别转换 UTC 边界，保留夏令时导致的日长度变化。第一页的 `daily: [{local_date, active_ms}]` 按日期升序返回 7 项，应用活跃时长与 `query.day` 应用排行一致，包含有效活动覆盖。未知应用的第一页返回 7 个零时长日、空标题和空规则。
 
-`titles: [{title, duration_ms}]` 只累计这些活跃切片中 Full 级别的可见标题，按时长降序、同值按标题文本升序取前 `ENTITY_DETAIL_TOP_TITLES`（5）项；只有较低采集级别的事实时为空。五个长度上限为 4,096 个 UTF-16 单元的标题即使需要 JSON 转义，也为第一页的日统计和规则留有空间。`rules: [{rule, label, label_key, category}]` 仅包含实际为该应用活跃时间提供最终分类的规则，按修订限定规则 ID 升序去重；`rule` 为 `<规则集>/<规则>@<版本>`，`label`、`label_key` 为当前规则快照的显示字段，可为 null，`category` 使用下述分类引用。分类标注覆盖掉的规则不进入列表。规则数量没有固定上限，因此规则列表分页，`daily` 和 `titles` 仅出现在第一页，后续页省略这两个字段，客户端保留第一页的数据并拼接各页 `rules`。两种详情操作允许 UI 和 CLI，使用同一个数据库读事务中的事实、应用和分类元数据及持有的规则快照，标题不写入日志。
+`titles: [{title, duration_ms}]` 只累计这些活跃切片中 Full 级别的可见标题，按时长降序、同值按标题文本升序取前 `ENTITY_DETAIL_TOP_TITLES`（5）项；只有较低采集级别的事实时为空。五个长度上限为 4,096 个 UTF-16 单元的标题即使需要 JSON 转义，也为第一页的日统计和规则留有空间。`rules: [{rule, label, label_key, category}]` 仅包含实际为该应用活跃时间提供最终分类的规则，按修订限定规则 ID 升序去重；`rule` 为 `<规则集>/<规则>@<版本>`，`label`、`label_key` 为当前规则快照的显示字段，可为 null，`category` 使用下述分类引用。分类标注覆盖掉的规则不进入列表。规则数量没有固定上限，因此规则列表分页，`daily` 和 `titles` 仅出现在第一页，后续页省略这两个字段，客户端保留第一页的数据并拼接各页 `rules`。零时长切片不进入实体详情的标题、规则和提取来源列表。两种详情操作允许 UI 和 CLI，使用同一个数据库读事务中的事实、应用和分类元数据及持有的规则快照，标题不写入日志。
 
 `query.pending_away` 只读取 idle 可用状态范围，锁屏、睡眠、断开和暂停范围不纳入；`offline_activity`、`active_override`、`note`、`dismissed_away` 覆盖的部分视为已标注，`category_override` 不计。部分覆盖时先扣除覆盖范围，再返回剩余连续片段中至少 15 分钟的部分。响应为 `{ranges: [{start_utc_ms, end_utc_ms, duration_ms}], versions, next_cursor}`，按开始时间排序，时长为 UTC 端点差，分页沿用版本化游标。
 
@@ -215,9 +215,11 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 分类引用为 `{kind:"unclassified"}` 或 `{kind:"classified", id, uuid, builtin_key, name, color, tendency}`。`builtin_key` 是稳定内置键，`name` 为用户输入或 null；名称为 null 时由界面翻译 `category.builtin.<key>`。规则来源为 `{kind:"rule", rule:"<规则集>/<规则>@<版本>"}`，注解来源为 `{kind:"annotation", annotation:"<UUID>"}`，未分类来源为 `{kind:"unclassified"}`。活动状态新增 `{kind:"active_override", annotation:"<UUID>"}` 和 `{kind:"offline_activity", annotation:"<UUID>"}`。分类元数据从查询的数据库快照读取，求值使用生成游标规则哈希的同一规则快照。
 
-时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。M4 的 `app` 细节对同窗口实例、同非空文档身份的连续片段先合并，保留分类与来源边界；无身份时要求原始标题相同；合并不跨时钟段或活动状态边界。dirty 等可变提取显示字段不阻止 app 合并，合并后采用最后切片的提取显示值。`raw` 保留原始标题与提取输出边界。其余像素合并规则为：相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`app` 与 `raw` 均要求文档身份相同（含两者皆空），`raw` 还要求标题与提取输出相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。M4 查询语义版本为 9，版本摘要包含该版本，因此此前语义生成的游标返回 `stale_cursor`。
+时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。M4 的 `app` 细节对同窗口实例、同非空文档身份的连续片段先合并，保留分类与来源边界；无身份时要求原始标题相同；合并不跨时钟段或活动状态边界。dirty 等可变提取显示字段不阻止 app 合并，合并后采用最后切片的提取显示值。`raw` 保留原始标题与提取输出边界。其余像素合并规则为：相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`app` 与 `raw` 均要求文档身份相同（含两者皆空），`raw` 还要求标题与提取输出相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。M4 查询语义版本为 10，版本摘要包含该版本，因此此前语义生成的游标返回 `stale_cursor`。
 
-游标是 `quartz-protocol::QueryCursor` 的不透明 JSON 对象，客户端原样保存和回传。核心当前结构包含 `versions`、类型化的 `query` 参数和下一项 `position`，按请求参数严格校验。游标编码后的 JSON 上限为 `MAX_CURSOR_BYTES`（256 KiB），与帧上限相同；文档详情游标携带完整文档引用，规则集游标携带未另设长度上限的 key，因此使用帧上限容纳现有最大游标。客户端解码和核心受理均检查该上限，按引用解析 JSON，已知字段之外的附加内容不复制到核心类型中。
+原始事实读取按有序键收集数据，收尾每个数据库循环轮次最多转换并哈希 32 条；每条转换后释放存储表示，仅保留其协议记录。页面字节数与版本摘要直接通过写入器计算，不保留整页 JSON 缓冲区。范围查询在完成确定下一页位置的桶后停止后续日期扫描，版本仍绑定完整请求范围。
+
+游标是 `quartz-protocol::QueryCursor` 的不透明 JSON 对象，客户端原样保存和回传。核心当前结构包含 `versions`、类型化的 `query` 参数和下一项 `position`，按请求参数严格校验。标注续页另带 `annotation_resume`：保存目标行的开始与结束 UTC 毫秒、UUID 和下一片段序号，`position` 为该行内片段序号；其他查询的游标不允许携带 `annotation_resume`。核心直接定位该行并跳过此前片段的文本边界，不再读取和序列化已返回的行。游标编码后的 JSON 上限为 `MAX_CURSOR_BYTES`（256 KiB），与帧上限相同；文档详情游标携带完整文档引用，规则集游标携带未另设长度上限的 key，因此使用帧上限容纳现有最大游标。客户端解码和核心受理均检查该上限，按引用解析 JSON，已知字段之外的附加内容不复制到核心类型中。
 
 版本摘要覆盖相交 UTC 日期的全部 `data_day_versions` 来源、`settings.metadata_version`、规则注册表快照中的分类、提取与隐私哈希、系统时区身份、日起点偏移、每周首日（周桶）、`stats_policy_version`、查询 UTC 边界和 `QUERY_SEMANTICS_VERSION`；缺失的元数据版本从 0 开始。响应分页计算绑定同一个完整输入摘要；query.range 按日折叠聚合，避免物化全年时间轴；游标参数不匹配或位置超出列表返回 `bad_request`，输入版本变化返回 `stale_cursor`。I/O 到数据库的查询通道容量为 `QUERY_CHANNEL_CAPACITY`（8），满时返回 `busy`。 M3 今天页客户端遇到 `stale_cursor` 时丢弃整组分页结果，最多重启 2 次；耗尽后显示行内错误。`busy` 与其他查询错误直接显示错误码和“重试”，不自动轮询。
 

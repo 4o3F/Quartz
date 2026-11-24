@@ -14,8 +14,9 @@ use quartz_protocol::{
 #[derive(Debug)]
 pub(super) struct AnnotationPage {
     scan: AnnotationScan,
+    resume: Option<quartz_protocol::AnnotationResume>,
+    current_resume: Option<quartz_protocol::AnnotationResume>,
     current: Option<EntityChunks>,
-    index: usize,
     position: PagePosition,
     budget: PageBudget,
     response: QueryAnnotationsResponse,
@@ -26,6 +27,7 @@ impl AnnotationPage {
         versions: QueryVersions,
         parameters: CursorQuery,
         position: PagePosition,
+        cursor: Option<&QueryCursor>,
     ) -> Result<Self, RunQueryError> {
         let response = QueryAnnotationsResponse {
             entities: Vec::new(),
@@ -33,10 +35,23 @@ impl AnnotationPage {
             next_cursor: None,
         };
         let budget = Self::budget(&response, &parameters)?;
+        let resume = cursor
+            .map(QueryCursor::decode)
+            .transpose()
+            .map_err(|_| RunQueryError::InvalidCursor)?
+            .and_then(|cursor| cursor.annotation_resume().cloned());
+        if !position.is_first()
+            && resume
+                .as_ref()
+                .is_none_or(|resume| resume.chunk != position.index())
+        {
+            return Err(RunQueryError::InvalidCursor);
+        }
         Ok(Self {
-            scan: AnnotationScan::default(),
+            scan: AnnotationScan::resume(resume.clone()),
+            resume,
+            current_resume: None,
             current: None,
-            index: 0,
             position,
             budget,
             response,
@@ -47,10 +62,19 @@ impl AnnotationPage {
         response: &QueryAnnotationsResponse,
         parameters: &CursorQuery,
     ) -> Result<PageBudget, RunQueryError> {
-        PageBudget::new(response)?.with_cursor(&QueryCursor::new(
+        PageBudget::new(response)?.with_cursor(&QueryCursor::new_annotation(
             response.versions.clone(),
             parameters.clone(),
-            usize::MAX,
+            quartz_protocol::AnnotationResume {
+                start_utc_ms: i64::MIN,
+                end_utc_ms: i64::MIN,
+                uuid: quartz_protocol::AnnotationId(
+                    "ffffffff-ffff-ffff-ffff-ffffffffffff"
+                        .parse()
+                        .expect("maximum-width UUID"),
+                ),
+                chunk: usize::MAX,
+            },
         ))
     }
     /// Processes one stored row or fragment before yielding to pending writes.
@@ -72,37 +96,50 @@ impl AnnotationPage {
                 versions: self.response.versions.clone(),
                 next_cursor: None,
             };
-            self.current = Some(EntityChunks::new(
-                entity,
-                &Self::budget(&empty, &self.parameters)?,
-            )?);
+            let resume = self
+                .resume
+                .take()
+                .unwrap_or(quartz_protocol::AnnotationResume {
+                    start_utc_ms: entity.start_utc_ms,
+                    end_utc_ms: entity.end_utc_ms,
+                    uuid: entity.uuid.clone(),
+                    chunk: 0,
+                });
+            let mut chunks = EntityChunks::new(entity, &Self::budget(&empty, &self.parameters)?)?;
+            chunks.seek(resume.chunk)?;
+            self.current = Some(chunks);
+            self.current_resume = Some(resume);
         }
         let chunks = self.current.as_mut().expect("current annotation retained");
         let Some(entity) = chunks.next() else {
             self.current = None;
             return Ok(None);
         };
-        if self.index >= self.position.index() {
-            if !self.budget.admit(&entity)? {
-                if self.response.entities.is_empty() {
-                    return Err(RunQueryError::PageTooLarge);
-                }
-                return Ok(Some(self.finish(Some(self.index))));
+        if !self.budget.admit(&entity)? {
+            if self.response.entities.is_empty() {
+                return Err(RunQueryError::PageTooLarge);
             }
-            self.response.entities.push(entity);
+            return Ok(Some(self.finish(self.current_resume.clone())));
         }
-        self.index += 1;
+        self.response.entities.push(entity);
+        self.current_resume
+            .as_mut()
+            .expect("current row position")
+            .chunk += 1;
         Ok(None)
     }
-    fn finish(&mut self, next: Option<usize>) -> QueryAnnotationsResponse {
+    fn finish(
+        &mut self,
+        next: Option<quartz_protocol::AnnotationResume>,
+    ) -> QueryAnnotationsResponse {
         QueryAnnotationsResponse {
             entities: std::mem::take(&mut self.response.entities),
             versions: self.response.versions.clone(),
-            next_cursor: next.map(|index| {
-                QueryCursor::new(
+            next_cursor: next.map(|resume| {
+                QueryCursor::new_annotation(
                     self.response.versions.clone(),
                     self.parameters.clone(),
-                    index,
+                    resume,
                 )
             }),
         }
@@ -125,6 +162,8 @@ enum ChunkProgress {
     More,
     Complete,
 }
+#[cfg(test)]
+std::thread_local! { static MATERIALIZED_FRAGMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 impl EntityChunks {
     fn new(mut entity: SavedAnnotation, budget: &PageBudget) -> Result<Self, RunQueryError> {
         if budget.fits(&entity)? {
@@ -144,9 +183,49 @@ impl EntityChunks {
             progress: ChunkProgress::More,
         })
     }
+    fn seek(&mut self, chunks: usize) -> Result<(), RunQueryError> {
+        match self {
+            Self::Complete(_) if chunks != 0 => return Err(RunQueryError::InvalidCursor),
+            Self::Complete(_) => {}
+            Self::Fragmented {
+                label,
+                note,
+                chunk_bytes,
+                progress,
+                ..
+            } => {
+                for _ in 0..chunks {
+                    if *progress == ChunkProgress::Complete {
+                        return Err(RunQueryError::InvalidCursor);
+                    }
+                    if let Some(label) = label {
+                        label.skip(*chunk_bytes);
+                    }
+                    if let Some(note) = note {
+                        note.skip(*chunk_bytes);
+                    }
+                    if label.as_ref().is_none_or(TextChunks::is_complete)
+                        && note.as_ref().is_none_or(TextChunks::is_complete)
+                    {
+                        *progress = ChunkProgress::Complete;
+                    }
+                }
+                if *progress == ChunkProgress::Complete {
+                    return Err(RunQueryError::InvalidCursor);
+                }
+            }
+        }
+        Ok(())
+    }
     fn next(&mut self) -> Option<SavedAnnotation> {
         match self {
-            Self::Complete(entity) => entity.take(),
+            Self::Complete(entity) => {
+                #[cfg(test)]
+                if entity.is_some() {
+                    MATERIALIZED_FRAGMENTS.update(|count| count + 1);
+                }
+                entity.take()
+            }
             Self::Fragmented {
                 metadata,
                 label,
@@ -157,6 +236,8 @@ impl EntityChunks {
                 if *progress == ChunkProgress::Complete {
                     return None;
                 }
+                #[cfg(test)]
+                MATERIALIZED_FRAGMENTS.update(|count| count + 1);
                 let mut entity = metadata.clone();
                 entity.label = label.as_mut().map(|text| text.next(*chunk_bytes));
                 entity.note = note.as_mut().map(|text| text.next(*chunk_bytes));
@@ -194,6 +275,13 @@ impl TextChunks {
     }
     fn is_complete(&self) -> bool {
         self.offset_utf8 == self.text.len()
+    }
+    fn skip(&mut self, budget: usize) {
+        let mut end = self.offset_utf8.saturating_add(budget).min(self.text.len());
+        while !self.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.offset_utf8 = end;
     }
     fn next(&mut self, budget: usize) -> AnnotationText {
         if self.text.len() <= budget {

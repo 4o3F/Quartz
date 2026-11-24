@@ -2097,3 +2097,325 @@ fn timezone_encoding_error_maps_to_internal() {
         ErrorKind::Internal
     );
 }
+
+#[test]
+fn entity_detail_ignores_rounded_zero_duration_titles() {
+    let calendar = details::EntityCalendar::in_zone(
+        "2026-03-10".parse().expect("date"),
+        calendar::DayStartOffset::MIDNIGHT,
+        jiff::tz::TimeZone::UTC,
+    )
+    .expect("calendar");
+    let start = calendar.range.start;
+    let mut row = window(1, start, start + 100);
+    if let InputRow::Foreground(foreground) = &mut row {
+        foreground.span.end_mono_ms = foreground.span.start_mono_ms + 1;
+    }
+    let derived = derive(
+        vec![clock(1, start, start, 100), row],
+        QueryRange {
+            start,
+            end: start + 1,
+        },
+    );
+    assert!(
+        derived
+            .segments
+            .iter()
+            .any(|segment| segment.activity.is_active() && segment.span.duration_ms == 0)
+    );
+    let mut accumulator = details::EntityDetailAccumulator::new(
+        details::EntitySelection::App {
+            id: quartz_protocol::ApplicationId(1),
+        },
+        calendar,
+    );
+    for segment in &derived.segments {
+        accumulator.push(segment, &derived.facts);
+    }
+    let response = accumulator.finish(QueryVersions("test".into()), PagePosition::First);
+    assert!(response.titles.expect("titles").is_empty());
+    assert!(response.rules.is_empty());
+    assert!(response.extraction.is_empty());
+}
+
+#[test]
+fn rejected_search_identity_is_normalized_once() {
+    let derived = derive(
+        vec![clock(1, 0, 0, 100), window(1, 0, 100)],
+        QueryRange { start: 0, end: 100 },
+    );
+    let request = quartz_protocol::QueryUnclassifiedRequest {
+        start_date: "2025-01-02".parse().expect("start"),
+        end_date: "2025-01-03".parse().expect("end"),
+        group_by: quartz_protocol::UnclassifiedGroupBy::App,
+        search: Some("does not match".into()),
+        cursor: None,
+    };
+    let mut accumulator = UnclassifiedAccumulator::new(&request);
+    let segment = derived
+        .segments
+        .iter()
+        .find(|segment| segment.activity.is_active())
+        .expect("active");
+    accumulator.push(segment, &derived.facts);
+    let once = accumulator.search_evaluations.get();
+    assert!(once > 0);
+    for _ in 0..100 {
+        accumulator.push(segment, &derived.facts);
+    }
+    assert_eq!(accumulator.search_evaluations.get(), once);
+    assert!(accumulator.finish().is_empty());
+}
+
+#[test]
+fn entity_detail_filters_unrelated_activity_before_projection() {
+    let calendar = details::EntityCalendar::in_zone(
+        "2026-03-10".parse().expect("date"),
+        calendar::DayStartOffset::MIDNIGHT,
+        jiff::tz::TimeZone::UTC,
+    )
+    .expect("calendar");
+    let start = calendar.range.start;
+    let derived = derive(
+        vec![clock(1, start, start, 100), window(1, start, start + 100)],
+        QueryRange {
+            start,
+            end: start + 100,
+        },
+    );
+    let mut accumulator = details::EntityDetailAccumulator::new(
+        details::EntitySelection::App {
+            id: quartz_protocol::ApplicationId(2),
+        },
+        calendar,
+    );
+    pipeline::PROJECTED_SEGMENTS.set(0);
+    for segment in &derived.segments {
+        accumulator.push(segment, &derived.facts);
+    }
+    assert_eq!(pipeline::PROJECTED_SEGMENTS.get(), 0);
+}
+
+#[test]
+fn pending_away_builds_no_hour_stacks() {
+    use crate::store::query::test_support::{FIXTURE_DATE, QueryFixture};
+    let mut fixture = QueryFixture::new(0);
+    let request = QueryRequest::PendingAway(quartz_protocol::QueryPendingAwayRequest {
+        local_date: FIXTURE_DATE.parse().expect("date"),
+        cursor: None,
+    });
+    calendar::BUILT_HOURS.set(0);
+    let response = fixture.run(request).expect("pending away");
+    assert!(matches!(response, QueryResponse::PendingAway(_)));
+    assert_eq!(calendar::BUILT_HOURS.get(), 0);
+}
+
+#[test]
+fn range_early_stop_measures_aggregation_and_page_encoding() {
+    use crate::store::query::test_support::{FIXTURE_DATE, QueryFixture};
+    let mut fixture = QueryFixture::new(900);
+    let date: quartz_protocol::LocalDate = FIXTURE_DATE.parse().expect("date");
+    let mut job = fixture.start(QueryRequest::Range(quartz_protocol::QueryRangeRequest {
+        start_date: date,
+        end_date: date.checked_add(jiff::Span::new().days(10)).expect("end"),
+        bucket: quartz_protocol::RangeBucket::Day,
+        dimensions: vec![
+            quartz_protocol::RangeDimension::App,
+            quartz_protocol::RangeDimension::Document,
+        ],
+        cursor: None,
+    }));
+    loop {
+        timing::MEASURED_STAGES.with_borrow_mut(Vec::clear);
+        if let Some(response) = job.advance().expect("advance") {
+            let QueryResponse::Range(page) = response else {
+                panic!("range response")
+            };
+            assert!(
+                page.next_cursor.is_some(),
+                "fixture must stop at a full page"
+            );
+            timing::MEASURED_STAGES.with_borrow(|stages| {
+                assert!(
+                    stages.ends_with(&[QueryStage::Aggregate, QueryStage::PageEncode]),
+                    "final operations must be measured: {stages:?}"
+                );
+            });
+            break;
+        }
+    }
+    fixture
+        .store
+        .return_query_reader(job.finish().expect("finish"));
+}
+
+#[test]
+fn document_details_filter_before_projection_with_normalized_optional_fields() {
+    use documents::DocumentIdentity;
+    const EXTRACTOR: &str = r"format='quartz-rules/1'
+[set]
+key='user.detail'
+kind='extraction'
+name='Document detail'
+[[rule]]
+id='parts'
+label='Named fields'
+app=[{field='app.exe_name',op='equals',value='unknown.exe'}]
+pattern='\A(?P<document>[^|]+)(?:\|(?P<project>[^|]+))?(?:\|(?P<profile>[^|]+))?\z'";
+    let date = "2026-03-10".parse().expect("date");
+    let zone = jiff::tz::TimeZone::UTC;
+    let calendar =
+        details::EntityCalendar::in_zone(date, calendar::DayStartOffset::MIDNIGHT, zone.clone())
+            .expect("calendar");
+    let start = calendar.range.start;
+    let mut rows = vec![clock(1, start, start, 30)];
+    let mut at = start;
+    for (index, title) in ["Cafe\u{301}|Re\u{301}po|Pe\u{301}rson", "Café", "Café|Répo"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = i64::try_from(index + 1).expect("fact ID");
+        let mut input = classified_window(id, at, at + 10, "unknown.exe");
+        if let InputRow::Foreground(row) = &mut input {
+            edit_foreground(row, CaptureLevel::Full, |content| {
+                content.title = Some(title.into());
+                content.title_id = Some(quartz_domain::facts::TitleId(id));
+                std::sync::Arc::make_mut(content.app.as_mut().expect("app")).id = ApplicationId(1);
+            });
+        }
+        rows.push(input);
+        at += 10;
+    }
+    let derived = derive_classified(
+        rows,
+        QueryRange { start, end: at },
+        classifier(&[EXTRACTOR]),
+    );
+    assert_eq!(derived.segments.len(), 3);
+    let selected = DocumentIdentity {
+        app: quartz_protocol::ApplicationId(1),
+        document: "Café".into(),
+        project: Some("Répo".into()),
+        profile: Some("Pérson".into()),
+    };
+    let extracted = quartz_domain::rules::Extraction {
+        document: Some("Cafe\u{301}".into()),
+        project: Some("Re\u{301}po".into()),
+        profile: Some("Pe\u{301}rson".into()),
+        dirty: false,
+        normalized_title: None,
+        status: quartz_domain::rules::ExtractionStatus::Extracted,
+    };
+    assert!(selected.matches_extraction(selected.app, &extracted));
+    struct Case {
+        identity: DocumentIdentity,
+        expected_segments: usize,
+    }
+    let cases = [
+        Case {
+            identity: selected.clone(),
+            expected_segments: 1,
+        },
+        Case {
+            identity: DocumentIdentity {
+                app: quartz_protocol::ApplicationId(2),
+                ..selected.clone()
+            },
+            expected_segments: 0,
+        },
+        Case {
+            identity: DocumentIdentity {
+                document: "Other".into(),
+                ..selected.clone()
+            },
+            expected_segments: 0,
+        },
+        Case {
+            identity: DocumentIdentity {
+                project: None,
+                ..selected.clone()
+            },
+            expected_segments: 0,
+        },
+        Case {
+            identity: DocumentIdentity {
+                profile: None,
+                ..selected.clone()
+            },
+            expected_segments: 1,
+        },
+        Case {
+            identity: DocumentIdentity {
+                project: None,
+                profile: None,
+                ..selected.clone()
+            },
+            expected_segments: 1,
+        },
+        Case {
+            identity: DocumentIdentity {
+                project: Some(String::new()),
+                profile: None,
+                ..selected
+            },
+            expected_segments: 0,
+        },
+    ];
+    for case in cases {
+        let expected: Vec<_> = derived
+            .segments
+            .iter()
+            .filter(|segment| {
+                let projected = TimelineProjection::project(
+                    segment,
+                    &derived.facts,
+                    quartz_protocol::TimelineDetail::Raw,
+                );
+                segment.activity.is_active()
+                    && segment.span.duration_ms > 0
+                    && DocumentIdentity::from_segment(&projected).as_ref() == Some(&case.identity)
+            })
+            .collect();
+        assert_eq!(
+            expected.len(),
+            case.expected_segments,
+            "fixture identity {:?}",
+            case.identity
+        );
+        let mut accumulator = details::EntityDetailAccumulator::new(
+            details::EntitySelection::Document {
+                identity: case.identity.clone(),
+            },
+            details::EntityCalendar::in_zone(
+                date,
+                calendar::DayStartOffset::MIDNIGHT,
+                zone.clone(),
+            )
+            .expect("calendar"),
+        );
+        pipeline::PROJECTED_SEGMENTS.set(0);
+        for segment in &derived.segments {
+            accumulator.push(segment, &derived.facts);
+        }
+        assert_eq!(
+            pipeline::PROJECTED_SEGMENTS.get(),
+            expected.len(),
+            "identity {:?}",
+            case.identity
+        );
+        let response = accumulator.finish(QueryVersions("test".into()), PagePosition::First);
+        assert_eq!(
+            response
+                .daily
+                .expect("daily")
+                .iter()
+                .map(|day| day.active_ms)
+                .sum::<i64>(),
+            expected
+                .iter()
+                .map(|segment| segment.span.duration_ms)
+                .sum::<i64>()
+        );
+    }
+}

@@ -1,36 +1,16 @@
-//! Dictionary enrichment and JSON presentation for capture dumps.
+//! Chronological capture dumps and JSON presentation.
 
 use super::super::{
     ReadOnlyStore, enums,
     enums::IntegerCode,
     rows::{CaptureRunsRow, ClockSegmentsRow, TimedPoliciesRow},
-    schema::{applications, intervals, titles, window_instances},
 };
-use super::{
-    Fact, FactDetails, FactEnd, FactEndReason, FactKind, FactReason, ReadFactsError, WindowDetails,
-};
-use diesel::{
-    Connection, ExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl, RunQueryDsl,
-};
+use super::{Fact, FactDetails, FactEnd, FactEndReason, FactKind, FactReason, ReadFactsError};
+use diesel::Connection;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// SQLite's guaranteed minimum bind limit, data model 03 §4.5.
-const SQLITE_BIND_LIMIT: usize = 999;
-
-#[derive(Debug, diesel::Queryable)]
-struct IntervalDetails {
-    id: i64,
-    display_name: Option<String>,
-    exe_path: Option<String>,
-    exe_name: Option<String>,
-    title: Option<String>,
-    hwnd: Option<i64>,
-    generation: Option<i64>,
-    pid: Option<i64>,
-    window_class: Option<String>,
-}
 impl ReadOnlyStore {
     /// Reads the same bounded SQL scans as the query pipeline inside one WAL snapshot.
     pub(crate) fn dump_range(&mut self, from: i64, to: i64) -> Result<Vec<Fact>, ReadFactsError> {
@@ -49,54 +29,6 @@ impl ReadOnlyStore {
             facts.sort_by(crate::store::facts::Fact::chronological_cmp);
             Ok(facts)
         })
-    }
-}
-impl Fact {
-    pub(in crate::store) fn enrich(
-        connection: &mut diesel::SqliteConnection,
-        facts: &mut [Fact],
-    ) -> Result<(), ReadFactsError> {
-        let ids: Vec<_> = facts.iter().map(|fact| fact.id).collect();
-        let mut details = BTreeMap::new();
-        for chunk in ids.chunks(SQLITE_BIND_LIMIT) {
-            let rows = intervals::table
-                .left_join(applications::table.on(intervals::app_id.eq(applications::id)))
-                .left_join(titles::table.on(intervals::title_id.eq(titles::id)))
-                .left_join(
-                    window_instances::table
-                        .on(intervals::window_instance_id.eq(window_instances::id)),
-                )
-                .filter(intervals::id.eq_any(chunk))
-                .select((
-                    intervals::id.assume_not_null(),
-                    applications::display_name.nullable(),
-                    applications::exe_path.nullable(),
-                    applications::exe_name.nullable(),
-                    titles::text.nullable(),
-                    window_instances::hwnd.nullable(),
-                    window_instances::generation.nullable(),
-                    window_instances::pid.nullable(),
-                    window_instances::window_class.nullable(),
-                ))
-                .load::<IntervalDetails>(connection)?;
-            details.extend(rows.into_iter().map(|row| (row.id, row)));
-        }
-        for fact in facts {
-            if let Some(row) = details.remove(&fact.id) {
-                fact.window = Some(WindowDetails {
-                    display_name: row.display_name,
-                    exe_path: row.exe_path,
-                    exe_name: row.exe_name,
-                    title: row.title,
-                    hwnd: row.hwnd,
-                    generation: row.generation,
-                    pid: row.pid,
-                    window_class: row.window_class,
-                });
-            }
-        }
-
-        Ok(())
     }
 }
 impl CaptureRunsRow {
