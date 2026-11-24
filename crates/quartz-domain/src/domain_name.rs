@@ -8,12 +8,55 @@ use snafu::{ResultExt, Snafu};
 /// Failure to normalize a domain, without retaining private domain text.
 #[derive(Debug, Snafu)]
 pub enum NormalizeDomainError {
+    /// Fragment normalization removed every input character.
+    #[snafu(display("normalized domain fragment is empty"))]
+    EmptyFragment,
     /// The input fails UTS #46, URL host character or DNS length validation.
     #[snafu(display("invalid domain name"))]
     InvalidDomain {
         /// The IDNA validation failure, which contains no input text.
         source: idna::Errors,
     },
+}
+
+/// A domain substring with UTS #46 labels and all separators preserved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainFragment(String);
+impl DomainFragment {
+    /// Normalizes each nonempty label while retaining leading, trailing and repeated dots.
+    ///
+    /// # Errors
+    /// Returns a typed empty-fragment error or the IDNA error for invalid spellings.
+    pub fn parse(value: &str) -> Result<Self, NormalizeDomainError> {
+        let mut normalized = String::new();
+        for (index, label) in value
+            .split(['.', '\u{3002}', '\u{ff0e}', '\u{ff61}'])
+            .enumerate()
+        {
+            if index != 0 {
+                normalized.push('.');
+            }
+            if !label.is_empty() {
+                let ascii = Uts46::new()
+                    .to_ascii(
+                        label.as_bytes(),
+                        AsciiDenyList::URL,
+                        Hyphens::Allow,
+                        DnsLength::Ignore,
+                    )
+                    .context(InvalidDomainSnafu)?;
+                normalized.push_str(&ascii);
+            }
+        }
+        if normalized.is_empty() {
+            return Err(NormalizeDomainError::EmptyFragment);
+        }
+        Ok(Self(normalized))
+    }
+    /// Borrows the ASCII substring used by literal comparison.
+    pub fn as_ascii(&self) -> &str {
+        &self.0
+    }
 }
 
 /// A validated lowercase ASCII domain key with Punycode labels where needed.
@@ -78,6 +121,83 @@ impl fmt::Display for DomainName {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fragments_reject_empty_normalized_output() {
+        for value in ["", "\u{00ad}"] {
+            assert!(
+                matches!(
+                    DomainFragment::parse(value),
+                    Err(NormalizeDomainError::EmptyFragment)
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn whole_domains_reject_empty_and_ignored_only_values() {
+        for value in ["", "\u{00ad}"] {
+            assert!(
+                matches!(
+                    DomainName::parse(value),
+                    Err(NormalizeDomainError::InvalidDomain { .. })
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fragments_match_whole_domain_normalization_and_preserve_dot_boundaries() {
+        for value in [
+            "EXAMPLE.COM",
+            "例子.测试",
+            "faß.de",
+            "MU\u{308}NCHEN.DE",
+            "ＥＸＡＭＰＬＥ。ＣＯＭ",
+            "例子．测试",
+            "例子｡测试",
+            "localhost",
+        ] {
+            assert_eq!(
+                DomainFragment::parse(value).expect("fragment").as_ascii(),
+                DomainName::parse(value).expect("whole domain").as_ascii(),
+                "{value:?}"
+            );
+        }
+        for value in [
+            ".EXAMPLE.COM.",
+            "。EXAMPLE。COM。",
+            "．EXAMPLE．COM．",
+            "｡EXAMPLE｡COM｡",
+        ] {
+            assert_eq!(
+                DomainFragment::parse(value).expect("separators").as_ascii(),
+                ".example.com."
+            );
+        }
+    }
+
+    #[test]
+    fn fragments_reject_invalid_url_characters_and_punycode() {
+        for value in [
+            "bad domain",
+            "example:443",
+            "example/path",
+            "xn--",
+            "xn--.com",
+            "a\0.com",
+        ] {
+            assert!(
+                matches!(
+                    DomainFragment::parse(value),
+                    Err(NormalizeDomainError::InvalidDomain { .. })
+                ),
+                "{value:?}"
+            );
+        }
+    }
 
     #[test]
     fn idn_ascii_unicode_and_punycode_round_trip() {

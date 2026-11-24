@@ -65,6 +65,16 @@ pub struct SourceLocation {
     pub column: usize,
 }
 impl SourceLocation {
+    /// Identifies persisted contents when their original text spans are unavailable.
+    pub fn database(key: &super::RuleSetKey, version: u32) -> Self {
+        Self {
+            file: format!("database:{key}@{version}").into(),
+            bytes: 0..0,
+            line: 1,
+            column: 1,
+        }
+    }
+
     pub(super) fn new(file: &str, source: &str, bytes: Range<usize>) -> Self {
         let prefix = &source[..bytes.start.min(source.len())];
         Self {

@@ -118,6 +118,23 @@ text_enum! {
         DomainSuffix => "domain_suffix",
     }
 }
+impl Operator {
+    pub(super) fn normalize_domain_value(
+        &self,
+        value: &str,
+    ) -> Result<String, crate::domain_name::NormalizeDomainError> {
+        use crate::domain_name::{DomainFragment, DomainName};
+        match self {
+            Self::Equals | Self::DomainSuffix => {
+                DomainName::parse(value).map(|domain| domain.as_ascii().to_owned())
+            }
+            Self::Contains | Self::StartsWith | Self::EndsWith => {
+                DomainFragment::parse(value).map(|fragment| fragment.as_ascii().to_owned())
+            }
+            Self::Regex => Ok(value.to_owned()),
+        }
+    }
+}
 text_enum! {
     /// How a rule combines its conditions.
     pub enum MatchMode {
@@ -262,6 +279,15 @@ pub enum RuleBody {
         /// Conditions restricted to fields available before persistence.
         when: Vec<Condition>,
     },
+}
+impl RuleBody {
+    pub(super) const fn kind(&self) -> RuleKind {
+        match self {
+            Self::Classification { .. } => RuleKind::Classification,
+            Self::Extraction { .. } => RuleKind::Extraction,
+            Self::Privacy { .. } => RuleKind::Privacy,
+        }
+    }
 }
 /// Complete rule contents, including an inherited identifier for overrides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

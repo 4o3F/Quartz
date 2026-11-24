@@ -530,3 +530,250 @@ fn loading_rules_rejects_missing_version_history_with_the_set_key() {
 fn test_now() -> quartz_domain::capture::UtcInstant {
     quartz_domain::capture::UtcInstant::try_from(0).expect("UTC")
 }
+
+#[test]
+fn loading_rejects_invalid_persisted_enablement() {
+    let fixture = Fixture::new();
+    // Values beyond i32 must not wrap to valid SQLite encodings during loading.
+    const WRAPS_TO_ENABLED: i64 = (1_i64 << i32::BITS) + 1;
+    for code in [-1, 2, i64::from(i32::MAX), WRAPS_TO_ENABLED, i64::MAX] {
+        diesel::sql_query("UPDATE rule_sets SET enabled=? WHERE key='builtin.privacy'")
+            .bind::<diesel::sql_types::BigInt, _>(code)
+            .execute(&mut fixture.connection())
+            .expect("corrupt enablement");
+        let result = RuleSets::new(&mut fixture.connection()).load();
+        assert!(
+            matches!(result, Err(LoadRulesError::InvalidEnablement { value }) if value == code),
+            "unsupported enablement {code}"
+        );
+    }
+}
+
+#[test]
+fn category_references_ignore_legacy_canonical_names_in_both_sort_orders() {
+    for uuid in [
+        "00000000-0000-4000-8000-000000000001",
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    ] {
+        let fixture = Fixture::new();
+        let canonical = quartz_domain::categories::BuiltinCategory::Development.uuid();
+        diesel::sql_query("INSERT INTO categories (uuid,name,color,tendency,sort_order,archived) VALUES (?,?,'neutral',2,0,0)")
+            .bind::<diesel::sql_types::Text,_>(uuid)
+            .bind::<diesel::sql_types::Text,_>("builtin:development")
+            .execute(&mut fixture.connection()).expect("legacy colliding name");
+        for reference in ["builtin:development", canonical.0.as_str()] {
+            let catalog = RuleSets::new(&mut fixture.connection())
+                .category_references(quartz_domain::categories::IncludeArchivedCategories::Exclude)
+                .expect("catalog");
+            let text = format!(
+                "format='quartz-rules/1'\n[set]\nkey='user.category'\nkind='classification'\nname='Test'\n[[rule]]\nid='one'\nlabel='Test'\ncategory='{reference}'\nwhen=[{{field='app.exe_name',op='equals',value='test.exe'}}]\n"
+            );
+            let set = RuleSet::parse(
+                "category.toml",
+                &text,
+                ParseContext {
+                    origin: RuleOrigin::User,
+                    references: &catalog,
+                },
+            )
+            .expect("canonical reference");
+            let RuleBody::Classification { category, .. } = &set.content.rule[0].body else {
+                panic!("classification")
+            };
+            assert_eq!(category.uuid, canonical, "sort position {uuid}");
+        }
+        diesel::update(categories::table.filter(categories::uuid.eq(uuid)))
+            .set(categories::name.eq(Some(canonical.0.as_str())))
+            .execute(&mut fixture.connection())
+            .expect("legacy UUID name");
+        let catalog = RuleSets::new(&mut fixture.connection())
+            .category_references(quartz_domain::categories::IncludeArchivedCategories::Exclude)
+            .expect("catalog");
+        let text = format!(
+            "format='quartz-rules/1'\n[set]\nkey='user.category'\nkind='classification'\nname='Test'\n[[rule]]\nid='one'\nlabel='Test'\ncategory='{}'\nwhen=[{{field='app.exe_name',op='equals',value='test.exe'}}]\n",
+            canonical.0
+        );
+        let set = RuleSet::parse(
+            "category.toml",
+            &text,
+            ParseContext {
+                origin: RuleOrigin::User,
+                references: &catalog,
+            },
+        )
+        .expect("UUID reference");
+        let RuleBody::Classification { category, .. } = &set.content.rule[0].body else {
+            panic!("classification")
+        };
+        assert_eq!(
+            category.uuid, canonical,
+            "UUID shadow, sort position {uuid}"
+        );
+    }
+}
+
+#[test]
+fn ambiguous_category_names_are_rejected_at_admission() {
+    let fixture = Fixture::new();
+    for uuid in [
+        "00000000-0000-4000-8000-000000000001",
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    ] {
+        diesel::sql_query("INSERT INTO categories (uuid,name,color,tendency,sort_order,archived) VALUES (?,'Shared','neutral',2,0,0)")
+            .bind::<diesel::sql_types::Text,_>(uuid).execute(&mut fixture.connection()).expect("duplicate display name");
+    }
+    let catalog = RuleSets::new(&mut fixture.connection())
+        .category_references(quartz_domain::categories::IncludeArchivedCategories::Exclude)
+        .expect("catalog");
+    assert_eq!(
+        catalog.resolve_category("Shared"),
+        Err(rules::ResolveCategoryReferenceError::Ambiguous)
+    );
+    let text = "format='quartz-rules/1'\n[set]\nkey='user.category'\nkind='classification'\nname='Test'\n[[rule]]\nid='one'\nlabel='Test'\ncategory='Shared'\nwhen=[{field='app.exe_name',op='equals',value='test.exe'}]\n";
+    let error = RuleSet::parse(
+        "ambiguous.toml",
+        text,
+        ParseContext {
+            origin: RuleOrigin::User,
+            references: &catalog,
+        },
+    )
+    .expect_err("ambiguous name");
+    assert_eq!(error.diagnostics().len(), 1);
+    assert_eq!(error.diagnostics()[0].code, rules::DiagnosticCode::Ref);
+    assert_eq!(error.diagnostics()[0].path, "rule[0].category");
+}
+
+#[test]
+fn existing_rule_updates_reject_identity_changes_and_roll_back() {
+    enum IdentityChange {
+        Kind,
+        AddParent,
+        RemoveParent,
+        Source,
+    }
+    for change in [
+        IdentityChange::Kind,
+        IdentityChange::AddParent,
+        IdentityChange::RemoveParent,
+        IdentityChange::Source,
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.apply("user.first", "Original", 0).expect("first");
+        let original = source("user.identity", "Original");
+        let original = match change {
+            IdentityChange::RemoveParent => {
+                original.replace("name='Test'", "name='Test'\nparent='builtin.privacy'")
+            }
+            _ => original,
+        };
+        fixture
+            .shell
+            .run(
+                &mut fixture.store,
+                test_now(),
+                RegistryCommand::Apply {
+                    key: "user.identity".parse().expect("key"),
+                    file: "identity.toml".into(),
+                    text: original,
+                    base_version: 0,
+                },
+            )
+            .expect("original identity");
+        let before = fixture.persisted();
+        let version_count = fixture.version_count();
+        let first = fixture
+            .shell
+            .core()
+            .decide(RegistryCommand::Apply {
+                key: "user.first".parse().expect("key"),
+                file: "first.toml".into(),
+                text: source("user.first", "Changed"),
+                base_version: 1,
+            })
+            .into_parts();
+        first.reply.expect("valid first write");
+        let second = fixture
+            .shell
+            .core()
+            .decide(RegistryCommand::Toggle {
+                key: "user.identity".parse().expect("key"),
+                base_version: 1,
+                enabled: Enablement::Disabled,
+            })
+            .into_parts();
+        second.reply.expect("valid second write");
+        let mut writes = first.writes;
+        let mut second_writes = second.writes;
+        let RuleSetWrite::Toggle(update) = second_writes.first_mut().expect("second write") else {
+            panic!("toggle")
+        };
+        match change {
+            IdentityChange::Kind => update.set.header.kind = RuleKind::Extraction,
+            IdentityChange::AddParent => update.set.header.parent = Some("builtin.privacy".into()),
+            IdentityChange::RemoveParent => update.set.header.parent = None,
+            IdentityChange::Source => {
+                update.origin = RuleOrigin::Builtin;
+                update.builtin_revision = Some(1);
+            }
+        }
+        writes.extend(second_writes);
+        let error = fixture
+            .connection()
+            .transaction(|connection| RuleSetTransaction::new(connection).execute(&writes, 0))
+            .expect_err("immutable identity precondition");
+        assert!(matches!(
+            error,
+            ExecuteRuleWritesError::PreconditionMismatch { key } if key.as_str() == "user.identity"
+        ));
+        assert_eq!(fixture.version_count(), version_count);
+        let after = fixture.persisted();
+        for key in before.sets.keys() {
+            assert_eq!(
+                after.sets[key].current.version,
+                before.sets[key].current.version
+            );
+            assert_eq!(after.sets[key].current.set, before.sets[key].current.set);
+            assert_eq!(after.sets[key].origin, before.sets[key].origin);
+        }
+    }
+}
+
+#[test]
+fn legacy_unknown_builtin_name_does_not_fall_back_to_display_name() {
+    let fixture = Fixture::new();
+    diesel::sql_query("INSERT INTO categories (uuid,name,color,tendency,sort_order,archived) VALUES ('00000000-0000-4000-8000-000000000001','builtin:future','neutral',2,0,0)")
+        .execute(&mut fixture.connection()).expect("legacy name");
+    let catalog = RuleSets::new(&mut fixture.connection())
+        .category_references(quartz_domain::categories::IncludeArchivedCategories::Exclude)
+        .expect("catalog");
+    assert_eq!(
+        catalog.resolve_category("builtin:future"),
+        Err(rules::ResolveCategoryReferenceError::Missing)
+    );
+}
+
+#[test]
+fn valid_rule_updates_do_not_write_immutable_columns() {
+    let mut fixture = Fixture::new();
+    fixture
+        .apply("user.identity", "Original", 0)
+        .expect("original");
+    fixture.connection().batch_execute("CREATE TRIGGER reject_identity_column_updates BEFORE UPDATE OF kind,parent_id,source ON rule_sets BEGIN SELECT RAISE(ABORT, 'immutable identity column update'); END;").expect("identity-column guard");
+    fixture
+        .shell
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::Toggle {
+                key: "user.identity".parse().expect("key"),
+                base_version: 1,
+                enabled: Enablement::Disabled,
+            },
+        )
+        .expect("valid update does not assign identity columns");
+    let state = fixture.persisted();
+    let entry = &state.sets[&"user.identity".parse().expect("key")];
+    assert_eq!(entry.current.version, 2);
+    assert_eq!(entry.current.enabled, Enablement::Disabled);
+}

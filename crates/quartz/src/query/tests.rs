@@ -539,9 +539,7 @@ pub(super) fn classifier(overlays: &[&str]) -> classification::Classifier {
     };
     let mut references = ReferenceCatalog::default();
     for builtin in quartz_domain::categories::BuiltinCategory::ALL {
-        references
-            .categories
-            .insert(format!("builtin:{}", builtin.key()), builtin.uuid().0);
+        references.insert_category(&builtin.uuid().0, Some(builtin.key()), None);
     }
     let mut registry = RuleRegistry::from_state(RegistryState {
         references,

@@ -28,7 +28,7 @@ pub use model::{
     EntryPosition, Field, MatchMode, Operator, Override, PrivacyAction, Rule, RuleBody,
     RuleEntryKind, RuleKind, RuleOrigin, RuleSet, SetHeader, WebAction,
 };
-pub use parse::{ParseContext, ParseRuleSetError, ReferenceCatalog};
+pub use parse::{ParseContext, ParseRuleSetError, ReferenceCatalog, ResolveCategoryReferenceError};
 pub use resolve::{
     EffectiveRule, EffectiveRules, Enablement, InstalledSet, OverlayWarning, OverrideRef,
     Resolution, ResolvedEntry, ResolvedEntryState, ResolvedNode, RuleEntrySource, RuleProvenance,

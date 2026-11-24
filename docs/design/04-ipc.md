@@ -215,7 +215,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 分类引用为 `{kind:"unclassified"}` 或 `{kind:"classified", id, uuid, builtin_key, name, color, tendency}`。`builtin_key` 是稳定内置键，`name` 为用户输入或 null；名称为 null 时由界面翻译 `category.builtin.<key>`。规则来源为 `{kind:"rule", rule:"<规则集>/<规则>@<版本>"}`，注解来源为 `{kind:"annotation", annotation:"<UUID>"}`，未分类来源为 `{kind:"unclassified"}`。活动状态新增 `{kind:"active_override", annotation:"<UUID>"}` 和 `{kind:"offline_activity", annotation:"<UUID>"}`。分类元数据从查询的数据库快照读取，求值使用生成游标规则哈希的同一规则快照。
 
-时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。M4 的 `app` 细节对同窗口实例、同非空文档身份的连续片段先合并，保留分类与来源边界；无身份时要求原始标题相同；合并不跨时钟段或活动状态边界。dirty 等可变提取显示字段不阻止 app 合并，合并后采用最后切片的提取显示值。`raw` 保留原始标题与提取输出边界。其余像素合并规则为：相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`app` 与 `raw` 均要求文档身份相同（含两者皆空），`raw` 还要求标题与提取输出相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。M4 查询语义版本为 8，版本摘要包含该版本，因此此前语义生成的游标返回 `stale_cursor`。
+时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。M4 的 `app` 细节对同窗口实例、同非空文档身份的连续片段先合并，保留分类与来源边界；无身份时要求原始标题相同；合并不跨时钟段或活动状态边界。dirty 等可变提取显示字段不阻止 app 合并，合并后采用最后切片的提取显示值。`raw` 保留原始标题与提取输出边界。其余像素合并规则为：相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`app` 与 `raw` 均要求文档身份相同（含两者皆空），`raw` 还要求标题与提取输出相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。M4 查询语义版本为 9，版本摘要包含该版本，因此此前语义生成的游标返回 `stale_cursor`。
 
 游标是 `quartz-protocol::QueryCursor` 的 JSON 对象，私有字段保存 `versions`、类型化的 `query` 参数和下一项 `position`，客户端原样保存和回传。
 
@@ -323,7 +323,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树返回的该值用作历史 scope.privacy_version。三个读取操作允许 UI、CLI，均按 200 KiB 页和不透明游标返回；`versions` 覆盖注册表全部修订、启停、排序与元数据输入。tree 按同级顺序、key 的前序遍历，versions 按版本降序，own 按文件顺序，effective 先按生效顺序列有效规则，再按树与文件顺序列被停用或覆盖的条目。entries 包含 `entry_kind`（`rule | override | disable`）、`content`（格式文档对应条目的字段）、`provenance`（定义与覆盖的 key/version/id 链）和 `state`（`effective | disabled | overridden | target_missing`）；告警使用稳定代码 `target_deleted | upstream_changed | conflict` 与目标规则引用。单条目编码超过 128 KiB 时校验报 `E-RULE-VALUE`，不产生无法分页的修订。
 
-写入仅允许 UI。`base_version = 0` 仅用于 edit/import 创建不存在或已删除的 key；恢复已删除 key 时沿用历史身份，版本从最后修订继续递增。其余写入必须使用当前非零版本。text 中 `[set].key` 必须等于请求 key。版本检查先于写入；过期返回 `rule_set_stale`，客户端读取确认结果，保留草稿，不用新基础版本自动重放。所有影响隐私保留动作的写入（包括启停、排序、删除与回退）都适用第 6.3.2 节回执要求。
+写入仅允许 UI。`base_version = 0` 仅用于 edit/import 创建不存在或已删除的 key；恢复已删除 key 时沿用历史身份，版本从最后修订继续递增。其余写入必须使用当前非零版本。text 中 `[set].key` 必须等于请求 key；保留 key 的类型和父级身份校验先于隐私预览回执校验。版本检查先于写入；过期返回 `rule_set_stale`，客户端读取确认结果，保留草稿，不用新基础版本自动重放。所有影响隐私保留动作的写入（包括启停、排序、删除与回退）都适用第 6.3.2 节回执要求。
 
 ```jsonc
 // 新建默认分类覆盖集；一次请求只修改一个 key
@@ -400,7 +400,7 @@ UUID 去重先于回执校验：已存在且确认内容相同则返回原 job�
 - `categories.reorder {parent_uuid,uuids}`：给出同父分类的完整最终顺序（含归档项），原子更新，返回 `{accepted:true}`。
 - `categories.archive {uuid,archived}`：归档或恢复，返回 `{entity}`；不提供 categories.delete，记录与规则、标注引用保留。只改变指定分类，子级保留父引用与各自归档状态。归档项从新规则与标注选择中隐藏；已有引用的查询行为见 03 第 5.1、5.3 节。
 
-不存在的 UUID、空白或超过 256 个 Unicode 标量的用户名称、非法色板或倾向、无效父级及层级环返回 `bad_request`，任一失败回滚。color 为 cat.1–cat.14 或 neutral，tendency 为 focus/neutral/distraction。重复最终值不改元数据版本；真实变化同事务增加 metadata_version，刷新规则引用目录、托盘与 day 订阅。
+不存在的 UUID、空白或超过 256 个 Unicode 标量的用户名称、使用 UUID 格式或 `builtin:` 命名空间的用户名称、非法色板或倾向、无效父级及层级环返回 `bad_request`，任一失败回滚。已有数据库中的保留命名空间名称仍可读取和改名；规则按稳定标识解析这些引用。重复显示名称可以保存，规则引用歧义名称时返回 `E-RULE-REF`，应使用 UUID 或内置键。color 为 cat.1–cat.14 或 neutral，tendency 为 focus/neutral/distraction。重复最终值不改元数据版本；真实变化同事务增加 metadata_version，刷新规则引用目录、托盘与 day 订阅。
 
 ### 6.4 浏览器
 

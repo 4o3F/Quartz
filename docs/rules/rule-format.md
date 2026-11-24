@@ -67,6 +67,8 @@ reason = "B 站改由本规则集细分"
 | `[[override]]` | 用新内容替换某条祖先规则 | `target` 必须位于本规则集的祖先链上；内容是完整的新规则，`id` 沿用目标 |
 | `[[disable]]` | 停用某条祖先规则 | `target` 必须位于祖先链上 |
 
+同一规则集中，每个 target 最多出现一次，override 与 disable 合并检查；重复时在文本解析阶段返回 `E-RULE-CONFLICT`。
+
 示例：内置分类规则集 `builtin.classification` 是根；用户新建 `user.my-tweaks`，以它为父，只停用一条、覆盖一条、新增两条。内置规则升级时，用户的差异原样保留。
 
 ```text
@@ -83,7 +85,7 @@ builtin.classification          （内置，随 Quartz 更新）
 - 两个互不为祖先的规则集，不能 `override` 或 `disable` 同一条规则。需要叠加修改时，让其中一个成为另一个的子规则集。
 - `precedent` 规则集只能使用 `[[rule]]`，不能覆盖或停用，因为判例永久有效。
 - 内置规则集不能直接编辑，只能通过子规则集修改。默认用户子集分别为 `user.local.classification`、`user.local.extraction`、`user.local.privacy`，以同类型 builtin 集为父；key 全局唯一。
-- 同一 key 创建后 kind 与 parent 固定，删除后恢复也沿用原身份；换父级时新建 key。
+- 同一 key 创建后 kind 与 parent 固定，删除后恢复也沿用原身份；换类型或父级时新建 key。编译时检查每条新增和覆盖规则的内容类型与 kind 一致。
 
 ### 1.2 生效规则的计算
 
@@ -171,7 +173,7 @@ M4 先提取再分类，窗口类名取自已保留的窗口实例；标题隐�
 
 - `case_sensitive = false`（默认）时，全角与半角字母数字、大小写、兼容字符都视为相同，例如 `ＶＳ` 与 `vs` 相同。
 - `regex` 不受 `case_sensitive` 影响，忽略大小写请在正则开头写 `(?i)`。
-- 域名可以写中文等 Unicode 形式，Quartz 自动转换。
+- `web.domain` 的 `equals` 和 `domain_suffix` 使用完整域名规范化：非过渡 UTS #46 转为小写 ASCII，Unicode 标签转为 Punycode，并去掉末尾的根点。`contains`、`starts_with`、`ends_with` 使用片段规范化：按域名分隔点逐段进行同样的 UTS #46 转换，保留首尾和连续分隔点，Unicode 分隔点统一为 `.`；比较对象为规范化后的 ASCII 域名。例如 `op = "starts_with", value = "docs."` 只匹配 `docs.` 开头，`ends_with` 的值 `.example.com` 只匹配带该后缀的子域名。片段中的非 ASCII 部分按标签编码后比较。规范化后为空的值（包括只含 UTS #46 忽略字符的片段）返回 `E-RULE-VALUE`。
 - `category`、`category.tendency`、`activity` 只能用 `equals`。
 
 ## 3. 规则类型
@@ -192,7 +194,7 @@ match = "all"
 when = [{ field = "app.exe_name", op = "equals", value = "code.exe" }]
 ```
 
-分类引用也可使用分类 UUID，导入时将名称或内置键解析成 UUID 并保存。第一条匹配规则引用的分类在查询时已归档或被删除，结果为未分类，诊断保留规则 ID 和分类 UUID。
+分类引用也可使用分类 UUID，导入时将名称或内置键解析成 UUID 并保存。UUID 与 `builtin:` 引用从独立的标识目录解析；显示名称必须唯一，否则返回 `E-RULE-REF`，应改用 UUID 或内置键。创建或改名时，分类名称不能使用 UUID 格式或 `builtin:` 命名空间。已有数据库中的此类名称保留显示并允许改名，解析时始终按稳定标识处理；不存在的稳定标识返回引用错误。第一条匹配规则引用的分类在查询时已归档或被删除，结果为未分类，诊断保留规则 ID 和分类 UUID。
 
 内置分类的键：`builtin:development`（开发）、`builtin:learning`（学习）、`builtin:communication`（沟通）、`builtin:entertainment`（娱乐）、`builtin:system`（系统与工具）。未分类不需要规则。
 
@@ -323,13 +325,13 @@ error[E-RULE-TARGET]: user.my-tweaks: override[0].target: "builtin.classificatio
 | `E-RULE-SET` | `[set]` 无效：`key` 格式错误、使用了 `builtin.` 前缀、`kind` 未知、与父级 `kind` 不同 |
 | `E-RULE-PARENT` | 父规则集不存在，或形成环 |
 | `E-RULE-TARGET` | `override`/`disable` 的目标不存在，或不在祖先链上 |
-| `E-RULE-CONFLICT` | 与另一个非祖先规则集覆盖或停用了同一条规则 |
+| `E-RULE-CONFLICT` | 同一规则集重复修改一个 target，或与另一个非祖先规则集修改了同一条规则 |
 | `E-RULE-IMMUTABLE` | 修改或删除了判例，或在判例规则集中使用 `override`/`disable` |
 | `E-RULE-FIELD` | 未知字段，或该规则类型不允许使用此字段 |
 | `E-RULE-OP` | 未知操作符，或操作符不适用于该字段 |
 | `E-RULE-VALUE` | 值为空、超长、时长或时间格式错误、枚举值无效 |
 | `E-RULE-REGEX` | 正则无法编译、超出大小限制或使用了不支持的语法 |
-| `E-RULE-REF` | 引用的分类、链或国策不存在 |
+| `E-RULE-REF` | 引用的分类、链或国策不存在，或分类显示名称有歧义 |
 | `E-RULE-DUP` | 规则集内 `id` 重复 |
 
 M4 隐私保存必须携带对应预览回执，覆盖导入、编辑、启停、排序、删除与回退中影响保留动作的操作。回执绑定完整修改、基础与父链版本、事实/标注和元数据输入、预览范围，有效期五分钟；数据或草稿变化后重新预览。预览区分条件命中与最终有效贡献，隐私影响只计仍保留且将进一步隐藏的事实；历史清理另行预览确认。请求、取消、期限和错误以 [04 第 6.3.2–6.3.4 节](../design/04-ipc.md#632-预览期限与回执) 为准；E-RULE-* 是内容诊断，preview_required 等是 IPC 操作错误。M7 判例保存也须预览。

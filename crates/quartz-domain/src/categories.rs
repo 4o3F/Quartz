@@ -13,6 +13,46 @@ pub struct CategoryId(pub i64);
 #[serde(transparent)]
 pub struct CategoryUuid(pub String);
 
+/// Stable category identifier syntax, independent of display names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CategoryIdentifier {
+    /// A hexadecimal UUID normalized to lowercase.
+    Uuid(CategoryUuid),
+    /// A key in the reserved builtin namespace.
+    Builtin(String),
+}
+impl CategoryIdentifier {
+    /// Recognizes builtin references and UUIDs in 8-4-4-4-12 form.
+    pub fn parse(value: &str) -> Option<Self> {
+        if let Some(key) = value.strip_prefix("builtin:") {
+            return Some(Self::Builtin(key.to_owned()));
+        }
+        // UUID text has 32 hexadecimal digits separated into five groups.
+        const UUID_TEXT_LEN: usize = 36;
+        const UUID_HYPHENS: [usize; 4] = [8, 13, 18, 23];
+        if value.len() == UUID_TEXT_LEN
+            && value.bytes().enumerate().all(|(index, byte)| {
+                if UUID_HYPHENS.contains(&index) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            })
+        {
+            Some(Self::Uuid(CategoryUuid(value.to_ascii_lowercase())))
+        } else {
+            None
+        }
+    }
+    /// Returns the normalized rule-text reference.
+    pub fn key(&self) -> String {
+        match self {
+            Self::Uuid(uuid) => uuid.0.clone(),
+            Self::Builtin(key) => format!("builtin:{key}"),
+        }
+    }
+}
+
 /// Number of category palette slots specified by design system section 3.3.
 pub const PALETTE_SLOT_COUNT: u8 = 14;
 
@@ -175,14 +215,11 @@ pub const MAX_CATEGORY_NAME_SCALARS: usize = 256;
 #[serde(try_from = "String", into = "String")]
 pub struct CategoryName(String);
 impl CategoryName {
-    /// Returns the validated, trimmed name.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-impl FromStr for CategoryName {
-    type Err = EditCategoryError;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
+    /// Reads legacy names for display, including names in a reserved namespace.
+    ///
+    /// # Errors
+    /// Rejects blank names and names exceeding the documented length limit.
+    pub fn from_stored(value: &str) -> Result<Self, EditCategoryError> {
         let value = value.trim();
         if value.is_empty() {
             return Err(EditCategoryError::BlankName);
@@ -191,6 +228,21 @@ impl FromStr for CategoryName {
             return Err(EditCategoryError::NameTooLong);
         }
         Ok(Self(value.to_owned()))
+    }
+
+    /// Returns the validated, trimmed name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl FromStr for CategoryName {
+    type Err = EditCategoryError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let name = Self::from_stored(value)?;
+        if CategoryIdentifier::parse(name.as_str()).is_some() {
+            return Err(EditCategoryError::ReservedName);
+        }
+        Ok(name)
     }
 }
 impl TryFrom<String> for CategoryName {
@@ -249,8 +301,15 @@ impl CategoryValues {
     /// Checks the name requirement after resolving the stored builtin identity.
     ///
     /// # Errors
-    /// Returns [`EditCategoryError::MissingName`] for unnamed user categories.
+    /// Rejects unnamed user categories and names in a reserved identifier namespace.
     pub fn validate_for(&self, builtin: Option<BuiltinCategory>) -> Result<(), EditCategoryError> {
+        if self
+            .name
+            .as_ref()
+            .is_some_and(|name| CategoryIdentifier::parse(name.as_str()).is_some())
+        {
+            return Err(EditCategoryError::ReservedName);
+        }
         if builtin.is_none() && self.name.is_none() {
             return Err(EditCategoryError::MissingName);
         }
@@ -307,6 +366,8 @@ pub enum EditCategoryError {
     BlankName,
     #[snafu(display("category name exceeds 256 Unicode scalars"))]
     NameTooLong,
+    #[snafu(display("category name uses a reserved canonical reference"))]
+    ReservedName,
     #[snafu(display("user category requires a name"))]
     MissingName,
     #[snafu(display("category parent does not exist"))]
@@ -324,6 +385,18 @@ pub enum EditCategoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_reject_canonical_category_references() {
+        for name in [
+            "builtin:development",
+            "builtin:future",
+            "71f5a800-423a-4000-8000-000000000001",
+            "71F5A800-423A-4000-8000-000000000001",
+        ] {
+            assert!(name.parse::<CategoryName>().is_err(), "{name}");
+        }
+    }
 
     #[test]
     fn names_trim_and_count_unicode_scalars() {

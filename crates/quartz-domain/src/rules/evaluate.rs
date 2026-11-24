@@ -80,9 +80,13 @@ impl FieldSnapshot {
         }
     }
 }
-/// Compilation failure retains the original regex or domain validation cause.
+/// Compilation rejects mismatched families and retains expression validation causes.
 #[derive(Debug, Snafu)]
 pub enum CompileRulesError {
+    /// A local definition or override belongs to a different rule family.
+    #[snafu(display("rule body does not match its rule-set kind"))]
+    KindMismatch,
+
     /// A pattern is invalid or exceeds its bounded compilation resources.
     #[snafu(display("could not compile rule expression"))]
     Regex {
@@ -264,6 +268,13 @@ impl CompiledCondition {
         }
     }
     fn compile(condition: &Condition) -> Result<Self, CompileRulesError> {
+        let mut condition = condition.clone();
+        if condition.field == Field::Domain && condition.op != Operator::DomainSuffix {
+            condition.value = condition
+                .op
+                .normalize_domain_value(&condition.value)
+                .context(DomainSnafu)?;
+        }
         let literal = |operation| ConditionMatcher::Literal {
             operation,
             nfc: NfcText::new(&condition.value),
@@ -275,14 +286,13 @@ impl CompiledCondition {
             Operator::StartsWith => literal(LiteralOperation::StartsWith),
             Operator::EndsWith => literal(LiteralOperation::EndsWith),
             Operator::Regex => ConditionMatcher::Regex(compile_regex(&condition.value)?),
-            Operator::DomainSuffix => ConditionMatcher::DomainSuffix(
-                DomainName::parse(&condition.value).context(DomainSnafu)?,
-            ),
+            Operator::DomainSuffix => {
+                let domain = DomainName::parse(&condition.value).context(DomainSnafu)?;
+                condition.value = domain.as_ascii().to_owned();
+                ConditionMatcher::DomainSuffix(domain)
+            }
         };
-        Ok(Self {
-            condition: condition.clone(),
-            matcher,
-        })
+        Ok(Self { condition, matcher })
     }
 }
 fn bounded_text(value: &str) -> &str {
@@ -641,7 +651,7 @@ impl EffectiveRules {
         let mut conditions = Vec::new();
         let mut patterns = Vec::new();
         for entry in &self.rules {
-            let compiled = entry.rule.compile_expressions()?;
+            let compiled = entry.rule.compile_expressions(self.kind)?;
             conditions.push(compiled.conditions);
             patterns.push(compiled.pattern);
         }
@@ -1017,7 +1027,13 @@ impl CompiledRules {
 }
 
 impl super::Rule {
-    fn compile_expressions(&self) -> Result<CompiledExpressions, CompileRulesError> {
+    fn compile_expressions(
+        &self,
+        kind: super::RuleKind,
+    ) -> Result<CompiledExpressions, CompileRulesError> {
+        if self.body.kind() != kind {
+            return Err(CompileRulesError::KindMismatch);
+        }
         let when = match &self.body {
             RuleBody::Classification { when, .. } | RuleBody::Privacy { when, .. } => when,
             RuleBody::Extraction { app, .. } => app,
@@ -1039,7 +1055,7 @@ impl super::RuleSet {
     /// Compiles every local definition and override, including currently disabled or shadowed entries.
     ///
     /// # Errors
-    /// Returns the original bounded-expression or domain compilation failure.
+    /// Rejects header/body family disagreement and returns expression compilation failures.
     pub fn validate_compilation(&self) -> Result<(), CompileRulesError> {
         for rule in self
             .content
@@ -1047,7 +1063,7 @@ impl super::RuleSet {
             .iter()
             .chain(self.content.r#override.iter().map(|entry| &entry.rule))
         {
-            rule.compile_expressions()?;
+            rule.compile_expressions(self.header.kind)?;
         }
         Ok(())
     }

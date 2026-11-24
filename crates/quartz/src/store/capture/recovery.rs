@@ -524,11 +524,11 @@ pub(crate) enum RecoverCaptureError {
     Transaction { source: diesel::result::Error },
 }
 #[derive(Debug)]
-enum RecoveryTransactionError {
+enum RecoverCaptureTransactionError {
     Operation { source: RecoverCaptureError },
     Transaction { source: diesel::result::Error },
 }
-impl From<diesel::result::Error> for RecoveryTransactionError {
+impl From<diesel::result::Error> for RecoverCaptureTransactionError {
     fn from(source: diesel::result::Error) -> Self {
         Self::Transaction { source }
     }
@@ -558,11 +558,11 @@ impl crate::store::Store {
         self.capture_transaction(keys, metadata, |capture| {
             capture
                 .recover()
-                .map_err(|source| RecoveryTransactionError::Operation { source })
+                .map_err(|source| RecoverCaptureTransactionError::Operation { source })
         })
         .map_err(|error| match error {
-            RecoveryTransactionError::Operation { source } => source,
-            RecoveryTransactionError::Transaction { source } => {
+            RecoverCaptureTransactionError::Operation { source } => source,
+            RecoverCaptureTransactionError::Transaction { source } => {
                 RecoverCaptureError::Transaction { source }
             }
         })

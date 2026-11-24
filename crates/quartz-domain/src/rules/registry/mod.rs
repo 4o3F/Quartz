@@ -214,6 +214,9 @@ pub enum DecideRegistryCommandError {
     /// An existing rule set cannot change its parent.
     #[snafu(display("an existing rule set cannot change its parent"))]
     ReparentSet,
+    /// An existing rule set cannot change its rule family.
+    #[snafu(display("an existing rule set cannot change its kind"))]
+    ChangeRuleKind,
     /// A rule set with active children cannot be deleted.
     #[snafu(display("a rule set with active children cannot be deleted"))]
     HasChildren,
@@ -385,9 +388,14 @@ impl RuleRegistry {
                 return Err(CreateRuleRegistryError::InvalidOrigin { key: key.clone() });
             }
         }
-        let snapshot =
-            RuleSnapshot::build(&state, SnapshotEpoch::initial(), BuildPolicy::Startup, None)
-                .context(create_error::SnapshotSnafu)?;
+        let snapshot = RuleSnapshot::build(
+            &state,
+            SnapshotEpoch::initial(),
+            BuildPolicy::Startup,
+            None,
+            &BTreeSet::new(),
+        )
+        .context(create_error::SnapshotSnafu)?;
         Ok(Self {
             state,
             snapshots: SnapshotCell::new(snapshot),
@@ -447,9 +455,14 @@ impl RuleRegistry {
             .base_epoch
             .next()
             .expect("decide checked the snapshot epoch increment");
-        let snapshot =
-            RuleSnapshot::build(&outcome.state, epoch, BuildPolicy::Startup, Some(&current))
-                .context(commit_error::SnapshotSnafu)?;
+        let snapshot = RuleSnapshot::build(
+            &outcome.state,
+            epoch,
+            BuildPolicy::Startup,
+            Some(&current),
+            &BTreeSet::new(),
+        )
+        .context(commit_error::SnapshotSnafu)?;
         self.state = outcome.state;
         self.snapshots.publish(snapshot);
         Ok(RulesChanged { epoch })
@@ -509,12 +522,13 @@ impl RuleRegistry {
                 if set.header.key != key.as_str() {
                     return Err(DecideRegistryCommandError::IdentityMismatch);
                 }
-                if set.header.kind == RuleKind::Privacy
+                let write = state.save_user(set)?;
+                if write.update().set.header.kind == RuleKind::Privacy
                     && preview_hash.as_ref() != Some(&current.hashes().privacy)
                 {
                     return Err(DecideRegistryCommandError::StalePreview);
                 }
-                writes.push(state.save_user(set)?);
+                writes.push(write);
             }
             RegistryCommand::Revert {
                 key,
@@ -528,6 +542,11 @@ impl RuleRegistry {
                     .ok_or(DecideRegistryCommandError::MissingRevision)?
                     .content
                     .clone();
+                set.locations.clear();
+                set.locations.insert(
+                    String::new(),
+                    rules::SourceLocation::database(&key, version),
+                );
                 writes.push(state.save_user(set)?);
             }
             RegistryCommand::Toggle {
@@ -614,6 +633,9 @@ impl RuleRegistry {
                     if old.origin != RuleOrigin::Builtin {
                         return Err(DecideRegistryCommandError::ReservedSet);
                     }
+                    if old.current.set.header.kind != set.header.kind {
+                        return Err(DecideRegistryCommandError::ChangeRuleKind);
+                    }
                     let upstream = old
                         .builtin_revision
                         .ok_or(DecideRegistryCommandError::InvalidBuiltin)?;
@@ -658,25 +680,7 @@ impl RuleRegistry {
                 _ => None,
             })
             .collect();
-        let installed = state.installed_sets();
-        let diagnostics: Vec<_> = [
-            RuleKind::Privacy,
-            RuleKind::Classification,
-            RuleKind::Extraction,
-        ]
-        .into_iter()
-        .flat_map(|kind| rules::Resolution::resolve(&installed, kind).diagnostics)
-        .filter(|diagnostic| {
-            diagnostic.code == rules::DiagnosticCode::Target
-                && edited.contains(diagnostic.set_key.as_str())
-        })
-        .collect();
-        if !diagnostics.is_empty() {
-            return Err(DecideRegistryCommandError::Snapshot {
-                source: BuildRuleSnapshotError::Tree { diagnostics },
-            });
-        }
-        let candidate = RuleSnapshot::build(&state, epoch, policy, Some(&current))
+        let candidate = RuleSnapshot::build(&state, epoch, policy, Some(&current), &edited)
             .context(command_error::SnapshotSnafu)?;
         let versions = writes
             .iter()
@@ -741,6 +745,9 @@ impl RegistryState {
         }
         if old.is_some_and(|entry| entry.current.set.header.parent != set.header.parent) {
             return Err(DecideRegistryCommandError::ReparentSet);
+        }
+        if old.is_some_and(|entry| entry.current.set.header.kind != set.header.kind) {
+            return Err(DecideRegistryCommandError::ChangeRuleKind);
         }
         // New keys start at the initial revision; retained histories advance from their last revision.
         let version = old

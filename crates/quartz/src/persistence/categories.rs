@@ -133,6 +133,7 @@ impl CategoryRequest {
                 domain::EditCategoryError::NotFound
                 | domain::EditCategoryError::BlankName
                 | domain::EditCategoryError::NameTooLong
+                | domain::EditCategoryError::ReservedName
                 | domain::EditCategoryError::MissingName
                 | domain::EditCategoryError::InvalidParent
                 | domain::EditCategoryError::Cycle
@@ -191,5 +192,118 @@ impl CategoryRequest {
             .next
             .map(|next| wire::QueryCursor::new(response.versions.clone(), query, next));
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_directory::DataDirectory;
+
+    #[test]
+    fn create_and_rename_reject_reserved_names_as_bad_request() {
+        let directory = tempfile::tempdir().expect("isolated database");
+        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
+        store.seed_categories().expect("builtins");
+        for name in [
+            "builtin:development",
+            "builtin:future",
+            "71f5a800-423a-4000-8000-000000000001",
+        ] {
+            let create = CategoryRequest::Create(wire::CategoriesCreateRequest {
+                entity: wire::NewCategory {
+                    uuid: "00000000-0000-4000-8000-000000000001"
+                        .parse()
+                        .expect("UUID"),
+                    parent_uuid: None,
+                    name: Some(name.into()),
+                    color: "neutral".into(),
+                    tendency: wire::CategoryTendency::Neutral,
+                },
+            });
+            let rename = CategoryRequest::Update(wire::CategoriesUpdateRequest {
+                entity: wire::CategoryEdit {
+                    uuid: domain::BuiltinCategory::Development
+                        .uuid()
+                        .0
+                        .parse()
+                        .expect("UUID"),
+                    parent_uuid: None,
+                    name: Some(name.into()),
+                    color: "neutral".into(),
+                    tendency: wire::CategoryTendency::Neutral,
+                },
+            });
+            for command in [create, rename] {
+                let before = store
+                    .category_listing(IncludeArchivedCategories::Include)
+                    .expect("before");
+                let error = command.execute(&mut store).expect_err("reserved name");
+                assert_eq!(error.kind, ErrorKind::BadRequest);
+                let after = store
+                    .category_listing(IncludeArchivedCategories::Include)
+                    .expect("after");
+                assert_eq!(after.entities, before.entities);
+                assert_eq!(after.metadata_version, before.metadata_version);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_reserved_names_remain_readable_and_can_be_renamed() {
+        use diesel::{Connection, RunQueryDsl};
+        let directory = tempfile::tempdir().expect("isolated database");
+        let mut store = Store::open(&DataDirectory::new(directory.path())).expect("store");
+        store.seed_categories().expect("builtins");
+        let uuid = domain::BuiltinCategory::Learning.uuid();
+        let mut connection = diesel::SqliteConnection::establish(
+            directory.path().join("quartz.db").to_str().expect("path"),
+        )
+        .expect("connection");
+        diesel::sql_query("UPDATE categories SET name='builtin:development' WHERE uuid=?")
+            .bind::<diesel::sql_types::Text, _>(&uuid.0)
+            .execute(&mut connection)
+            .expect("legacy name");
+        let listed = store
+            .list_categories(IncludeArchivedCategories::Include)
+            .expect("legacy names can be read");
+        assert_eq!(
+            listed
+                .iter()
+                .find(|entity| entity.uuid == uuid)
+                .expect("learning")
+                .values
+                .name
+                .as_ref()
+                .expect("legacy name")
+                .as_str(),
+            "builtin:development"
+        );
+        CategoryRequest::Update(wire::CategoriesUpdateRequest {
+            entity: wire::CategoryEdit {
+                uuid: uuid.0.parse().expect("UUID"),
+                parent_uuid: None,
+                name: Some("Renamed".into()),
+                color: "neutral".into(),
+                tendency: wire::CategoryTendency::Neutral,
+            },
+        })
+        .execute(&mut store)
+        .expect("rename legacy name");
+        let listed = store
+            .list_categories(IncludeArchivedCategories::Include)
+            .expect("renamed categories");
+        assert_eq!(
+            listed
+                .iter()
+                .find(|entity| entity.uuid == uuid)
+                .expect("learning")
+                .values
+                .name
+                .as_ref()
+                .expect("name")
+                .as_str(),
+            "Renamed"
+        );
     }
 }

@@ -1,11 +1,11 @@
 use super::{ComputeUpstreamChangesError, RegistryState, SnapshotEpoch, UpstreamChange};
 use crate::rules::{
     self, CompileRulesError, CompiledRules, ContentHash, Diagnostic, DiagnosticCode, Enablement,
-    Resolution, RuleKind, RuleSetKey,
+    Resolution, RuleKind, RuleSetKey, resolve::RuleTree,
 };
 use arc_swap::ArcSwap;
 use snafu::{ResultExt, Snafu};
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 /// Hashes used by queries and caches independently of a process's publication epoch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +94,7 @@ impl RuleSnapshot {
         epoch: SnapshotEpoch,
         policy: BuildPolicy,
         baseline: Option<&RuleSnapshot>,
+        edited: &BTreeSet<&str>,
     ) -> Result<Self, BuildRuleSnapshotError> {
         let mut sets = installed.installed_sets();
         let mut warnings = Vec::new();
@@ -122,43 +123,49 @@ impl RuleSnapshot {
                 }
             }
         }
-        let mut families = Vec::new();
-        let mut resolutions = Vec::new();
-        for kind in [
+        let tree = RuleTree::new(&sets);
+        let family_resolutions: Vec<_> = [
             RuleKind::Privacy,
             RuleKind::Classification,
             RuleKind::Extraction,
-        ] {
-            let resolution = Resolution::resolve(&sets, kind);
-            let blocking: Vec<_> = resolution
-                .diagnostics
-                .iter()
-                .filter(|diagnostic| {
-                    let existing = baseline.is_some_and(|snapshot| snapshot.warnings.iter().any(|warning| matches!(warning,
-                        RuleWarning::Tree(old) if old.code == diagnostic.code && old.set_key == diagnostic.set_key && old.path == diagnostic.path && old.location == diagnostic.location)));
-                    !existing && (policy == BuildPolicy::Strict || diagnostic.code != DiagnosticCode::Target)
-                })
-                .cloned()
-                .collect();
-            if !blocking.is_empty() && policy != BuildPolicy::Startup {
-                return Err(BuildRuleSnapshotError::Tree {
-                    diagnostics: blocking,
-                });
-            }
-            warnings.extend(
-                resolution
-                    .diagnostics
+        ]
+        .into_iter()
+        .map(|kind| tree.resolve(kind))
+        .collect();
+        let diagnostics: Vec<_> = tree
+            .diagnostics()
+            .iter()
+            .chain(
+                family_resolutions
                     .iter()
-                    .cloned()
-                    .map(RuleWarning::Tree),
-            );
+                    .flat_map(|family| family.diagnostics()),
+            )
+            .cloned()
+            .collect();
+        let blocking: Vec<_> = diagnostics.iter().filter(|diagnostic| {
+            let existing = baseline.is_some_and(|snapshot| snapshot.warnings.iter().any(|warning| matches!(warning,
+                RuleWarning::Tree(old) if old.code == diagnostic.code && old.set_key == diagnostic.set_key && old.path == diagnostic.path && old.location == diagnostic.location)));
+            (diagnostic.code == DiagnosticCode::Target && edited.contains(diagnostic.set_key.as_str()))
+                || (!existing && (policy == BuildPolicy::Strict || diagnostic.code != DiagnosticCode::Target))
+        }).cloned().collect();
+        if !blocking.is_empty() && policy != BuildPolicy::Startup {
+            return Err(BuildRuleSnapshotError::Tree {
+                diagnostics: blocking,
+            });
+        }
+        warnings.extend(diagnostics.into_iter().map(RuleWarning::Tree));
+        let resolutions: Vec<_> = family_resolutions
+            .into_iter()
+            .map(|family| family.into_resolution())
+            .collect();
+        let mut families = Vec::new();
+        for resolution in &resolutions {
             let hash = resolution.effective.version_hash.clone();
             let compiled = resolution
                 .effective
                 .compile()
                 .context(snapshot_error::EffectiveSnafu)?;
             families.push((compiled, hash));
-            resolutions.push(resolution);
         }
         let (extraction, extraction_hash) = families.pop().expect("three rule families");
         let (classification, classification_hash) =

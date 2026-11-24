@@ -6,7 +6,7 @@ use super::{
     schema::{categories, rule_set_versions, rule_sets},
 };
 use diesel::{
-    SqliteConnection,
+    SqliteConnection, SqliteExpressionMethods,
     prelude::{
         Connection, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper,
     },
@@ -35,6 +35,8 @@ pub(crate) enum LoadRulesError {
     MissingVersionHistory { set: RuleSetKey },
     #[snafu(display("stored current revision is missing"))]
     MissingRevision,
+    #[snafu(display("stored rule enablement is unsupported"))]
+    InvalidEnablement { value: i64 },
     #[snafu(display("stored rule revision exceeds the supported range"))]
     InvalidVersion { source: std::num::TryFromIntError },
     #[snafu(display("stored contents do not match their SHA-256"))]
@@ -59,12 +61,36 @@ pub(crate) enum ExecuteRuleWritesError {
     Database { source: diesel::result::Error },
     #[snafu(display("persisted rule row has no identifier"))]
     MissingId,
-    #[snafu(display("persisted revision no longer matches the write precondition for {key}"))]
-    UnexpectedVersion { key: RuleSetKey },
+    #[snafu(display(
+        "persisted identity or revision no longer matches the write precondition for {key}"
+    ))]
+    PreconditionMismatch { key: RuleSetKey },
 }
 impl From<diesel::result::Error> for ExecuteRuleWritesError {
     fn from(source: diesel::result::Error) -> Self {
         Self::Database { source }
+    }
+}
+
+/// SQLite stores rule enablement as exactly zero or one (03 §2.6).
+#[derive(Debug, Clone, Copy)]
+enum PersistedEnablement {
+    Disabled,
+    Enabled,
+}
+impl PersistedEnablement {
+    fn decode(value: i64) -> Result<Self, LoadRulesError> {
+        match value {
+            0 => Ok(Self::Disabled),
+            1 => Ok(Self::Enabled),
+            value => Err(LoadRulesError::InvalidEnablement { value }),
+        }
+    }
+    fn domain(self) -> Enablement {
+        match self {
+            Self::Disabled => Enablement::Disabled,
+            Self::Enabled => Enablement::Enabled,
+        }
     }
 }
 
@@ -83,6 +109,17 @@ struct CategoryReferenceRow {
     uuid: String,
     name: Option<String>,
     builtin_key: Option<String>,
+}
+
+/// Read the SQLite integer before narrowing can turn a malformed value into zero or one.
+#[derive(diesel::Queryable, diesel::Selectable)]
+#[diesel(table_name = rule_sets)]
+struct StoredRuleSet {
+    #[diesel(embed)]
+    row: RuleSetsRow,
+    #[diesel(select_expression = diesel::dsl::sql::<diesel::sql_types::BigInt>("rule_sets.enabled"))]
+    #[diesel(select_expression_type = diesel::expression::SqlLiteral<diesel::sql_types::BigInt>)]
+    enablement: i64,
 }
 
 impl<'connection> RuleSets<'connection> {
@@ -107,29 +144,20 @@ impl<'connection> RuleSets<'connection> {
             .load::<CategoryReferenceRow>(self.connection)?;
         let mut references = ReferenceCatalog::default();
         for row in rows {
-            references
-                .categories
-                .insert(row.uuid.clone(), row.uuid.clone());
-            if let Some(name) = row.name {
-                references.categories.insert(name, row.uuid.clone());
-            }
-            if let Some(key) = row.builtin_key {
-                references
-                    .categories
-                    .insert(format!("builtin:{key}"), row.uuid);
-            }
+            references.insert_category(&row.uuid, row.builtin_key.as_deref(), row.name.as_deref());
         }
         Ok(references)
     }
     fn load_rows(&mut self) -> Result<RegistryState, LoadRulesError> {
         let rows = rule_sets::table
-            .select(RuleSetsRow::as_select())
+            .select(StoredRuleSet::as_select())
             .order(rule_sets::id)
-            .load::<RuleSetsRow>(self.connection)
+            .load::<StoredRuleSet>(self.connection)
             .context(QuerySnafu)?;
         let keys: BTreeMap<_, _> = rows
             .iter()
-            .map(|row| {
+            .map(|stored| {
+                let row = &stored.row;
                 Ok((
                     row.id.ok_or(LoadRulesError::MissingId)?,
                     row.key.parse::<RuleSetKey>().context(IdentitySnafu)?,
@@ -162,7 +190,9 @@ impl<'connection> RuleSets<'connection> {
         let references = self
             .category_references(quartz_domain::categories::IncludeArchivedCategories::Exclude)?;
         let mut sets = BTreeMap::new();
-        for row in rows {
+        for stored in rows {
+            let row = stored.row;
+            let enablement = PersistedEnablement::decode(stored.enablement)?;
             let id = row.id.ok_or(LoadRulesError::MissingId)?;
             let key = keys.get(&id).ok_or(LoadRulesError::MissingId)?.clone();
             let parent = row
@@ -194,12 +224,7 @@ impl<'connection> RuleSets<'connection> {
                 content,
                 locations: BTreeMap::from([(
                     String::new(),
-                    SourceLocation {
-                        file: format!("database:{key}@{version}").into(),
-                        bytes: 0..0,
-                        line: 1,
-                        column: 1,
-                    },
+                    SourceLocation::database(&key, version),
                 )]),
             };
             sets.insert(
@@ -208,11 +233,7 @@ impl<'connection> RuleSets<'connection> {
                     current: InstalledSet {
                         set,
                         version,
-                        enabled: if row.enabled == 0 {
-                            Enablement::Disabled
-                        } else {
-                            Enablement::Enabled
-                        },
+                        enabled: enablement.domain(),
                         sibling_order: row.sibling_order,
                     },
                     origin: match row.source {
@@ -310,12 +331,12 @@ impl<'connection> RuleSetTransaction<'connection> {
                 ExpectedRuleVersion::Version(expected) => diesel::update(
                     rule_sets::table
                         .filter(rule_sets::key.eq(update.key.as_str()))
-                        .filter(rule_sets::current_version.eq(i64::from(expected))),
+                        .filter(rule_sets::current_version.eq(i64::from(expected)))
+                        .filter(rule_sets::kind.eq(kind))
+                        .filter(rule_sets::parent_id.is(parent_id))
+                        .filter(rule_sets::source.eq(source)),
                 )
                 .set((
-                    rule_sets::kind.eq(kind),
-                    rule_sets::parent_id.eq(parent_id),
-                    rule_sets::source.eq(source),
                     rule_sets::builtin_revision.eq(builtin_revision),
                     rule_sets::name.eq(&update.set.header.name),
                     rule_sets::enabled.eq(enabled),
@@ -328,7 +349,7 @@ impl<'connection> RuleSetTransaction<'connection> {
                 .optional()
                 .context(execute_error::DatabaseSnafu)?
                 .flatten()
-                .ok_or_else(|| ExecuteRuleWritesError::UnexpectedVersion {
+                .ok_or_else(|| ExecuteRuleWritesError::PreconditionMismatch {
                     key: update.key.clone(),
                 })?,
             };

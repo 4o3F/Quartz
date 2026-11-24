@@ -873,15 +873,9 @@ mod tests {
             .ipc(Op::CategoriesCreate, fixture.category_body())
             .expect("create over IPC");
         fixture.assert_category_publication();
-        let references = &fixture
-            .database
-            .registry
-            .core()
-            .state()
-            .references
-            .categories;
+        let references = &fixture.database.registry.core().state().references;
         assert_eq!(
-            references.get("研究").map(String::as_str),
+            references.resolve_category("研究").ok(),
             Some(CATEGORY_UUID)
         );
         let mut retry = fixture.category_body();
@@ -908,16 +902,10 @@ mod tests {
             .ipc(Op::CategoriesUpdate, rename.clone())
             .expect("rename");
         fixture.assert_category_publication();
-        let references = &fixture
-            .database
-            .registry
-            .core()
-            .state()
-            .references
-            .categories;
-        assert!(!references.contains_key("研究"));
+        let references = &fixture.database.registry.core().state().references;
+        assert!(references.resolve_category("研究").is_err());
         assert_eq!(
-            references.get("阅读").map(String::as_str),
+            references.resolve_category("阅读").ok(),
             Some(CATEGORY_UUID)
         );
         let listing = fixture
@@ -1047,9 +1035,8 @@ mod tests {
                     .core()
                     .state()
                     .references
-                    .categories
-                    .get("研究")
-                    .map(String::as_str),
+                    .resolve_category("研究")
+                    .ok(),
                 Some(CATEGORY_UUID)
             );
         }
@@ -1144,16 +1131,16 @@ mod tests {
                 .core()
                 .state()
                 .references
-                .categories
-                .contains_key("builtin:development")
+                .resolve_category("builtin:development")
+                .is_ok()
         );
         assert!(
             !reopened
                 .core()
                 .state()
                 .references
-                .categories
-                .contains_key(CATEGORY_UUID)
+                .resolve_category(CATEGORY_UUID)
+                .is_ok()
         );
         fixture
             .ipc(

@@ -386,7 +386,13 @@ fn own_file_order_and_effective_order_preserve_suppressed_entries_and_uuid_categ
         .expect("stored UUID");
     assert_eq!(
         category.to_string(),
-        fixture.shell.core().state().references.categories["builtin:learning"]
+        fixture
+            .shell
+            .core()
+            .state()
+            .references
+            .resolve_category("builtin:learning")
+            .expect("learning")
     );
 }
 

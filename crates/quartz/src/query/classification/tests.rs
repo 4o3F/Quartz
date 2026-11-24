@@ -16,18 +16,15 @@ fn foreground() -> Foreground {
 fn isolated_classifier(field: Field) -> Classifier {
     let categories = categories();
     let mut state = RegistryState::default();
-    state.references.categories.insert(
-        "Learning".into(),
-        categories
-            .iter()
-            .find(|category| {
-                category.builtin_key == Some(quartz_domain::categories::BuiltinCategory::Learning)
-            })
-            .expect("learning category")
-            .uuid
-            .0
-            .clone(),
-    );
+    let learning = categories
+        .iter()
+        .find(|category| {
+            category.builtin_key == Some(quartz_domain::categories::BuiltinCategory::Learning)
+        })
+        .expect("learning category");
+    state
+        .references
+        .insert_category(&learning.uuid.0, Some("learning"), Some("Learning"));
     let mut registry = RuleRegistry::from_state(state).expect("registry");
     let source = format!(
         "format='quartz-rules/1'\n[set]\nkey='user.single'\nkind='classification'\nname='Single field'\n[[rule]]\nid='match'\nlabel='Match field'\ncategory='Learning'\nwhen=[{{field='{}',op='contains',value='document'}}]",

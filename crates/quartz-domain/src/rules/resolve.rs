@@ -248,8 +248,39 @@ pub struct OverlayWarning {
 }
 
 impl Resolution {
-    /// Validates ancestry and sibling modifications, then applies overlays in tree preorder.
+    /// Validates the whole tree, then resolves the selected rule family.
     pub fn resolve(sets: &[InstalledSet], kind: RuleKind) -> Self {
+        RuleTree::new(sets).resolve(kind).into_resolution()
+    }
+}
+
+/// Family evaluation and diagnostics produced independently of shared tree validation.
+#[derive(Debug)]
+pub(super) struct FamilyResolution {
+    resolution: Resolution,
+    diagnostics: Vec<Diagnostic>,
+}
+impl FamilyResolution {
+    pub(super) fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+    pub(super) fn into_resolution(self) -> Resolution {
+        self.resolution
+    }
+}
+
+/// Shared ancestry and directive validation for every family in one installed tree.
+pub(super) struct RuleTree<'sets> {
+    sets: &'sets [InstalledSet],
+    by_key: BTreeMap<&'sets str, usize>,
+    ancestors: Vec<Vec<usize>>,
+    invalid: BTreeSet<usize>,
+    bad_targets: BTreeSet<Modification>,
+    diagnostics: Vec<Diagnostic>,
+    overlay_warnings: Vec<OverlayWarning>,
+}
+impl<'sets> RuleTree<'sets> {
+    pub(super) fn new(sets: &'sets [InstalledSet]) -> Self {
         let mut diagnostics = Vec::new();
         let mut by_key = BTreeMap::new();
         for (index, installed) in sets.iter().enumerate() {
@@ -383,6 +414,26 @@ impl Resolution {
                 });
             }
         }
+        Self {
+            sets,
+            by_key,
+            ancestors,
+            invalid,
+            bad_targets,
+            diagnostics,
+            overlay_warnings,
+        }
+    }
+    pub(super) fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+    pub(super) fn resolve(&self, kind: RuleKind) -> FamilyResolution {
+        let sets = self.sets;
+        let by_key = &self.by_key;
+        let ancestors = &self.ancestors;
+        let invalid = &self.invalid;
+        let bad_targets = &self.bad_targets;
+        let overlay_warnings = &self.overlay_warnings;
         let mut traversal: Vec<_> = (0..sets.len())
             .filter(|&i| {
                 sets[i].set.header.kind == kind
@@ -633,6 +684,7 @@ impl Resolution {
                 });
             }
         }
+        let mut diagnostics = Vec::new();
         for entry in &entries {
             let set = &sets[by_key[entry.key.as_str()]].set;
             if entry.format_entry(&set.content).to_string().len() > super::MAX_ENTRY_BYTES {
@@ -643,17 +695,26 @@ impl Resolution {
                 ));
             }
         }
-        Resolution {
-            nodes,
-            entries,
-            overlay_warnings,
-            effective: EffectiveRules {
-                kind,
-                rules,
-                suppressed,
-                version_hash,
-            },
+        let all_diagnostics = self
+            .diagnostics
+            .iter()
+            .chain(&diagnostics)
+            .cloned()
+            .collect();
+        FamilyResolution {
             diagnostics,
+            resolution: Resolution {
+                nodes,
+                entries,
+                overlay_warnings: overlay_warnings.clone(),
+                effective: EffectiveRules {
+                    kind,
+                    rules,
+                    suppressed,
+                    version_hash,
+                },
+                diagnostics: all_diagnostics,
+            },
         }
     }
 }

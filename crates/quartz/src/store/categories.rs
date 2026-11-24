@@ -9,8 +9,8 @@ use diesel::{
 };
 use quartz_domain::categories::{
     ArchiveCategory, BuiltinCategory, Category, CategoryArchiveState, CategoryEntity, CategoryId,
-    CategoryTendency, CategoryUuid, CategoryValues, CreateCategory, EditCategoryError,
-    IncludeArchivedCategories, ReorderCategories, UpdateCategory,
+    CategoryName, CategoryTendency, CategoryUuid, CategoryValues, CreateCategory,
+    EditCategoryError, IncludeArchivedCategories, ReorderCategories, UpdateCategory,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -379,7 +379,7 @@ impl CategoryTree {
             name: row
                 .name
                 .as_deref()
-                .map(str::parse)
+                .map(CategoryName::from_stored)
                 .transpose()
                 .map_err(|_| invalid())?,
             color: row.color.parse().map_err(|_| invalid())?,
@@ -389,7 +389,9 @@ impl CategoryTree {
                 enums::CategoryTendency::Distraction => CategoryTendency::Distraction,
             },
         };
-        values.validate_for(builtin_key).map_err(|_| invalid())?;
+        if values.name.is_none() && builtin_key.is_none() {
+            return Err(invalid());
+        }
         Ok(CategoryEntity {
             id: CategoryId(row.id.ok_or_else(invalid)?),
             uuid: CategoryUuid(row.uuid.clone()),

@@ -603,7 +603,7 @@ fn editing_an_overlay_still_requires_valid_targets_after_an_upstream_deletion() 
     });
     assert!(decision.writes().is_empty());
     assert!(
-        matches!(decision.reply(), Err(DecideRegistryCommandError::Snapshot { source: BuildRuleSnapshotError::Tree { diagnostics } }) if diagnostics.iter().any(|diagnostic| diagnostic.code == rules::DiagnosticCode::Target))
+        matches!(decision.reply(), Err(DecideRegistryCommandError::Snapshot { source: BuildRuleSnapshotError::Tree { diagnostics } }) if diagnostics.len() == 1 && diagnostics[0].code == rules::DiagnosticCode::Target && diagnostics[0].set_key == "user.overlay" && diagnostics[0].path == "override[0].target")
     );
 }
 
@@ -651,4 +651,233 @@ fn finishing_startup_rejects_retained_read_handles_and_snapshots() {
     let snapshot = core.snapshots().load();
     assert!(core.finish_startup().is_err(), "snapshot escaped startup");
     assert_eq!(snapshot.epoch().get(), 0);
+}
+
+#[test]
+fn retained_keys_reject_family_changes_on_apply_and_import() {
+    for kind in [
+        RuleKind::Privacy,
+        RuleKind::Extraction,
+        RuleKind::Classification,
+    ] {
+        for deletion in [RuleSetDeletion::Active, RuleSetDeletion::Deleted] {
+            let mut fixture = Fixture::new();
+            let text = format!(
+                "format='quartz-rules/1'\n[set]\nkey='user.family'\nkind='{}'\nname='Original'\n",
+                kind.as_str()
+            );
+            fixture
+                .commit(RegistryCommand::Apply {
+                    key: "user.family".parse().expect("key"),
+                    file: "original.toml".into(),
+                    text,
+                    base_version: 0,
+                })
+                .expect("original");
+            let base_version = if deletion == RuleSetDeletion::Deleted {
+                fixture
+                    .commit(RegistryCommand::Delete {
+                        key: "user.family".parse().expect("key"),
+                        base_version: 1,
+                    })
+                    .expect("delete");
+                0
+            } else {
+                1
+            };
+            let replacement_kind = if kind == RuleKind::Privacy {
+                RuleKind::Extraction
+            } else {
+                RuleKind::Privacy
+            };
+            let text = format!(
+                "format='quartz-rules/1'\n[set]\nkey='user.family'\nkind='{}'\nname='Changed'\n",
+                replacement_kind.as_str()
+            );
+            for command in [
+                RegistryCommand::Apply {
+                    key: "user.family".parse().expect("key"),
+                    file: "changed.toml".into(),
+                    text: text.clone(),
+                    base_version,
+                },
+                RegistryCommand::Import {
+                    key: "user.family".parse().expect("key"),
+                    file: "changed.toml".into(),
+                    text: text.clone(),
+                    base_version,
+                    preview_hash: None,
+                },
+                RegistryCommand::Import {
+                    key: "user.family".parse().expect("key"),
+                    file: "changed.toml".into(),
+                    text: text.clone(),
+                    base_version,
+                    preview_hash: Some(ContentHash::of("stale")),
+                },
+            ] {
+                let before = fixture.core.snapshots().load();
+                let decision = fixture.core.decide(command);
+                assert!(
+                    matches!(
+                        decision.reply(),
+                        Err(DecideRegistryCommandError::ChangeRuleKind)
+                    ),
+                    "{kind:?}, {deletion:?}: {:?}",
+                    decision.reply()
+                );
+                assert!(decision.writes().is_empty());
+                assert!(Arc::ptr_eq(&before, &fixture.core.snapshots().load()));
+            }
+        }
+    }
+}
+
+#[test]
+fn revert_uses_historical_database_location() {
+    let mut fixture = Fixture::new();
+    fixture
+        .commit(RegistryCommand::InstallBuiltin {
+            set: builtin("Original"),
+            revision: 1,
+        })
+        .expect("builtin");
+    fixture
+        .commit(overlay("user.overlay", "builtin.test"))
+        .expect("overlay");
+    let RegistryCommand::Apply {
+        key, file, text, ..
+    } = overlay("user.overlay", "builtin.test")
+    else {
+        panic!("overlay")
+    };
+    let header = text
+        .split("[[override]]")
+        .next()
+        .expect("header")
+        .to_owned();
+    fixture
+        .commit(RegistryCommand::Apply {
+            key,
+            file,
+            text: header,
+            base_version: 1,
+        })
+        .expect("remove overlay");
+    let mut removed = builtin("Removed");
+    removed.content = rules::Content::default();
+    fixture
+        .commit(RegistryCommand::InstallBuiltin {
+            set: removed,
+            revision: 2,
+        })
+        .expect("remove target");
+    let decision = fixture.core.decide(RegistryCommand::Revert {
+        key: "user.overlay".parse().expect("key"),
+        base_version: 2,
+        version: 1,
+    });
+    let Err(DecideRegistryCommandError::Snapshot {
+        source: BuildRuleSnapshotError::Tree { diagnostics },
+    }) = decision.reply()
+    else {
+        panic!("invalid historical target")
+    };
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].path, "override[0].target");
+    assert_eq!(
+        diagnostics[0].location.file,
+        PathBuf::from("database:user.overlay@1")
+    );
+    assert_eq!(diagnostics[0].location.bytes, 0..0);
+    assert_eq!(diagnostics[0].location.line, 1);
+    assert_eq!(diagnostics[0].location.column, 1);
+}
+
+#[test]
+fn startup_reports_each_tree_diagnostic_once() {
+    let mut fixture = Fixture::new();
+    fixture
+        .commit(RegistryCommand::InstallBuiltin {
+            set: builtin("Original"),
+            revision: 1,
+        })
+        .expect("builtin");
+    fixture
+        .commit(overlay("user.overlay", "builtin.test"))
+        .expect("overlay");
+    let mut state = fixture.core.state().clone();
+    let parent = state
+        .sets
+        .get_mut(&"builtin.test".parse().expect("key"))
+        .expect("builtin");
+    parent.current.set.content = rules::Content::default();
+    parent.versions.get_mut(&1).expect("revision").content = rules::Content::default();
+    let core = RuleRegistry::from_state(state).expect("startup retains warning");
+    let snapshot = core.snapshots().load();
+    let [RuleWarning::Tree(diagnostic)] = snapshot.warnings() else {
+        panic!("exactly one tree warning: {:?}", snapshot.warnings())
+    };
+    assert_eq!(diagnostic.code, rules::DiagnosticCode::Target);
+    assert_eq!(diagnostic.set_key, "user.overlay");
+    assert_eq!(diagnostic.path, "override[0].target");
+    assert_eq!(diagnostic.location.file, PathBuf::from("overlay.toml"));
+}
+
+#[test]
+fn revert_rejects_historical_body_from_another_family() {
+    let mut fixture = Fixture::new();
+    fixture
+        .commit(apply("user.history", "First", 0))
+        .expect("first");
+    fixture
+        .commit(apply("user.history", "Second", 1))
+        .expect("second");
+    let mut state = fixture.core.state().clone();
+    let entry = state
+        .sets
+        .get_mut(&"user.history".parse().expect("key"))
+        .expect("set");
+    entry.versions.get_mut(&1).expect("revision").content.rule[0].body = RuleBody::Extraction {
+        app: vec![],
+        pattern: "(?P<document>.+)".into(),
+    };
+    let core = RuleRegistry::from_state(state).expect("current revision remains valid");
+    let decision = core.decide(RegistryCommand::Revert {
+        key: "user.history".parse().expect("key"),
+        base_version: 2,
+        version: 1,
+    });
+    assert!(matches!(
+        decision.reply(),
+        Err(DecideRegistryCommandError::Snapshot {
+            source: BuildRuleSnapshotError::Compile {
+                source: rules::CompileRulesError::KindMismatch,
+                ..
+            },
+        })
+    ));
+    assert!(decision.writes().is_empty());
+}
+
+#[test]
+fn builtin_revision_cannot_change_family() {
+    let mut fixture = Fixture::new();
+    fixture
+        .commit(RegistryCommand::InstallBuiltin {
+            set: builtin("First"),
+            revision: 1,
+        })
+        .expect("first");
+    let mut set = builtin("Changed");
+    set.header.kind = RuleKind::Extraction;
+    set.content = rules::Content::default();
+    let decision = fixture
+        .core
+        .decide(RegistryCommand::InstallBuiltin { set, revision: 2 });
+    assert!(matches!(
+        decision.reply(),
+        Err(DecideRegistryCommandError::ChangeRuleKind)
+    ));
+    assert!(decision.writes().is_empty());
 }

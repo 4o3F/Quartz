@@ -3,19 +3,12 @@ use crate::{domain_name::DomainName, text::NfcText};
 use std::collections::BTreeMap;
 
 fn catalog() -> ReferenceCatalog {
-    ReferenceCatalog {
-        categories: [
-            "development",
-            "learning",
-            "communication",
-            "entertainment",
-            "system",
-        ]
-        .into_iter()
-        .map(|key| (format!("builtin:{key}"), format!("uuid-{key}")))
-        .chain([("开发".into(), "uuid-development".into())])
-        .collect(),
+    let mut catalog = ReferenceCatalog::default();
+    for builtin in crate::categories::BuiltinCategory::ALL {
+        let name = (builtin == crate::categories::BuiltinCategory::Development).then_some("开发");
+        catalog.insert_category(&builtin.uuid().0, Some(builtin.key()), name);
     }
+    catalog
 }
 fn user(source: &str) -> RuleSet {
     RuleSet::parse(
@@ -754,7 +747,15 @@ fn extraction_and_shadowed_classification_have_structured_explanations() {
         .compile()
         .expect("compile")
         .evaluate(&snapshot);
-    assert_eq!(output.category_uuid.as_deref(), Some("uuid-development"));
+    assert_eq!(
+        output.category_uuid.as_deref(),
+        Some(
+            crate::categories::BuiltinCategory::Development
+                .uuid()
+                .0
+                .as_str()
+        )
+    );
     assert!(matches!(
         output.rules[1].status,
         RuleStatus::Shadowed {
@@ -1188,10 +1189,9 @@ fn builtin_classification_validates_and_matches_only_current_fields_and_known_ca
             panic!("classification body");
         };
         assert!(
-            catalog()
-                .categories
-                .values()
-                .any(|uuid| uuid == &category.uuid.0)
+            crate::categories::BuiltinCategory::ALL
+                .into_iter()
+                .any(|builtin| builtin.uuid() == category.uuid)
         );
         assert!(when.iter().all(|condition| matches!(
             condition.field,
@@ -1617,4 +1617,167 @@ fn encoded_entry_limit_rejects_large_combined_values_with_value_diagnostic() {
             .iter()
             .any(|diagnostic| diagnostic.code == DiagnosticCode::Value)
     );
+}
+
+#[test]
+fn domain_fragments_preserve_separators_and_idna_labels() {
+    for op in ["contains", "starts_with", "ends_with"] {
+        let pattern = match op {
+            "starts_with" => "DOCS.",
+            "ends_with" => ".例子.测试",
+            _ => ".例子.",
+        };
+        let matching = FieldSnapshot {
+            domain: Some(DomainName::parse("docs.例子.测试").expect("domain")),
+            ..Default::default()
+        };
+        let unrelated = FieldSnapshot {
+            domain: Some(DomainName::parse("docsite.例子.测试").expect("domain")),
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate_condition("web.domain", op, pattern, "", &matching)
+                .privacy
+                .window_title,
+            Action::Drop,
+            "{op}"
+        );
+        if op == "starts_with" {
+            assert_eq!(
+                evaluate_condition("web.domain", op, pattern, "", &unrelated)
+                    .privacy
+                    .window_title,
+                Action::Keep
+            );
+        }
+        if op == "ends_with" {
+            let bare = FieldSnapshot {
+                domain: Some(DomainName::parse("例子.测试").expect("bare domain")),
+                ..Default::default()
+            };
+            assert_eq!(
+                evaluate_condition("web.domain", op, pattern, "", &bare)
+                    .privacy
+                    .window_title,
+                Action::Keep
+            );
+        }
+    }
+}
+
+#[test]
+fn parser_rejects_repeated_modification_targets_locally() {
+    for directives in [
+        "[[disable]]\ntarget='user.parent/one'\n[[disable]]\ntarget='user.parent/one'\n".to_owned(),
+        format!(
+            "{}\n[[disable]]\ntarget='user.parent/one'\n",
+            overlay("user.parent/one")
+        ),
+    ] {
+        let text = format!(
+            "format='quartz-rules/1'\n[set]\nkey='user.child'\nkind='privacy'\nname='Child'\nparent='user.parent'\n{directives}"
+        );
+        let error = RuleSet::parse(
+            "duplicate.toml",
+            &text,
+            ParseContext {
+                origin: RuleOrigin::User,
+                references: &catalog(),
+            },
+        )
+        .expect_err("local duplicate target");
+        assert_eq!(error.diagnostics().len(), 1);
+        let diagnostic = &error.diagnostics()[0];
+        assert_eq!(diagnostic.code, DiagnosticCode::Conflict);
+        assert!(diagnostic.path.starts_with("disable["));
+        assert_eq!(
+            diagnostic.message,
+            "target is modified more than once in this rule set"
+        );
+    }
+}
+
+#[test]
+fn compilation_rejects_header_body_family_mismatch() {
+    let mut set = privacy("user.mismatch", None, &rule("one"));
+    set.header.kind = RuleKind::Extraction;
+    assert!(set.validate_compilation().is_err());
+    assert!(
+        Resolution::resolve(&[installed(set)], RuleKind::Extraction)
+            .effective
+            .compile()
+            .is_err()
+    );
+    let mut set = privacy(
+        "user.child",
+        Some("user.parent"),
+        &overlay("user.parent/one"),
+    );
+    set.header.kind = RuleKind::Extraction;
+    assert!(
+        set.validate_compilation().is_err(),
+        "overrides are checked too"
+    );
+}
+
+#[test]
+fn domain_conditions_reject_empty_and_ignored_only_values() {
+    for op in [
+        "contains",
+        "starts_with",
+        "ends_with",
+        "equals",
+        "domain_suffix",
+    ] {
+        for value in ["", "\u{00ad}"] {
+            let text = format!(
+                "format='quartz-rules/1'\n[set]\nkey='user.empty-domain'\nkind='privacy'\nname='Test'\n[[rule]]\nid='one'\npreset='title_hidden'\nwhen=[{{field='web.domain',op='{op}',value='{value}'}}]\n"
+            );
+            let error = RuleSet::parse(
+                "empty-domain.toml",
+                &text,
+                ParseContext {
+                    origin: RuleOrigin::User,
+                    references: &catalog(),
+                },
+            )
+            .expect_err("empty normalized condition");
+            assert!(
+                error
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == DiagnosticCode::Value
+                        && diagnostic.path == "rule[0].when[0].value"),
+                "{op}, {value:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn family_diagnostics_are_independent_of_shared_tree_diagnostics() {
+    let mut set = privacy("user.large", Some("user.missing"), &rule("one"));
+    set.content.rule[0].label = Some("x".repeat(MAX_ENTRY_BYTES));
+    let sets = [installed(set)];
+    let tree = super::resolve::RuleTree::new(&sets);
+    let [tree_diagnostic] = tree.diagnostics() else {
+        panic!("one missing-parent diagnostic")
+    };
+    assert_eq!(tree_diagnostic.code, DiagnosticCode::Parent);
+    assert_eq!(tree_diagnostic.path, "set.parent");
+    let privacy = tree.resolve(RuleKind::Privacy);
+    let [family_diagnostic] = privacy.diagnostics() else {
+        panic!("one oversized-entry diagnostic")
+    };
+    assert_eq!(family_diagnostic.code, DiagnosticCode::Value);
+    assert_eq!(family_diagnostic.set_key, "user.large");
+    assert!(family_diagnostic.path.is_empty());
+    let expected_family_diagnostic = family_diagnostic.clone();
+    let aggregate = privacy.into_resolution();
+    assert_eq!(aggregate.diagnostics.len(), 2);
+    assert!(aggregate.diagnostics.contains(tree_diagnostic));
+    assert!(aggregate.diagnostics.contains(&expected_family_diagnostic));
+    let extraction = tree.resolve(RuleKind::Extraction);
+    assert!(extraction.diagnostics().is_empty());
+    assert_eq!(extraction.into_resolution().diagnostics, tree.diagnostics());
 }

@@ -231,7 +231,7 @@ CREATE TABLE rule_sets (
   source           INTEGER NOT NULL,       -- 1 builtin | 2 user
   builtin_revision INTEGER,                -- 仅内置规则集保存发布修订号
   name             TEXT NOT NULL,
-  enabled          INTEGER NOT NULL DEFAULT 1, -- 停用时整个子树不生效
+  enabled          INTEGER NOT NULL DEFAULT 1, -- 0 停用 | 1 启用；其他值在加载时拒绝；停用时整个子树不生效
   deleted_utc_ms   INTEGER,                -- NULL = 活跃；删除保留所有版本
   sibling_order    INTEGER NOT NULL,       -- 同一父级下的顺序
   current_version  INTEGER NOT NULL,
@@ -305,10 +305,10 @@ schema 版本由 diesel 的 `__diesel_schema_migrations` 表记录，不另建�
 - 规则数量在数百条以内。核心启动或规则变化时，把每类规则的规则集树解析为生效规则列表并编译（正则、规范化后的条件值），组成不可变的规则快照常驻内存；查询与采集线程只读快照。规则的修改、快照发布与并发控制由规则注册表负责，见 01 第 6.2 节：注册表是规则表的唯一写者，修改先编译、后提交、再发布，并按 `base_version` 拒绝过期修改。
 - 每条生效规则带来源：定义它的规则集 key 与版本、规则 id，以及覆盖它的规则集。这份来源用于解释（`rules.explain`）、命中预览与隐私解释 ID。
 - 界面中“编辑内置规则”不修改内置规则集，而是写入用户选定的覆盖规则集（默认分别为 `user.local.classification`、`user.local.extraction`、`user.local.privacy`，以同 kind 的内置规则集为父）；编辑用户规则则生成该规则集的新版本。
-- 规则集创建后父级身份固定，删除后重新导入同一 key 也不改变父级；需要换父级时新建规则集。历史基线只由 `rule_set_versions.parent_version` 沿固定父级链追溯。
-- 历史版本全部保留（体积很小），用于版本 diff、回退与三方对比。分类规则的条件字段有：`app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`、`web.domain`、`web.tab_title`、`browser.profile_label`。判例与国策检查另可使用 `category`、`category.tendency`、`activity`。隐私规则另用 06 第 4 节的字段白名单，保存时拒绝 `doc.*` 与 `title.normalized`。
+- 规则集创建后 kind 与父级身份固定，删除后重新导入同一 key 也沿用原身份；需要换类型或父级时新建规则集。存储更新将 kind、父级、来源与当前修订共同作为写入前置条件，不更新这三个身份列；条件不符时回滚事务。历史基线只由 `rule_set_versions.parent_version` 沿固定父级链追溯。
+- 历史版本全部保留（体积很小），用于版本 diff、回退与三方对比。回退内容使用来源历史版本的 `database:<key>@<version>` 合成位置，不沿用当前文本跨度；编译检查规则正文与头部 kind 一致。整树身份、祖先和目标校验只执行一次，再分别计算各类型的生效规则；每项树诊断只发布一次。分类规则的条件字段有：`app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`、`web.domain`、`web.tab_title`、`browser.profile_label`。判例与国策检查另可使用 `category`、`category.tendency`、`activity`。隐私规则另用 06 第 4 节的字段白名单，保存时拒绝 `doc.*` 与 `title.normalized`。
 
-操作符有：`equals`、`contains`、`starts_with`、`ends_with`、`regex`、`domain_suffix`。文本比较的规范化、大小写与全半角处理、IDN 域名转换见 10 第 4.1 节；匹配结果与界面语言无关。
+操作符有：`equals`、`contains`、`starts_with`、`ends_with`、`regex`、`domain_suffix`。文本比较的规范化、大小写与全半角处理、IDN 域名转换见 10 第 4.1 节；匹配结果与界面语言无关。域名子串操作保留片段的首尾及连续分隔点，完整域名操作才移除根点，具体转换见规则格式第 2.2 节。求值语义改变时递增现有 `QUERY_SEMANTICS_VERSION`；新文本的规范化内容变化同时反映在规则内容哈希中。
 
 ### 2.7 版本与缓存
 
@@ -583,7 +583,7 @@ struct DerivedSegment {
 
 `builtin.classification` 包含 52 条规则：开发 19 条、学习 10 条、沟通 10 条、娱乐 8 条、系统与工具 5 条。规则以可执行文件名精确匹配，覆盖编辑器、开发环境、终端、Office、阅读与学习工具、聊天、邮件、会议、游戏及启动器、播放器和系统工具；另以提取文档名精确匹配记事本中的 `Cargo.toml` 和 `pyproject.toml`，将这两类项目配置归为开发；其他记事本文档和浏览器按应用保持未分类。M4 分类导入接受 `app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`；窗口类名取自已存储窗口实例，提取先于分类。网页字段在 M5 接入；未知或尚未提供的字段返回 `E-RULE-FIELD`。
 
-分类规则只读取采集级别允许保留的字段：`TitleHidden` 提供应用与已保留的窗口类名，标题及提取字段缺失；`Excluded` 不参与分类。普通条件对缺失字段不成立，取反条件的行为遵循规则格式第 2 节。导入时把内置键、分类名或 UUID 解析为分类 UUID；查询中第一条匹配规则引用的分类已归档或不存在时，结果为未分类，并记录包含规则 ID 和分类 UUID 的诊断。
+分类规则只读取采集级别允许保留的字段：`TitleHidden` 提供应用与已保留的窗口类名，标题及提取字段缺失；`Excluded` 不参与分类。普通条件对缺失字段不成立，取反条件的行为遵循规则格式第 2 节。导入时把内置键、分类名或 UUID 解析为分类 UUID。UUID 与 `builtin:` 使用独立标识目录，分类名称只在唯一匹配时可用；歧义名称返回 `E-RULE-REF`。创建和改名拒绝使用 UUID 格式或 `builtin:` 命名空间的名称；已有此类名称保留显示与改名入口，规则解析始终按稳定标识处理；查询中第一条匹配规则引用的分类已归档或不存在时，结果为未分类，并记录包含规则 ID 和分类 UUID 的诊断。
 
 专注和分心占比以活跃时长为分母，分母为零时均为 0。最长连续专注段是同一时钟段内 UTC 首尾相接、倾向均为 `focus` 的活跃片段的单调时长之和；允许跨应用和跨专注分类，非活跃片段、其他倾向或时间间隙会中断连续段。没有时钟段的连续专注离线活动按 UTC 时长累计；进入或离开采集时钟段会中断连续段。
 

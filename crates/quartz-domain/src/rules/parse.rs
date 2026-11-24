@@ -6,7 +6,6 @@ use super::{
         REGEX_SIZE_LIMIT, Rule, RuleBody, RuleKind, RuleOrigin, RuleSet, SetHeader, WebAction,
     },
 };
-use crate::domain_name::DomainName;
 use regex::RegexBuilder;
 use serde::{
     Deserialize,
@@ -25,11 +24,63 @@ const DEFAULT_PRIORITY: u16 = 50;
 /// Largest rule priority accepted by the published format.
 const MAX_PRIORITY: u16 = 1000;
 
-/// Names and builtin keys mapped to durable category UUIDs by the caller.
+/// Stable identifiers and display names resolved independently at rule admission.
 #[derive(Debug, Clone, Default)]
 pub struct ReferenceCatalog {
-    /// Accepted category names, builtin keys, and UUIDs mapped to durable category UUIDs.
-    pub categories: BTreeMap<String, String>,
+    identifiers: BTreeMap<String, String>,
+    names: BTreeMap<String, BTreeSet<String>>,
+}
+/// A category reference is absent or its display name identifies multiple categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Snafu)]
+#[snafu(module)]
+pub enum ResolveCategoryReferenceError {
+    /// The referenced identifier or display name does not exist.
+    #[snafu(display("category does not exist"))]
+    Missing,
+    /// More than one category has this display name.
+    #[snafu(display("category name is ambiguous"))]
+    Ambiguous,
+}
+impl ReferenceCatalog {
+    /// Adds one category without allowing its display name to shadow an identifier.
+    pub fn insert_category(&mut self, uuid: &str, builtin_key: Option<&str>, name: Option<&str>) {
+        self.identifiers
+            .insert(uuid.to_ascii_lowercase(), uuid.to_owned());
+        if let Some(key) = builtin_key {
+            self.identifiers
+                .insert(format!("builtin:{key}"), uuid.to_owned());
+        }
+        if let Some(name) = name {
+            self.names
+                .entry(name.to_owned())
+                .or_default()
+                .insert(uuid.to_owned());
+        }
+    }
+    /// Resolves identifiers directly and display names only when their match is unique.
+    ///
+    /// # Errors
+    /// Returns a typed missing or ambiguous reference error.
+    pub fn resolve_category(&self, reference: &str) -> Result<&str, ResolveCategoryReferenceError> {
+        if let Some(identifier) = crate::categories::CategoryIdentifier::parse(reference) {
+            return self
+                .identifiers
+                .get(&identifier.key())
+                .map(String::as_str)
+                .ok_or(ResolveCategoryReferenceError::Missing);
+        }
+        let matches = self
+            .names
+            .get(reference)
+            .ok_or(ResolveCategoryReferenceError::Missing)?;
+        if matches.len() != 1 {
+            return Err(ResolveCategoryReferenceError::Ambiguous);
+        }
+        matches
+            .first()
+            .map(String::as_str)
+            .ok_or(ResolveCategoryReferenceError::Missing)
+    }
 }
 /// Import authority and known references; user files cannot grant themselves builtin authority.
 #[derive(Debug, Clone, Copy)]
@@ -268,6 +319,7 @@ impl RuleSet {
         }
         let mut content = Content::default();
         let mut ids = BTreeSet::new();
+        let mut targets = BTreeSet::new();
         for section in ["rule", "override", "disable"] {
             let Some(entries) = root.get(section) else {
                 continue;
@@ -283,14 +335,22 @@ impl RuleSet {
                     "precedent sets only permit appended rules",
                 );
             }
-            let mut targets = BTreeSet::new();
             for (index, entry) in entries.iter().enumerate() {
                 let path = format!("{section}[{index}]");
                 if section == "disable" {
                     check.keys(entry, &path, &["target", "reason"]);
                     let target = check.required_string(entry, "target", &path);
                     match &target {
-                        Some(target) => check.target(target, &path),
+                        Some(target) => {
+                            check.target(target, &path);
+                            if !targets.insert(target.clone()) {
+                                check.error(
+                                    DiagnosticCode::Conflict,
+                                    &format!("{path}.target"),
+                                    "target is modified more than once in this rule set",
+                                );
+                            }
+                        }
                         None => check.invalid_target(&path),
                     }
                     let reason = check.string(entry, "reason", &path, Required::No);
@@ -313,7 +373,7 @@ impl RuleSet {
                     check.error(
                         DiagnosticCode::Conflict,
                         &format!("{path}.target"),
-                        "target is modified more than once",
+                        "target is modified more than once in this rule set",
                     );
                 }
                 let id = if section == "rule" {
@@ -445,6 +505,24 @@ impl Check<'_> {
             &format!("{path}.target"),
             "expected a target in set-key/rule-id format",
         );
+    }
+    fn category(&mut self, reference: &str, path: &str) -> Option<String> {
+        match self.context.references.resolve_category(reference) {
+            Ok(uuid) => Some(uuid.to_owned()),
+            Err(error) => {
+                self.error(
+                    DiagnosticCode::Ref,
+                    path,
+                    match error {
+                        ResolveCategoryReferenceError::Missing => "category does not exist",
+                        ResolveCategoryReferenceError::Ambiguous => {
+                            "category name is ambiguous; use a UUID or builtin reference"
+                        }
+                    },
+                );
+                None
+            }
+        }
     }
     fn error(&mut self, code: DiagnosticCode, path: &str, message: impl Into<String>) {
         let mut ancestor = path.to_owned();
@@ -629,8 +707,8 @@ impl Check<'_> {
                     self.regex(value, &format!("{path}.value"), RuleKind::Classification);
                 }
                 if field == Field::Domain && op != Operator::Regex {
-                    match DomainName::parse(value) {
-                        Ok(domain) => *value = domain.as_ascii().to_owned(),
+                    match op.normalize_domain_value(value) {
+                        Ok(normalized) => *value = normalized,
                         Err(_) => self.error(
                             DiagnosticCode::Value,
                             &format!("{path}.value"),
@@ -651,13 +729,9 @@ impl Check<'_> {
                     );
                 }
                 if field == Field::Category {
-                    match self.context.references.categories.get(value) {
-                        Some(uuid) => *value = uuid.clone(),
-                        None => self.error(
-                            DiagnosticCode::Ref,
-                            &format!("{path}.value"),
-                            "category does not exist",
-                        ),
+                    match self.category(value, &format!("{path}.value")) {
+                        Some(uuid) => *value = uuid,
+                        None => continue,
                     }
                 }
                 conditions.push(Condition {
@@ -783,16 +857,17 @@ impl Check<'_> {
         let body = match kind {
             RuleKind::Classification => {
                 let category = self.required_string(entry, "category", path);
-                let uuid = category
-                    .as_ref()
-                    .and_then(|category| self.context.references.categories.get(category).cloned());
-                if uuid.is_none() {
-                    self.error(
-                        DiagnosticCode::Ref,
-                        &format!("{path}.category"),
-                        "category does not exist",
-                    );
-                }
+                let uuid = match category {
+                    Some(category) => self.category(&category, &format!("{path}.category")),
+                    None => {
+                        self.error(
+                            DiagnosticCode::Ref,
+                            &format!("{path}.category"),
+                            "category does not exist",
+                        );
+                        None
+                    }
+                };
                 let when = self.conditions(entry, "when", path, kind);
                 RuleBody::Classification {
                     category: CategoryReference {
