@@ -23,6 +23,8 @@ pub struct RuleSetVersion {
     pub version: u32,
     /// Canonical rule definitions and overlays.
     pub content: Content,
+    /// Saved header; absent only in revisions written before header snapshots.
+    pub header: Option<crate::rules::SetHeader>,
     /// Parent revision captured when these contents were authored.
     pub parent_version: Option<u32>,
     /// Optional revision annotation.
@@ -31,7 +33,20 @@ pub struct RuleSetVersion {
     pub created_utc_ms: Option<i64>,
 }
 impl RuleSetVersion {
-    /// Hashes the canonical contents that a persistence adapter writes.
+    /// Returns the saved header, or the current row fields available for a legacy revision.
+    pub fn header_or_legacy(&self, current: &crate::rules::SetHeader) -> crate::rules::SetHeader {
+        self.header
+            .clone()
+            .unwrap_or_else(|| crate::rules::SetHeader {
+                key: current.key.clone(),
+                kind: current.kind,
+                name: current.name.clone(),
+                parent: current.parent.clone(),
+                description: None,
+                chain: None,
+            })
+    }
+    /// Hashes canonical entries for rule-content comparisons, excluding the saved header.
     pub fn content_hash(&self) -> ContentHash {
         self.content.content_hash()
     }

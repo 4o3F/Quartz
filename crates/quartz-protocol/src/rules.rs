@@ -56,6 +56,38 @@ pub struct RuleSetsEditRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_receipt: Option<String>,
 }
+/// Validates text against an observed installed revision without saving it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulesTextValidateRequest {
+    pub key: String,
+    pub base_version: u32,
+    pub text: String,
+}
+/// Content diagnostics from a contextual dry run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulesTextValidateResponse {
+    pub valid: bool,
+    pub diagnostics: Vec<RuleDiagnostic>,
+    pub truncated: bool,
+}
+/// Exports current or retained contents, including deleted history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulesTextExportRequest {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<NonZeroU32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<QueryCursor>,
+}
+/// A UTF-8 fragment of deterministic quartz-rules/1 text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulesTextExportResponse {
+    pub text: String,
+    pub versions: QueryVersions,
+    pub next_cursor: Option<QueryCursor>,
+}
 /// Changes enablement of a user set and its effective subtree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

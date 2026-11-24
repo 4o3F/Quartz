@@ -30,6 +30,12 @@ const INITIAL_REVISION: u32 = 1;
 /// Builtin roots precede every user root in the same family.
 const FIRST_USER_ROOT_ORDER: usize = 1;
 
+#[derive(Clone, Copy)]
+enum CommandPurpose {
+    Save,
+    Validate,
+}
+
 /// A client uses zero to request creation of a missing or deleted rule set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BaseVersion {
@@ -454,7 +460,10 @@ impl RuleRegistry {
     }
     /// Computes a write plan without mutating state, epoch, or the published snapshot.
     pub fn decide(&self, command: RegistryCommand) -> Decision {
-        match self.try_decide(command) {
+        self.decision(command, CommandPurpose::Save)
+    }
+    fn decision(&self, command: RegistryCommand, purpose: CommandPurpose) -> Decision {
+        match self.try_decide(command, purpose) {
             Ok(decision) => decision,
             Err(error) => Decision {
                 writes: Vec::new(),
@@ -462,6 +471,11 @@ impl RuleRegistry {
                 outcome: None,
             },
         }
+    }
+    /// Computes a validation plan without changing the registry or publishing a snapshot.
+    /// Installed builtin sets permit their trusted metadata; callers must discard the plan.
+    pub fn decide_validation(&self, command: RegistryCommand) -> Decision {
+        self.decision(command, CommandPurpose::Validate)
     }
     /// Publishes a previously validated candidate after the shell commits its writes.
     ///
@@ -495,8 +509,22 @@ impl RuleRegistry {
         self.snapshots.publish(snapshot);
         Ok(RulesChanged { epoch })
     }
-    fn try_decide(&self, command: RegistryCommand) -> Result<Decision, DecideRegistryCommandError> {
-        command.check_user_targets(&self.state)?;
+    fn try_decide(
+        &self,
+        command: RegistryCommand,
+        purpose: CommandPurpose,
+    ) -> Result<Decision, DecideRegistryCommandError> {
+        let origin = match (&command, purpose) {
+            (RegistryCommand::Apply { key, .. }, CommandPurpose::Validate) => self
+                .state
+                .sets
+                .get(key)
+                .map_or(RuleOrigin::User, |entry| entry.origin),
+            _ => RuleOrigin::User,
+        };
+        if origin == RuleOrigin::User {
+            command.check_user_targets(&self.state)?;
+        }
         let current = self.snapshots.load();
         let epoch = current
             .epoch()
@@ -521,7 +549,7 @@ impl RuleRegistry {
                     &file.to_string_lossy(),
                     &text,
                     ParseContext {
-                        origin: RuleOrigin::User,
+                        origin,
                         references: &state.references,
                     },
                 )
@@ -529,7 +557,7 @@ impl RuleRegistry {
                 if set.header.key != key.as_str() {
                     return Err(DecideRegistryCommandError::IdentityMismatch);
                 }
-                writes.push(state.save_user(set)?);
+                writes.push(state.save_text(set, origin)?);
             }
             RegistryCommand::Import {
                 key,
@@ -551,7 +579,7 @@ impl RuleRegistry {
                 if set.header.key != key.as_str() {
                     return Err(DecideRegistryCommandError::IdentityMismatch);
                 }
-                let write = state.save_user(set)?;
+                let write = state.save_text(set, RuleOrigin::User)?;
                 if write.update().set.header.kind == RuleKind::Privacy
                     && preview_hash.as_ref() != Some(&current.hashes().privacy)
                 {
@@ -566,17 +594,17 @@ impl RuleRegistry {
             } => {
                 state.check_base(&key, base_version)?;
                 let mut set = state.active(&key)?.current.set.clone();
-                set.content = state
+                let revision = state
                     .version(&key, version)
-                    .ok_or(DecideRegistryCommandError::MissingRevision)?
-                    .content
-                    .clone();
+                    .ok_or(DecideRegistryCommandError::MissingRevision)?;
+                set.content = revision.content.clone();
+                set.header = revision.header_or_legacy(&set.header);
                 set.locations.clear();
                 set.locations.insert(
                     String::new(),
                     rules::SourceLocation::database(&key, version),
                 );
-                writes.push(state.save_user(set)?);
+                writes.push(state.save_text(set, RuleOrigin::User)?);
             }
             RegistryCommand::Toggle {
                 key,
@@ -783,17 +811,21 @@ impl RegistryState {
         }
         Ok(())
     }
-    fn save_user(&mut self, set: RuleSet) -> Result<RuleSetWrite, DecideRegistryCommandError> {
+    fn save_text(
+        &mut self,
+        set: RuleSet,
+        origin: RuleOrigin,
+    ) -> Result<RuleSetWrite, DecideRegistryCommandError> {
         let key: RuleSetKey = set
             .header
             .key
             .parse()
             .context(command_error::IdentitySnafu)?;
-        if key.as_str().starts_with("builtin.") {
+        if origin == RuleOrigin::User && key.as_str().starts_with("builtin.") {
             return Err(DecideRegistryCommandError::ReservedSet { key: key.clone() });
         }
         let old = self.sets.get(&key);
-        if old.is_some_and(|entry| entry.origin != RuleOrigin::User) {
+        if old.is_some_and(|entry| entry.origin != origin) {
             return Err(DecideRegistryCommandError::ReservedSet { key: key.clone() });
         }
         if old.is_some_and(|entry| entry.current.set.header.parent != set.header.parent) {
@@ -813,7 +845,8 @@ impl RegistryState {
             })
             .transpose()?
             .unwrap_or(INITIAL_REVISION);
-        let update = self.content_update(set, version, RuleOrigin::User, None)?;
+        let builtin_revision = old.and_then(|entry| entry.builtin_revision);
+        let update = self.content_update(set, version, origin, builtin_revision)?;
         self.apply_update(&update);
         Ok(RuleSetWrite::CommitVersion(update))
     }
@@ -869,6 +902,7 @@ impl RegistryState {
             revision: RuleSetVersion {
                 version,
                 content: set.content.clone(),
+                header: Some(set.header.clone()),
                 parent_version,
                 note: None,
                 created_utc_ms: None,
@@ -903,6 +937,7 @@ impl RegistryState {
             .ok_or(DecideRegistryCommandError::MissingRevision)?
             .clone();
         revision.version = version;
+        revision.header = Some(old.current.set.header.clone());
         revision.created_utc_ms = None;
         revision.note = Some("rule-set state changed".into());
         let update = RuleSetUpdate {

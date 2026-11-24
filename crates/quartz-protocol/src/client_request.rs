@@ -47,6 +47,8 @@ macro_rules! requests {
     )*};
 }
 requests! {
+    crate::RulesTextValidateRequest => RulesTextValidate => crate::RulesTextValidateResponse,
+    crate::RulesTextExportRequest => RulesTextExport => crate::RulesTextExportResponse,
     crate::RuleSetsEditRequest => RuleSetsEdit => crate::RuleSetsWriteResponse,
     crate::RuleSetsSetEnabledRequest => RuleSetsSetEnabled => crate::RuleSetsWriteResponse,
     crate::RuleSetsReorderRequest => RuleSetsReorder => crate::RuleSetsWriteResponse,

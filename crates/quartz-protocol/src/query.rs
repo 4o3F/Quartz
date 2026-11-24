@@ -239,6 +239,11 @@ pub enum CursorQuery {
         version: Option<std::num::NonZeroU32>,
         view: crate::rules::RuleView,
     },
+    /// Canonical text export selection; position is a UTF-8 byte offset.
+    RulesTextExport {
+        key: String,
+        version: Option<std::num::NonZeroU32>,
+    },
     /// Retained revision listing inputs.
     RuleSetsVersions { key: String },
     /// Saved annotation entities intersecting a bounded UTC range.

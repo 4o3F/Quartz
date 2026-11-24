@@ -364,7 +364,14 @@ impl DatabaseLoop {
         let system = command.settings.as_ref().map(|ports| ports.system);
         let mut result = self.execute_write(command.request, system);
         self.store.limit_write_wait(Duration::MAX);
-        if result.is_ok() {
+        if result.is_ok()
+            && !matches!(
+                result,
+                Ok(crate::persistence::dispatch::WriteResponse::RuleValidation(
+                    _
+                ))
+            )
+        {
             self.publish_versions()?;
             if matches!(
                 result,

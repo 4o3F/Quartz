@@ -87,6 +87,16 @@ impl PageBudget {
             .ok_or(RunQueryError::PageTooLarge)?;
         Ok(self)
     }
+    /// Admits one character inside an already reserved JSON string, including escaping.
+    pub(crate) fn admit_text_character(&mut self, character: char) -> Result<bool, RunQueryError> {
+        const JSON_STRING_QUOTES: usize = 2;
+        let bytes = JsonBytes::measure(&character)? - JSON_STRING_QUOTES;
+        if bytes > self.remaining {
+            return Ok(false);
+        }
+        self.remaining -= bytes;
+        Ok(true)
+    }
     pub(crate) fn page<T: Serialize>(
         self,
         items: Vec<T>,

@@ -3,6 +3,7 @@
 mod content_hash;
 mod diagnostic;
 mod evaluate;
+mod export;
 mod format;
 mod identity;
 mod model;

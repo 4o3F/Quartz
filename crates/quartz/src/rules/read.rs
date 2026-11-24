@@ -34,6 +34,7 @@ pub(crate) enum ReadRequest {
     Tree(RuleSetsTreeRequest),
     Get(RuleSetsGetRequest),
     Versions(RuleSetsVersionsRequest),
+    Export(wire::RulesTextExportRequest),
 }
 /// Typed response bodies for the three rule read operations.
 #[derive(Debug, serde::Serialize)]
@@ -42,10 +43,12 @@ pub(crate) enum ReadResponse {
     Tree(RuleSetsTreeResponse),
     Get(RuleSetsGetResponse),
     Versions(RuleSetsVersionsResponse),
+    Export(wire::RulesTextExportResponse),
 }
 impl ReadRequest {
     pub(crate) fn decode(op: wire::Op, body: serde_json::Value) -> Result<Self, serde_json::Error> {
         let request = match op {
+            wire::Op::RulesTextExport => serde_json::from_value(body).map(Self::Export),
             wire::Op::RuleSetsTree => serde_json::from_value(body).map(Self::Tree),
             wire::Op::RuleSetsGet => serde_json::from_value(body).map(Self::Get),
             wire::Op::RuleSetsVersions => serde_json::from_value(body).map(Self::Versions),
@@ -54,6 +57,14 @@ impl ReadRequest {
             )),
         }?;
         match &request {
+            Self::Export(body) => {
+                if let Some(cursor) = &body.cursor {
+                    cursor.validate_query(&wire::CursorQuery::RulesTextExport {
+                        key: body.key.clone(),
+                        version: body.version,
+                    })?;
+                }
+            }
             Self::Tree(body) => {
                 if let Some(cursor) = &body.cursor {
                     cursor.validate_query(&wire::CursorQuery::RuleSetsTree {
@@ -83,6 +94,7 @@ impl ReadRequest {
     pub(crate) fn execute(self, inputs: ReadInputs) -> Result<ReadResponse, ProtocolError> {
         let versions = inputs.versions();
         match self {
+            Self::Export(request) => inputs.export(request, versions).map(ReadResponse::Export),
             Self::Tree(request) => inputs.tree(request, versions).map(ReadResponse::Tree),
             Self::Get(request) => inputs.contents(request, versions).map(ReadResponse::Get),
             Self::Versions(request) => inputs
@@ -95,7 +107,7 @@ impl ReadInputs {
     pub(crate) fn versions(&self) -> wire::QueryVersions {
         let sets: Vec<_> = self.snapshot.state().sets.iter().map(|item| {
             let revisions: Vec<_> = item.1.versions.values().map(|revision| serde_json::json!({
-                "version": revision.version, "content": revision.content,
+                "version": revision.version, "content": revision.content, "header": revision.header,
                 "parent_version": revision.parent_version, "note": revision.note,
                 "created_utc_ms": revision.created_utc_ms,
             })).collect();
@@ -112,6 +124,74 @@ impl ReadInputs {
         }).collect();
         let encoded = serde_json::json!({"semantics": "rule-reads.v1", "metadata": self.metadata_version, "sets": sets});
         wire::QueryVersions(domain::ContentHash::of(&encoded.to_string()).to_string())
+    }
+    fn export(
+        &self,
+        request: wire::RulesTextExportRequest,
+        versions: wire::QueryVersions,
+    ) -> Result<wire::RulesTextExportResponse, ProtocolError> {
+        let query = wire::CursorQuery::RulesTextExport {
+            key: request.key.clone(),
+            version: request.version,
+        };
+        let position = Self::position(request.cursor.as_ref(), &versions, &query)?;
+        let key: domain::RuleSetKey = request
+            .key
+            .parse()
+            .map_err(|_| ProtocolError::new(ErrorKind::BadRequest))?;
+        let missing = || {
+            ProtocolError::new(ErrorKind::RuleSetNotFound {
+                key: request.key.clone(),
+                version: request.version.map(u32::from),
+            })
+        };
+        let set = self.snapshot.state().sets.get(&key).ok_or_else(missing)?;
+        if request.version.is_none() && set.deletion == RuleSetDeletion::Deleted {
+            return Err(missing());
+        }
+        let version = request.version.map_or(set.current.version, u32::from);
+        let revision = set.versions.get(&version).ok_or_else(missing)?;
+        // Revisions predating header snapshots retain only the current row header.
+        let header = revision.header_or_legacy(&set.current.set.header);
+        let text = revision.content.canonical_text(&header);
+        if text.len() > wire::MAX_RULE_TEXT_BYTES {
+            return Err(ProtocolError::new(ErrorKind::BadRequest));
+        }
+        let start = match position {
+            PagePosition::First => 0,
+            PagePosition::Cursor(index) => index,
+        };
+        if start >= text.len() || !text.is_char_boundary(start) {
+            return Err(ProtocolError::new(ErrorKind::BadRequest));
+        }
+        let mut response = wire::RulesTextExportResponse {
+            text: String::new(),
+            versions,
+            next_cursor: None,
+        };
+        let mut budget = Self::budget(&response, &response.versions, &query)?;
+        let mut end = start;
+        for character in text[start..].chars() {
+            if !budget
+                .admit_text_character(character)
+                .map_err(Self::paging_error)?
+            {
+                break;
+            }
+            end += character.len_utf8();
+        }
+        if end == start {
+            return Err(Self::internal());
+        }
+        response.text = text[start..end].into();
+        if end < text.len() {
+            response.next_cursor = Some(wire::QueryCursor::new(
+                response.versions.clone(),
+                query,
+                end,
+            ));
+        }
+        Ok(response)
     }
     fn kind(kind: RuleKind) -> domain::RuleKind {
         match kind {

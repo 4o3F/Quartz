@@ -1830,3 +1830,41 @@ fn committed_classification_edit_immediately_splits_capture_without_another_obse
         "one immediate boundary for the classification commit"
     );
 }
+
+#[test]
+fn rule_validation_dispatch_returns_diagnostics_without_publishing_or_saving_a_revision() {
+    use crate::core::app::MainCommand;
+    use crate::persistence::dispatch::{WriteRequest, WriteResponse};
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let request = WriteRequest::decode(quartz_protocol::Op::RulesTextValidate, serde_json::json!({
+        "key":"user.validation", "base_version":0,
+        "text":"format='quartz-rules/1'\n[set]\nkey='user.validation'\nkind='privacy'\nname='Draft'\n"
+    })).expect("typed validation");
+    let response = runtime
+        .workers
+        .writes
+        .submit(request)
+        .expect("admission")
+        .blocking_recv()
+        .expect("reply")
+        .expect("dry run");
+    assert!(
+        matches!(response,WriteResponse::RuleValidation(body) if body.valid && body.diagnostics.is_empty())
+    );
+    let directory = runtime.shutdown();
+    let state = crate::store::ReadOnlyStore::open(&directory.path().join("quartz.db"))
+        .expect("read only store")
+        .rule_sets()
+        .load()
+        .expect("rules");
+    assert!(
+        !state
+            .sets
+            .contains_key(&"user.validation".parse().expect("key"))
+    );
+    assert_eq!(
+        Inspection::open(directory.path()).policy_boundary_count(),
+        0
+    );
+}

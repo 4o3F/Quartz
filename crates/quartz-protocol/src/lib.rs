@@ -52,7 +52,8 @@ pub use rules::{
     RuleSetWarning, RuleSetsDeleteRequest, RuleSetsEditRequest, RuleSetsGetRequest,
     RuleSetsGetResponse, RuleSetsReorderRequest, RuleSetsRevertRequest, RuleSetsSetEnabledRequest,
     RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsVersionsRequest, RuleSetsVersionsResponse,
-    RuleSetsWriteResponse, RuleView, RuleWarningCode, RuleWebAction,
+    RuleSetsWriteResponse, RuleView, RuleWarningCode, RuleWebAction, RulesTextExportRequest,
+    RulesTextExportResponse, RulesTextValidateRequest, RulesTextValidateResponse,
 };
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};
 pub use topic::{LocalDate, ParseTopicError, Subscribe, SubscribeResponse, Topic, Unsubscribe};

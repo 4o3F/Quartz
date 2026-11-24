@@ -687,6 +687,13 @@ pub(crate) mod tests {
                     serde_json::json!({"key":"builtin.privacy"}),
                 )
                 .await;
+            client
+                .request(
+                    5,
+                    quartz_protocol::Op::RulesTextExport,
+                    serde_json::json!({"key":"builtin.privacy"}),
+                )
+                .await;
             client.close().await;
         }
     }

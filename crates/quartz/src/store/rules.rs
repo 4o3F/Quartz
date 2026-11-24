@@ -18,6 +18,7 @@ use quartz_domain::rules::{
     self, Content, ContentHash, Enablement, InstalledSet, ReferenceCatalog, RuleKind, RuleOrigin,
     RuleSet, RuleSetKey, SetHeader, SourceLocation,
 };
+use serde::Serialize;
 use snafu::{ResultExt, Snafu};
 use std::collections::BTreeMap;
 
@@ -170,13 +171,14 @@ impl<'connection> RuleSets<'connection> {
             .load::<RuleSetVersionsRow>(self.connection)
             .context(QuerySnafu)?
         {
-            let content = row.decode_content()?;
+            let saved = row.decode_content()?;
             let version = u32::try_from(row.version).context(InvalidVersionSnafu)?;
             versions.entry(row.set_id).or_default().insert(
                 version,
                 RuleSetVersion {
                     version,
-                    content,
+                    content: saved.content,
+                    header: saved.set,
                     parent_version: row
                         .parent_version
                         .map(u32::try_from)
@@ -212,15 +214,18 @@ impl<'connection> RuleSets<'connection> {
                 .ok_or(LoadRulesError::MissingRevision)?
                 .content
                 .clone();
+            let legacy_header = SetHeader {
+                key: row.key,
+                kind: row.kind.domain_kind(),
+                name: row.name,
+                parent,
+                description: None,
+                chain: None,
+            };
+            // Legacy rows have no header snapshot; only the row header remains available.
+            let header = history[&version].header.clone().unwrap_or(legacy_header);
             let set = RuleSet {
-                header: SetHeader {
-                    key: row.key,
-                    kind: row.kind.domain_kind(),
-                    name: row.name,
-                    parent,
-                    description: None,
-                    chain: None,
-                },
+                header,
                 content,
                 locations: BTreeMap::from([(
                     String::new(),
@@ -353,12 +358,18 @@ impl<'connection> RuleSetTransaction<'connection> {
                     key: update.key.clone(),
                 })?,
             };
+            let saved = StoredRevisionContent {
+                content: update.revision.content.clone(),
+                set: update.revision.header.clone(),
+            };
+            let content = serde_json::to_string(&saved).expect("stored rule revision is JSON-safe");
+            let content_hash = ContentHash::of(&content).to_string();
             diesel::insert_into(rule_set_versions::table)
                 .values(&RuleSetVersionsRow {
                     set_id: id,
                     version: current_version,
-                    content: update.revision.content.canonical_json(),
-                    content_hash: update.revision.content_hash().to_string(),
+                    content,
+                    content_hash,
                     parent_version: update.revision.parent_version.map(i64::from),
                     note: update.revision.note.clone(),
                     created_utc_ms: committed_at_ms,
@@ -389,14 +400,33 @@ impl RuleSetKind {
         }
     }
 }
+#[derive(Serialize)]
+struct StoredRevisionContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    set: Option<SetHeader>,
+    #[serde(flatten)]
+    content: Content,
+}
+impl StoredRevisionContent {
+    fn decode(text: &str) -> Result<Self, serde_json::Error> {
+        let mut fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(text)?;
+        let set = match fields.remove("set") {
+            Some(value) => serde_json::from_value(value)?,
+            None => None,
+        };
+        // Decode the remaining object directly so Content rejects unknown fields.
+        let content = serde_json::from_value(serde_json::Value::Object(fields))?;
+        Ok(Self { set, content })
+    }
+}
 impl RuleSetVersionsRow {
-    fn decode_content(&self) -> Result<Content, LoadRulesError> {
+    fn decode_content(&self) -> Result<StoredRevisionContent, LoadRulesError> {
         let stored = self
             .content_hash
             .parse::<ContentHash>()
             .context(InvalidHashSnafu)?;
         snafu::ensure!(stored == ContentHash::of(&self.content), HashMismatchSnafu);
-        serde_json::from_str(&self.content).context(DecodeSnafu)
+        StoredRevisionContent::decode(&self.content).context(DecodeSnafu)
     }
 }
 

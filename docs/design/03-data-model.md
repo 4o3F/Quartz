@@ -305,6 +305,8 @@ schema 版本由 diesel 的 `__diesel_schema_migrations` 表记录，不另建�
 
 所有规则（分类、提取、隐私，以及 M7 的判例与国策检查）都以**规则集**组织，规则集通过 `parent_id` 组成树，子规则集只保存相对父级的差异（新增 `rule`、覆盖 `override`、停用 `disable`）。规则集树的语义、生效规则的计算顺序、对外文本格式 `quartz-rules/1`、全部字段、操作符与校验错误码，以 [规则格式文档](../rules/rule-format.md) 为准；`rule_set_versions.content` 是该文本的规范化 JSON 形式，分类改用 uuid 引用，因此分类改名不影响规则。
 
+新修订的 `rule_set_versions.content` 在规范条目 JSON 中增加可选 `set` 对象，保存完整的 key、kind、name、parent、description、chain 头部，`content_hash` 仍校验整个存储 JSON 的 SHA-256。启停、排序、删除也保存头部；回退恢复来源修订的头部和条目。加载当前版本和导出历史版本使用对应修订的头部。这是现有 JSON 列的附加字段，不改变数据库 schema。旧修订没有保存头部时，导出与回退使用当前 rule_sets 行中的 key、kind、name、parent，description 与 chain 为空；旧名称和未曾持久化的 description 无法恢复。加载两种修订 JSON 时均拒绝未知顶层字段。规则生效内容哈希继续使用规范条目，规则读取 versions 摘要另包含历史头部。
+
 - 规则数量在数百条以内。核心启动或规则变化时，把每类规则的规则集树解析为生效规则列表并编译（正则、规范化后的条件值），组成不可变的规则快照常驻内存；查询与采集线程只读快照。规则的修改、快照发布与并发控制由规则注册表负责，见 01 第 6.2 节：注册表是规则表的唯一写者，修改先编译、后提交、再发布，并按 `base_version` 拒绝过期修改。
 - 每条生效规则带来源：定义它的规则集 key 与版本、规则 id，以及覆盖它的规则集。这份来源用于解释（`rules.explain`）、命中预览与隐私解释 ID。
 - 界面中“编辑内置规则”不修改内置规则集，而是写入用户选定的覆盖规则集（默认分别为 `user.local.classification`、`user.local.extraction`、`user.local.privacy`，以同 kind 的内置规则集为父）；编辑用户规则则生成该规则集的新版本。

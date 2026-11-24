@@ -487,17 +487,19 @@ fn startup_rebuild_degrades_uncompilable_user_or_builtin_sets_without_sql_decisi
             .first::<RuleSetVersionsRow>(&mut connection)
             .expect("revision");
         let mut content = row.decode_content().expect("content");
-        match &mut content.rule[0].body {
+        match &mut content.content.rule[0].body {
             RuleBody::Privacy { when, .. } | RuleBody::Classification { when, .. } => {
                 when[0].op = rules::Operator::Regex;
                 when[0].value = "(".into();
             }
             _ => panic!("fixture contains classification or privacy conditions"),
         }
+        let encoded = serde_json::to_string(&content).expect("stored revision");
+        let hash = ContentHash::of(&encoded).to_string();
         diesel::update(rule_set_versions::table.find((id.expect("id"), 1i64)))
             .set((
-                rule_set_versions::content.eq(content.canonical_json()),
-                rule_set_versions::content_hash.eq(content.content_hash().to_string()),
+                rule_set_versions::content.eq(encoded),
+                rule_set_versions::content_hash.eq(hash),
             ))
             .execute(&mut connection)
             .expect("older accepted pattern");
@@ -799,4 +801,108 @@ fn valid_rule_updates_do_not_write_immutable_columns() {
     let entry = &state.sets[&"user.identity".parse().expect("key")];
     assert_eq!(entry.current.version, 2);
     assert_eq!(entry.current.enabled, Enablement::Disabled);
+}
+
+impl Store {
+    /// Rewrites saved revisions using the exact pre-D3 content and checksum encoding.
+    pub(crate) fn rewrite_rule_revisions_as_legacy(&mut self) {
+        let rows = rule_set_versions::table
+            .select(RuleSetVersionsRow::as_select())
+            .load::<RuleSetVersionsRow>(&mut self.writer)
+            .expect("saved revisions");
+        for row in rows {
+            let content = row.decode_content().expect("valid revision").content;
+            let legacy = content.canonical_json();
+            assert!(
+                !serde_json::from_str::<serde_json::Value>(&legacy)
+                    .expect("content JSON")
+                    .as_object()
+                    .expect("content object")
+                    .contains_key("set")
+            );
+            diesel::update(rule_set_versions::table.find((row.set_id, row.version)))
+                .set((
+                    rule_set_versions::content.eq(legacy),
+                    rule_set_versions::content_hash.eq(content.content_hash().to_string()),
+                ))
+                .execute(&mut self.writer)
+                .expect("pre-D3 revision");
+        }
+    }
+}
+
+#[test]
+fn legacy_builtin_rows_load_without_installing_new_revisions() {
+    let mut fixture = Fixture::new();
+    fixture.store.rewrite_rule_revisions_as_legacy();
+    let before = fixture.persisted();
+    assert!(before.sets.values().all(|set| {
+        set.versions
+            .values()
+            .all(|revision| revision.header.is_none())
+    }));
+    let count = fixture.version_count();
+    let mut shell = RegistryShell::open(&mut fixture.store, test_now()).expect("load legacy rows");
+    assert_eq!(fixture.version_count(), count);
+    let snapshot = shell.snapshots().load();
+    for (key, entry) in &before.sets {
+        let installed = &shell.core().state().sets[key];
+        assert_eq!(entry.versions, installed.versions);
+        let result = shell
+            .run(
+                &mut fixture.store,
+                test_now(),
+                RegistryCommand::InstallBuiltin {
+                    set: entry.current.set.clone(),
+                    revision: entry.builtin_revision.expect("builtin revision"),
+                },
+            )
+            .expect("install legacy builtin is a no-op");
+        assert!(result.event.is_none());
+        assert!(Arc::ptr_eq(&snapshot, &shell.snapshots().load()));
+    }
+    assert_eq!(fixture.version_count(), count);
+    assert!(fixture.persisted().sets.values().all(|set| {
+        set.versions
+            .values()
+            .all(|revision| revision.header.is_none())
+    }));
+}
+
+#[test]
+fn revision_loading_rejects_unknown_top_level_fields_with_or_without_saved_headers() {
+    #[derive(Debug)]
+    enum RevisionEncoding {
+        Legacy,
+        SavedHeader,
+    }
+    for encoding in [RevisionEncoding::Legacy, RevisionEncoding::SavedHeader] {
+        let mut fixture = Fixture::new();
+        if matches!(encoding, RevisionEncoding::Legacy) {
+            fixture.store.rewrite_rule_revisions_as_legacy();
+        }
+        let mut connection = fixture.connection();
+        let row = rule_set_versions::table
+            .select(RuleSetVersionsRow::as_select())
+            .first::<RuleSetVersionsRow>(&mut connection)
+            .expect("stored revision");
+        let mut value: serde_json::Value = serde_json::from_str(&row.content).expect("stored JSON");
+        value["unexpected"] = serde_json::json!("unknown field");
+        let content = value.to_string();
+        let hash = ContentHash::of(&content).to_string();
+        diesel::update(rule_set_versions::table.find((row.set_id, row.version)))
+            .set((
+                rule_set_versions::content.eq(content),
+                rule_set_versions::content_hash.eq(hash),
+            ))
+            .execute(&mut connection)
+            .expect("unknown field with valid checksum");
+        assert!(
+            matches!(
+                fixture.store.rule_sets().load(),
+                Err(LoadRulesError::Decode { .. })
+            ),
+            "{encoding:?}"
+        );
+    }
 }

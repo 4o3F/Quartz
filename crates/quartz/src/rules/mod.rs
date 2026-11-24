@@ -6,3 +6,6 @@ pub(crate) mod read;
 
 #[cfg(any(windows, test))]
 pub(crate) mod write;
+
+#[cfg(any(windows, test))]
+mod diagnostic;

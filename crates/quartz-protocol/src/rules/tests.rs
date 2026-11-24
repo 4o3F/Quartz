@@ -185,3 +185,61 @@ fn mutations_reject_unknown_fields_and_invalid_revision_numbers() {
         assert!(serde_json::from_value::<RuleSetsRevertRequest>(body).is_err());
     }
 }
+
+#[test]
+fn rule_text_contracts_preserve_fixtures_and_accept_additive_responses() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/rule-text.json")).expect("fixture");
+    WireSnapshot::round_trip::<RulesTextValidateRequest>(fixture["validate"].clone());
+    WireSnapshot::round_trip::<RulesTextExportRequest>(fixture["export"].clone());
+    WireSnapshot::round_trip::<RulesTextValidateResponse>(fixture["valid"].clone());
+    WireSnapshot::round_trip::<RulesTextValidateResponse>(fixture["invalid"].clone());
+    WireSnapshot::round_trip::<RulesTextExportResponse>(fixture["page"].clone());
+    WireSnapshot::strict_mutation::<RulesTextValidateRequest>(fixture["validate"].clone(), true);
+    let mut export = fixture["export"].clone();
+    export["extra"] = json!(true);
+    assert!(serde_json::from_value::<RulesTextExportRequest>(export).is_err());
+    for invalid in [
+        json!(0),
+        json!(-1),
+        json!(1.5),
+        json!(true),
+        json!(u64::from(u32::MAX) + 1),
+    ] {
+        let mut export = fixture["export"].clone();
+        export["version"] = invalid;
+        assert!(serde_json::from_value::<RulesTextExportRequest>(export).is_err());
+    }
+    assert!(
+        serde_json::from_str::<RulesTextValidateRequest>(
+            r#"{"key":"user.text","base_version":0,"text":"","text":""}"#
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<RulesTextExportRequest>(
+            r#"{"key":"user.text","version":1,"version":2}"#
+        )
+        .is_err()
+    );
+    let mut valid = fixture["valid"].clone();
+    valid["future"] = json!(true);
+    assert!(serde_json::from_value::<RulesTextValidateResponse>(valid).is_ok());
+    let mut page = fixture["page"].clone();
+    page["future"] = json!(true);
+    assert!(serde_json::from_value::<RulesTextExportResponse>(page).is_ok());
+    for role in [crate::Role::Ui, crate::Role::Cli] {
+        assert!(role.authorize(crate::Op::RulesTextValidate).is_ok());
+        assert!(role.authorize(crate::Op::RulesTextExport).is_ok());
+    }
+    assert!(
+        crate::Role::Host
+            .authorize(crate::Op::RulesTextValidate)
+            .is_err()
+    );
+    assert!(
+        crate::Role::Host
+            .authorize(crate::Op::RulesTextExport)
+            .is_err()
+    );
+}

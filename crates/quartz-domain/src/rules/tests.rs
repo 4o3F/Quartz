@@ -1781,3 +1781,145 @@ fn family_diagnostics_are_independent_of_shared_tree_diagnostics() {
     assert!(extraction.diagnostics().is_empty());
     assert_eq!(extraction.into_resolution().diagnostics, tree.diagnostics());
 }
+
+#[test]
+fn canonical_export_preserves_builtin_headers_metadata_and_contents() {
+    for source in [BUILTIN_CLASSIFICATION, BUILTIN_EXTRACTION, BUILTIN_PRIVACY] {
+        let context = ParseContext {
+            origin: RuleOrigin::Builtin,
+            references: &catalog(),
+        };
+        let set = RuleSet::parse("builtin.toml", source, context).expect("builtin");
+        let text = set.canonical_text();
+        let parsed = RuleSet::parse("export.toml", &text, context).expect("canonical builtin");
+        assert_eq!(parsed.header, set.header);
+        assert_eq!(parsed.content, set.content);
+        assert_eq!(parsed.canonical_text(), text);
+        assert!(!text.contains("builtin:"));
+    }
+}
+
+#[test]
+fn canonical_export_preserves_overlays_source_order_and_escaped_text() {
+    let mut set = privacy(
+        "user.roundtrip",
+        Some("builtin.privacy"),
+        &format!(
+            "{}\n[[disable]]\ntarget='builtin.privacy/browser-private-edge'\nreason='Unused'\n{}{}",
+            rule("local"),
+            overlay("builtin.privacy/browser-private-chrome"),
+            rule("last")
+        ),
+    );
+    set.header.name = "集合 \"quoted\" \\ \n \t \u{0} \u{7f} 😀".into();
+    set.header.description = Some("Description\r\n中文".into());
+    let text = set.canonical_text();
+    let parsed = user(&text);
+    assert_eq!(parsed.header, set.header);
+    assert_eq!(parsed.content, set.content);
+    assert_eq!(parsed.canonical_text(), text);
+}
+
+#[test]
+fn canonical_export_round_trips_every_available_field_and_operator() {
+    for kind in [
+        RuleKind::Classification,
+        RuleKind::Extraction,
+        RuleKind::Privacy,
+    ] {
+        for field in Field::ALL
+            .iter()
+            .copied()
+            .filter(|field| field.allows(kind))
+        {
+            for op in Operator::ALL
+                .iter()
+                .copied()
+                .filter(|op| *op != Operator::DomainSuffix || field == Field::Domain)
+            {
+                let condition = format!(
+                    "{{field='{}',op='{}',value='example.com',case_sensitive=true,negate=true}}",
+                    field.as_str(),
+                    op.as_str()
+                );
+                let body = match kind {
+                    RuleKind::Classification => {
+                        format!("category='builtin:development'\nmatch='any'\nwhen=[{condition}]")
+                    }
+                    RuleKind::Extraction => format!(
+                        "app=[{condition}]\npattern='(?P<document>.+?)(?P<project>x)?(?P<profile>y)?(?P<dirty>z)?'"
+                    ),
+                    RuleKind::Privacy => format!(
+                        "match='any'\nwhen=[{condition}]\napp='keep'\nwindow_title='drop'\nweb='domain_only'"
+                    ),
+                    _ => unreachable!("supported families"),
+                };
+                let set = user(&format!(
+                    "format='quartz-rules/1'\n[set]\nkey='user.fields'\nkind='{}'\nname='Fields'\n[[rule]]\nid='one'\nlabel='Field'\npriority=1000\n{body}\n",
+                    kind.as_str()
+                ));
+                let text = set.canonical_text();
+                let parsed = user(&text);
+                assert_eq!(parsed.content, set.content, "{kind:?} {field:?} {op:?}");
+                assert_eq!(parsed.canonical_text(), text);
+                let mut registry = registry::RuleRegistry::from_state(registry::RegistryState {
+                    references: catalog(),
+                    ..Default::default()
+                })
+                .expect("empty registry");
+                let command = || registry::RegistryCommand::Apply {
+                    key: set.header.key.parse().expect("key"),
+                    file: "roundtrip.toml".into(),
+                    text: text.clone(),
+                    base_version: 0,
+                };
+                let decision = registry.decide(command()).into_parts();
+                decision.reply.expect("install representative user set");
+                registry
+                    .committed(decision.outcome.expect("candidate"))
+                    .expect("publish fixture");
+                let validation = registry.decide_validation(registry::RegistryCommand::Apply {
+                    key: set.header.key.parse().expect("key"),
+                    file: "roundtrip.toml".into(),
+                    text: text.clone(),
+                    base_version: 1,
+                });
+                validation
+                    .reply()
+                    .as_ref()
+                    .expect("export validates as an edit of the installed key");
+            }
+        }
+    }
+}
+
+#[test]
+fn canonical_exports_omit_empty_languages_and_sort_header_entry_and_condition_keys() {
+    let context = ParseContext {
+        origin: RuleOrigin::Builtin,
+        references: &catalog(),
+    };
+    let source = "format='quartz-rules/1'\n[set]\nkey='builtin.order'\nkind='privacy'\nname='Order'\ndescription='Description'\n[[rule]]\nid='one'\nlabel_key='privacy.label'\nverified=false\ndetector='detector'\nlanguages=[]\npreset='title_hidden'\nwhen=[{field='title.raw',op='contains',value='secret',negate=true,case_sensitive=true}]\n";
+    let set = RuleSet::parse("order.toml", source, context).expect("builtin set");
+    let text = set.canonical_text();
+    let expected = concat!(
+        "format = \"quartz-rules/1\"\n\n[set]\n",
+        "description = \"Description\"\nkey = \"builtin.order\"\nkind = \"privacy\"\nname = \"Order\"\n",
+        "\n[[rule]]\napp = \"keep\"\ndetector = \"detector\"\nid = \"one\"\nlabel_key = \"privacy.label\"\nmatch = \"all\"\npriority = 50\nverified = false\nweb = \"full\"\n",
+        "when = [{ case_sensitive = true, field = \"title.raw\", negate = true, op = \"contains\", value = \"secret\" }]\nwindow_title = \"drop\"\n"
+    );
+    assert_eq!(text, expected);
+    assert_eq!(
+        RuleSet::parse("export.toml", &text, context)
+            .expect("canonical text")
+            .content,
+        set.content
+    );
+    assert!(
+        !set.content
+            .entry_fields(EntryPosition::Rule(0))
+            .as_object()
+            .expect("entry object")
+            .contains_key("languages")
+    );
+}

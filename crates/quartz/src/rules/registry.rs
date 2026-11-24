@@ -6,8 +6,8 @@ use crate::store::{
 };
 use quartz_domain::rules::registry::{
     CommitRuleDecisionError, CreateRuleRegistryError, DecideRegistryCommandError, DecisionParts,
-    RegistryCommand, RegistrySuccess, ResetSnapshotEpochError, RuleRegistry, RuleWarning,
-    RulesChanged, SnapshotCell,
+    RegistryCommand, RegistrySuccess, ResetSnapshotEpochError, RuleRegistry, RuleSetWrite,
+    RuleWarning, RulesChanged, SnapshotCell,
 };
 use quartz_domain::rules::{self, ParseContext, ParseRuleSetError, RuleOrigin, RuleSet};
 use snafu::{ResultExt, Snafu};
@@ -34,6 +34,8 @@ pub(crate) enum RunRegistryCommandError {
     Decide { source: DecideRegistryCommandError },
     #[snafu(display("privacy writes require a preview receipt"))]
     PreviewRequired,
+    #[snafu(display("canonical rule text exceeds the IPC text limit"))]
+    TextTooLarge,
     #[snafu(display("rule writes did not commit"))]
     Persist { source: ExecuteRuleWritesError },
     #[snafu(display("could not publish committed rule state"))]
@@ -70,6 +72,11 @@ const BUILTIN_RULE_SETS: &[BuiltinRuleSet<'static>] = &[
         revision: rules::BUILTIN_EXTRACTION_REVISION,
     },
 ];
+
+enum TextBudget {
+    Ipc,
+    Unrestricted,
+}
 
 /// Owns effects; command interpretation and publication remain in quartz-domain.
 #[derive(Debug)]
@@ -142,11 +149,41 @@ impl RegistryShell {
         &self.registry
     }
 
+    pub(crate) fn rule_origin(&self, key: &rules::RuleSetKey) -> Option<RuleOrigin> {
+        self.registry
+            .state()
+            .sets
+            .get(key)
+            .map(|entry| entry.origin)
+    }
+    pub(crate) fn validate(&self, command: RegistryCommand) -> Result<(), RunRegistryCommandError> {
+        let parts = self.registry.decide_validation(command).into_parts();
+        parts.reply.context(run_error::DecideSnafu)?;
+        Self::check_text_budget(&parts.writes)?;
+        Ok(())
+    }
     pub(crate) fn run(
         &mut self,
         store: &mut Store,
         now: quartz_domain::capture::UtcInstant,
         command: RegistryCommand,
+    ) -> Result<RegistryResult, RunRegistryCommandError> {
+        self.run_with_budget(store, now, command, TextBudget::Unrestricted)
+    }
+    pub(crate) fn run_ipc(
+        &mut self,
+        store: &mut Store,
+        now: quartz_domain::capture::UtcInstant,
+        command: RegistryCommand,
+    ) -> Result<RegistryResult, RunRegistryCommandError> {
+        self.run_with_budget(store, now, command, TextBudget::Ipc)
+    }
+    fn run_with_budget(
+        &mut self,
+        store: &mut Store,
+        now: quartz_domain::capture::UtcInstant,
+        command: RegistryCommand,
+        budget: TextBudget,
     ) -> Result<RegistryResult, RunRegistryCommandError> {
         let decision = self.registry.decide(command);
         let DecisionParts {
@@ -155,6 +192,9 @@ impl RegistryShell {
             outcome,
         } = decision.into_parts();
         let reply = reply.context(run_error::DecideSnafu)?;
+        if matches!(budget, TextBudget::Ipc) {
+            Self::check_text_budget(&writes)?;
+        }
         // E2 will authorize exact mutations with connection-bound preview receipts.
         if writes.iter().any(|write| {
             !matches!(
@@ -179,6 +219,16 @@ impl RegistryShell {
             None
         };
         Ok(RegistryResult { reply, event })
+    }
+    fn check_text_budget(writes: &[RuleSetWrite]) -> Result<(), RunRegistryCommandError> {
+        for write in writes {
+            if let RuleSetWrite::CommitVersion(update) = write
+                && update.set.canonical_text().len() > quartz_protocol::MAX_RULE_TEXT_BYTES
+            {
+                return Err(RunRegistryCommandError::TextTooLarge);
+            }
+        }
+        Ok(())
     }
     fn log_warnings(&self) {
         for warning in self.snapshots().load().warnings() {

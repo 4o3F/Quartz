@@ -48,6 +48,9 @@ impl Rule {
                     .filter(|item| !item.1.is_null())
                     .map(|item| (item.0.clone(), item.1.clone())),
             );
+            if builtin.languages.is_empty() {
+                fields.remove("languages");
+            }
         }
         match &self.body {
             RuleBody::Classification {

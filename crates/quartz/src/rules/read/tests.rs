@@ -867,3 +867,318 @@ fn root_reorders_keep_builtin_first_and_reorder_only_active_user_roots() {
     assert_eq!(roots[1].sibling_order, 1);
     assert_eq!(roots[2].sibling_order, 2);
 }
+
+impl Fixture {
+    fn export_text(
+        &mut self,
+        request: wire::RulesTextExportRequest,
+    ) -> Result<wire::RulesTextExportResponse, ProtocolError> {
+        let inputs = self.inputs();
+        let versions = inputs.versions();
+        inputs.export(request, versions)
+    }
+    fn export_request(key: &str, version: Option<NonZeroU32>) -> wire::RulesTextExportRequest {
+        wire::RulesTextExportRequest {
+            key: key.into(),
+            version,
+            cursor: None,
+        }
+    }
+}
+#[test]
+fn text_exports_preserve_saved_headers_overlays_and_deleted_history_after_reopening() {
+    let mut fixture = Fixture::new();
+    let key = "user.export";
+    let entries = format!(
+        "{}[[disable]]\ntarget='builtin.classification/vscode'\nreason='Unused'\n{}",
+        Fixture::rule("local", 100),
+        Fixture::replacement("builtin.classification/notepad-plus-plus")
+    );
+    let source = format!(
+        "{}\n",
+        Fixture::source(key, Some("builtin.classification"), &entries).replace(
+            "name='Read test'",
+            "name='Original'\ndescription='Saved description'"
+        )
+    );
+    fixture.run(RegistryCommand::Apply {
+        key: key.parse().expect("key"),
+        file: "export.toml".into(),
+        text: source.clone(),
+        base_version: 0,
+    });
+    let first = fixture
+        .export_text(Fixture::export_request(key, None))
+        .expect("export");
+    let parsed = RuleSet::parse(
+        "export.toml",
+        &first.text,
+        ParseContext {
+            origin: RuleOrigin::User,
+            references: &fixture.shell.core().state().references,
+        },
+    )
+    .expect("parse exported text");
+    assert_eq!(parsed.header.name, "Original");
+    assert_eq!(
+        parsed.header.description.as_deref(),
+        Some("Saved description")
+    );
+    assert_eq!(parsed.canonical_text(), first.text);
+    let response = crate::rules::write::RuleMutation::validate(
+        wire::RulesTextValidateRequest {
+            key: key.into(),
+            base_version: 1,
+            text: first.text.clone(),
+        },
+        &fixture.shell,
+    )
+    .expect("contextual export validation");
+    assert!(response.valid);
+    fixture.run(RegistryCommand::Apply {
+        key: key.parse().expect("key"),
+        file: "export.toml".into(),
+        text: source
+            .replace("Original", "Renamed")
+            .replace("Saved description", "New description"),
+        base_version: 1,
+    });
+    fixture.run(RegistryCommand::Delete {
+        key: key.parse().expect("key"),
+        base_version: 2,
+    });
+    fixture.shell =
+        RegistryShell::open(&mut fixture.store, Fixture::now()).expect("reopened registry");
+    assert!(matches!(
+        fixture
+            .export_text(Fixture::export_request(key, None))
+            .expect_err("deleted current")
+            .kind,
+        ErrorKind::RuleSetNotFound { version: None, .. }
+    ));
+    let historical = fixture
+        .export_text(Fixture::export_request(key, NonZeroU32::new(1)))
+        .expect("retained history");
+    assert_eq!(historical.text, first.text);
+    let renamed = fixture
+        .export_text(Fixture::export_request(key, NonZeroU32::new(2)))
+        .expect("renamed history");
+    assert!(renamed.text.contains("Renamed"));
+    assert!(renamed.text.contains("New description"));
+    assert!(matches!(
+        fixture
+            .export_text(Fixture::export_request(key, NonZeroU32::new(99)))
+            .expect_err("missing revision")
+            .kind,
+        ErrorKind::RuleSetNotFound {
+            version: Some(99),
+            ..
+        }
+    ));
+    fixture.run(RegistryCommand::Apply {
+        key: key.parse().expect("key"),
+        file: "restore.toml".into(),
+        text: source,
+        base_version: 0,
+    });
+    fixture.run(RegistryCommand::Revert {
+        key: key.parse().expect("key"),
+        base_version: 4,
+        version: 2,
+    });
+    let reverted = fixture
+        .export_text(Fixture::export_request(key, None))
+        .expect("reverted header");
+    assert_eq!(reverted.text, renamed.text);
+}
+#[test]
+fn text_export_pages_fit_encoded_budget_preserve_utf8_and_reject_stale_or_rebound_cursors() {
+    const RULE_COUNT: usize = 20;
+    const LABEL_QUOTES: usize = 4000;
+    let mut fixture = Fixture::new();
+    let label = serde_json::to_string(&format!("{}中文😀", "\"".repeat(LABEL_QUOTES)))
+        .expect("TOML string");
+    let entries = (0..RULE_COUNT)
+        .map(|index| {
+            Fixture::rule(&format!("entry-{index}"), 50)
+                .replace(&format!("'Rule entry-{index}'"), &label)
+        })
+        .collect::<String>();
+    fixture.apply("user.pages", None, &entries, 0);
+    let request = Fixture::export_request("user.pages", None);
+    let first = fixture.export_text(request.clone()).expect("first page");
+    assert!(first.next_cursor.is_some());
+    let mut text = first.text.clone();
+    let mut cursor = first.next_cursor.clone();
+    while let Some(next) = cursor {
+        let page = fixture
+            .export_text(wire::RulesTextExportRequest {
+                cursor: Some(next),
+                ..request.clone()
+            })
+            .expect("next UTF-8 page");
+        assert!(serde_json::to_vec(&page).expect("page bytes").len() <= wire::QUERY_PAGE_BYTES);
+        text.push_str(&page.text);
+        cursor = page.next_cursor;
+    }
+    let current = fixture
+        .shell
+        .core()
+        .state()
+        .sets
+        .get(&"user.pages".parse().expect("key"))
+        .expect("saved set");
+    assert_eq!(text, current.current.set.canonical_text());
+    assert!(text.len() <= wire::MAX_RULE_TEXT_BYTES);
+    assert!(
+        crate::rules::write::RuleMutation::validate(
+            wire::RulesTextValidateRequest {
+                key: "user.pages".into(),
+                base_version: 1,
+                text
+            },
+            &fixture.shell
+        )
+        .expect("export validates")
+        .valid
+    );
+    let split_character = first.text.find('中').expect("multibyte text") + 1;
+    let invalid = wire::QueryCursor::new(
+        first.versions.clone(),
+        wire::CursorQuery::RulesTextExport {
+            key: request.key.clone(),
+            version: None,
+        },
+        split_character,
+    );
+    assert_eq!(
+        fixture
+            .export_text(wire::RulesTextExportRequest {
+                cursor: Some(invalid),
+                ..request.clone()
+            })
+            .expect_err("offset splits UTF-8 character")
+            .kind,
+        ErrorKind::BadRequest
+    );
+    let cursor = first.next_cursor.expect("cursor");
+    let mut rebound = request.clone();
+    rebound.version = NonZeroU32::new(1);
+    rebound.cursor = Some(cursor.clone());
+    assert!(
+        ReadRequest::decode(
+            wire::Op::RulesTextExport,
+            serde_json::to_value(rebound).expect("body")
+        )
+        .is_err()
+    );
+    let invalid = wire::QueryCursor::new(
+        first.versions.clone(),
+        wire::CursorQuery::RulesTextExport {
+            key: request.key.clone(),
+            version: None,
+        },
+        usize::MAX,
+    );
+    assert_eq!(
+        fixture
+            .export_text(wire::RulesTextExportRequest {
+                cursor: Some(invalid),
+                ..request.clone()
+            })
+            .expect_err("offset out of range")
+            .kind,
+        ErrorKind::BadRequest
+    );
+    fixture.apply("user.pages", None, &entries, 1);
+    assert_eq!(
+        fixture
+            .export_text(wire::RulesTextExportRequest {
+                cursor: Some(cursor),
+                ..request
+            })
+            .expect_err("new revision invalidates cursor")
+            .kind,
+        ErrorKind::StaleCursor
+    );
+}
+
+impl Fixture {
+    fn legacy_header_history() -> Self {
+        let mut fixture = Self::new();
+        fixture.apply("user.legacy", None, &Self::rule("one", 50), 0);
+        fixture.store.rewrite_rule_revisions_as_legacy();
+        fixture.shell =
+            RegistryShell::open(&mut fixture.store, Self::now()).expect("legacy registry");
+        let old = fixture
+            .export_text(Self::export_request("user.legacy", NonZeroU32::new(1)))
+            .expect("legacy historical export");
+        assert!(!old.text.contains("description"));
+        assert_eq!(
+            old.text,
+            fixture.shell.core().state().sets[&"user.legacy".parse().expect("key")]
+                .current
+                .set
+                .canonical_text()
+        );
+        let source = Self::source("user.legacy", None, &Self::rule("two", 50)).replace(
+            "name='Read test'",
+            "name='New name'\ndescription='Later description'",
+        );
+        fixture.run(RegistryCommand::Apply {
+            key: "user.legacy".parse().expect("key"),
+            file: "new.toml".into(),
+            text: source,
+            base_version: 1,
+        });
+        fixture.shell =
+            RegistryShell::open(&mut fixture.store, Self::now()).expect("reopen mixed history");
+        fixture
+    }
+}
+#[test]
+fn legacy_exports_use_row_header_without_later_revision_description() {
+    let mut fixture = Fixture::legacy_header_history();
+    let text = fixture
+        .export_text(Fixture::export_request("user.legacy", NonZeroU32::new(1)))
+        .expect("legacy export")
+        .text;
+    let parsed = RuleSet::parse(
+        "legacy.toml",
+        &text,
+        ParseContext {
+            origin: RuleOrigin::User,
+            references: &fixture.shell.core().state().references,
+        },
+    )
+    .expect("legacy text");
+    assert_eq!(parsed.header.name, "New name");
+    assert_eq!(parsed.header.description, None);
+    assert_eq!(parsed.header.chain, None);
+    assert_eq!(parsed.content.rule[0].id, "one");
+}
+#[test]
+fn reverting_legacy_revisions_uses_row_header_without_later_revision_description() {
+    let mut fixture = Fixture::legacy_header_history();
+    fixture.run(RegistryCommand::Revert {
+        key: "user.legacy".parse().expect("key"),
+        base_version: 2,
+        version: 1,
+    });
+    fixture.shell =
+        RegistryShell::open(&mut fixture.store, Fixture::now()).expect("reopen reverted history");
+    let entry = &fixture.shell.core().state().sets[&"user.legacy".parse().expect("key")];
+    assert_eq!(entry.current.version, 3);
+    assert_eq!(entry.current.set.content.rule[0].id, "one");
+    let header = entry.versions[&3]
+        .header
+        .as_ref()
+        .expect("new saved header");
+    assert_eq!(header.name, "New name");
+    assert_eq!(header.description, None);
+    assert_eq!(header.chain, None);
+    let exported = fixture
+        .export_text(Fixture::export_request("user.legacy", None))
+        .expect("reverted export");
+    assert!(!exported.text.contains("description"));
+}

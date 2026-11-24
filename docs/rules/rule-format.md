@@ -308,6 +308,10 @@ when = [{ field = "category", op = "equals", value = "builtin:entertainment" }]
 
 界面中有相同功能：导入时的校验、预览与 diff，片段详情中的“为什么是这个结果”，以及规则集树视图。
 
+导出通过 `rules_text.export` 协议操作取得；`rules_text.validate` 对指定 key 与基础版本作上下文校验。M4-D3 不新增命令行语法，规则命令行接入安排在 M4-E5。
+
+规范导出使用 LF 换行，末尾保留一个换行，先写 `format` 和 `[set]`，随后按保存的跨节顺序写 `[[rule]]`、`[[override]]`、`[[disable]]`。表内键按字典序排列，条件使用内联表并保留条件数组顺序；字符串使用双引号及 TOML 转义。默认 priority、match、case_sensitive、negate 写出，隐私 preset 展开为 app/window_title/web，分类名称和内置键均写为保存的 UUID。可选空值省略；内置条目保留 detector、verified、label_key 和非空的 languages；languages 为空时省略，与未提供该字段等价。用户条目不增加这些字段。相同保存内容重复导出得到相同字节，导出后解析再导出也得到相同字节。内置 key 的只读验证权限与诊断返回方式见 [04 第 6.3.3 节](../design/04-ipc.md#633-文本与解释)。
+
 ### 4.2 错误
 
 错误格式固定，可以原样贴回给 AI 修改：

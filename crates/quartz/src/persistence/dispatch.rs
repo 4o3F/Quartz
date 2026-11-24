@@ -12,6 +12,7 @@ use tokio::sync::oneshot;
 #[serde(untagged)]
 pub(crate) enum WriteResponse {
     Rules(quartz_protocol::RuleSetsWriteResponse),
+    RuleValidation(quartz_protocol::RulesTextValidateResponse),
     Annotations(quartz_protocol::AnnotationsResponse),
     Category(quartz_protocol::CategoryResponse),
     Categories(quartz_protocol::CategoriesListResponse),
@@ -25,6 +26,9 @@ impl WriteRequest {
     ) -> Result<Self, serde_json::Error> {
         use crate::rules::write::RuleMutation;
         let request = match op {
+            quartz_protocol::Op::RulesTextValidate => {
+                serde_json::from_value(body).map(Self::RuleValidation)
+            }
             quartz_protocol::Op::RuleSetsEdit => serde_json::from_value(body)
                 .map(RuleMutation::Edit)
                 .map(Self::Rules),
@@ -88,6 +92,10 @@ impl WriteRequest {
         registry: &mut crate::rules::registry::RegistryShell,
     ) -> Result<WriteResponse, ProtocolError> {
         let result = match self {
+            Self::RuleValidation(request) => {
+                return crate::rules::write::RuleMutation::validate(request, registry)
+                    .map(WriteResponse::RuleValidation);
+            }
             Self::Rules(request) => {
                 return request
                     .execute(registry, store, now)
@@ -160,6 +168,7 @@ pub(crate) const WRITE_CHANNEL_CAPACITY: usize = 8;
 #[derive(Debug)]
 pub(crate) enum WriteRequest {
     Rules(crate::rules::write::RuleMutation),
+    RuleValidation(quartz_protocol::RulesTextValidateRequest),
     SettingsGet,
     SettingsSet(quartz_protocol::SettingsSetRequest),
     Annotations(AnnotationWrite),

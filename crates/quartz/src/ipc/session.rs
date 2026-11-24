@@ -294,7 +294,10 @@ impl ConnectionSession {
                         };
                         Action::Unsubscribe { id, subscription }
                     }
-                    Op::RuleSetsTree | Op::RuleSetsGet | Op::RuleSetsVersions => {
+                    Op::RuleSetsTree
+                    | Op::RuleSetsGet
+                    | Op::RuleSetsVersions
+                    | Op::RulesTextExport => {
                         match crate::rules::read::ReadRequest::decode(request.op, request.body) {
                             Ok(request) => Action::Rules { id, request },
                             Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
@@ -312,7 +315,8 @@ impl ConnectionSession {
                         id,
                         crate::query::QueryRequest::decode(request.op, request.body),
                     ),
-                    Op::RuleSetsEdit
+                    Op::RulesTextValidate
+                    | Op::RuleSetsEdit
                     | Op::RuleSetsSetEnabled
                     | Op::RuleSetsReorder
                     | Op::RuleSetsDelete
@@ -338,11 +342,9 @@ impl ConnectionSession {
                     Op::Hello => Action::error(Some(id), ErrorKind::BadRequest),
                     Op::RulesPreview
                     | Op::RulesExplain
-                    | Op::RulesTextValidate
                     | Op::RulesTextPreview
                     | Op::RulesTextDiff
                     | Op::RulesTextImport
-                    | Op::RulesTextExport
                     | Op::DataDelete
                     | Op::BrowserHello
                     | Op::BrowserState
@@ -396,13 +398,20 @@ mod tests {
                 state: State::Ready(role),
                 allowed: AllowedRoles::Quartz,
             };
-            for op in [Op::RuleSetsTree, Op::RuleSetsGet, Op::RuleSetsVersions] {
+            for op in [
+                Op::RuleSetsTree,
+                Op::RuleSetsGet,
+                Op::RuleSetsVersions,
+                Op::RulesTextExport,
+            ] {
                 let body = match op {
                     Op::RuleSetsTree => serde_json::json!({"kind":"privacy"}),
                     Op::RuleSetsGet => {
                         serde_json::json!({"key":"builtin.privacy","view":"effective"})
                     }
-                    Op::RuleSetsVersions => serde_json::json!({"key":"builtin.privacy"}),
+                    Op::RuleSetsVersions | Op::RulesTextExport => {
+                        serde_json::json!({"key":"builtin.privacy"})
+                    }
                     _ => unreachable!("three read operations"),
                 };
                 assert!(matches!(
@@ -1218,6 +1227,47 @@ mod tests {
                 ),
                 "{:?}",
                 case.op
+            );
+        }
+    }
+    #[test]
+    fn ui_and_cli_validation_requests_are_decoded_strictly_before_admission() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("validation".into()));
+        for role in [
+            ReadyRole::Ui {
+                state: UiState::Visible,
+            },
+            ReadyRole::Cli,
+        ] {
+            let mut session = ConnectionSession {
+                state: State::Ready(role),
+                allowed: AllowedRoles::Quartz,
+            };
+            let body = serde_json::json!({"key":"user.validation","base_version":0,"text":""});
+            assert!(matches!(
+                session.receive(
+                    request(1, Op::RulesTextValidate, body.clone()),
+                    &status.subscribe().borrow().status
+                ),
+                Action::Write {
+                    request: crate::persistence::dispatch::WriteRequest::RuleValidation(_),
+                    ..
+                }
+            ));
+            let mut invalid = body;
+            invalid["extra"] = serde_json::json!(true);
+            assert_eq!(
+                session
+                    .receive(
+                        request(2, Op::RulesTextValidate, invalid),
+                        &status.subscribe().borrow().status
+                    )
+                    .reply()
+                    .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::BadRequest)
+                }
             );
         }
     }
