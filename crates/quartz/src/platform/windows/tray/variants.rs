@@ -25,13 +25,44 @@ const DOT_COLOR: u32 = 0xff69_45b8;
 const DOT_RIM: u32 = 0xffff_ffff;
 
 #[derive(Debug, snafu::Snafu)]
-#[snafu(display("could not generate tray icon pixels or handles: {source}"))]
-pub(in crate::platform::windows) struct GenerateTrayIconsError {
-    source: windows::core::Error,
+pub(in crate::platform::windows) enum GenerateTrayIconsError {
+    #[snafu(display("could not generate tray icon pixels or handles: {source}"))]
+    Windows { source: windows::core::Error },
+    #[snafu(display("tray icon GDI operation failed: {operation}"))]
+    Gdi { operation: GdiCall },
 }
 impl From<windows::core::Error> for GenerateTrayIconsError {
     fn from(source: windows::core::Error) -> Self {
-        Self { source }
+        Self::Windows { source }
+    }
+}
+/// These GDI calls report failure without a documented extended last-error value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(in crate::platform::windows) enum GdiCall {
+    CreateCompatibleDC,
+    GdiFlush,
+    SelectObject,
+    CreateBitmap,
+}
+impl GdiCall {
+    fn check(self, outcome: GdiOutcome) -> Result<(), GenerateTrayIconsError> {
+        match outcome {
+            GdiOutcome::Succeeded => Ok(()),
+            GdiOutcome::Failed => Err(GenerateTrayIconsError::Gdi { operation: self }),
+        }
+    }
+}
+enum GdiOutcome {
+    Succeeded,
+    Failed,
+}
+impl GdiOutcome {
+    fn from_success(succeeded: bool) -> Self {
+        if succeeded {
+            Self::Succeeded
+        } else {
+            Self::Failed
+        }
     }
 }
 struct OwnedIcon(HICON);
@@ -54,10 +85,10 @@ impl IconVariants {
                 canvas.dc, 0, 0, source, ICON_SIDE, ICON_SIDE, 0, None, DI_NORMAL,
             )
         }?;
-        // SAFETY: Complete DrawIconEx's GDI writes before reading the DIB memory.
-        if !unsafe { Gdi::GdiFlush() }.as_bool() {
-            return Err(windows::core::Error::from_thread().into());
-        }
+        GdiCall::GdiFlush.check(GdiOutcome::from_success(
+            // SAFETY: Complete DrawIconEx's GDI writes before reading the DIB memory.
+            unsafe { Gdi::GdiFlush() }.as_bool(),
+        ))?;
         // SAFETY: CreateDIBSection allocated PIXEL_COUNT aligned u32 pixels for this canvas.
         let original = unsafe { std::slice::from_raw_parts(canvas.pixels, PIXEL_COUNT) }.to_vec();
         let has_alpha = original.iter().any(|pixel| pixel & OPAQUE_ALPHA != 0);
@@ -121,9 +152,7 @@ impl Canvas {
     fn new() -> Result<Self, GenerateTrayIconsError> {
         // SAFETY: A compatible memory DC requires no borrowed window resources.
         let dc = unsafe { Gdi::CreateCompatibleDC(None) };
-        if dc.is_invalid() {
-            return Err(windows::core::Error::from_thread().into());
-        }
+        GdiCall::CreateCompatibleDC.check(GdiOutcome::from_success(!dc.is_invalid()))?;
         let mut canvas = Self {
             dc,
             bitmap: HBITMAP::default(),
@@ -151,17 +180,13 @@ impl Canvas {
         canvas.pixels = pixels.cast();
         // SAFETY: Both DC and bitmap are uniquely owned and remain live until restored in Drop.
         canvas.previous = unsafe { Gdi::SelectObject(dc, canvas.bitmap.into()) };
-        if canvas.previous.is_invalid() {
-            return Err(windows::core::Error::from_thread().into());
-        }
+        GdiCall::SelectObject.check(GdiOutcome::from_success(!canvas.previous.is_invalid()))?;
         // SAFETY: Zeroed monochrome mask is opaque; per-pixel alpha controls the icon transparency.
         let mask = [0_u8; MASK_BYTES];
         // SAFETY: mask supplies the complete monochrome bitmap and is copied synchronously.
         canvas.mask =
             unsafe { Gdi::CreateBitmap(ICON_SIDE, ICON_SIDE, 1, 1, Some(mask.as_ptr().cast())) };
-        if canvas.mask.is_invalid() {
-            return Err(windows::core::Error::from_thread().into());
-        }
+        GdiCall::CreateBitmap.check(GdiOutcome::from_success(!canvas.mask.is_invalid()))?;
         // SAFETY: The allocated canvas contains exactly PIXEL_COUNT writable pixels.
         unsafe { std::ptr::write_bytes(canvas.pixels, 0, PIXEL_COUNT) };
         Ok(canvas)
@@ -205,6 +230,27 @@ impl Drop for Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_gdi_calls_identify_operation_without_an_extended_error_source() {
+        use std::error::Error as _;
+        for operation in [
+            GdiCall::CreateCompatibleDC,
+            GdiCall::GdiFlush,
+            GdiCall::SelectObject,
+            GdiCall::CreateBitmap,
+        ] {
+            let error = operation
+                .check(GdiOutcome::Failed)
+                .expect_err("injected GDI failure");
+            assert!(error.source().is_none());
+            assert!(
+                matches!(error, GenerateTrayIconsError::Gdi { operation: reported } if reported == operation)
+            );
+            operation
+                .check(GdiOutcome::Succeeded)
+                .expect("injected success");
+        }
+    }
     #[test]
     fn generated_variants_preserve_alpha_and_add_a_visible_privacy_marker() {
         let original = vec![0xff12_3456; PIXEL_COUNT];

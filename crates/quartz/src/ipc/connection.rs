@@ -321,14 +321,9 @@ impl Connection {
         }
     }
     async fn finish_closing(&self, writer: &mut OutboxTask) -> io::Result<()> {
-        let deadline = tokio::time::Instant::now() + self.timeouts.close_flush;
         let outcome = tokio::time::timeout(self.timeouts.close_flush, writer.finish()).await;
         match outcome {
-            Ok(result) => {
-                // Allow the final response to be read before DisconnectNamedPipe discards unread bytes.
-                tokio::time::sleep_until(deadline).await;
-                result
-            }
+            Ok(result) => result,
             Err(error) => {
                 tracing::debug!(%error, "pipe final response deadline expired; closing connection");
                 Ok(())
@@ -602,6 +597,31 @@ pub(crate) mod tests {
             pending_write.reply.is_closed(),
             "disconnect drops the response without waiting for persistence"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flushed_final_response_releases_connection_without_grace_delay() {
+        let database = TestDatabase::start();
+        let status = StatusPublisher::new(quartz_protocol::InstanceId("close-test".into()));
+        let mut writer = OutboxTask::spawn(tokio::io::sink());
+        writer
+            .handle
+            .response(Action::success_response(
+                RequestId(1),
+                quartz_protocol::AcceptedBody,
+            ))
+            .expect("final response");
+        let started = tokio::time::Instant::now();
+        connection(&database, &status)
+            .finish_closing(&mut writer)
+            .await
+            .expect("finish");
+        assert_eq!(
+            tokio::time::Instant::now(),
+            started,
+            "flushed frame must release the slot immediately"
+        );
+        writer.stop().await.expect("stop");
     }
 
     #[test]

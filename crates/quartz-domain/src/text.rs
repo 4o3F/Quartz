@@ -107,7 +107,16 @@ impl fmt::Display for FoldedKey {
 /// Encodes bytes as lowercase hexadecimal digits.
 #[must_use]
 pub fn encode_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    // One byte has two base-16 digits, including its leading zero.
+    const DIGITS_PER_BYTE: usize = 2;
+    const RADIX: u8 = 16;
+    let mut output = String::with_capacity(bytes.len().saturating_mul(DIGITS_PER_BYTE));
+    for byte in bytes {
+        output.push(char::from(DIGITS[usize::from(byte / RADIX)]));
+        output.push(char::from(DIGITS[usize::from(byte % RADIX)]));
+    }
+    output
 }
 
 #[cfg(test)]

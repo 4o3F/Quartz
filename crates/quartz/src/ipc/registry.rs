@@ -4,9 +4,10 @@ use super::{
     ProcessId, PublishedStatus, UiCommand, UiPort,
     outbox::{OutboxHandle, QueueFrameError},
 };
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use quartz_protocol::{ControlBody, ControlOp, Response, Role, Subscribe, Topic};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -16,6 +17,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 /// Bounded registry commands on the existing I/O runtime (01 §6, 04 §7).
 const REGISTRY_MAILBOX_CAPACITY: usize = 64;
+/// Reconciliation failures retry after one second without blocking registry controls.
+const RECONCILE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ConnectionId(u64);
@@ -108,6 +111,9 @@ impl RegistryHandle {
                 status,
                 versions,
                 connections: BTreeMap::new(),
+                pending: VecDeque::new(),
+                versions_in_flight: FuturesUnordered::new(),
+                reconciliation: ReconcileVersions::Current,
             }
             .run(),
         );
@@ -250,7 +256,40 @@ struct ConnectionRegistry {
     status: watch::Receiver<PublishedStatus>,
     versions: crate::query::versions::VersionPort,
     connections: BTreeMap<ConnectionId, Connection>,
+    pending: VecDeque<SubscriptionChange>,
+    versions_in_flight: FuturesUnordered<VersionFlight>,
+    reconciliation: ReconcileVersions,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReconcileVersions {
+    Current,
+    Required,
+    RetryAt(tokio::time::Instant),
+}
+struct PendingSubscription {
+    id: ConnectionId,
+    subscription: Subscribe,
+    response: Response,
+    reply: oneshot::Sender<Result<(), QueueFrameError>>,
+}
+enum SubscriptionChange {
+    Subscribe(PendingSubscription),
+    Unsubscribe {
+        id: ConnectionId,
+        subscription: quartz_protocol::Unsubscribe,
+        reply: oneshot::Sender<()>,
+    },
+}
+enum VersionAction {
+    Subscribe(PendingSubscription),
+    Reconcile,
+}
+struct VersionCompletion {
+    action: VersionAction,
+    result: Result<crate::query::versions::PublishedVersions, quartz_protocol::ProtocolError>,
+}
+type VersionFlight = std::pin::Pin<Box<dyn std::future::Future<Output = VersionCompletion> + Send>>;
+
 impl ConnectionRegistry {
     async fn run(mut self) {
         let mut publisher = VersionPublisher::Active;
@@ -269,9 +308,16 @@ impl ConnectionRegistry {
                     true
                 }
             });
-            self.prune_days(removed_days).await;
+            self.prune_days(removed_days);
+            self.advance_subscriptions();
+            let reconciliation = self.reconciliation;
             tokio::select! {
-                message = self.receiver.recv() => match message { Some(message) => self.receive(message).await, None => return },
+                () = Self::wait_reconciliation(reconciliation) => { self.reconciliation = ReconcileVersions::Required; }
+                completed = self.versions_in_flight.next(), if !self.versions_in_flight.is_empty() => {
+                    let completed = completed.expect("version request exists");
+                    self.complete_versions(completed);
+                }
+                message = self.receiver.recv() => match message { Some(message) => self.receive(message), None => return },
                 changed = self.status.changed() => {
                     if let Err(error) = changed { tracing::debug!(%error, "main status publisher stopped"); return; }
                     self.publish_state();
@@ -308,7 +354,7 @@ impl ConnectionRegistry {
             }
         }
     }
-    async fn receive(&mut self, message: RegistryMessage) {
+    fn receive(&mut self, message: RegistryMessage) {
         match message {
             RegistryMessage::Register {
                 id,
@@ -326,6 +372,7 @@ impl ConnectionRegistry {
                 {
                     tracing::warn!(%error, "could not report UI registration");
                     outbox.close();
+                    return;
                 }
                 self.connections.insert(
                     id,
@@ -344,7 +391,7 @@ impl ConnectionRegistry {
                     {
                         tracing::warn!(%error, "could not report UI disconnection");
                     }
-                    self.prune_days(connection.days.into_keys().collect()).await;
+                    self.prune_days(connection.days.into_keys().collect());
                 }
             }
             RegistryMessage::Subscribe {
@@ -353,34 +400,23 @@ impl ConnectionRegistry {
                 response,
                 reply,
             } => {
-                let result = self.subscribe(id, subscription, response).await;
-                if reply.send(result).is_err() {
-                    tracing::debug!("subscriber left before registry acknowledgement");
-                }
+                self.queue_change(SubscriptionChange::Subscribe(PendingSubscription {
+                    id,
+                    subscription,
+                    response,
+                    reply,
+                }));
             }
             RegistryMessage::Unsubscribe {
                 id,
                 subscription,
                 reply,
             } => {
-                let mut removed = std::collections::BTreeSet::new();
-                if let Some(connection) = self.connections.get_mut(&id) {
-                    for topic in subscription.topics {
-                        match topic {
-                            Topic::State => connection.state = StateSubscription::Absent,
-                            Topic::Day(date) => {
-                                connection.days.remove(&date);
-                                removed.insert(date);
-                            }
-                            Topic::Control => {}
-                        }
-                        connection.outbox.unsubscribe(topic);
-                    }
-                }
-                self.prune_days(removed).await;
-                if reply.send(()).is_err() {
-                    tracing::debug!("unsubscribe caller left");
-                }
+                self.queue_change(SubscriptionChange::Unsubscribe {
+                    id,
+                    subscription,
+                    reply,
+                });
             }
             RegistryMessage::TargetControl { connection, op } => {
                 if !matches!(
@@ -429,44 +465,194 @@ impl ConnectionRegistry {
                 }
             }
         }
+        self.advance_subscriptions();
     }
-    async fn subscribe(
-        &mut self,
-        id: ConnectionId,
-        subscription: Subscribe,
-        response: Response,
-    ) -> Result<(), QueueFrameError> {
-        let mut dates: std::collections::BTreeSet<_> = self
-            .connections
-            .values()
-            .flat_map(|connection| connection.days.keys().copied())
-            .collect();
-        dates.extend(subscription.topics.iter().filter_map(|topic| match topic {
-            Topic::Day(date) => Some(*date),
-            _ => None,
-        }));
-        // A date already published for the tray still needs its own registry subscription.
-        let needs_days = dates.iter().any(|date| {
-            !self
-                .connections
-                .values()
-                .any(|connection| connection.days.contains_key(date))
-        });
-        let prepared = if needs_days {
-            match self.versions.set_days(dates).await {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    let connection = self.connections.get(&id).ok_or(QueueFrameError::Closed)?;
-                    return connection.outbox.response(Response {
-                        id: response.id,
-                        outcome: quartz_protocol::ResponseOutcome::Err { error },
+    fn queue_change(&mut self, change: SubscriptionChange) {
+        // Waiting for a digest must not turn the bounded mailbox into an unbounded backlog.
+        if self.pending.len() < REGISTRY_MAILBOX_CAPACITY {
+            self.pending.push_back(change);
+            return;
+        }
+        match change {
+            SubscriptionChange::Subscribe(pending) => {
+                let result = self
+                    .connections
+                    .get(&pending.id)
+                    .ok_or(QueueFrameError::Closed)
+                    .and_then(|connection| {
+                        connection.outbox.response(Response {
+                            id: pending.response.id,
+                            outcome: quartz_protocol::ResponseOutcome::Err {
+                                error: quartz_protocol::ProtocolError::new(
+                                    quartz_protocol::ErrorKind::Busy,
+                                ),
+                            },
+                        })
                     });
+                let _ = pending.reply.send(result);
+            }
+            SubscriptionChange::Unsubscribe { id, .. } => {
+                if let Some(connection) = self.connections.get(&id) {
+                    connection.outbox.close();
                 }
             }
-        } else {
-            self.versions.updates.borrow().clone()
+        }
+    }
+    fn desired_dates(&self) -> BTreeSet<quartz_protocol::LocalDate> {
+        self.connections
+            .values()
+            .flat_map(|connection| connection.days.keys().copied())
+            .collect()
+    }
+    fn request_versions(
+        &mut self,
+        dates: BTreeSet<quartz_protocol::LocalDate>,
+        action: VersionAction,
+    ) {
+        let submitted = self.versions.submit_days(dates);
+        self.versions_in_flight.push(Box::pin(async move {
+            let result = match submitted {
+                Ok(received) => received.await.unwrap_or_else(|_| {
+                    Err(quartz_protocol::ProtocolError::new(
+                        quartz_protocol::ErrorKind::Internal,
+                    ))
+                }),
+                Err(error) => Err(error),
+            };
+            VersionCompletion { result, action }
+        }));
+    }
+
+    async fn wait_reconciliation(state: ReconcileVersions) {
+        match state {
+            ReconcileVersions::RetryAt(at) => tokio::time::sleep_until(at).await,
+            ReconcileVersions::Current | ReconcileVersions::Required => {
+                std::future::pending().await
+            }
+        }
+    }
+    fn advance_subscriptions(&mut self) {
+        while self.versions_in_flight.is_empty() {
+            if self.reconciliation == ReconcileVersions::Required {
+                self.reconciliation = ReconcileVersions::Current;
+                self.request_versions(self.desired_dates(), VersionAction::Reconcile);
+                return;
+            }
+            let Some(change) = self.pending.pop_front() else {
+                return;
+            };
+            match change {
+                SubscriptionChange::Subscribe(subscription) => {
+                    let Some(connection) = self.connections.get(&subscription.id) else {
+                        let _ = subscription.reply.send(Err(QueueFrameError::Closed));
+                        continue;
+                    };
+                    if connection.outbox.is_closed() {
+                        let _ = subscription.reply.send(Err(QueueFrameError::Closed));
+                        continue;
+                    }
+                    let mut dates = self.desired_dates();
+                    let needs_days =
+                        subscription
+                            .subscription
+                            .topics
+                            .iter()
+                            .any(|topic| match topic {
+                                Topic::Day(date) => !dates.contains(date),
+                                _ => false,
+                            });
+                    if needs_days {
+                        dates.extend(subscription.subscription.topics.iter().filter_map(|topic| {
+                            match topic {
+                                Topic::Day(date) => Some(*date),
+                                _ => None,
+                            }
+                        }));
+                        self.request_versions(dates, VersionAction::Subscribe(subscription));
+                        return;
+                    }
+                    let prepared = self.versions.updates.borrow().clone();
+                    self.complete_subscription(subscription, Ok(prepared));
+                }
+                SubscriptionChange::Unsubscribe {
+                    id,
+                    subscription,
+                    reply,
+                } => {
+                    if let Some(connection) = self.connections.get_mut(&id) {
+                        for topic in subscription.topics {
+                            match topic {
+                                Topic::State => connection.state = StateSubscription::Absent,
+                                Topic::Day(date) => {
+                                    if connection.days.remove(&date).is_some() {
+                                        self.reconciliation = ReconcileVersions::Required;
+                                    }
+                                }
+                                Topic::Control => {}
+                            }
+                            connection.outbox.unsubscribe(topic);
+                        }
+                    }
+                    // Shared dates do not need another database turn.
+                    if self.reconciliation == ReconcileVersions::Required {
+                        let published = self.versions.updates.borrow();
+                        if self.desired_dates().iter().eq(published.days.keys()) {
+                            self.reconciliation = ReconcileVersions::Current;
+                        }
+                    }
+                    let _ = reply.send(());
+                }
+            }
+        }
+    }
+    fn complete_versions(&mut self, completed: VersionCompletion) {
+        match completed.action {
+            VersionAction::Subscribe(subscription) => {
+                self.complete_subscription(subscription, completed.result)
+            }
+            VersionAction::Reconcile => {
+                if let Err(error) = completed.result {
+                    tracing::warn!(?error, "could not reconcile day version subscriptions");
+                    self.reconciliation =
+                        ReconcileVersions::RetryAt(tokio::time::Instant::now() + RECONCILE_RETRY);
+                }
+            }
+        }
+    }
+    fn complete_subscription(
+        &mut self,
+        pending: PendingSubscription,
+        prepared: Result<crate::query::versions::PublishedVersions, quartz_protocol::ProtocolError>,
+    ) {
+        let result = self.install_subscription(&pending, prepared);
+        if result.is_err() {
+            // The publisher may have installed candidate dates before response admission failed.
+            self.reconciliation = ReconcileVersions::Required;
+        }
+        if pending.reply.send(result).is_err() {
+            tracing::debug!("subscriber left before registry acknowledgement");
+        }
+    }
+    fn install_subscription(
+        &mut self,
+        pending: &PendingSubscription,
+        prepared: Result<crate::query::versions::PublishedVersions, quartz_protocol::ProtocolError>,
+    ) -> Result<(), QueueFrameError> {
+        let connection = self
+            .connections
+            .get_mut(&pending.id)
+            .ok_or(QueueFrameError::Closed)?;
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return connection.outbox.response(Response {
+                    id: pending.response.id,
+                    outcome: quartz_protocol::ResponseOutcome::Err { error },
+                });
+            }
         };
-        let prepared_days = subscription
+        let days = pending
+            .subscription
             .topics
             .iter()
             .filter_map(|topic| match topic {
@@ -481,19 +667,16 @@ impl ConnectionRegistry {
                     .ok_or(QueueFrameError::Closed)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let connection = self
-            .connections
-            .get_mut(&id)
-            .ok_or(QueueFrameError::Closed)?;
-        connection.outbox.response(response)?;
-        for changed in prepared_days {
-            let date = changed.date;
-            if let std::collections::btree_map::Entry::Vacant(entry) = connection.days.entry(date) {
+        connection.outbox.response(pending.response.clone())?;
+        for changed in days {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                connection.days.entry(changed.date)
+            {
                 connection.outbox.day(changed.clone());
                 entry.insert(changed);
             }
         }
-        if subscription.topics.contains(&Topic::State)
+        if pending.subscription.topics.contains(&Topic::State)
             && connection.state == StateSubscription::Absent
         {
             connection.state = StateSubscription::Subscribed;
@@ -501,23 +684,9 @@ impl ConnectionRegistry {
         }
         Ok(())
     }
-    async fn prune_days(
-        &self,
-        removed_days: std::collections::BTreeSet<quartz_protocol::LocalDate>,
-    ) {
-        if removed_days.is_empty() {
-            return;
-        }
-        let dates: std::collections::BTreeSet<_> = self
-            .connections
-            .values()
-            .flat_map(|connection| connection.days.keys().copied())
-            .collect();
-        if removed_days.is_subset(&dates) {
-            return;
-        }
-        if let Err(error) = self.versions.set_days(dates).await {
-            tracing::warn!(?error, "could not prune day version subscriptions");
+    fn prune_days(&mut self, removed_days: BTreeSet<quartz_protocol::LocalDate>) {
+        if !removed_days.is_subset(&self.desired_dates()) {
+            self.reconciliation = ReconcileVersions::Required;
         }
     }
     fn publish_state(&self) {
@@ -538,6 +707,87 @@ mod tests {
     use super::*;
     /// Bounds the barrier when a regression waits for an unserviced database command.
     const TEST_BARRIER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    #[tokio::test]
+    async fn registry_controls_remain_available_while_subscription_digest_waits() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("waiting-digest".into()));
+        let mut fixture = crate::store::query::test_support::QueryFixture::new(0);
+        let snapshots =
+            quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+                .expect("rules")
+                .snapshots();
+        let channel = crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
+            .expect("versions");
+        let registry =
+            RegistryHandle::start(status.subscribe(), channel.port, Arc::new(|_| Ok(())));
+        let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
+        let registration = registry
+            .register(ConnectionPeer::Cli, writer.handle.clone())
+            .expect("register");
+        let _reply = registry
+            .submit_subscribe(
+                registration.id,
+                Subscribe {
+                    topics: vec![Topic::Day("2025-01-02".parse().expect("date"))],
+                },
+                Response {
+                    id: Some(quartz_protocol::RequestId(1)),
+                    outcome: quartz_protocol::ResponseOutcome::Ok {
+                        body: serde_json::json!({}),
+                    },
+                },
+            )
+            .expect("submit");
+        tokio::task::yield_now().await;
+        assert!(
+            !channel.publisher.requests.is_empty(),
+            "database request is waiting"
+        );
+        assert_eq!(
+            tokio::time::timeout(TEST_BARRIER_TIMEOUT, registry.outboxes())
+                .await
+                .expect("registry barrier must not wait for database")
+                .expect("barrier")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_ui_registration_does_not_emit_disconnection() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("rejected-ui".into()));
+        let database = crate::query::dispatch::test_support::TestDatabase::start();
+        let disconnected = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = disconnected.clone();
+        let registry = RegistryHandle::start(
+            status.subscribe(),
+            database.versions.clone(),
+            Arc::new(move |command| match command {
+                UiCommand::Registered { .. } => Err(super::super::QueueUiError),
+                UiCommand::Unregistered { .. } => {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+                _ => Ok(()),
+            }),
+        );
+        let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
+        let registration = registry
+            .register(
+                ConnectionPeer::Ui(UiPeer {
+                    pid: ProcessId::new(std::process::id()),
+                    state: quartz_protocol::UiState::Starting,
+                }),
+                writer.handle.clone(),
+            )
+            .expect("register");
+        registry.outboxes().await.expect("barrier");
+        drop(registration);
+        registry.outboxes().await.expect("cleanup barrier");
+        assert_eq!(disconnected.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn cli_unregister_and_closed_outbox_cleanup_do_not_request_day_versions() {
@@ -626,6 +876,9 @@ mod tests {
                 status: status.subscribe(),
                 versions: channel.port,
                 connections: BTreeMap::new(),
+                pending: VecDeque::new(),
+                versions_in_flight: FuturesUnordered::new(),
+                reconciliation: ReconcileVersions::Current,
             };
             for id in [ConnectionId::for_test(1), ConnectionId::for_test(2)] {
                 registry.connections.insert(
@@ -638,33 +891,19 @@ mod tests {
                     },
                 );
             }
-            tokio::time::timeout(
-                TEST_BARRIER_TIMEOUT,
-                registry.receive(RegistryMessage::Unregister {
-                    id: ConnectionId::for_test(1),
-                }),
-            )
-            .await
-            .expect("shared day needs no database request");
-            assert!(channel.publisher.requests.is_empty());
-            let removal = tokio::spawn(async move {
-                registry
-                    .receive(RegistryMessage::Unregister {
-                        id: ConnectionId::for_test(2),
-                    })
-                    .await;
+            registry.receive(RegistryMessage::Unregister {
+                id: ConnectionId::for_test(1),
             });
-            tokio::task::yield_now().await;
+            assert!(channel.publisher.requests.is_empty());
+            registry.receive(RegistryMessage::Unregister {
+                id: ConnectionId::for_test(2),
+            });
             let command = channel
                 .publisher
                 .requests
                 .try_recv()
                 .expect("last subscriber prunes its date");
             channel.publisher.receive(command);
-            tokio::time::timeout(TEST_BARRIER_TIMEOUT, removal)
-                .await
-                .expect("prune completes")
-                .expect("removal task");
             assert!(channel.publisher.requests.is_empty());
         });
     }
@@ -751,5 +990,74 @@ mod tests {
             drop(registration);
             assert!(registry.outboxes().await.expect("barrier").is_empty());
         });
+    }
+    #[tokio::test]
+    async fn failed_subscription_response_reconciles_publisher_dates() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("orphan-day".into()));
+        let mut fixture = crate::store::query::test_support::QueryFixture::new(0);
+        let snapshots =
+            quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+                .expect("rules")
+                .snapshots();
+        let mut channel =
+            crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
+                .expect("versions");
+        let updates = channel.port.updates.clone();
+        let registry =
+            RegistryHandle::start(status.subscribe(), channel.port, Arc::new(|_| Ok(())));
+        let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
+        let registration = registry
+            .register(ConnectionPeer::Cli, writer.handle.clone())
+            .expect("register");
+        let reply = registry
+            .submit_subscribe(
+                registration.id,
+                Subscribe {
+                    topics: vec![Topic::Day("2025-01-02".parse().expect("date"))],
+                },
+                Response {
+                    id: Some(quartz_protocol::RequestId(1)),
+                    outcome: quartz_protocol::ResponseOutcome::Ok {
+                        body: serde_json::json!({}),
+                    },
+                },
+            )
+            .expect("subscribe");
+        let request = SelfContainedVersions::next(&channel.publisher.requests).await;
+        writer.handle.close();
+        channel.publisher.receive(request);
+        assert!(reply.await.expect("subscription reply").is_err());
+        let reconciliation = SelfContainedVersions::next(&channel.publisher.requests).await;
+        drop(reconciliation); // Simulate a failed reconciliation round trip.
+        assert!(!updates.borrow().days.is_empty());
+        let retry = SelfContainedVersions::next(&channel.publisher.requests).await;
+        channel.publisher.receive(retry);
+        assert!(
+            updates.borrow().days.is_empty(),
+            "no subscriber owns the abandoned date"
+        );
+    }
+    struct SelfContainedVersions;
+    impl SelfContainedVersions {
+        async fn next(
+            requests: &crossbeam_channel::Receiver<crate::query::versions::VersionCommand>,
+        ) -> crate::query::versions::VersionCommand {
+            tokio::time::timeout(RECONCILE_RETRY + TEST_BARRIER_TIMEOUT, async {
+                loop {
+                    match requests.try_recv() {
+                        Ok(command) => return command,
+                        Err(crossbeam_channel::TryRecvError::Empty) => {
+                            tokio::task::yield_now().await
+                        }
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                            panic!("version publisher disconnected")
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("registry submits version request without another subscriber")
+        }
     }
 }

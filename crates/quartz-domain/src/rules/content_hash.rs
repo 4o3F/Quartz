@@ -3,6 +3,9 @@ use sha2::{Digest, Sha256};
 use snafu::Snafu;
 use std::{fmt, str::FromStr};
 
+/// SHA-256 encodes 256 bits as 64 hexadecimal digits.
+const SHA256_HEX_DIGITS: usize = 64;
+
 /// Lowercase hexadecimal SHA-256 of canonical content or an effective rule list.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -39,7 +42,7 @@ impl TryFrom<String> for ContentHash {
     /// # Errors
     /// Returns an error unless the value contains exactly 64 lowercase hexadecimal digits.
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.len() != 64
+        if value.len() != SHA256_HEX_DIGITS
             || !value
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))

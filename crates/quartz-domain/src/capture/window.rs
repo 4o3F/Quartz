@@ -34,7 +34,7 @@ impl ProcessId {
     }
 }
 /// HWND reuse sequence within one capture run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct InstanceGeneration(u64);
 
 impl InstanceGeneration {
@@ -269,17 +269,33 @@ enum InstanceLifecycle {
 struct Entry {
     instance: WindowInstance,
     lifecycle: InstanceLifecycle,
+    last_seen: super::MonoInstant,
 }
-/// Window identities retained for one run, including retirement history per HWND.
+#[derive(Debug)]
+pub(super) struct ObservedInstance {
+    pub instance: WindowInstance,
+    pub retired: Option<WindowId>,
+}
+/// Window identities retained in a bounded run-local cache, including retirement history per HWND.
 #[derive(Debug, Clone, Default)]
 pub struct WindowInstances {
     entries: BTreeMap<WindowHandle, Entry>,
     ids: IdAllocator,
+    generation_floor: InstanceGeneration,
+    highest_generation: InstanceGeneration,
 }
 impl WindowInstances {
     /// Resolves a current instance, incrementing generation after retirement or identity change.
     #[must_use]
     pub fn observe(&mut self, facts: &WindowFacts, at: Timestamp) -> WindowInstance {
+        self.observe_with_retirement(facts, at, None).instance
+    }
+    pub(super) fn observe_with_retirement(
+        &mut self,
+        facts: &WindowFacts,
+        at: Timestamp,
+        protected: Option<WindowId>,
+    ) -> ObservedInstance {
         let old = self.entries.get(&facts.handle);
         let same = old.is_some_and(|old| {
             old.lifecycle == InstanceLifecycle::Live
@@ -298,16 +314,41 @@ impl WindowInstances {
                 entry.instance.display_name = facts.display_name.clone();
             }
             entry.instance.metadata_source = facts.metadata_source;
-            return entry.instance.clone();
+            entry.last_seen = at.mono;
+            return ObservedInstance {
+                instance: entry.instance.clone(),
+                retired: None,
+            };
         }
-        let generation = match old {
-            Some(old) => old
-                .instance
-                .generation
+        let previous_generation = old.map(|entry| entry.instance.generation);
+        let mut retired = old
+            .filter(|entry| entry.lifecycle == InstanceLifecycle::Live)
+            .map(|entry| entry.instance.id);
+        if old.is_none() && self.entries.len() >= limits::WINDOW_INSTANCE_CAPACITY {
+            let (&handle, _) = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| Some(entry.instance.id) != protected)
+                .min_by_key(|(_, entry)| entry.last_seen)
+                .expect("cache capacity leaves a victim outside the protected foreground");
+            self.generation_floor = self
+                .highest_generation
                 .next()
-                .expect("window instance generation exhausted"),
-            None => InstanceGeneration::initial(),
+                .expect("window instance generation exhausted");
+            retired = self
+                .entries
+                .remove(&handle)
+                .filter(|entry| entry.lifecycle == InstanceLifecycle::Live)
+                .map(|entry| entry.instance.id);
+        }
+        let generation = match previous_generation {
+            Some(previous) => previous
+                .next()
+                .expect("window instance generation exhausted")
+                .max(self.generation_floor),
+            None => self.generation_floor,
         };
+        self.highest_generation = self.highest_generation.max(generation);
         let instance = WindowInstance {
             id: self.ids.window(),
             handle: facts.handle,
@@ -326,9 +367,14 @@ impl WindowInstances {
             Entry {
                 instance: instance.clone(),
                 lifecycle: InstanceLifecycle::Live,
+                last_seen: at.mono,
             },
         );
-        instance
+        ObservedInstance { instance, retired }
+    }
+    #[cfg(test)]
+    pub(super) fn retained_count(&self) -> usize {
+        self.entries.len()
     }
     /// Finds the live instance associated with a native destroy notification.
     pub(super) fn live_id(&self, handle: WindowHandle) -> Option<WindowId> {

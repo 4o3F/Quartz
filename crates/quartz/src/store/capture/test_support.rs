@@ -86,6 +86,28 @@ impl Fixture {
             let _ = self.step(now, feedback);
         }
     }
+    pub(crate) fn discard_window_observation(&mut self, handle: u64) -> Timestamp {
+        let parts = self.step(at(10), foreground(handle, "discarded observation"));
+        assert!(self.shell.accept(parts, at(10)).feedback.is_empty());
+        let now = at(10)
+            .checked_advance(limits::BACKLOG_RETENTION)
+            .expect("retention");
+        let expired = self
+            .shell
+            .flush(&mut self.store, now, CheckpointCollection::Skip);
+        assert!(expired.failure().is_none());
+        assert!(
+            expired
+                .feedback
+                .iter()
+                .any(|event| matches!(event, CaptureEvent::PersistenceGap { .. }))
+        );
+        for feedback in expired.feedback {
+            let parts = self.step(now, feedback);
+            assert!(self.shell.accept(parts, now).feedback.is_empty());
+        }
+        now
+    }
     pub(crate) fn hide_web_field(&mut self, field: quartz_domain::rules::Field) {
         use quartz_domain::rules::registry::RegistryCommand;
         let mut registry = RuleRegistry::from_state(RegistryState::default()).expect("rules");

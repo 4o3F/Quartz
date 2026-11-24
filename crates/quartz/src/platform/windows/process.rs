@@ -176,6 +176,46 @@ pub(super) enum ReadPowerSourceError {
     #[snafu(display("unknown AC line status: {status}"))]
     Unknown { status: u8 },
 }
+/// Remembers the last observed status so hover failures are reported once per transition.
+#[derive(Debug, Default)]
+pub(super) struct PowerChecks {
+    previous: Option<PowerObservation>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerObservation {
+    Ac,
+    Battery,
+    Unknown(u8),
+    ReadFailure(windows::core::HRESULT),
+}
+impl PowerChecks {
+    pub(super) fn read(
+        &mut self,
+        read: impl FnOnce() -> Result<PowerSource, ReadPowerSourceError>,
+        mut warn: impl FnMut(&ReadPowerSourceError),
+    ) -> Option<PowerSource> {
+        let result = read();
+        let observation = match &result {
+            Ok(PowerSource::Ac) => PowerObservation::Ac,
+            Ok(PowerSource::Battery) => PowerObservation::Battery,
+            Err(ReadPowerSourceError::Unknown { status }) => PowerObservation::Unknown(*status),
+            Err(ReadPowerSourceError::Read { source }) => {
+                PowerObservation::ReadFailure(source.code())
+            }
+        };
+        let changed = self.previous != Some(observation);
+        self.previous = Some(observation);
+        match result {
+            Ok(power) => Some(power),
+            Err(error) => {
+                if changed {
+                    warn(&error);
+                }
+                None
+            }
+        }
+    }
+}
 impl PowerSource {
     pub(super) fn read() -> Result<Self, ReadPowerSourceError> {
         use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
@@ -195,6 +235,25 @@ impl PowerSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repeated_power_failures_warn_once_until_status_changes() {
+        let mut checks = PowerChecks::default();
+        let warnings = std::cell::Cell::new(0);
+        let mut read = |status| {
+            checks.read(
+                || PowerSource::from_ac_line_status(status),
+                |_| warnings.set(warnings.get() + 1),
+            )
+        };
+        assert!(read(u8::MAX).is_none());
+        assert!(read(u8::MAX).is_none());
+        assert_eq!(warnings.get(), 1);
+        assert_eq!(read(AC_ONLINE), Some(PowerSource::Ac));
+        assert!(read(u8::MAX).is_none());
+        assert_eq!(warnings.get(), 2);
+        assert!(read(2).is_none());
+        assert_eq!(warnings.get(), 3);
+    }
     #[test]
     fn power_source_codes_are_typed_and_unknown_is_an_error() {
         assert_eq!(

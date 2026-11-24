@@ -268,13 +268,10 @@ enum SettingsCommand {
     },
 }
 impl SettingsCommand {
-    #[cfg(windows)]
-    fn run<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
-        self,
-        mut client: quartz_pipe::CoreClient<T>,
-    ) -> Result<(), quartz_pipe::CallCoreError> {
-        let response = match self {
-            Self::Get => client.call(&quartz_protocol::SettingsGetRequest {})?,
+    #[cfg(any(windows, test))]
+    fn into_update(self) -> Option<quartz_protocol::SettingsSetRequest> {
+        match self {
+            Self::Get => None,
             Self::Set {
                 language,
                 hour_cycle,
@@ -282,21 +279,33 @@ impl SettingsCommand {
                 prewarm_enabled,
                 resident_enabled,
                 prewarm_on_battery,
-            } => {
-                let update = quartz_protocol::SettingsSetRequest {
-                    language: language.map(Into::into),
-                    hour_cycle: hour_cycle.map(Into::into),
-                    first_day_of_week: first_day_of_week.map(Into::into),
-                    resident: resident_enabled.map(|enabled| quartz_protocol::ResidentUpdate {
-                        enabled: Some(enabled.into()),
-                    }),
-                    prewarm: Some(quartz_protocol::PrewarmUpdate {
+            } => Some(quartz_protocol::SettingsSetRequest {
+                language: language.map(Into::into),
+                hour_cycle: hour_cycle.map(Into::into),
+                first_day_of_week: first_day_of_week.map(Into::into),
+                resident: resident_enabled.map(|enabled| quartz_protocol::ResidentUpdate {
+                    enabled: Some(enabled.into()),
+                }),
+                prewarm: if prewarm_enabled.is_some() || prewarm_on_battery.is_some() {
+                    Some(quartz_protocol::PrewarmUpdate {
                         enabled: prewarm_enabled.map(Into::into),
                         on_battery: prewarm_on_battery.map(Into::into),
-                    }),
-                };
-                client.call(&update)?
-            }
+                    })
+                } else {
+                    None
+                },
+            }),
+        }
+    }
+
+    #[cfg(windows)]
+    fn run<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        self,
+        mut client: quartz_pipe::CoreClient<T>,
+    ) -> Result<(), quartz_pipe::CallCoreError> {
+        let response = match self.into_update() {
+            Some(update) => client.call(&update)?,
+            None => client.call(&quartz_protocol::SettingsGetRequest {})?,
         };
         let response =
             serde_json::to_value(response).map_err(quartz_pipe::CallCoreError::encode_body)?;
@@ -422,6 +431,12 @@ fn main() -> ExitCode {
         Ok(args) => args,
         Err(error) => {
             platform::attach_parent_console();
+            if error.use_stderr() {
+                logging::BootstrapDiagnostic::from_error(&error).report();
+                return ExitCode::from(
+                    u8::try_from(error.exit_code()).expect("clap uses exit codes zero and two"),
+                );
+            }
             error.exit();
         }
     };
@@ -440,7 +455,7 @@ fn main() -> ExitCode {
             let _log = match init_ui_diagnostics() {
                 Ok(guard) => Some(guard),
                 Err(error) => {
-                    tracing::error!(?error, "could not initialize UI diagnostics");
+                    logging::BootstrapDiagnostic::from_error(&error).report();
                     core_error =
                         core_error.or(Some(quartz_protocol::CoreErrorCode::CoreStartFailed));
                     None
@@ -468,7 +483,7 @@ fn main() -> ExitCode {
         Some(Command::Cli(command)) => {
             platform::attach_parent_console();
             if let Err(error) = logging::init() {
-                eprintln!("could not initialize entry diagnostics: {error}");
+                logging::BootstrapDiagnostic::from_error(&error).report();
                 return ExitCode::FAILURE;
             }
             match command.dispatch() {
@@ -818,6 +833,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn language_only_settings_update_omits_prewarm_members() {
+        let args = Args::try_parse_from(["quartz", "settings", "set", "--language", "auto"])
+            .expect("language update");
+        let Some(Command::Cli(CliCommand::Settings { command })) = args.command else {
+            panic!("settings command")
+        };
+        let update = command.into_update().expect("update");
+        assert!(update.prewarm.is_none());
+        assert!(update.resident.is_none());
+    }
     #[test]
     fn locale_settings_combine_with_lifecycle_flags_and_preserve_omitted_fields() {
         let args = Args::try_parse_from([

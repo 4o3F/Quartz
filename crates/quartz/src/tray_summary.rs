@@ -1,6 +1,7 @@
 //! Cached tray aggregates and localized presentation without database access.
 
-use quartz_i18n::{Language, MessageKey};
+use crate::tray_tooltip::TOOLTIP_TEXT_UNITS;
+use quartz_i18n::{Language, MessageArgument, MessageKey};
 use quartz_protocol::{
     ApplicationRank, BuiltinCategory, CategoryDuration, CategoryRef, DayMetrics, ForegroundState,
     QueryDayResponse,
@@ -11,8 +12,6 @@ pub(crate) const MINUTE_MS: i64 = 60 * 1000;
 const MINUTES_PER_HOUR: i64 = 60;
 /// 07 §1.3 keeps the four leading categories in the compact menu.
 const TOP_CATEGORY_COUNT: usize = 4;
-/// Windows reserves one UTF-16 unit in szTip for the terminator (07 §1.2).
-const TOOLTIP_UNITS: usize = 127;
 const PERCENT: f64 = 100.0;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,9 +46,12 @@ impl TraySummary {
         })
     }
     pub(crate) fn today_text(&self, language: Language) -> String {
-        MessageKey::new("tray.today").in_language(language).replace(
-            "%{duration}",
-            &TrayText::duration(self.metrics.active_ms, language),
+        MessageKey::new("tray.today").format(
+            language,
+            &[MessageArgument::new(
+                "duration",
+                &TrayText::duration(self.metrics.active_ms, language),
+            )],
         )
     }
     pub(crate) fn categories_text(&self, language: Language) -> String {
@@ -62,13 +64,16 @@ impl TraySummary {
             .iter()
             .take(TOP_CATEGORY_COUNT)
             .map(|row| {
-                MessageKey::new("today.legend_item")
-                    .in_language(language)
-                    .replace("%{name}", &TrayText::category(&row.category, language))
-                    .replace(
-                        "%{duration}",
-                        &TrayText::duration(row.duration_ms, language),
-                    )
+                MessageKey::new("today.legend_item").format(
+                    language,
+                    &[
+                        MessageArgument::new("name", &TrayText::category(&row.category, language)),
+                        MessageArgument::new(
+                            "duration",
+                            &TrayText::duration(row.duration_ms, language),
+                        ),
+                    ],
+                )
             })
             .collect::<Vec<_>>()
             .join(" · ")
@@ -78,19 +83,23 @@ impl TraySummary {
             .recent
             .as_ref()
             .map(|row| {
-                MessageKey::new("today.legend_item")
-                    .in_language(language)
-                    .replace("%{name}", &TrayText::menu_value(&row.app.display_name))
-                    .replace("%{duration}", &TrayText::duration(row.active_ms, language))
+                MessageKey::new("today.legend_item").format(
+                    language,
+                    &[
+                        MessageArgument::new("name", &TrayText::menu_value(&row.app.display_name)),
+                        MessageArgument::new(
+                            "duration",
+                            &TrayText::duration(row.active_ms, language),
+                        ),
+                    ],
+                )
             })
             .unwrap_or_else(|| {
                 MessageKey::new("tray.no_activity")
                     .in_language(language)
                     .into_owned()
             });
-        MessageKey::new("tray.recent")
-            .in_language(language)
-            .replace("%{activity}", &value)
+        MessageKey::new("tray.recent").format(language, &[MessageArgument::new("activity", &value)])
     }
     pub(crate) fn tooltip(
         &self,
@@ -98,20 +107,23 @@ impl TraySummary {
         now_ms: i64,
         language: Language,
     ) -> String {
-        let mut text = MessageKey::new("tray.summary")
-            .in_language(language)
-            .replace(
-                "%{duration}",
-                &TrayText::duration(self.metrics.active_ms, language),
-            )
-            .replace(
-                "%{focus}",
-                &format!("{:.0}", self.metrics.focus_ratio * PERCENT),
-            )
-            .replace(
-                "%{distraction}",
-                &format!("{:.0}", self.metrics.distract_ratio * PERCENT),
-            );
+        let mut text = MessageKey::new("tray.summary").format(
+            language,
+            &[
+                MessageArgument::new(
+                    "duration",
+                    &TrayText::duration(self.metrics.active_ms, language),
+                ),
+                MessageArgument::new(
+                    "focus",
+                    &format!("{:.0}", self.metrics.focus_ratio * PERCENT),
+                ),
+                MessageArgument::new(
+                    "distraction",
+                    &format!("{:.0}", self.metrics.distract_ratio * PERCENT),
+                ),
+            ],
+        );
         if let Some(view) = foreground
             && let Some(app) = &view.app
         {
@@ -132,14 +144,17 @@ impl TraySummary {
                 }
                 None => TrayText::plain(identity),
             };
-            let line = MessageKey::new("tray.current")
-                .in_language(language)
-                .replace("%{current}", &current)
-                .replace(
-                    "%{minutes}",
-                    &(now_ms.saturating_sub(view.interval_start_utc_ms).max(0) / MINUTE_MS)
-                        .to_string(),
-                );
+            let line = MessageKey::new("tray.current").format(
+                language,
+                &[
+                    MessageArgument::new("current", &current),
+                    MessageArgument::new(
+                        "minutes",
+                        &(now_ms.saturating_sub(view.interval_start_utc_ms).max(0) / MINUTE_MS)
+                            .to_string(),
+                    ),
+                ],
+            );
             text.push('\n');
             text.push_str(&line);
         }
@@ -160,10 +175,13 @@ impl TrayText {
         } else {
             "tray.duration_hm"
         };
-        MessageKey::new(key)
-            .in_language(language)
-            .replace("%{hours}", &hours.to_string())
-            .replace("%{minutes}", &minutes.to_string())
+        MessageKey::new(key).format(
+            language,
+            &[
+                MessageArgument::new("hours", &hours.to_string()),
+                MessageArgument::new("minutes", &minutes.to_string()),
+            ],
+        )
     }
     fn category(category: &CategoryRef, language: Language) -> String {
         let key = match category {
@@ -194,13 +212,13 @@ impl TrayText {
         Self::plain(value).replace('&', "&&")
     }
     pub(crate) fn truncate(value: &str) -> String {
-        if value.encode_utf16().count() <= TOOLTIP_UNITS {
+        if value.encode_utf16().count() <= TOOLTIP_TEXT_UNITS {
             return value.to_owned();
         }
         let mut text = String::new();
         let mut units = 0;
         for character in value.chars() {
-            if units + character.len_utf16() >= TOOLTIP_UNITS {
+            if units + character.len_utf16() >= TOOLTIP_TEXT_UNITS {
                 break;
             }
             units += character.len_utf16();
@@ -226,6 +244,51 @@ mod tests {
             },
             categories: Vec::new(),
             recent: None,
+        }
+    }
+    #[test]
+    fn placeholder_like_user_text_is_preserved_in_tooltips_and_menus() {
+        let mut summary = summary();
+        let foreground = ForegroundState {
+            app: Some(quartz_protocol::AppIdentity::Unresolved("Editor".into())),
+            title: Some("literal %{minutes}".into()),
+            interval_start_utc_ms: 0,
+        };
+        summary.categories.push(CategoryDuration {
+            category: CategoryRef::Classified {
+                category: quartz_protocol::Category {
+                    id: quartz_protocol::CategoryId(1),
+                    uuid: quartz_protocol::CategoryUuid(
+                        "00000000-0000-0000-0000-000000000001".into(),
+                    ),
+                    builtin_key: None,
+                    name: Some("literal %{duration}".into()),
+                    color: "neutral".into(),
+                    tendency: quartz_protocol::CategoryTendency::Neutral,
+                }
+                .into(),
+            },
+            duration_ms: MINUTE_MS,
+        });
+        summary.recent = Some(serde_json::from_value(serde_json::json!({
+            "app": {"id":1, "exe_name":null, "display_name":"literal %{duration}"}, "active_ms":MINUTE_MS,
+        })).expect("recent app"));
+        for language in [Language::English, Language::SimplifiedChinese] {
+            assert!(
+                summary
+                    .recent_text(language)
+                    .contains("literal %{duration}")
+            );
+            assert!(
+                summary
+                    .tooltip(Some(&foreground), MINUTE_MS, language)
+                    .contains("literal %{minutes}")
+            );
+            assert!(
+                summary
+                    .categories_text(language)
+                    .contains("literal %{duration}")
+            );
         }
     }
     #[test]
@@ -273,19 +336,19 @@ mod tests {
         for language in [Language::English, Language::SimplifiedChinese] {
             let text = summary().tooltip(Some(&foreground), 0, language);
             assert!(text.ends_with('…'));
-            assert!(text.encode_utf16().count() <= TOOLTIP_UNITS);
+            assert!(text.encode_utf16().count() <= TOOLTIP_TEXT_UNITS);
             assert_eq!(text.matches('\n').count(), 1);
             assert!(!text.contains('\0'));
             crate::tray_tooltip::TrayTooltipText::try_from(text.as_str())
                 .expect("truncated tooltip fits");
         }
         assert_eq!(
-            TrayText::truncate(&"a".repeat(TOOLTIP_UNITS)),
-            "a".repeat(TOOLTIP_UNITS)
+            TrayText::truncate(&"a".repeat(TOOLTIP_TEXT_UNITS)),
+            "a".repeat(TOOLTIP_TEXT_UNITS)
         );
         assert_eq!(
-            TrayText::truncate(&"a".repeat(TOOLTIP_UNITS + 1)),
-            format!("{}…", "a".repeat(TOOLTIP_UNITS - 1))
+            TrayText::truncate(&"a".repeat(TOOLTIP_TEXT_UNITS + 1)),
+            format!("{}…", "a".repeat(TOOLTIP_TEXT_UNITS - 1))
         );
     }
     #[test]
@@ -319,7 +382,7 @@ mod tests {
                 "maximum elapsed minutes for {language}"
             );
             let unbounded = format!("{summary}\n{current}");
-            if unbounded.encode_utf16().count() <= TOOLTIP_UNITS {
+            if unbounded.encode_utf16().count() <= TOOLTIP_TEXT_UNITS {
                 assert_eq!(elapsed, unbounded);
             } else {
                 assert!(elapsed.ends_with('…'));
@@ -340,7 +403,10 @@ mod tests {
                 let text = maximum.tooltip(Some(&foreground), i64::MAX, language);
                 assert!(text.ends_with('…'), "long formatted content for {language}");
                 let units = text.encode_utf16().count();
-                assert!((TOOLTIP_UNITS - char::MAX.len_utf16()..=TOOLTIP_UNITS).contains(&units));
+                assert!(
+                    (TOOLTIP_TEXT_UNITS - char::MAX.len_utf16()..=TOOLTIP_TEXT_UNITS)
+                        .contains(&units)
+                );
                 crate::tray_tooltip::TrayTooltipText::try_from(text.as_str())
                     .expect("formatted tooltip fits");
             }

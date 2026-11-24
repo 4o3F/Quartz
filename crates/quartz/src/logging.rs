@@ -1,5 +1,8 @@
 //! Entry-layer tracing setup.
 
+mod bootstrap;
+pub(crate) use bootstrap::BootstrapDiagnostic;
+
 #[cfg(any(windows, test))]
 mod rolling;
 #[cfg(any(windows, test))]

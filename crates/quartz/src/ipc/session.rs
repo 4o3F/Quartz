@@ -330,8 +330,8 @@ impl ConnectionSession {
                             Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
                         }
                     }
-                    Op::Hello
-                    | Op::RuleSetsSetEnabled
+                    Op::Hello => Action::error(Some(id), ErrorKind::BadRequest),
+                    Op::RuleSetsSetEnabled
                     | Op::RuleSetsReorder
                     | Op::RuleSetsDelete
                     | Op::RuleSetsRevert
@@ -676,6 +676,28 @@ mod tests {
                 }
             );
         }
+    }
+    #[test]
+    fn duplicate_hello_rejects_request_and_preserves_negotiated_role() {
+        let publisher =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("duplicate-hello".into()));
+        let receiver = publisher.subscribe();
+        let mut session = ConnectionSession {
+            state: State::Ready(ReadyRole::Cli),
+            allowed: AllowedRoles::Quartz,
+        };
+        let action = session.receive(request(2, Op::Hello, serde_json::json!({"proto":{"min":1,"max":1},"role":"ui","ui":{"state":"visible"},"client_version":"test"})), &receiver.borrow().status);
+        assert_eq!(
+            action.reply().outcome,
+            ResponseOutcome::Err {
+                error: ProtocolError::new(ErrorKind::BadRequest)
+            }
+        );
+        assert!(matches!(
+            session.peer(ProcessId::new(1)),
+            Some(ConnectionPeer::Cli)
+        ));
+        assert!(!session.closing());
     }
     #[test]
     fn pure_session_requires_hello_and_authorizes_without_io() {

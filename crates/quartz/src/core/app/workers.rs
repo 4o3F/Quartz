@@ -2,7 +2,7 @@
 
 use super::{
     CONTROL_CAPACITY, CaptureSender, DatabaseCommand, Feedback, MainPort, Observation,
-    SHUTDOWN_TIMEOUT, Shutdown, ShutdownPort, WORKER_COUNT, Worker, WorkerFailure, WorkerGuard,
+    RunWorkerError, SHUTDOWN_TIMEOUT, Shutdown, ShutdownPort, WORKER_COUNT, Worker, WorkerGuard,
 };
 use super::{capture_loop::CaptureLoop, database_loop::DatabaseLoop};
 use crate::{
@@ -68,7 +68,7 @@ pub(crate) enum JoinWorkersError {
     #[snafu(display("worker panicked"))]
     Panicked,
     #[snafu(display("{source}"))]
-    Failed { source: Box<WorkerFailure> },
+    Failed { source: Box<RunWorkerError> },
 }
 
 pub(crate) struct Workers {
@@ -79,7 +79,7 @@ pub(crate) struct Workers {
     pub versions: crate::query::versions::VersionPort,
     shutdown: Sender<Shutdown>,
     finished: Receiver<()>,
-    completed: Receiver<Result<(), WorkerFailure>>,
+    completed: Receiver<Result<(), RunWorkerError>>,
     handles: Vec<JoinHandle<()>>,
 }
 struct Channel<T> {
@@ -98,7 +98,7 @@ struct WorkerChannels {
     feedback: Channel<Feedback>,
     main: super::MainChannel,
     shutdown: Channel<Shutdown>,
-    completed: Channel<Result<(), WorkerFailure>>,
+    completed: Channel<Result<(), RunWorkerError>>,
     finished: Channel<()>,
     overloaded: Arc<AtomicBool>,
 }
@@ -121,7 +121,7 @@ impl WorkerChannels {
         main: MainPort,
     ) -> Result<JoinHandle<()>, StartWorkersError> {
         self.spawn(Worker::Database, main, move || {
-            database.run().map_err(|source| WorkerFailure::Database {
+            database.run().map_err(|source| RunWorkerError::Database {
                 source: Box::new(source),
             })
         })
@@ -138,7 +138,7 @@ impl WorkerChannels {
             capture
                 .initialize(step, startup)
                 .and_then(|()| capture.run(create_foreground))
-                .map_err(|source| WorkerFailure::Capture {
+                .map_err(|source| RunWorkerError::Capture {
                     source: Box::new(source),
                 })
         })
@@ -147,7 +147,7 @@ impl WorkerChannels {
         &self,
         worker: Worker,
         main: MainPort,
-        run: impl FnOnce() -> Result<(), WorkerFailure> + Send + 'static,
+        run: impl FnOnce() -> Result<(), RunWorkerError> + Send + 'static,
     ) -> Result<JoinHandle<()>, StartWorkersError> {
         let completed = self.completed.sender.clone();
         let finished = self.finished.sender.clone();
@@ -352,7 +352,7 @@ impl Workers {
     fn wait_completion(
         &self,
         deadline: Instant,
-    ) -> Result<Result<(), WorkerFailure>, JoinWorkersError> {
+    ) -> Result<Result<(), RunWorkerError>, JoinWorkersError> {
         self.completed
             .recv_deadline(deadline)
             .map_err(|error| match error {

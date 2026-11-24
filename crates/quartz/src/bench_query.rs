@@ -354,10 +354,12 @@ impl<'path> BenchQuery<'path> {
         )
         .context(RegistrySnafu)?;
         let rules = registry.snapshots().load();
+        let zone = crate::query::RunQueryError::system_time_zone(jiff::tz::TimeZone::try_system)
+            .context(QuerySnafu)?;
         let local_date = jiff::Timestamp::from_millisecond(from)
             .map_err(crate::query::RunQueryError::from)
             .context(QuerySnafu)?
-            .to_zoned_datetime(jiff::tz::TimeZone::system())
+            .to_zoned_datetime(zone.clone())
             .date();
         let offset = reader
             .query_settings()
@@ -365,12 +367,13 @@ impl<'path> BenchQuery<'path> {
             .context(QuerySnafu)?
             .day_start_offset;
         let calendar =
-            crate::query::calendar::DayCalendar::new(local_date, offset).context(QuerySnafu)?;
+            crate::query::calendar::DayCalendar::in_zone(local_date, offset, zone.clone())
+                .context(QuerySnafu)?;
         if self.scope == BenchQueryScope::Range {
             writeln!(
                 output,
                 "range calendar: start_date={local_date} system_zone={:?} day_start_offset_min={}",
-                jiff::tz::TimeZone::system(),
+                zone.clone(),
                 offset.minutes()
             )
             .context(OutputSnafu)?;
@@ -381,7 +384,7 @@ impl<'path> BenchQuery<'path> {
         }
         // 60 seconds per pixel gives a 1,440-pixel daily timeline.
         const BENCH_PIXEL_MS: u64 = 60_000;
-        writeln!(output, "pipeline local_date={local_date} system_zone={:?} day_start_offset_min={} from_utc_ms={} day_to_utc_ms={} ms_per_pixel={BENCH_PIXEL_MS}", jiff::tz::TimeZone::system(), offset.minutes(), calendar.range.start, calendar.range.end).context(OutputSnafu)?;
+        writeln!(output, "pipeline local_date={local_date} system_zone={:?} day_start_offset_min={} from_utc_ms={} day_to_utc_ms={} ms_per_pixel={BENCH_PIXEL_MS}", zone.clone(), offset.minutes(), calendar.range.start, calendar.range.end).context(OutputSnafu)?;
         let timeline = |days| {
             QueryRequest::Timeline(QueryTimelineRequest {
                 start_utc_ms: calendar.range.start,
@@ -457,7 +460,7 @@ impl<'path> BenchQuery<'path> {
         let last_capture_date = jiff::Timestamp::from_millisecond(extent.to_utc_ms - 1)
             .map_err(crate::query::RunQueryError::from)
             .context(QuerySnafu)?
-            .to_zoned_datetime(jiff::tz::TimeZone::system())
+            .to_zoned_datetime(zone.clone())
             .date();
         let document_date = date
             .yesterday()

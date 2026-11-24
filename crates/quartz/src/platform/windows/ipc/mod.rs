@@ -13,3 +13,5 @@ pub(crate) use security::CreatePipeSecurityError;
 pub(crate) use server::{PipeServer, PipeServerConfig};
 #[cfg(test)]
 mod tests;
+
+mod flush;

@@ -69,7 +69,10 @@ impl Menu {
         let label = WideString::new(&key.in_language(language));
         // SAFETY: The menu is live and AppendMenuW copies the terminated label.
         unsafe { WindowsAndMessaging::AppendMenuW(self.0, flags, id, PCWSTR(label.as_ptr())) }
-            .map_err(|source| ShowTrayMenuError::AppendMenu { key, source })
+            .map_err(|source| ShowTrayMenuError::AppendMenu {
+                item: key.into(),
+                source,
+            })
     }
     pub(super) fn submenu(
         &self,

@@ -24,6 +24,9 @@ const DEFAULT_PRIORITY: u16 = 50;
 /// Largest rule priority accepted by the published format.
 const MAX_PRIORITY: u16 = 1000;
 
+/// Maximum conditions in one all/any/none group (quartz-rules/1).
+const MAX_CONDITIONS: usize = 32;
+
 /// Stable identifiers and display names resolved independently at rule admission.
 #[derive(Debug, Clone, Default)]
 pub struct ReferenceCatalog {
@@ -648,8 +651,12 @@ impl Check<'_> {
             self.error(DiagnosticCode::Key, &path, "expected a condition array");
             return Vec::new();
         };
-        if entries.is_empty() || entries.len() > 32 {
-            self.error(DiagnosticCode::Value, &path, "expected 1 to 32 conditions");
+        if entries.is_empty() || entries.len() > MAX_CONDITIONS {
+            self.error(
+                DiagnosticCode::Value,
+                &path,
+                format!("expected 1 to {MAX_CONDITIONS} conditions"),
+            );
         }
         let mut conditions = Vec::new();
         for (index, entry) in entries.iter().enumerate() {

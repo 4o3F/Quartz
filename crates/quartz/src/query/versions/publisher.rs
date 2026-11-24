@@ -30,6 +30,7 @@ pub(crate) struct VersionPort {
     pub updates: watch::Receiver<PublishedVersions>,
 }
 impl VersionPort {
+    #[cfg(test)]
     pub(crate) async fn set_days(
         &self,
         dates: BTreeSet<LocalDate>,
@@ -43,11 +44,26 @@ impl VersionPort {
         self.subscribe(VersionSubscriber::Tray, BTreeSet::from([date]))
             .await
     }
+    pub(crate) fn submit_days(
+        &self,
+        dates: BTreeSet<LocalDate>,
+    ) -> Result<oneshot::Receiver<Result<PublishedVersions, ProtocolError>>, ProtocolError> {
+        self.submit(VersionSubscriber::Registry, dates)
+    }
     async fn subscribe(
         &self,
         subscriber: VersionSubscriber,
         dates: BTreeSet<LocalDate>,
     ) -> Result<PublishedVersions, ProtocolError> {
+        self.submit(subscriber, dates)?
+            .await
+            .map_err(|_| ProtocolError::new(ErrorKind::Internal))?
+    }
+    fn submit(
+        &self,
+        subscriber: VersionSubscriber,
+        dates: BTreeSet<LocalDate>,
+    ) -> Result<oneshot::Receiver<Result<PublishedVersions, ProtocolError>>, ProtocolError> {
         let (reply, received) = oneshot::channel();
         self.requests
             .try_send(VersionCommand {
@@ -61,9 +77,7 @@ impl VersionPort {
                     crossbeam_channel::TrySendError::Disconnected(_) => ErrorKind::Internal,
                 })
             })?;
-        received
-            .await
-            .map_err(|_| ProtocolError::new(ErrorKind::Internal))?
+        Ok(received)
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

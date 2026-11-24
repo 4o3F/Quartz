@@ -21,7 +21,6 @@ pub(crate) enum CheckRulesError {
     Invalid { count: usize },
     #[snafu(display("rule sibling order exceeds the supported range"))]
     SiblingOrderOverflow { source: std::num::TryFromIntError },
-    #[cfg(windows)]
     #[snafu(display("could not resolve rule database directory"))]
     Directory {
         source: crate::data_directory::ResolveDataDirectoryError,
@@ -45,9 +44,20 @@ impl<'files> CheckRulesCommand<'files> {
         #[cfg(windows)]
         let database = Some(DataDirectory::resolve().context(DirectorySnafu)?.database());
         #[cfg(not(windows))]
-        let database = std::env::var_os("LOCALAPPDATA")
-            .map(|path| DataDirectory::new(PathBuf::from(path).join("Quartz")).database());
+        let database = Self::optional_database(std::env::var_os("LOCALAPPDATA"))?;
         self.check(database.as_deref())
+    }
+    #[cfg(any(not(windows), test))]
+    fn optional_database(
+        local: Option<std::ffi::OsString>,
+    ) -> Result<Option<PathBuf>, CheckRulesError> {
+        local
+            .map(|path| {
+                DataDirectory::from_local_app_data(Some(path))
+                    .map(|directory| directory.database())
+                    .context(DirectorySnafu)
+            })
+            .transpose()
     }
     fn check(&self, database: Option<&Path>) -> Result<(), CheckRulesError> {
         let database = match database {
@@ -125,6 +135,26 @@ impl<'files> CheckRulesCommand<'files> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optional_rule_database_rejects_empty_and_relative_environment_roots() {
+        for root in ["", "relative"] {
+            assert!(matches!(
+                super::CheckRulesCommand::optional_database(Some(root.into())),
+                Err(super::CheckRulesError::Directory { .. })
+            ));
+        }
+        assert!(
+            super::CheckRulesCommand::optional_database(None)
+                .expect("absent root")
+                .is_none()
+        );
+        let root = std::env::temp_dir();
+        assert_eq!(
+            super::CheckRulesCommand::optional_database(Some(root.clone().into_os_string()))
+                .expect("absolute root"),
+            Some(root.join("Quartz").join("quartz.db"))
+        );
+    }
     use super::*;
     #[test]
     fn checks_offline_without_creating_a_database() {

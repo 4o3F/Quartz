@@ -56,13 +56,16 @@ pub(super) struct EvaluatedForeground {
     observed: ObservedForeground,
     pub at: Timestamp,
     pub source: ObservationSource,
+    pub retired: Option<WindowId>,
 }
 impl ForegroundReading {
     pub(super) fn evaluate(
         self,
         windows: &mut WindowInstances,
         context: EvaluationContext<'_>,
+        protected: Option<WindowId>,
     ) -> EvaluatedForeground {
+        let mut retired = None;
         let observed = match self.foreground {
             Foreground::None(reason) => ObservedForeground::None(reason),
             Foreground::Window {
@@ -70,7 +73,9 @@ impl ForegroundReading {
                 mut privacy,
             } => {
                 let fingerprint = facts.title.fingerprint();
-                let instance = windows.observe(&facts, self.at);
+                let observation = windows.observe_with_retirement(&facts, self.at, protected);
+                retired = observation.retired;
+                let instance = observation.instance;
                 let mut fields = facts.capture(&privacy, context.rules);
                 if let Retention::Cached(floor) = context.retention {
                     fields.restrict_to(&floor);
@@ -92,6 +97,7 @@ impl ForegroundReading {
             observed,
             at: self.at,
             source: self.source,
+            retired,
         }
     }
 }
@@ -239,7 +245,26 @@ impl ForegroundTracker {
             }),
         };
     }
+    pub(super) fn retire(&mut self, id: WindowId) {
+        self.changes.remove(&id);
+    }
+    pub(super) fn prune_histories(&mut self, at: MonoInstant) {
+        self.changes.retain(|_, changes| {
+            while changes
+                .front()
+                .is_some_and(|time| time.advance(limits::TITLE_STORM_WINDOW) < at)
+            {
+                changes.pop_front();
+            }
+            !changes.is_empty()
+        });
+    }
+    #[cfg(test)]
+    pub(super) fn history_count(&self) -> usize {
+        self.changes.len()
+    }
     pub(super) fn title_activity(&mut self, instance: WindowId, at: MonoInstant) -> TitleActivity {
+        self.prune_histories(at);
         let changes = self.changes.entry(instance).or_default();
         changes.push_back(at);
         while changes
@@ -249,6 +274,9 @@ impl ForegroundTracker {
             changes.pop_front();
         }
         if changes.len() > limits::TITLE_STORM_COUNT {
+            while changes.len() > limits::TITLE_STORM_COUNT + 1 {
+                changes.pop_front();
+            }
             TitleActivity::Storm
         } else {
             TitleActivity::Ordinary

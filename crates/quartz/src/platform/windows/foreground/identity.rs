@@ -181,7 +181,6 @@ impl DisplayName {
 pub(crate) struct Resolver {
     processes: BoundedCache<ProcessKey, ProcessMetadata>,
     names: BoundedCache<String, DisplayName>,
-    failures: u64,
 }
 pub(crate) use crate::core::foreground::Resolution;
 impl Resolver {
@@ -189,7 +188,6 @@ impl Resolver {
         Self {
             processes: BoundedCache::new(foreground::PROCESS_CACHE_CAPACITY),
             names: BoundedCache::new(foreground::DISPLAY_CACHE_CAPACITY),
-            failures: 0,
         }
     }
     pub(crate) fn resolve(&mut self, snapshot: Snapshot) -> Resolution {
@@ -222,7 +220,7 @@ impl Resolver {
                     } else {
                         tracing::warn!(kind = ?error.kind(), "window class unavailable; requesting foreground review");
                     }
-                    self.failures = self.failures.saturating_add(1);
+
                     self.processes.evict_process(owner);
                     return Resolution::Review;
                 }
@@ -238,7 +236,7 @@ impl Resolver {
                             } else {
                                 tracing::warn!(kind = ?error.kind(), "child window class unavailable; requesting foreground review");
                             }
-                            self.failures = self.failures.saturating_add(1);
+
                             self.processes.evict_process(owner);
                             return Resolution::Review;
                         }
@@ -357,7 +355,7 @@ impl Resolver {
             Ok(metadata) => Some(metadata),
             Err(error) => {
                 tracing::debug!(kind = ?error.kind(), "process identity unresolved");
-                self.failures = self.failures.saturating_add(1);
+
                 self.processes.evict_process(process);
                 None
             }

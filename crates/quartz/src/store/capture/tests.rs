@@ -114,7 +114,8 @@ fn review_persists_resolved_content_in_new_window_generation() {
         unresolved.process_created_utc_ms
     );
     assert_ne!(resolved.app_id, unresolved.app_id);
-    assert_eq!(unresolved.last_seen_utc_ms, 0);
+    assert_eq!(unresolved.last_seen_utc_ms, 100);
+    assert_eq!(unresolved.retired_utc_ms, Some(100));
     assert_eq!(resolved.first_seen_utc_ms, 100);
     assert_eq!(resolved.last_seen_utc_ms, 200);
     let app = applications::table
@@ -2437,4 +2438,128 @@ fn closed_segment_mappings_are_retired_after_backlog_repair() {
     }
     assert!(matches!(fixture.shell.state(), PersistenceState::Ready));
     assert!(fixture.shell.segment_count() <= 1);
+}
+
+#[test]
+fn evicted_reused_handle_persists_a_distinct_window_row_and_new_application() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    for handle in
+        2..=u64::try_from(domain::limits::WINDOW_INSTANCE_CAPACITY + 1).expect("test handles")
+    {
+        fixture.persist(at(handle), foreground(handle, "window"));
+    }
+    let CaptureEvent::Foreground {
+        foreground: Foreground::Window { mut facts, privacy },
+        ..
+    } = foreground(1, "new application")
+    else {
+        panic!("window")
+    };
+    facts.app = AppIdentity::Exe("c:\\new.exe".into());
+    facts.exe_name = Some("new.exe".into());
+    facts.display_name = "New".into();
+    fixture.persist(
+        at(10_000),
+        CaptureEvent::Foreground {
+            source: ObservationSource::Review,
+            foreground: Foreground::Window {
+                facts: facts.clone(),
+                privacy,
+            },
+        },
+    );
+    let instances = window_instances::table
+        .filter(window_instances::hwnd.eq(1))
+        .order(window_instances::generation)
+        .select(WindowInstancesRow::as_select())
+        .load(&mut fixture.store.writer)
+        .expect("HWND history");
+    assert_eq!(
+        instances.len(),
+        2,
+        "reused evicted HWND needs a new database row"
+    );
+    assert_ne!(instances[0].app_id, instances[1].app_id);
+    assert!(instances[1].generation > instances[0].generation);
+    assert!(instances[0].retired_utc_ms.is_some());
+    let app = applications::table
+        .filter(applications::id.eq(instances[1].app_id))
+        .select(ApplicationsRow::as_select())
+        .first(&mut fixture.store.writer)
+        .expect("new application");
+    assert_eq!(app.identity_key, facts.app.key());
+    let intervals = fixture.intervals();
+    let last = intervals.last().expect("new interval");
+    assert_eq!(last.window_instance_id, instances[1].id);
+    assert_eq!(last.app_id, Some(instances[1].app_id));
+    assert!(fixture.shell.window_count() <= domain::limits::WINDOW_INSTANCE_CAPACITY);
+}
+
+#[test]
+fn destroying_discarded_window_commits_without_a_secondary_database_gap() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    let now = fixture.discard_window_observation(2);
+    fixture.persist(
+        now,
+        CaptureEvent::DestroyWindow {
+            handle: WindowHandle::new(2),
+        },
+    );
+    assert_eq!(
+        window_instances::table
+            .filter(window_instances::hwnd.eq(2))
+            .count()
+            .get_result::<i64>(&mut fixture.store.writer)
+            .expect("window count"),
+        0
+    );
+    assert_eq!(
+        capture_gaps::table
+            .filter(capture_gaps::reason.eq(enums::GapReason::DatabaseError))
+            .count()
+            .get_result::<i64>(&mut fixture.store.writer)
+            .expect("secondary gaps"),
+        0
+    );
+}
+#[test]
+fn evicting_discarded_window_commits_without_a_secondary_database_gap() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    let now = fixture.discard_window_observation(2);
+    for handle in 3..=u64::try_from(limits::WINDOW_INSTANCE_CAPACITY + 3).expect("test handles") {
+        fixture.persist(now, foreground(handle, "healthy observation"));
+    }
+    assert!(fixture.shell.window_count() <= limits::WINDOW_INSTANCE_CAPACITY);
+    assert_eq!(
+        capture_gaps::table
+            .filter(capture_gaps::reason.eq(enums::GapReason::DatabaseError))
+            .count()
+            .get_result::<i64>(&mut fixture.store.writer)
+            .expect("secondary gaps"),
+        0
+    );
+}
+#[test]
+fn refocusing_discarded_window_registers_it_before_persisting_the_interval() {
+    let mut fixture = Fixture::new(at(0));
+    fixture.ready(at(0));
+    let now = fixture.discard_window_observation(2);
+    fixture.persist(now, foreground(2, "fresh observation"));
+    let instance = window_instances::table
+        .filter(window_instances::hwnd.eq(2))
+        .select(WindowInstancesRow::as_select())
+        .first(&mut fixture.store.writer)
+        .expect("registered window");
+    let rows = fixture.intervals();
+    assert_eq!(
+        rows.last().expect("new interval").window_instance_id,
+        instance.id
+    );
+    assert_eq!(
+        rows.last().expect("new interval").app_id,
+        Some(instance.app_id)
+    );
 }

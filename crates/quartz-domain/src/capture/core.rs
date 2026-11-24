@@ -21,6 +21,7 @@ use super::{
     components::{
         AvailabilityAction, AvailabilityEvidence, AvailabilitySet, BatchLedger, BatchSettlement,
         ClockSegment, ReviewHistory, SessionBoundary, StepContext, WaitingRange,
+        WindowRegistrations,
     },
     phase::{GapSpan, Phase, ResumeTarget},
 };
@@ -75,7 +76,7 @@ pub struct CaptureCore {
     review_history: ReviewHistory,
     epoch: Option<SnapshotEpoch>,
     windows: WindowInstances,
-    allowed_windows: BTreeSet<WindowId>,
+    window_registrations: WindowRegistrations,
     deadlines: DeadlineScheduler,
     timed: super::timed::TimedStates,
     persisted_deadlines: BTreeSet<SchedulerKind>,
@@ -120,7 +121,7 @@ impl CaptureCore {
             review_history: ReviewHistory::default(),
             epoch: None,
             windows: WindowInstances::default(),
-            allowed_windows: BTreeSet::new(),
+            window_registrations: WindowRegistrations::default(),
             deadlines,
             timed: super::timed::TimedStates::default(),
             persisted_deadlines: BTreeSet::new(),
@@ -194,6 +195,16 @@ impl CaptureCore {
             previous_waiting,
             old_state: self.state(),
         };
+        // Settle first observations before policy or midnight work can reference their instances.
+        match event {
+            CaptureEvent::Committed(batch) => {
+                self.settle_batch(*batch, BatchSettlement::Committed, step)
+            }
+            CaptureEvent::BatchDiscarded(batch) => {
+                self.settle_batch(*batch, BatchSettlement::Discarded, step)
+            }
+            _ => {}
+        }
         self.observe_clock(at, event, step)?;
         let at = self.clock.ordered_boundary(at)?;
         if !matches!(
@@ -202,11 +213,15 @@ impl CaptureCore {
         ) {
             self.restore_availability(at, step);
         }
-        self.adopt_rules(at, rules, event, step)?;
+        if !matches!(event, CaptureEvent::BatchDiscarded(_)) {
+            self.adopt_rules(at, rules, event, step)?;
+        }
         // Every input can arrive after midnight even if its timer notification was delayed.
         if !matches!(
             event,
-            CaptureEvent::EventOverload | CaptureEvent::PersistenceGap { .. }
+            CaptureEvent::EventOverload
+                | CaptureEvent::PersistenceGap { .. }
+                | CaptureEvent::BatchDiscarded(_)
         ) {
             self.split_foreground(at, step)?;
         }
@@ -330,10 +345,7 @@ impl CaptureCore {
                 reason,
                 lost_through,
             } => self.persistence_gap(reason, lost_through, step)?,
-            CaptureEvent::Committed(batch) => self.settle_batch(batch, BatchSettlement::Committed),
-            CaptureEvent::BatchDiscarded(batch) => {
-                self.settle_batch(batch, BatchSettlement::Discarded)
-            }
+            CaptureEvent::Committed(_) | CaptureEvent::BatchDiscarded(_) => {}
             CaptureEvent::Shutdown => self.shutdown(at, step)?,
         }
         Ok(())
@@ -362,9 +374,22 @@ impl CaptureCore {
         )?;
         Ok(())
     }
+    #[cfg(test)]
+    pub(super) fn retained_windows(&self) -> usize {
+        self.windows.retained_count()
+    }
+    #[cfg(test)]
+    pub(super) fn allowed_window_count(&self) -> usize {
+        self.window_registrations.len()
+    }
+    #[cfg(test)]
+    pub(super) fn title_history_count(&self) -> usize {
+        self.tracker.history_count()
+    }
     fn destroy(&mut self, id: WindowId, at: Timestamp, step: &mut CaptureStep) {
         self.windows.retire(id);
-        if self.allowed_windows.remove(&id) {
+        self.tracker.retire(id);
+        if self.window_registrations.retire(id) {
             step.writes
                 .push(CaptureWrite::RetireWindow { instance: id, at });
         }
@@ -633,8 +658,20 @@ impl CaptureCore {
         };
         validate_time().map_err(|source| StepCaptureError::Time { source })
     }
-    fn settle_batch(&mut self, batch: BatchId, outcome: BatchSettlement) {
+    fn settle_batch(&mut self, batch: BatchId, outcome: BatchSettlement, step: &mut CaptureStep) {
         self.ledger.settle(batch, outcome);
+        let lost = self.window_registrations.settle(batch, outcome);
+        if self
+            .tracker
+            .instance()
+            .is_some_and(|instance| lost.contains(&instance))
+        {
+            // The dependent interval was discarded too; closing it would reference a missing row.
+            self.phase.take_interval();
+            self.phase.request_review();
+            self.tracker.forget();
+            step.effects.push(CaptureEffect::ReviewForeground);
+        }
     }
     fn finish(&mut self, at: Timestamp, step: &mut CaptureStep) {
         if !step.writes.is_empty() {
@@ -644,7 +681,9 @@ impl CaptureCore {
                     range: TimeRange { start: at, end: at },
                 });
             }
-            step.batch = Some(self.ledger.emit(&mut self.ids));
+            let batch = self.ledger.emit(&mut self.ids);
+            self.window_registrations.enqueue(batch);
+            step.batch = Some(batch);
         }
         step.effects
             .push(CaptureEffect::ScheduleTimer(if self.phase.ended() {
@@ -955,8 +994,18 @@ impl CaptureCore {
         }
         self.confirm_foreground_read(reading.at, step)?;
         self.split_foreground(reading.at, step)?;
-        let observed = reading.evaluate(&mut self.windows, context);
+        let observed = reading.evaluate(&mut self.windows, context, self.tracker.instance());
+        let retired = observed.retired;
+        let at = observed.at;
+        self.tracker.prune_histories(at.mono);
         self.apply_foreground(observed, step);
+        if let Some(id) = retired {
+            self.tracker.retire(id);
+            if self.window_registrations.retire(id) {
+                step.writes
+                    .push(CaptureWrite::RetireWindow { instance: id, at });
+            }
+        }
         Ok(())
     }
     fn confirm_foreground_read(
@@ -982,7 +1031,7 @@ impl CaptureCore {
             return;
         }
         if let Some(instance) = observed.allowed_instance() {
-            self.allowed_windows.insert(instance.id);
+            self.window_registrations.observe(instance.id);
             step.writes.push(CaptureWrite::ObserveWindow {
                 instance: instance.clone(),
                 at: observed.at,
@@ -1316,6 +1365,7 @@ impl CaptureCore {
         }
         match owner {
             SchedulerKind::Maintenance => {
+                self.tracker.prune_histories(at.mono);
                 if at.mono > self.clock.maintenance_deadline.advance(limits::BATCH_WAIT) {
                     self.begin_gap(self.clock.last_at, GapReason::EventOverload, step)?;
                 }

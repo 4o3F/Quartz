@@ -55,9 +55,9 @@ pub(in crate::platform::windows) enum UpdateTrayTooltipError {
 pub(in crate::platform::windows) enum ShowTrayMenuError {
     #[snafu(display("could not create tray menu (CreatePopupMenu)"))]
     CreatePopupMenu { source: windows::core::Error },
-    #[snafu(display("could not append tray menu item {key} (AppendMenuW)"))]
+    #[snafu(display("could not append tray menu item {item} (AppendMenuW)"))]
     AppendMenu {
-        key: quartz_i18n::MessageKey<'static>,
+        item: MenuItemLabel,
         source: windows::core::Error,
     },
     #[snafu(display("tray menu command exceeds the supported range"))]
@@ -66,6 +66,28 @@ pub(in crate::platform::windows) enum ShowTrayMenuError {
     GetCursorPosition { source: windows::core::Error },
     #[snafu(display("could not set default tray menu item (SetMenuDefaultItem)"))]
     SetDefault { source: windows::core::Error },
+}
+
+/// Static menu identities for diagnostics; never carries rendered user text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::platform::windows) enum MenuItemLabel {
+    Catalog(quartz_i18n::MessageKey<'static>),
+    Categories,
+    Separator,
+}
+impl fmt::Display for MenuItemLabel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Catalog(key) => key.fmt(formatter),
+            Self::Categories => formatter.write_str("summary categories"),
+            Self::Separator => formatter.write_str("separator"),
+        }
+    }
+}
+impl From<quartz_i18n::MessageKey<'static>> for MenuItemLabel {
+    fn from(key: quartz_i18n::MessageKey<'static>) -> Self {
+        Self::Catalog(key)
+    }
 }
 
 /// Tray commands with their Windows menu IDs and translation keys.

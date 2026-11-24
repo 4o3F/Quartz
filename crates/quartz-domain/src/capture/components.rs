@@ -3,7 +3,7 @@
 use super::{
     AvailabilityEndReason, AvailabilityReason, BatchId, CaptureStep, CaptureWrite, IdleDecision,
     IdleRecord, IdleStatus, IntervalEndReason, MonoInstant, OpenAvailability, ReadLastInputError,
-    RowId, RunId, SegmentId, TimeRange, Timestamp, ids::IdAllocator,
+    RowId, RunId, SegmentId, TimeRange, Timestamp, WindowId, ids::IdAllocator,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -84,6 +84,58 @@ impl BatchLedger {
     pub(super) fn emit(&mut self, ids: &mut IdAllocator) -> BatchId {
         self.emitted = ids.batch();
         self.emitted
+    }
+}
+/// First observations must be queued before use and acknowledged before becoming durable.
+#[derive(Debug, Default)]
+pub(super) struct WindowRegistrations {
+    entries: BTreeMap<WindowId, WindowRegistration>,
+}
+#[derive(Debug, Clone, Copy)]
+enum WindowRegistration {
+    Unbatched,
+    Queued(BatchId),
+    Durable,
+}
+impl WindowRegistrations {
+    pub(super) fn observe(&mut self, instance: WindowId) {
+        self.entries
+            .entry(instance)
+            .or_insert(WindowRegistration::Unbatched);
+    }
+    pub(super) fn enqueue(&mut self, batch: BatchId) {
+        for registration in self.entries.values_mut() {
+            if matches!(registration, WindowRegistration::Unbatched) {
+                *registration = WindowRegistration::Queued(batch);
+            }
+        }
+    }
+    pub(super) fn settle(
+        &mut self,
+        batch: BatchId,
+        outcome: BatchSettlement,
+    ) -> BTreeSet<WindowId> {
+        let mut lost = BTreeSet::new();
+        self.entries.retain(|instance, registration| {
+            if matches!(registration, WindowRegistration::Queued(queued) if *queued == batch) {
+                match outcome {
+                    BatchSettlement::Committed => *registration = WindowRegistration::Durable,
+                    BatchSettlement::Discarded => {
+                        lost.insert(*instance);
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+        lost
+    }
+    pub(super) fn retire(&mut self, instance: WindowId) -> bool {
+        self.entries.remove(&instance).is_some()
+    }
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
     }
 }
 #[derive(Debug)]

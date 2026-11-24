@@ -368,13 +368,11 @@ impl Sources {
         {
             self.core_deadline = None;
         }
-        if self.session.retry().is_some_and(|retry| retry <= at.mono) {
-            self.query_session()?;
+        DeadlineTurn {
+            at,
+            session_retry: self.session.retry(),
         }
-        self.foreground
-            .retry(at.mono)
-            .map_err(|source| ObserveSystemError::Foreground { source })?;
-        self.arm(at)
+        .run(self)
     }
     pub(super) fn hook_health(&self) -> super::foreground::HookHealth {
         self.foreground.health()
@@ -401,6 +399,45 @@ impl Sources {
             }
             .idle(),
         ))
+    }
+}
+trait DeadlineOperations {
+    type Error;
+    fn query_session(&mut self) -> Result<(), Self::Error>;
+    fn retry_foreground(&mut self, at: MonoInstant) -> Result<(), Self::Error>;
+    fn arm(&mut self, at: Timestamp) -> Result<(), Self::Error>;
+}
+struct DeadlineTurn {
+    at: Timestamp,
+    session_retry: Option<MonoInstant>,
+}
+impl DeadlineTurn {
+    fn run(
+        self,
+        operations: &mut impl DeadlineOperations<Error = ObserveSystemError>,
+    ) -> Result<(), ObserveSystemError> {
+        operations.retry_foreground(self.at.mono)?;
+        if self
+            .session_retry
+            .is_some_and(|retry| retry <= self.at.mono)
+        {
+            return operations.query_session();
+        }
+        operations.arm(self.at)
+    }
+}
+impl DeadlineOperations for Sources {
+    type Error = ObserveSystemError;
+    fn query_session(&mut self) -> Result<(), Self::Error> {
+        Sources::query_session(self)
+    }
+    fn retry_foreground(&mut self, at: MonoInstant) -> Result<(), Self::Error> {
+        self.foreground
+            .retry(at)
+            .map_err(|source| ObserveSystemError::Foreground { source })
+    }
+    fn arm(&mut self, at: Timestamp) -> Result<(), Self::Error> {
+        Sources::arm(self, at)
     }
 }
 impl Drop for Sources {
@@ -462,6 +499,53 @@ pub(super) fn clock() -> Arc<dyn ClockReader> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_retry_arms_once_with_its_fresh_clock_after_foreground_retry() {
+        use super::*;
+        struct FakeDeadlines {
+            arms: Vec<Timestamp>,
+            foreground: Vec<MonoInstant>,
+            fresh: Timestamp,
+        }
+        impl DeadlineOperations for FakeDeadlines {
+            type Error = ObserveSystemError;
+            fn query_session(&mut self) -> Result<(), Self::Error> {
+                self.arm(self.fresh)
+            }
+            fn retry_foreground(&mut self, at: MonoInstant) -> Result<(), Self::Error> {
+                self.foreground.push(at);
+                Ok(())
+            }
+            fn arm(&mut self, at: Timestamp) -> Result<(), Self::Error> {
+                self.arms.push(at);
+                Ok(())
+            }
+        }
+        let at = crate::store::capture::test_support::at(10);
+        let fresh = crate::store::capture::test_support::at(20);
+        let mut operations = FakeDeadlines {
+            arms: Vec::new(),
+            foreground: Vec::new(),
+            fresh,
+        };
+        DeadlineTurn {
+            at,
+            session_retry: Some(at.mono),
+        }
+        .run(&mut operations)
+        .expect("retry");
+        assert_eq!(operations.foreground, [at.mono]);
+        assert_eq!(operations.arms, [fresh]);
+        operations.arms.clear();
+        DeadlineTurn {
+            at,
+            session_retry: None,
+        }
+        .run(&mut operations)
+        .expect("ordinary deadline");
+        assert_eq!(operations.arms, [at]);
+    }
+
     use super::*;
     use quartz_domain::capture::StopChange;
     #[test]

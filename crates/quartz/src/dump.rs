@@ -161,20 +161,56 @@ impl<'date> DumpDay<'date> {
         output: &mut impl Write,
     ) -> Result<(), DumpDayError> {
         let mut client = connection.context(CoreSnafu)?;
+        self.write_pages(|request| client.facts(request), zone, output)
+    }
+    #[cfg(any(windows, test))]
+    fn write_pages(
+        &self,
+        page: impl FnMut(
+            &quartz_protocol::QueryFactsRequest,
+        ) -> Result<quartz_protocol::QueryFactsResponse, CallCoreError>,
+        zone: &TimeZone,
+        output: &mut impl Write,
+    ) -> Result<(), DumpDayError> {
+        self.write_pages_to(
+            page,
+            zone,
+            output,
+            tempfile::tempfile().context(OutputSnafu)?,
+        )
+    }
+    #[cfg(any(windows, test))]
+    fn write_pages_to(
+        &self,
+        mut page: impl FnMut(
+            &quartz_protocol::QueryFactsRequest,
+        ) -> Result<quartz_protocol::QueryFactsResponse, CallCoreError>,
+        zone: &TimeZone,
+        output: &mut impl Write,
+        spool: impl io::Read + io::Write + io::Seek,
+    ) -> Result<(), DumpDayError> {
         let mut request = quartz_protocol::QueryFactsRequest {
             local_date: self.local_date()?,
             cursor: None,
         };
+        let mut buffered = io::BufWriter::new(spool);
         loop {
-            let response = client.facts(&request).context(CoreSnafu)?;
+            let response = page(&request).context(CoreSnafu)?;
             for fact in response.facts {
-                self.write_fact(&fact, zone, output)?;
+                self.write_fact(&fact, zone, &mut buffered)?;
             }
             match response.next_cursor {
                 Some(cursor) => request.cursor = Some(cursor),
-                None => return Ok(()),
+                None => break,
             }
         }
+        let mut buffered = buffered
+            .into_inner()
+            .map_err(|error| error.into_error())
+            .context(OutputSnafu)?;
+        buffered.rewind().context(OutputSnafu)?;
+        io::copy(&mut buffered, output).context(OutputSnafu)?;
+        Ok(())
     }
     fn local(value: i64, zone: &TimeZone) -> Result<String, DumpDayError> {
         Ok(jiff::Timestamp::from_millisecond(value)
@@ -277,6 +313,114 @@ mod tests {
         NoForegroundReason, OpenAvailability, OpenInterval, RowId, RunEndReason, RunId, SegmentId,
         SessionKey, StopReason, TimeRange, TimedPolicy, TimedState, Timestamp, UtcInstant,
     };
+
+    struct CountingSpool {
+        file: io::Cursor<Vec<u8>>,
+        writes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        failure: Option<io::ErrorKind>,
+    }
+    impl Write for CountingSpool {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(kind) = self.failure {
+                return Err(kind.into());
+            }
+            self.file.write(bytes)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl io::Read for CountingSpool {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            io::Read::read(&mut self.file, bytes)
+        }
+    }
+    impl io::Seek for CountingSpool {
+        fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+            io::Seek::seek(&mut self.file, position)
+        }
+    }
+    #[test]
+    fn small_export_coalesces_fact_fields_into_one_spool_write() {
+        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spool = CountingSpool {
+            file: io::Cursor::new(Vec::new()),
+            writes: writes.clone(),
+            failure: None,
+        };
+        let mut output = Vec::new();
+        DumpDay::new("2025-01-02", DumpFormat::Json).write_pages_to(|_| Ok(quartz_protocol::QueryFactsResponse {
+            facts: vec![serde_json::from_value(serde_json::json!({"kind":"clock_segment", "id":1, "start_utc_ms":0, "end_utc_ms":1})).expect("fact")],
+            versions: quartz_protocol::QueryVersions("first".into()), next_cursor: None,
+        }), &TimeZone::UTC, &mut output, spool).expect("export");
+        assert!(!output.is_empty());
+        assert_eq!(writes.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn spool_flush_failure_returns_output_error_before_publishing_records() {
+        let spool = CountingSpool {
+            file: io::Cursor::new(Vec::new()),
+            writes: Default::default(),
+            failure: Some(io::ErrorKind::PermissionDenied),
+        };
+        let mut output = Vec::new();
+        let error = DumpDay::new("2025-01-02", DumpFormat::Json).write_pages_to(|_| Ok(quartz_protocol::QueryFactsResponse {
+            facts: vec![serde_json::from_value(serde_json::json!({"kind":"clock_segment", "id":1, "start_utc_ms":0, "end_utc_ms":1})).expect("fact")],
+            versions: quartz_protocol::QueryVersions("first".into()), next_cursor: None,
+        }), &TimeZone::UTC, &mut output, spool).expect_err("failed spool write");
+        assert!(
+            matches!(error, DumpDayError::Output { source } if source.kind() == io::ErrorKind::PermissionDenied)
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn stale_continuation_publishes_no_partial_export() {
+        let dump = DumpDay::new("2025-01-02", DumpFormat::Json);
+        let mut output = Vec::new();
+        let mut calls = 0;
+        let fact: FactRecord = serde_json::from_value(serde_json::json!({
+            "kind":"clock_segment", "id":1, "start_utc_ms":0, "end_utc_ms":1
+        }))
+        .expect("fact");
+        let error = dump
+            .write_pages(
+                |request| {
+                    calls += 1;
+                    if request.cursor.is_some() {
+                        return Err(CallCoreError::Protocol {
+                            kind: quartz_protocol::ErrorKind::StaleCursor,
+                        });
+                    }
+                    Ok(quartz_protocol::QueryFactsResponse {
+                        facts: vec![fact.clone()],
+                        versions: quartz_protocol::QueryVersions("first".into()),
+                        next_cursor: Some(quartz_protocol::QueryCursor::new(
+                            quartz_protocol::QueryVersions("first".into()),
+                            quartz_protocol::CursorQuery::Facts {
+                                local_date: request.local_date,
+                            },
+                            1,
+                        )),
+                    })
+                },
+                &TimeZone::UTC,
+                &mut output,
+            )
+            .expect_err("stale continuation");
+        assert_eq!(calls, 2);
+        assert!(matches!(
+            error,
+            DumpDayError::Core {
+                source: CallCoreError::Protocol {
+                    kind: quartz_protocol::ErrorKind::StaleCursor
+                }
+            }
+        ));
+        assert!(output.is_empty(), "a failed export must publish no records");
+    }
 
     fn at(text: &str) -> Timestamp {
         let utc: jiff::Timestamp = text.parse().expect("fixture timestamp");

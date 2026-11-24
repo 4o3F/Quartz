@@ -146,6 +146,11 @@ pub(crate) struct Persistence {
 }
 impl Persistence {
     #[cfg(test)]
+    pub(crate) fn window_count(&self) -> usize {
+        self.keys.window_count()
+    }
+
+    #[cfg(test)]
     pub(crate) fn segment_count(&self) -> usize {
         self.keys.segment_count()
     }

@@ -270,6 +270,11 @@ impl<'connection> Capture<'connection> {
 
 impl CaptureKeys {
     #[cfg(test)]
+    pub(crate) fn window_count(&self) -> usize {
+        self.runs.values().map(|run| run.windows.len()).sum()
+    }
+
+    #[cfg(test)]
     pub(crate) fn segment_count(&self) -> usize {
         self.runs.values().map(|run| run.segments.len()).sum()
     }

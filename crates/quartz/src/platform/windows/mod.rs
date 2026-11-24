@@ -176,6 +176,7 @@ pub(crate) struct CoreProcess {
     log: Option<logging::FileLogGuard>,
     hooks: foreground::HookHealth,
     ui: UiState<process::UiProcess>,
+    power: process::PowerChecks,
     ui_open_started: Option<std::time::Instant>,
     capture: Option<CaptureState>,
     persistence: PersistenceState,
@@ -197,6 +198,7 @@ impl CoreProcess {
             log: None,
             hooks: Default::default(),
             ui: UiState::default(),
+            power: Default::default(),
             ui_open_started: None,
             capture: None,
             persistence: PersistenceState::Ready,
@@ -210,16 +212,33 @@ impl CoreProcess {
     pub(crate) fn run(mut self, autostart: Autostart) -> ExitCode {
         match self.start(autostart) {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                let report = error.report();
-                tracing::error!(?error, code = %report.code, "core failed");
-                if let Err(error) = process::CoreErrorUi::new(&report).launch() {
-                    tracing::error!(?error, "could not launch core error UI");
-                }
-                ExitCode::FAILURE
-            }
+            Err(error) => self.report_startup_failure(
+                &error,
+                |report| process::CoreErrorUi::new(report).launch(),
+                |error| logging::BootstrapDiagnostic::from_error(error).report(),
+            ),
         }
     }
+    fn report_startup_failure<E: std::error::Error>(
+        &self,
+        error: &RunCoreError,
+        launch: impl FnOnce(&quartz_protocol::CoreError) -> Result<(), E>,
+        mut bootstrap: impl FnMut(&dyn std::error::Error),
+    ) -> ExitCode {
+        let report = error.report();
+        tracing::error!(?error, code = %report.code, "core failed");
+        if self.log.is_none() {
+            bootstrap(error);
+        }
+        if let Err(error) = launch(&report) {
+            tracing::error!(?error, "could not launch core error UI");
+            if self.log.is_none() {
+                bootstrap(&error);
+            }
+        }
+        ExitCode::FAILURE
+    }
+
     fn start(&mut self, autostart: Autostart) -> Result<(), RunCoreError> {
         let data_directory = DataDirectory::resolve().context(DataDirectorySnafu)?;
         self.log = Some(
@@ -674,19 +693,15 @@ impl CoreProcess {
             TrayCommand::Hover => {
                 let now = std::time::Instant::now();
                 let settings = status.ui_settings().prewarm;
-                if self.ui.prewarm_available(now, settings.enabled) {
-                    match PowerSource::read() {
-                        Ok(power) => {
-                            if let Err(error) = self.ui.hover(now, settings, power, || {
-                                process::UiProcess::launch(LaunchIntent::Prewarm)
-                            }) {
-                                tracing::warn!(%error, "could not launch prewarm UI");
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "could not read power source; skipping prewarm")
-                        }
-                    }
+                if self.ui.prewarm_available(now, settings.enabled)
+                    && let Some(power) = self.power.read(PowerSource::read, |error| {
+                        tracing::warn!(%error, "could not read power source; skipping prewarm");
+                    })
+                    && let Err(error) = self.ui.hover(now, settings, power, || {
+                        process::UiProcess::launch(LaunchIntent::Prewarm)
+                    })
+                {
+                    tracing::warn!(%error, "could not launch prewarm UI");
                 }
             }
             TrayCommand::Annotate(choice) => self.submit_annotation(choice, runtime),
@@ -1034,6 +1049,40 @@ mod tests {
         assert!(result.is_err(), "the message-loop error still propagates");
         assert_eq!(CoreExit::Shutdown.runtime_exit(), RuntimeExit::Shutdown);
         assert_eq!(CoreExit::UserExit.runtime_exit(), RuntimeExit::UserExit);
+    }
+
+    #[test]
+    fn failures_before_core_logging_report_startup_and_error_ui_causes() {
+        let errors = [
+            RunCoreError::DataDirectory {
+                source: crate::data_directory::ResolveDataDirectoryError,
+            },
+            RunCoreError::InitLog {
+                source: logging::InitFileLogError::CreateDirectory {
+                    target: logging::LogTarget::Core,
+                    path: "injected-log-path".into(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected core log failure",
+                    ),
+                },
+            },
+        ];
+        for error in errors {
+            let mut diagnostics = Vec::new();
+            let exit = CoreProcess::new().report_startup_failure(
+                &error,
+                |_| Err(std::io::Error::other("injected error UI launch failure")),
+                |error| diagnostics.push(snafu::Report::from_error(error).to_string()),
+            );
+            assert_eq!(exit, ExitCode::FAILURE);
+            assert_eq!(diagnostics.len(), 2);
+            assert_eq!(
+                diagnostics[0],
+                snafu::Report::from_error(&error).to_string()
+            );
+            assert!(diagnostics[1].contains("injected error UI launch failure"));
+        }
     }
 
     #[test]

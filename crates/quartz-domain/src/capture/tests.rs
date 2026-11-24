@@ -2956,3 +2956,271 @@ fn shutdown_ignores_a_new_rule_epoch_when_settling_the_active_rows() {
     assert!(step.writes.iter().any(|write| matches!(write, CaptureWrite::CloseInterval { at: end, reason: IntervalEndReason::Shutdown, .. } if *end == at(200))));
     assert_conservation(&fixture.writes);
 }
+
+#[test]
+fn destroyed_replaced_and_inactive_windows_release_title_bookkeeping() {
+    let mut fixture = Fixture::active();
+    let _ = fixture.review(at(1), window(1, "changed"));
+    assert_eq!(fixture.core.title_history_count(), 1);
+    let _ = fixture.send(
+        at(2),
+        CaptureEvent::DestroyWindow {
+            handle: WindowHandle::new(1),
+        },
+    );
+    assert_eq!(fixture.core.title_history_count(), 0);
+    assert_eq!(fixture.core.allowed_window_count(), 0);
+    let _ = fixture.review(at(3), window(1, "new generation"));
+    let _ = fixture.review(at(4), window(1, "changed again"));
+    let mut replacement = window(1, "replacement");
+    if let Foreground::Window { facts, .. } = &mut replacement {
+        facts.process = ProcessId::new(8);
+    }
+    let _ = fixture.review(at(5), replacement);
+    assert_eq!(fixture.core.title_history_count(), 0);
+    assert_eq!(fixture.core.allowed_window_count(), 1);
+    let _ = fixture.review(at(6), window(2, "initial"));
+    let _ = fixture.review(at(7), window(2, "changed"));
+    let _ = fixture.review(at(20_000), window(3, "later"));
+    assert_eq!(fixture.core.title_history_count(), 0);
+}
+
+#[test]
+fn many_windows_without_background_destroy_keep_bookkeeping_bounded() {
+    let mut fixture = Fixture::active();
+    for handle in 2..=u64::try_from(limits::WINDOW_INSTANCE_CAPACITY * 3).expect("test handles") {
+        let _ = fixture.review(at(handle * 2), window(handle, "initial"));
+        let _ = fixture.review(at(handle * 2 + 1), window(handle, "changed"));
+        assert!(fixture.core.retained_windows() <= limits::WINDOW_INSTANCE_CAPACITY);
+        assert!(fixture.core.allowed_window_count() <= limits::WINDOW_INSTANCE_CAPACITY);
+        assert!(fixture.core.title_history_count() <= limits::WINDOW_INSTANCE_CAPACITY);
+    }
+    let reviewed = fixture.review(at(10_000), window(1, "returned after eviction"));
+    assert!(reviewed.writes.iter().any(|write| matches!(write, CaptureWrite::ObserveWindow { instance, .. } if instance.id != WindowId::from_persisted(1))));
+}
+
+#[test]
+fn evicted_handles_receive_generations_above_all_previously_issued_generations() {
+    let mut instances = WindowInstances::default();
+    let Foreground::Window { mut facts, .. } = window(1, "initial") else {
+        panic!("window")
+    };
+    let mut highest = instances.observe(&facts, at(0)).generation;
+    for _ in 0..3 {
+        instances.retire(instances.live_id(facts.handle).expect("live"));
+        highest = instances.observe(&facts, at(0)).generation;
+    }
+    let first = instances.live_id(facts.handle).expect("live");
+    for handle in 2..=u64::try_from(limits::WINDOW_INSTANCE_CAPACITY + 1).expect("test handles") {
+        facts.handle = WindowHandle::new(handle);
+        let observed = instances.observe(&facts, at(handle));
+        highest = highest.max(observed.generation);
+    }
+    facts.handle = WindowHandle::new(1);
+    facts.app = AppIdentity::Exe("c:\\new.exe".into());
+    let reused = instances.observe(&facts, at(10_000));
+    assert_ne!(reused.id, first);
+    assert!(
+        reused.generation > highest,
+        "generation must survive HWND cache eviction"
+    );
+}
+
+#[test]
+fn cache_eviction_retires_the_old_live_mapping_and_preserves_current_foreground() {
+    let mut fixture = Fixture::active();
+    let first = fixture
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            CaptureWrite::ObserveWindow { instance, .. } => Some(instance.id),
+            _ => None,
+        })
+        .expect("first window");
+    for handle in 2..=u64::try_from(limits::WINDOW_INSTANCE_CAPACITY).expect("capacity") {
+        let _ = fixture.review(at(0), window(handle, "same timestamp"));
+    }
+    let _ = fixture.review(at(0), window(1, "current"));
+    let step = fixture.review(
+        at(0),
+        window(
+            u64::try_from(limits::WINDOW_INSTANCE_CAPACITY + 1).expect("new handle"),
+            "next",
+        ),
+    );
+    let retired = step
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            CaptureWrite::RetireWindow { instance, .. } => Some(*instance),
+            _ => None,
+        })
+        .expect("evicted live instance is retired");
+    assert_ne!(
+        retired, first,
+        "current foreground must be protected from eviction"
+    );
+    let returned = fixture.review(at(0), window(1, "current"));
+    assert!(returned.writes.iter().any(|write| matches!(write, CaptureWrite::ObserveWindow { instance, .. } if instance.id == first)));
+}
+
+struct DiscardedWindowObservation {
+    instance: WindowId,
+    at: Timestamp,
+}
+impl Fixture {
+    fn discard_window_observation(&mut self, handle: u64) -> DiscardedWindowObservation {
+        let observed = self.hook(at(10), window(handle, "lost observation"));
+        let instance = observed
+            .writes
+            .iter()
+            .find_map(|write| match write {
+                CaptureWrite::ObserveWindow { instance, .. } => Some(instance.id),
+                _ => None,
+            })
+            .expect("window observation");
+        let mut backlog = WriteBacklog::new();
+        let batch = observed
+            .into_parts(RunId::new(1))
+            .batch
+            .expect("observed batch");
+        let _ = backlog.push(batch, at(10));
+        let now = at(10).advance(limits::BACKLOG_RETENTION);
+        let loss = backlog.advance(now);
+        assert!(!loss.discarded.is_empty());
+        for batch in loss.discarded {
+            let _ = self.send(now, CaptureEvent::BatchDiscarded(batch));
+        }
+        let lost_through = loss
+            .gaps
+            .iter()
+            .map(|gap| gap.range.end)
+            .max_by_key(|at| at.mono)
+            .expect("loss range");
+        let _ = self.send(
+            now,
+            CaptureEvent::PersistenceGap {
+                reason: GapReason::WriteQueueOverload,
+                lost_through,
+            },
+        );
+        DiscardedWindowObservation { instance, at: now }
+    }
+}
+#[test]
+fn discarded_window_observation_is_not_retired_on_destroy() {
+    let mut fixture = Fixture::active();
+    let lost = fixture.discard_window_observation(2);
+    let step = fixture.send(
+        lost.at,
+        CaptureEvent::DestroyWindow {
+            handle: WindowHandle::new(2),
+        },
+    );
+    assert!(!step.writes.iter().any(|write| matches!(write, CaptureWrite::RetireWindow { instance, .. } if *instance == lost.instance)));
+}
+#[test]
+fn discarded_window_observation_is_not_retired_on_cache_eviction() {
+    let mut fixture = Fixture::active();
+    let lost = fixture.discard_window_observation(2);
+    for handle in 3..=u64::try_from(limits::WINDOW_INSTANCE_CAPACITY + 3).expect("test handles") {
+        let step = fixture.review(lost.at, window(handle, "healthy observation"));
+        assert!(!step.writes.iter().any(|write| matches!(write, CaptureWrite::RetireWindow { instance, .. } if *instance == lost.instance)));
+    }
+}
+#[test]
+fn discarded_current_observation_clears_interval_before_further_work() {
+    let mut fixture = Fixture::active();
+    let observed = fixture.hook(at(10), window(2, "lost observation"));
+    let batch = observed.batch.expect("observed batch");
+    let discarded = fixture.send(at(20), CaptureEvent::BatchDiscarded(batch));
+    assert!(discarded.writes.is_empty());
+    assert!(
+        fixture.core.foreground_view().is_none(),
+        "an unpersisted interval must not remain current"
+    );
+    let midnight = u64::try_from(limits::UTC_DAY.as_millis()).expect("day");
+    let step = fixture.send(
+        at(midnight + 1),
+        CaptureEvent::ClockChanged(ClockChange::TimeChange),
+    );
+    assert!(!step.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::OpenInterval(_) | CaptureWrite::CloseInterval { .. }
+    )));
+}
+#[test]
+fn refocused_discarded_window_is_observed_before_its_new_interval() {
+    let mut fixture = Fixture::active();
+    let lost = fixture.discard_window_observation(2);
+    let step = fixture.hook(lost.at, window(2, "fresh observation"));
+    let observed = step.writes.iter().position(|write| matches!(write, CaptureWrite::ObserveWindow { instance, .. } if instance.id == lost.instance)).expect("observation re-emitted");
+    let opened = step.writes.iter().position(|write| matches!(write, CaptureWrite::OpenInterval(OpenInterval { fact: IntervalFact::Window { instance: Some(instance), .. }, .. }) if *instance == lost.instance)).expect("new interval");
+    assert!(observed < opened);
+}
+#[test]
+fn discarding_metadata_update_keeps_committed_window_registration() {
+    let mut fixture = Fixture::new(at(0));
+    let _ = fixture.send(
+        at(0),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    let first = fixture.review(at(0), window(2, "committed"));
+    let _ = fixture.send(
+        at(0),
+        CaptureEvent::Committed(first.batch.expect("first observation")),
+    );
+    let lost = fixture.discard_window_observation(2);
+    let step = fixture.send(
+        lost.at,
+        CaptureEvent::DestroyWindow {
+            handle: WindowHandle::new(2),
+        },
+    );
+    assert!(step.writes.iter().any(|write| matches!(write, CaptureWrite::RetireWindow { instance, .. } if *instance == lost.instance)));
+}
+
+#[test]
+fn same_window_hook_reobserves_a_discarded_instance_before_opening_an_interval() {
+    let mut fixture = Fixture::active();
+    let observed = fixture.hook(at(10), window(2, "lost observation"));
+    let batch = observed.batch.expect("first observation batch");
+    let _ = fixture.send(at(20), CaptureEvent::BatchDiscarded(batch));
+    let step = fixture.hook(at(21), window(2, "lost observation"));
+    let observation = step
+        .writes
+        .iter()
+        .position(|write| matches!(write, CaptureWrite::ObserveWindow { .. }))
+        .expect("observation re-emitted");
+    let interval = step
+        .writes
+        .iter()
+        .position(|write| matches!(write, CaptureWrite::OpenInterval(_)))
+        .expect("new interval");
+    assert!(observation < interval);
+}
+#[test]
+fn discarding_later_metadata_preserves_an_earlier_queued_window_observation() {
+    let mut fixture = Fixture::active();
+    let first = fixture.hook(at(10), window(2, "first observation"));
+    let instance = first
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            CaptureWrite::ObserveWindow { instance, .. } => Some(instance.id),
+            _ => None,
+        })
+        .expect("first observation");
+    let update = fixture.review(at(20), window(2, "updated observation"));
+    let _ = fixture.send(
+        at(30),
+        CaptureEvent::BatchDiscarded(update.batch.expect("metadata batch")),
+    );
+    let step = fixture.send(
+        at(30),
+        CaptureEvent::DestroyWindow {
+            handle: WindowHandle::new(2),
+        },
+    );
+    assert!(step.writes.iter().any(|write| matches!(write, CaptureWrite::RetireWindow { instance: retired, .. } if *retired == instance)));
+}

@@ -91,7 +91,7 @@ enum RulesCommand {
 | `dump`、`status`、`gen-data`、`bench-query`、`restore-backup`、`rules check/preview/diff/explain/tree` | 命令行 |
 | 解析失败 | 报错退出，不进入核心 |
 
-`dump` 默认通过管道请求 `query.facts` 并读取全部分页；核心未运行时以非零状态退出并提示 `--offline`，核心停止或挂起时可显式使用 `dump --offline` 直接只读导出。
+`dump` 默认通过管道请求 `query.facts`，先将全部分页写入自动清理的临时文件，全部成功后才输出到标准输出；分页过期或查询失败时返回类型化错误并丢弃本次导出。核心未运行时以非零状态退出并提示 `--offline`，核心停止或挂起时可显式使用 `dump --offline` 直接只读导出。
 
 解析失败时退出码为 2，不启动核心。这样，浏览器或其他调用方传入未预料的参数时，不会误启动第二个核心。`ui` 在帮助中隐藏，它是核心拉起界面时使用的进程间约定。
 
@@ -101,7 +101,7 @@ enum RulesCommand {
 2. 预热进程（`ui --prewarm`）不开窗口，它的行为本来就需要用参数区分。
 3. 用户双击 exe 或从开始菜单启动时不带参数，走核心路径：核心已在运行时，把“打开界面”转发给核心后退出（第 3 节），由核心按第 4 节拉起界面。用户直接运行 `quartz ui` 时，界面通过握手登记到核心，由核心接管其进程退出观察和显示路由。
 
-**控制台输出。** `quartz.exe` 使用 `windows` 子系统，启动时没有控制台。`Args::try_parse()` 返回帮助、版本或解析错误时，先调用 `AttachConsole(ATTACH_PARENT_PROCESS)`，再由 clap 输出并选择退出码。解析成功后，仅用户命令行子命令附加父控制台，核心和界面均不附加。没有父控制台时（例如被双击后解析失败），错误写入日志文件。GUI 子系统进程附加控制台后，cmd 不会等它退出，输出可能和下一个提示符交错。
+**控制台输出。** `quartz.exe` 使用 `windows` 子系统，启动时没有控制台。`Args::try_parse()` 返回帮助、版本或解析错误时，先调用 `AttachConsole(ATTACH_PARENT_PROCESS)`，再由 clap 输出并选择退出码。解析成功后，仅用户命令行子命令附加父控制台，核心和界面均不附加。解析错误、日志初始化前的核心启动失败，以及此时拉起错误界面失败，都通过独立的启动诊断写入标准错误流及 `logs/bootstrap.log`，包含完整错误来源链；单个输出失败仍尝试另一个，输出失败不会触发 panic。该日志达到 64 KiB 后清空，再写入新诊断。GUI 子系统进程附加控制台后，cmd 不会等它退出，输出可能和下一个提示符交错。
 
 `quartz-host.exe` 使用独立的 console 子系统入口接收浏览器提供的标准句柄，不链接 GPUI。浏览器参数不用于入口路由；Native Messaging manifest 的 `allowed_origins`、`allowed_extensions` 限制可调用的扩展。用户命令行入口仍留在 `quartz.exe`。
 
@@ -136,7 +136,7 @@ enum RulesCommand {
 鼠标悬停通知 `NIN_POPUPOPEN` 或首个 `WM_MOUSEMOVE` 触发预热判断，同时请求刷新托盘摘要与提示。只有常驻关闭、状态为 `None`、设置与电源允许且冷却期已过时，核心才通过 `CreateProcessW` 启动 `ui --prewarm`，进入 `Starting { intent: Prewarm }`；预热不设置 `STARTF_FORCEONFEEDBACK`，也不显示“正在打开…”提示。
 
 - `ui.prewarm.enabled` 默认 `true`，`ui.prewarm.on_battery` 默认 `false`，通过 `quartz settings set --prewarm-enabled true --prewarm-on-battery false` 或 `settings.set` 修改。
-- 核心在允许启动的悬停事件上调用 `GetSystemPowerStatus`：接通电源可预热，电池供电按 `ui.prewarm.on_battery` 判断；读取失败或电源状态未知时记录警告并跳过。现有睡眠与恢复通知不提供电源接入状态。
+- 核心在允许启动的悬停事件上调用 `GetSystemPowerStatus`：接通电源可预热，电池供电按 `ui.prewarm.on_battery` 判断；读取失败或电源状态未知时跳过预热，仅在状态或错误码改变时记录一次警告；恢复为已知状态后再次出现相同失败也会记录。现有睡眠与恢复通知不提供电源接入状态。
 - UI 持有单实例互斥量，进入 GPUI 的 `Application::run` 完成初始化及 D3D 设备创建，不创建窗口；随后发送 `hello`，登记 `ui.state = prewarming`，进入 `Registered { phase: Prewarming }`。收到 `ui.show` 才复用正常打开路径创建主窗口并确认首帧；断线、初次连接失败或 `ui.shutdown` 均退出隐藏进程。
 - `PREWARM_TTL` 为 8 秒，由核心主线程管理，从 I/O 线程完成 hello 时记录的单调时间起算，与逻辑日截止时间共同决定 `MsgWaitForMultipleObjects` 的等待期限。到期且没有显示请求时，仅向对应预热连接发送 `ui.shutdown`，进入 `Closing` 并保留句柄直到退出。
 - 主线程先处理已收到的打开请求，再检查 TTL；打开请求保留为 `Pending` 并取消预热期限，握手前请求在登记后重放 `ui.show`，握手后请求立即定向发送，直到首帧确认才清除。退出控制已经发出后收到的打开请求，沿用 `Closing` 的规则等待旧进程退出后启动一次。
@@ -216,7 +216,7 @@ crates/
 
 I/O 与托盘写入通过独立的有界 `WritePort`（`WRITE_CHANNEL_CAPACITY`，8）投递，队列满时返回 `busy`，数据库线程先提交全部待落盘的采集批次，再处理一条写命令，成功提交后发布版本变化。采集提交截止时间和关闭请求优先于写命令，写命令的 SQLite 锁等待限制在 `COMMIT_HEADROOM` 内，执行后返回循环重新检查采集队列。
 
-I/O 线程内用普通 tokio task 和有界 `mpsc` 实现一个连接注册表 actor，以及每个连接独立的 outbox actor。数据库线程的 `VersionPublisher` 保存 UTC 日期版本并计算已订阅逻辑日期的摘要，通过 watch 发布 `{date, versions}`；注册表只保留已订阅日期的摘要。注册表持有连接角色、订阅和发送句柄，扇出只调用非阻塞投递；outbox 负责发送预算、可靠消息顺序和最新状态槽。主线程通过 watch 发布已清洗状态，通过有界邮箱非阻塞投递控制消息；客户端写入只由 outbox 等待，详细规则见 04 第 7 节。
+I/O 线程内用普通 tokio task 和有界 `mpsc` 实现一个连接注册表 actor，以及每个连接独立的 outbox actor。数据库线程的 `VersionPublisher` 保存 UTC 日期版本并计算已订阅逻辑日期的摘要，通过 watch 发布 `{date, versions}`；注册表只保留已订阅日期的摘要。注册表持有连接角色、订阅和发送句柄，扇出只调用非阻塞投递；outbox 负责发送预算、可靠消息顺序和最新状态槽。主线程通过 watch 发布已清洗状态，通过有界邮箱非阻塞投递控制消息；客户端写入只由 outbox 等待，详细规则见 04 第 7 节。连接级错误关闭时，管道服务最多增加一个临时原生刷新线程，等待客户端读取末帧；等待容量和刷新共用 500 毫秒期限，完成后结束该线程。
 
 线程之间用有界通道连接：
 

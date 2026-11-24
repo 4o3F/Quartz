@@ -36,3 +36,6 @@ pub const UTC_DAY_MS: i64 = 86_400_000;
 /// Two UTC days reserved for capture boundaries and their next midnights.
 pub(super) const CAPTURE_UTC_HEADROOM: Duration =
     Duration::from_millis(UTC_DAY_MS.unsigned_abs() * 2);
+
+/// Retain at most 1,024 recently observed HWND identities, including retired generations (02 §2.2).
+pub const WINDOW_INSTANCE_CAPACITY: usize = 1_024;

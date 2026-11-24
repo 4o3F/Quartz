@@ -430,7 +430,10 @@ impl OutboxActor {
                 writer.send(payload.as_slice()).await?;
                 drop(reservation);
             }
-            OutboxMessage::Finish => return Ok(WriteProgress::Finished),
+            OutboxMessage::Finish => {
+                tokio::io::AsyncWriteExt::shutdown(writer.get_mut()).await?;
+                return Ok(WriteProgress::Finished);
+            }
         }
         Ok(WriteProgress::Continue)
     }

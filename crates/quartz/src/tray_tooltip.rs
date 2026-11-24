@@ -2,6 +2,11 @@
 
 use snafu::Snafu;
 
+/// NOTIFYICONDATAW::szTip contains 128 UTF-16 units, including its NUL terminator.
+pub(crate) const TOOLTIP_BUFFER_UNITS: usize = 128;
+/// The final szTip unit is reserved for NUL (07 §1.2).
+pub(crate) const TOOLTIP_TEXT_UNITS: usize = TOOLTIP_BUFFER_UNITS - 1;
+
 /// Clock periods each span twelve civil hours.
 const HOURS_PER_PERIOD: i8 = 12;
 
@@ -30,18 +35,40 @@ impl TrayTooltip {
         Self::CaptureGap,
     ];
     pub(crate) fn text(self, language: quartz_i18n::Language) -> String {
+        self.text_with_zone(language, jiff::tz::TimeZone::try_system)
+    }
+    fn text_with_zone(
+        self,
+        language: quartz_i18n::Language,
+        resolve: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
+    ) -> String {
         if let Self::Paused {
             until_utc_ms,
             hour_cycle,
         } = self
         {
-            let time = jiff::Timestamp::from_millisecond(until_utc_ms)
-                .expect("capture validated deadline")
-                .to_zoned_datetime(jiff::tz::TimeZone::system())
-                .time();
+            let time = Self::resume_time(until_utc_ms, resolve);
+            let time = match time {
+                Ok(time) => time,
+                Err(error) => {
+                    tracing::warn!(%error, "could not resolve pause resume time");
+                    return quartz_i18n::MessageKey::new("tray.paused_unknown_time")
+                        .in_language(language)
+                        .into_owned();
+                }
+            };
             return self.paused_text(language, time, hour_cycle);
         }
         self.key().in_language(language).into_owned()
+    }
+    fn resume_time(
+        until_utc_ms: i64,
+        resolve: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
+    ) -> Result<jiff::civil::Time, ResolveResumeTimeError> {
+        let zone = resolve().map_err(|source| ResolveResumeTimeError::TimeZone { source })?;
+        let timestamp = jiff::Timestamp::from_millisecond(until_utc_ms)
+            .map_err(|source| ResolveResumeTimeError::Timestamp { source })?;
+        Ok(timestamp.to_zoned_datetime(zone).time())
     }
     fn paused_text(
         self,
@@ -93,20 +120,30 @@ impl TrayTooltip {
     }
 }
 
+#[derive(Debug, Snafu)]
+enum ResolveResumeTimeError {
+    #[snafu(display("could not resolve system time zone: {source}"))]
+    TimeZone { source: jiff::Error },
+    #[snafu(display("invalid pause deadline: {source}"))]
+    Timestamp { source: jiff::Error },
+}
+
 /// A tooltip that cannot fit together with its terminating NUL.
 #[derive(Debug, Snafu)]
-#[snafu(display("tray tooltip needs {units} UTF-16 units; at most 127 are available"))]
+#[snafu(display(
+    "tray tooltip needs {units} UTF-16 units; at most {TOOLTIP_TEXT_UNITS} are available"
+))]
 pub(super) struct FormatTrayTooltipError {
     units: usize,
 }
 
 /// Complete UTF-16 tooltip with space reserved for its terminating NUL.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TrayTooltipText([u16; 128]);
+pub(crate) struct TrayTooltipText([u16; TOOLTIP_BUFFER_UNITS]);
 
 impl TrayTooltipText {
     /// Transfers the fixed buffer to NOTIFYICONDATAW.
-    pub(crate) fn into_buffer(self) -> [u16; 128] {
+    pub(crate) fn into_buffer(self) -> [u16; TOOLTIP_BUFFER_UNITS] {
         self.0
     }
 }
@@ -120,10 +157,10 @@ impl TryFrom<&str> for TrayTooltipText {
     /// Returns an error when the text needs more than 127 UTF-16 units.
     fn try_from(text: &str) -> Result<Self, Self::Error> {
         let units = text.encode_utf16().count();
-        if units >= 128 {
+        if units > TOOLTIP_TEXT_UNITS {
             return FormatTrayTooltipSnafu { units }.fail();
         }
-        let mut buffer = [0; 128];
+        let mut buffer = [0; TOOLTIP_BUFFER_UNITS];
         for (slot, unit) in buffer.iter_mut().zip(text.encode_utf16()) {
             *slot = unit;
         }
@@ -135,6 +172,19 @@ impl TryFrom<&str> for TrayTooltipText {
 mod tests {
     use super::*;
 
+    #[test]
+    fn unresolved_resume_timezone_displays_localized_unknown_time() {
+        for &language in quartz_i18n::Language::ALL {
+            let tooltip = TrayTooltip::Paused {
+                until_utc_ms: 0,
+                hour_cycle: Some(quartz_protocol::HourCycle::H24),
+            };
+            assert_eq!(
+                tooltip.text_with_zone(language, || jiff::tz::TimeZone::get("Quartz/Unavailable")),
+                quartz_i18n::MessageKey::new("tray.paused_unknown_time").in_language(language)
+            );
+        }
+    }
     #[test]
     fn every_tray_text_key_resolves_in_both_catalogs() {
         for locale in [
@@ -176,7 +226,7 @@ mod tests {
             TrayTooltipText::try_from("")
                 .expect("empty tooltip")
                 .into_buffer(),
-            [0; 128]
+            [0; TOOLTIP_BUFFER_UNITS]
         );
     }
     #[test]

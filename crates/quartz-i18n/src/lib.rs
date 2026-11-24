@@ -16,6 +16,20 @@ mod translations {
 
 use translations::{_rust_i18n_t, _rust_i18n_try_translate};
 
+/// One named value inserted into a translated template without rescanning its contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageArgument<'value> {
+    name: &'value str,
+    value: &'value str,
+}
+impl<'value> MessageArgument<'value> {
+    /// Borrows a placeholder name and its literal replacement text.
+    #[must_use]
+    pub const fn new(name: &'value str, value: &'value str) -> Self {
+        Self { name, value }
+    }
+}
+
 /// A catalog message identifier, borrowed without allocating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MessageKey<'key>(&'key str);
@@ -39,6 +53,27 @@ impl<'key> MessageKey<'key> {
     #[must_use]
     pub fn in_language(self, language: Language) -> Cow<'key, str> {
         rust_i18n::t!(self.0, locale = language.code())
+    }
+    /// Substitutes named placeholders in one pass, preserving placeholder-like argument text.
+    #[must_use]
+    pub fn format(self, language: Language, arguments: &[MessageArgument<'_>]) -> String {
+        let template = self.in_language(language);
+        let mut rest = template.as_ref();
+        let mut output = String::with_capacity(rest.len());
+        const PLACEHOLDER_PREFIX: &str = "%{";
+        while let Some(start) = rest.find(PLACEHOLDER_PREFIX) {
+            output.push_str(&rest[..start]);
+            rest = &rest[start..];
+            let Some(end) = rest.find('}') else { break };
+            let name = &rest[PLACEHOLDER_PREFIX.len()..end];
+            match arguments.iter().find(|argument| argument.name == name) {
+                Some(argument) => output.push_str(argument.value),
+                None => output.push_str(&rest[..=end]),
+            }
+            rest = &rest[end + 1..];
+        }
+        output.push_str(rest);
+        output
     }
     /// Checks the language's own catalog without English fallback.
     #[must_use]
@@ -188,6 +223,62 @@ mod tests {
         names
     }
 
+    #[test]
+    fn message_arguments_compare_names_and_literal_values() {
+        assert_eq!(
+            MessageArgument::new("name", "value"),
+            MessageArgument::new("name", "value")
+        );
+        assert_ne!(
+            MessageArgument::new("name", "value"),
+            MessageArgument::new("other", "value")
+        );
+        assert_ne!(
+            MessageArgument::new("name", "value"),
+            MessageArgument::new("name", "other")
+        );
+    }
+    #[test]
+    fn message_format_preserves_unclosed_and_unknown_placeholders() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale lock");
+        let arguments = [MessageArgument::new("known", "replacement")];
+        assert_eq!(
+            MessageKey::new("prefix %{known").format(Language::English, &arguments),
+            "prefix %{known"
+        );
+        assert_eq!(
+            MessageKey::new("%{unknown} %{known}").format(Language::English, &arguments),
+            "%{unknown} replacement"
+        );
+        assert_eq!(
+            MessageKey::new("%{").format(Language::English, &arguments),
+            "%{"
+        );
+    }
+    #[test]
+    fn message_format_replaces_repeated_placeholders_without_rescanning_arguments() {
+        let _locale = LOCALE_TEST_LOCK.lock().expect("locale lock");
+        assert_eq!(
+            MessageKey::new("%{name} / %{name} / %{duration}").format(
+                Language::English,
+                &[
+                    MessageArgument::new("name", "literal %{duration}"),
+                    MessageArgument::new("duration", "5m"),
+                ]
+            ),
+            "literal %{duration} / literal %{duration} / 5m"
+        );
+        assert_eq!(
+            MessageKey::new("today.legend_item").format(
+                Language::English,
+                &[
+                    MessageArgument::new("name", "literal %{duration}"),
+                    MessageArgument::new("duration", "5m"),
+                ]
+            ),
+            "literal %{duration} 5m"
+        );
+    }
     #[test]
     fn capture_and_builtin_privacy_labels_resolve_in_both_catalogs() {
         let _locale = LOCALE_TEST_LOCK.lock().expect("locale test lock poisoned");

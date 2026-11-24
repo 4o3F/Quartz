@@ -117,7 +117,9 @@ impl VersionState {
 #[cfg(any(windows, test))]
 mod publisher;
 #[cfg(any(windows, test))]
-pub(crate) use publisher::{VersionChannel, VersionCommand, VersionPort, VersionPublisher};
+pub(crate) use publisher::{
+    PublishedVersions, VersionChannel, VersionCommand, VersionPort, VersionPublisher,
+};
 
 #[cfg(test)]
 mod tests {

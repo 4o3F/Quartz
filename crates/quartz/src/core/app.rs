@@ -154,7 +154,7 @@ pub(crate) enum CloseCaptureError {
 }
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub(crate) enum WorkerFailure {
+pub(crate) enum RunWorkerError {
     #[snafu(display("capture worker failed: {source}"))]
     Capture {
         source: Box<capture_loop::RunCaptureLoopError>,
@@ -307,9 +307,9 @@ impl WorkerGuard {
     fn run(
         worker: Worker,
         main: MainPort,
-        completed: Sender<Result<(), WorkerFailure>>,
+        completed: Sender<Result<(), RunWorkerError>>,
         finished: Sender<()>,
-        run: impl FnOnce() -> Result<(), WorkerFailure>,
+        run: impl FnOnce() -> Result<(), RunWorkerError>,
     ) {
         let guard = Self { worker, main };
         tracing::info!(?worker, "worker started");

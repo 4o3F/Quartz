@@ -86,6 +86,7 @@ impl DayCalendar {
             Ok(today.end)
         }
     }
+    #[cfg(test)]
     pub(crate) fn new(date: LocalDate, offset: DayStartOffset) -> Result<Self, RunQueryError> {
         Self::in_zone(
             date,

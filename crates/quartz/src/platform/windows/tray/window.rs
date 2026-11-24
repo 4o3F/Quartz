@@ -551,20 +551,24 @@ mod tests {
         let taskbar_created = 0xc000;
         let tray_callback = u32::from(AppMessage::TrayCallback);
         for (message, parameter, expected) in [
-            (tray_callback, NIN_SELECT as isize, Some(CoreEvent::OpenUi)),
             (
                 tray_callback,
-                isize::MIN | NIN_SELECT as isize,
+                isize::try_from(NIN_SELECT).expect("notification fits LPARAM"),
                 Some(CoreEvent::OpenUi),
             ),
             (
                 tray_callback,
-                NIN_KEYSELECT as isize,
+                isize::MIN | isize::try_from(NIN_SELECT).expect("notification fits LPARAM"),
                 Some(CoreEvent::OpenUi),
             ),
             (
                 tray_callback,
-                WM_CONTEXTMENU as isize,
+                isize::try_from(NIN_KEYSELECT).expect("notification fits LPARAM"),
+                Some(CoreEvent::OpenUi),
+            ),
+            (
+                tray_callback,
+                isize::try_from(WM_CONTEXTMENU).expect("notification fits LPARAM"),
                 Some(CoreEvent::ShowTrayMenu),
             ),
             (
@@ -579,17 +583,17 @@ mod tests {
             ),
             (
                 tray_callback,
-                0x1234_0000 | NIN_SELECT as isize,
+                0x1234_0000 | isize::try_from(NIN_SELECT).expect("notification fits LPARAM"),
                 Some(CoreEvent::OpenUi),
             ),
             (
                 tray_callback,
-                0x1234_0000 | NIN_KEYSELECT as isize,
+                0x1234_0000 | isize::try_from(NIN_KEYSELECT).expect("notification fits LPARAM"),
                 Some(CoreEvent::OpenUi),
             ),
             (
                 tray_callback,
-                0x1234_0000 | WM_CONTEXTMENU as isize,
+                0x1234_0000 | isize::try_from(WM_CONTEXTMENU).expect("notification fits LPARAM"),
                 Some(CoreEvent::ShowTrayMenu),
             ),
             (tray_callback, 0xffff, None),

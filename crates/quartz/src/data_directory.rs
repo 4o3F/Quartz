@@ -32,7 +32,9 @@ impl DataDirectory {
         Self::from_local_app_data(std::env::var_os("LOCALAPPDATA"))
     }
 
-    fn from_local_app_data(local: Option<OsString>) -> Result<Self, ResolveDataDirectoryError> {
+    pub(crate) fn from_local_app_data(
+        local: Option<OsString>,
+    ) -> Result<Self, ResolveDataDirectoryError> {
         local
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())

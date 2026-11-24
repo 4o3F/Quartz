@@ -34,6 +34,8 @@ const RULE_READ_BLOCKING_RESERVE: usize = 1;
 const AUTHENTICATION_PARALLELISM: usize = MAX_BLOCKING_THREADS - RULE_READ_BLOCKING_RESERVE;
 /// Bounded non-blocking main-thread control commands (01 §6).
 const CONTROL_MAILBOX_CAPACITY: usize = 64;
+/// A single temporary native flush thread stays within the core thread budget (08 §1).
+const NATIVE_FLUSH_PARALLELISM: usize = 1;
 /// Yield while a bounded shutdown flush completes (01 §6).
 const SHUTDOWN_FLUSH_POLL: Duration = Duration::from_millis(10);
 
@@ -135,7 +137,9 @@ impl PipeServer {
         let (ready, startup) = bounded(LIFECYCLE_CAPACITY);
         let (finished, completed) = bounded(LIFECYCLE_CAPACITY);
         let io = IoThread {
+            connections: ConnectedSlots::default(),
             listener: Arc::new(PipeListener {
+                flush_capacity: Arc::new(Semaphore::new(NATIVE_FLUSH_PARALLELISM)),
                 name: config.name,
                 owner: config.owner,
                 authentication: AuthenticationPool::new(),
@@ -251,6 +255,7 @@ enum InstanceOrder {
     Additional,
 }
 struct PipeListener {
+    flush_capacity: Arc<Semaphore>,
     name: PipeName,
     owner: ProcessIdentity,
     authentication: AuthenticationPool,
@@ -283,7 +288,26 @@ impl PipeListener {
         })
     }
 }
+/// Counts accepted transports, including peers still authenticating or awaiting hello.
+#[derive(Clone, Default)]
+struct ConnectedSlots(Arc<std::sync::atomic::AtomicUsize>);
+impl ConnectedSlots {
+    fn connect(&self) -> ConnectedSlot {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ConnectedSlot(self.clone())
+    }
+    fn is_empty(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed) == 0
+    }
+}
+struct ConnectedSlot(ConnectedSlots);
+impl Drop for ConnectedSlot {
+    fn drop(&mut self) {
+        self.0.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 struct IoThread {
+    connections: ConnectedSlots,
     services: Services,
     listener: Arc<PipeListener>,
     timeouts: ConnectionTimeouts,
@@ -333,12 +357,26 @@ impl IoThread {
     }
     fn slot(&self, registry: &RegistryHandle, life: &watch::Receiver<ServerLife>) -> Slot {
         Slot {
+            connections: self.connections.clone(),
             registry: registry.clone(),
             services: self.services.clone(),
             listener: Arc::clone(&self.listener),
             timeouts: self.timeouts,
             life: life.clone(),
         }
+    }
+    async fn flush_shutdown(&self, outboxes: &[crate::ipc::outbox::OutboxHandle]) {
+        if self.connections.is_empty() {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + self.timeouts.close_flush;
+        while outboxes.iter().any(|outbox| outbox.queued_bytes() != 0)
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(SHUTDOWN_FLUSH_POLL).await;
+        }
+        // Let readers consume a successfully flushed shutdown notification before disconnect.
+        tokio::time::sleep_until(deadline).await;
     }
     async fn serve(mut self, pipes: Vec<NamedPipeServer>) {
         let registry = self.services.start_registry();
@@ -367,14 +405,7 @@ impl IoThread {
         // Barrier processes preceding controls before checking pending bytes; clients are never awaited by the registry.
         match registry.outboxes().await {
             Ok(outboxes) => {
-                let deadline = tokio::time::Instant::now() + self.timeouts.close_flush;
-                while outboxes.iter().any(|outbox| outbox.queued_bytes() != 0)
-                    && tokio::time::Instant::now() < deadline
-                {
-                    tokio::time::sleep(SHUTDOWN_FLUSH_POLL).await;
-                }
-                // Let readers consume a successfully flushed shutdown notification before disconnect.
-                tokio::time::sleep_until(deadline).await;
+                self.flush_shutdown(&outboxes).await;
             }
             Err(error) => {
                 tracing::warn!(%error, "registry unavailable during bounded shutdown flush")
@@ -487,7 +518,13 @@ impl AuthenticationPool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipeReuse {
+    Reuse,
+    Replace,
+}
 struct Slot {
+    connections: ConnectedSlots,
     services: Services,
     registry: RegistryHandle,
     listener: Arc<PipeListener>,
@@ -510,20 +547,19 @@ impl Slot {
                     }
                 },
             };
-            let outcome = self.serve_connection(Arc::clone(&pipe)).await;
-            // Reuse the slot's instance; pending completion packets can retain a closed handle.
-            if let Err(error) = pipe.disconnect() {
-                use windows::Win32::Foundation::{ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED};
-                if error.is_win32(ERROR_PIPE_NOT_CONNECTED) || error.is_win32(ERROR_NO_DATA) {
-                    tracing::debug!(%error, "pipe client already disconnected");
-                } else {
-                    tracing::error!(error = %Report::from_error(&error), "could not disconnect pipe slot before replacement");
-                    tokio::time::sleep(backoff.next_delay()).await;
-                    continue;
-                }
-            }
-            if *self.life.borrow() == ServerLife::Stopping {
+            let mut disconnect = DisconnectPipe(Some(Arc::clone(&pipe)));
+            let flush = super::flush::PipeFlush::new(Arc::clone(&self.listener.flush_capacity));
+            let outcome = self
+                .serve_connection(Arc::clone(&pipe), flush.clone())
+                .await;
+            // Pending completion packets can retain a closed handle until flush cleanup finishes.
+            let Some(reuse) = self.settle_connection(disconnect.finish(), &flush).await else {
                 return;
+            };
+            if reuse == PipeReuse::Replace {
+                drop(pipe);
+                tokio::time::sleep(backoff.next_delay()).await;
+                continue;
             }
             initial = Some(pipe);
             match outcome {
@@ -535,7 +571,44 @@ impl Slot {
             }
         }
     }
-    async fn serve_connection(&self, pipe: Arc<NamedPipeServer>) -> io::Result<()> {
+    async fn settle_connection(
+        &self,
+        disconnected: io::Result<()>,
+        flush: &super::flush::PipeFlush,
+    ) -> Option<PipeReuse> {
+        let reuse = if let Err(error) = disconnected {
+            use windows::Win32::Foundation::{ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED};
+            if error.is_win32(ERROR_PIPE_NOT_CONNECTED) || error.is_win32(ERROR_NO_DATA) {
+                tracing::debug!(%error, "pipe client already disconnected");
+                PipeReuse::Reuse
+            } else {
+                tracing::error!(error = %Report::from_error(&error), "could not disconnect pipe slot before replacement");
+                PipeReuse::Replace
+            }
+        } else {
+            PipeReuse::Reuse
+        };
+        if *self.life.borrow() == ServerLife::Stopping {
+            return None;
+        }
+        if let Err(error) = flush.wait_reusable(self.timeouts.close_flush).await {
+            tracing::warn!(%error, "pipe slot disabled until its old flush releases resources");
+            let mut life = self.life.clone();
+            tokio::select! {
+                result = flush.wait_completion() => {
+                    if let Err(error) = result { tracing::error!(%error, "pipe flush cleanup stopped"); return None; }
+                }
+                _ = life.changed() => return None,
+            }
+            tracing::info!("pipe slot recovered after old flush released resources");
+        }
+        Some(reuse)
+    }
+    async fn serve_connection(
+        &self,
+        pipe: Arc<NamedPipeServer>,
+        flush: super::flush::PipeFlush,
+    ) -> io::Result<()> {
         if let Err(error) = pipe.connect().await {
             use windows::Win32::Foundation::{
                 ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED,
@@ -549,6 +622,10 @@ impl Slot {
             }
             return Err(error);
         }
+        if *self.life.borrow() == ServerLife::Stopping {
+            return Ok(());
+        }
+        let _connected = self.connections.connect();
         let hello_deadline = tokio::time::Instant::now() + self.timeouts.hello;
         let mut pid = 0;
         // SAFETY: The pipe is connected and owned, and pid is writable output storage.
@@ -575,8 +652,8 @@ impl Slot {
         match peer {
             Ok(allowed) => {
                 let mut session = ConnectionSession::new(allowed);
-                let read = PipeTransport(Arc::clone(&pipe));
-                let write = PipeTransport(pipe);
+                let read = PipeTransport::new(Arc::clone(&pipe), flush.clone());
+                let write = PipeTransport::new(pipe, flush);
                 if let Err(error) = (Connection {
                     services: self.services.clone(),
                     registry: self.registry.clone(),
@@ -595,8 +672,37 @@ impl Slot {
     }
 }
 
+/// Cancels native pipe draining even when server shutdown aborts a slot task.
+struct DisconnectPipe(Option<Arc<NamedPipeServer>>);
+impl DisconnectPipe {
+    fn finish(&mut self) -> io::Result<()> {
+        self.0.take().expect("slot owns its pipe").disconnect()
+    }
+}
+impl Drop for DisconnectPipe {
+    fn drop(&mut self) {
+        if let Some(pipe) = self.0.take() {
+            // Task cancellation must also unblock a native FlushFileBuffers worker.
+            let _ = pipe.disconnect();
+        }
+    }
+}
+
 /// Shares one instance between the slot and its sole reader and writer.
-struct PipeTransport(Arc<NamedPipeServer>);
+struct PipeTransport {
+    pipe: Arc<NamedPipeServer>,
+    flush: super::flush::PipeFlush,
+    pending_flush: Option<super::flush::PendingFlush>,
+}
+impl PipeTransport {
+    fn new(pipe: Arc<NamedPipeServer>, flush: super::flush::PipeFlush) -> Self {
+        Self {
+            pipe,
+            flush,
+            pending_flush: None,
+        }
+    }
+}
 impl AsyncRead for PipeTransport {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -607,8 +713,8 @@ impl AsyncRead for PipeTransport {
             return Poll::Ready(Ok(()));
         }
         loop {
-            ready!(self.0.poll_read_ready(cx))?;
-            match self.0.try_read_buf(buffer) {
+            ready!(self.pipe.poll_read_ready(cx))?;
+            match self.pipe.try_read_buf(buffer) {
                 Ok(_) => return Poll::Ready(Ok(())),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Poll::Ready(Err(error)),
@@ -623,8 +729,8 @@ impl AsyncWrite for PipeTransport {
         buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
         loop {
-            ready!(self.0.poll_write_ready(cx))?;
-            match self.0.try_write(buffer) {
+            ready!(self.pipe.poll_write_ready(cx))?;
+            match self.pipe.try_write(buffer) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 result => return Poll::Ready(result),
             }
@@ -633,8 +739,14 @@ impl AsyncWrite for PipeTransport {
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_flush(cx)
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.pending_flush.is_none() {
+            self.pending_flush = Some(self.flush.start(Arc::clone(&self.pipe)));
+        }
+        self.pending_flush
+            .as_mut()
+            .expect("native flush started")
+            .poll(cx)
     }
 }
 
@@ -879,6 +991,27 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn idle_server_shutdown_completes_without_reader_grace_period() {
+        let fixture = slot();
+        let (_stop, stopping) = oneshot::channel();
+        let (_control, controls) = mpsc::channel(CONTROL_MAILBOX_CAPACITY);
+        let server = IoThread {
+            connections: ConnectedSlots::default(),
+            services: fixture.slot.services.clone(),
+            listener: fixture.slot.listener.clone(),
+            timeouts: Default::default(),
+            stopping,
+            controls,
+        };
+        let before = tokio::time::Instant::now();
+        server.flush_shutdown(&[]).await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            before,
+            "no client needs a reader grace period"
+        );
+    }
     #[test]
     fn shutdown_with_disconnecting_client_does_not_recreate_or_log_errors() {
         let log = tempfile::NamedTempFile::new().expect("shutdown log");
@@ -907,6 +1040,7 @@ mod tests {
                 let (stop, stopping) = oneshot::channel();
                 let (_control, controls) = mpsc::channel(CONTROL_MAILBOX_CAPACITY);
                 let server = IoThread {
+                    connections: ConnectedSlots::default(),
                     services: fixture.slot.services.clone(),
                     listener: Arc::clone(&listener),
                     timeouts: ConnectionTimeouts {
@@ -959,6 +1093,7 @@ mod tests {
             _queries: channel.receiver,
             _database: database,
             slot: Slot {
+                connections: ConnectedSlots::default(),
                 registry: RegistryHandle::start(
                     publisher.subscribe(),
                     received.clone(),
@@ -974,6 +1109,7 @@ mod tests {
                     ui: Arc::new(|_| Ok(())),
                 },
                 listener: Arc::new(PipeListener {
+                    flush_capacity: Arc::new(Semaphore::new(NATIVE_FLUSH_PARALLELISM)),
                     name: PipeName::for_test(suffix),
                     owner: ProcessIdentity::current().expect("test identity"),
                     authentication: AuthenticationPool::new(),
@@ -1063,5 +1199,104 @@ mod tests {
         assert_eq!(backoff.next_delay(), SLOT_RETRY_MAX);
         backoff.reset();
         assert_eq!(backoff.next_delay(), SLOT_RETRY_INITIAL);
+    }
+    #[tokio::test]
+    async fn unexpected_disconnect_waits_for_old_flush_before_replacing_the_instance() {
+        let mut fixture = slot();
+        let (_life, life) = watch::channel(ServerLife::Serving);
+        fixture.slot.life = life;
+        let flush = super::super::flush::PipeFlush::new(Arc::new(Semaphore::new(1)));
+        let (release, waiting) = crossbeam_channel::bounded(1);
+        let (entered, started) = oneshot::channel();
+        let pending = flush.start_with(move || {
+            let _ = entered.send(());
+            waiting
+                .recv_timeout(TEST_RECONNECT_TIMEOUT)
+                .expect("release fake flush");
+            Ok(())
+        });
+        started.await.expect("flush worker started");
+        let cleanup = fixture.slot.settle_connection(
+            Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            &flush,
+        );
+        tokio::pin!(cleanup);
+        let early = tokio::time::timeout(TEST_CLOSE_TIMEOUT * 2, &mut cleanup).await;
+        release.send(()).expect("release old flush");
+        assert!(
+            early.is_err(),
+            "instance replacement must wait for flush resource release"
+        );
+        assert_eq!(
+            tokio::time::timeout(TEST_RECONNECT_TIMEOUT, cleanup)
+                .await
+                .expect("cleanup finishes"),
+            Some(PipeReuse::Replace)
+        );
+        assert!(flush.reusable());
+        drop(pending);
+    }
+    #[test]
+    fn disabled_slot_logs_one_recovery_after_flush_cleanup() {
+        let log = tempfile::NamedTempFile::new().expect("slot log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(std::sync::Mutex::new(log.reopen().expect("log writer")))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            runtime().block_on(async {
+                let mut fixture = slot();
+                let (_life, life) = watch::channel(ServerLife::Serving);
+                fixture.slot.life = life;
+                let flush = super::super::flush::PipeFlush::new(Arc::new(Semaphore::new(1)));
+                let (release, waiting) = crossbeam_channel::bounded(1);
+                let (entered, started) = oneshot::channel();
+                let pending = flush.start_with(move || {
+                    let _ = entered.send(());
+                    waiting
+                        .recv_timeout(TEST_RECONNECT_TIMEOUT)
+                        .expect("release fake flush");
+                    Ok(())
+                });
+                started.await.expect("flush worker started");
+                let cleanup = fixture.slot.settle_connection(Ok(()), &flush);
+                tokio::pin!(cleanup);
+                assert!(
+                    tokio::time::timeout(TEST_CLOSE_TIMEOUT * 2, &mut cleanup)
+                        .await
+                        .is_err()
+                );
+                release.send(()).expect("release old flush");
+                assert_eq!(
+                    tokio::time::timeout(TEST_RECONNECT_TIMEOUT, cleanup)
+                        .await
+                        .expect("recovery"),
+                    Some(PipeReuse::Reuse)
+                );
+                assert_eq!(
+                    fixture.slot.settle_connection(Ok(()), &flush).await,
+                    Some(PipeReuse::Reuse)
+                );
+                drop(pending);
+            });
+        });
+        let messages = std::fs::read_to_string(log.path()).expect("captured slot messages");
+        let disabled = messages
+            .lines()
+            .filter(|message| {
+                message.contains("pipe slot disabled until its old flush releases resources")
+            })
+            .collect::<Vec<_>>();
+        let recovered = messages
+            .lines()
+            .filter(|message| {
+                message.contains("pipe slot recovered after old flush released resources")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(disabled.len(), 1, "{messages}");
+        assert_eq!(recovered.len(), 1, "{messages}");
+        assert!(disabled[0].contains("WARN"), "{messages}");
+        assert!(recovered[0].contains("INFO"), "{messages}");
     }
 }
