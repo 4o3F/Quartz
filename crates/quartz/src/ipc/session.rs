@@ -312,7 +312,12 @@ impl ConnectionSession {
                         id,
                         crate::query::QueryRequest::decode(request.op, request.body),
                     ),
-                    Op::SettingsGet
+                    Op::RuleSetsEdit
+                    | Op::RuleSetsSetEnabled
+                    | Op::RuleSetsReorder
+                    | Op::RuleSetsDelete
+                    | Op::RuleSetsRevert
+                    | Op::SettingsGet
                     | Op::SettingsSet
                     | Op::AnnotationsCreate
                     | Op::AnnotationsUpdate
@@ -331,12 +336,7 @@ impl ConnectionSession {
                         }
                     }
                     Op::Hello => Action::error(Some(id), ErrorKind::BadRequest),
-                    Op::RuleSetsSetEnabled
-                    | Op::RuleSetsReorder
-                    | Op::RuleSetsDelete
-                    | Op::RuleSetsRevert
-                    | Op::RuleSetsEdit
-                    | Op::RulesPreview
+                    Op::RulesPreview
                     | Op::RulesExplain
                     | Op::RulesTextValidate
                     | Op::RulesTextPreview
@@ -424,6 +424,82 @@ mod tests {
                     }
                 );
             }
+        }
+    }
+
+    #[test]
+    fn rule_mutations_allow_only_ui_and_reject_unknown_fields_before_admission() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("rule-writes".into()));
+        let status = status.subscribe();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../quartz-protocol/tests/fixtures/rule-mutations.json"
+        ))
+        .expect("fixture");
+        struct Case {
+            op: Op,
+            body: serde_json::Value,
+        }
+        for case in [
+            Case {
+                op: Op::RuleSetsEdit,
+                body: fixture["edit"].clone(),
+            },
+            Case {
+                op: Op::RuleSetsSetEnabled,
+                body: fixture["set_enabled"].clone(),
+            },
+            Case {
+                op: Op::RuleSetsReorder,
+                body: fixture["reorder"].clone(),
+            },
+            Case {
+                op: Op::RuleSetsDelete,
+                body: fixture["delete"].clone(),
+            },
+            Case {
+                op: Op::RuleSetsRevert,
+                body: fixture["revert"].clone(),
+            },
+        ] {
+            let mut cli = ConnectionSession {
+                state: State::Ready(ReadyRole::Cli),
+                allowed: AllowedRoles::Quartz,
+            };
+            assert_eq!(
+                cli.receive(
+                    request(1, case.op, case.body.clone()),
+                    &status.borrow().status
+                )
+                .reply()
+                .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::Forbidden)
+                }
+            );
+            let mut ui = ConnectionSession {
+                state: State::Ready(ReadyRole::Ui {
+                    state: UiState::Visible,
+                }),
+                allowed: AllowedRoles::Quartz,
+            };
+            assert!(matches!(
+                ui.receive(
+                    request(1, case.op, case.body.clone()),
+                    &status.borrow().status
+                ),
+                Action::Write { .. }
+            ));
+            let mut invalid = case.body;
+            invalid["extra"] = serde_json::json!(true);
+            assert_eq!(
+                ui.receive(request(2, case.op, invalid), &status.borrow().status)
+                    .reply()
+                    .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::BadRequest)
+                }
+            );
         }
     }
 

@@ -47,6 +47,22 @@ pub enum ErrorKind {
     },
     /// The selected set or historical revision does not exist.
     RuleSetNotFound { key: String, version: Option<u32> },
+    /// Builtin rule sets can only be changed by embedded upgrades.
+    RuleSetReadOnly { key: String },
+    /// A set with active children cannot be deleted.
+    RuleSetHasChildren { key: String },
+    /// An existing key cannot change its family or parent.
+    RuleSetIdentity {
+        key: String,
+        field: crate::RuleSetIdentityField,
+    },
+    /// Rule contents or the candidate tree failed validation.
+    RuleValidationFailed {
+        diagnostics: Vec<crate::RuleDiagnostic>,
+        truncated: bool,
+    },
+    /// Privacy mutations require preview issuance in M4-E2.
+    PreviewRequired,
     /// The host could not connect to the core.
     CoreOffline,
     /// The core could not complete the request because of an internal failure.
@@ -77,6 +93,11 @@ impl ErrorKind {
             Self::StaleDocumentRef => "stale_document_ref",
             Self::RuleSetStale { .. } => "rule_set_stale",
             Self::RuleSetNotFound { .. } => "rule_set_not_found",
+            Self::RuleSetReadOnly { .. } => "rule_set_read_only",
+            Self::RuleSetHasChildren { .. } => "rule_set_has_children",
+            Self::RuleSetIdentity { .. } => "rule_set_identity",
+            Self::RuleValidationFailed { .. } => "rule_validation_failed",
+            Self::PreviewRequired => "preview_required",
             Self::CoreOffline => "core_offline",
             Self::Internal => "internal",
             Self::Busy => "busy",
@@ -126,12 +147,17 @@ mod tests {
             "stale_document_ref",
             "rule_set_stale",
             "rule_set_not_found",
+            "rule_set_read_only",
+            "rule_set_has_children",
+            "rule_set_identity",
+            "rule_validation_failed",
+            "preview_required",
             "core_offline",
             "internal",
             "version_exhausted",
             "busy",
         ] {
-            let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "key": "user.local", "version": null, "core_version": "test-core"});
+            let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "key": "user.local", "version": null, "core_version": "test-core", "field":"parent", "diagnostics":[], "truncated":false});
             let kind: ErrorKind = serde_json::from_value(wire).expect("known error kind");
             assert_eq!(kind.code(), name);
             assert_eq!(

@@ -825,3 +825,45 @@ fn family_trees_reuse_evaluator_hashes_and_format_specific_fields() {
         Some(wire::RuleApp::Conditions(_))
     ) && entry.content.pattern.is_some()));
 }
+
+#[test]
+fn root_reorders_keep_builtin_first_and_reorder_only_active_user_roots() {
+    let mut fixture = Fixture::new();
+    fixture.apply("a.custom", None, &Fixture::rule("a", 50), 0);
+    fixture.apply("z.custom", None, &Fixture::rule("z", 50), 0);
+    fixture.apply("user.deleted", None, &Fixture::rule("deleted", 50), 0);
+    fixture.run(RegistryCommand::Delete {
+        key: "user.deleted".parse().expect("key"),
+        base_version: 1,
+    });
+    fixture.run(RegistryCommand::Reorder {
+        siblings: vec![
+            SiblingRevision {
+                key: "z.custom".parse().expect("key"),
+                base_version: 1,
+            },
+            SiblingRevision {
+                key: "a.custom".parse().expect("key"),
+                base_version: 1,
+            },
+        ],
+    });
+    let tree = fixture.tree();
+    let roots: Vec<_> = tree
+        .nodes
+        .iter()
+        .filter(|node| node.parent.is_none())
+        .collect();
+    assert!(roots.iter().map(|node| node.key.as_str()).eq([
+        "builtin.classification",
+        "z.custom",
+        "a.custom"
+    ]));
+    assert_eq!(roots[0].sibling_order, 0);
+    assert_eq!(
+        roots[0].version,
+        quartz_domain::rules::BUILTIN_CLASSIFICATION_REVISION
+    );
+    assert_eq!(roots[1].sibling_order, 1);
+    assert_eq!(roots[2].sibling_order, 2);
+}

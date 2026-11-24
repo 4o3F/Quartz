@@ -47,6 +47,11 @@ macro_rules! requests {
     )*};
 }
 requests! {
+    crate::RuleSetsEditRequest => RuleSetsEdit => crate::RuleSetsWriteResponse,
+    crate::RuleSetsSetEnabledRequest => RuleSetsSetEnabled => crate::RuleSetsWriteResponse,
+    crate::RuleSetsReorderRequest => RuleSetsReorder => crate::RuleSetsWriteResponse,
+    crate::RuleSetsDeleteRequest => RuleSetsDelete => crate::RuleSetsWriteResponse,
+    crate::RuleSetsRevertRequest => RuleSetsRevert => crate::RuleSetsWriteResponse,
     crate::CategoriesListRequest => CategoriesList => crate::CategoriesListResponse,
     crate::CategoriesCreateRequest => CategoriesCreate => crate::CategoryResponse,
     crate::CategoriesUpdateRequest => CategoriesUpdate => crate::CategoryResponse,

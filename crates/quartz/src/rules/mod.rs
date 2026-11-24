@@ -3,3 +3,6 @@
 pub(crate) mod registry;
 
 pub(crate) mod read;
+
+#[cfg(any(windows, test))]
+pub(crate) mod write;

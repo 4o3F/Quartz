@@ -3,7 +3,7 @@
 #[cfg(any(windows, test))]
 mod categories;
 #[cfg(any(windows, test))]
-mod diagnostics;
+pub(crate) mod diagnostics;
 #[cfg(any(windows, test))]
 pub(crate) mod dispatch;
 mod queue;

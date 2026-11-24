@@ -284,7 +284,7 @@ fn unknown_operation_preserves_connection_and_permission_errors_are_typed() {
     assert!(matches!(
         ui.request(Op::RuleSetsEdit, &json!({})),
         Err(CallCoreError::Protocol {
-            kind: ErrorKind::NotImplemented
+            kind: ErrorKind::BadRequest
         })
     ));
     for client in [&mut ui, &mut cli] {

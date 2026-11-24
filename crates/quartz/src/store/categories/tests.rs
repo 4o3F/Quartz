@@ -865,6 +865,11 @@ fn create_uses_one_tree_load_and_retry_uses_no_tree_load() {
     use diesel::connection::InstrumentationEvent;
     use std::sync::{Arc, Mutex};
     let mut fixture = Fixture::new();
+    let mut registry = crate::rules::registry::RegistryShell::open(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+    )
+    .expect("registry");
     let queries = Arc::new(Mutex::new(Vec::new()));
     let observed = queries.clone();
     fixture
@@ -896,6 +901,7 @@ fn create_uses_one_tree_load_and_retry_uses_no_tree_load() {
         &mut fixture.store,
         quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
         None,
+        &mut registry,
     )
     .expect("create");
     let created = std::mem::take(&mut *queries.lock().expect("queries"));
@@ -921,6 +927,7 @@ fn create_uses_one_tree_load_and_retry_uses_no_tree_load() {
         &mut fixture.store,
         quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
         None,
+        &mut registry,
     )
     .expect("UUID retry precedes value validation");
     assert_eq!(tree_loads(&queries.lock().expect("queries")), 0);

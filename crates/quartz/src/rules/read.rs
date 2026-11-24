@@ -92,7 +92,7 @@ impl ReadRequest {
     }
 }
 impl ReadInputs {
-    fn versions(&self) -> wire::QueryVersions {
+    pub(crate) fn versions(&self) -> wire::QueryVersions {
         let sets: Vec<_> = self.snapshot.state().sets.iter().map(|item| {
             let revisions: Vec<_> = item.1.versions.values().map(|revision| serde_json::json!({
                 "version": revision.version, "content": revision.content,

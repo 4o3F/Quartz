@@ -237,6 +237,13 @@ impl Inspection {
             .get_result(&mut self.connection)
             .expect("overload gap count")
     }
+    pub(crate) fn policy_boundary_count(&mut self) -> i64 {
+        intervals::table
+            .filter(intervals::end_reason.eq(enums::IntervalEndReason::PolicyChanged))
+            .count()
+            .get_result(&mut self.connection)
+            .expect("policy boundary count")
+    }
     pub(crate) fn idle_count(&mut self) -> i64 {
         self.availability_count(enums::AvailabilityReason::Idle)
     }

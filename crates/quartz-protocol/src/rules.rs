@@ -1,4 +1,4 @@
-//! Rule-set tree, canonical contents, and retained revision read contracts.
+//! Rule-set reads and atomic mutation contracts.
 
 use crate::{QueryCursor, QueryVersions, Uuid};
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,99 @@ pub struct RuleSetsVersionsRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<QueryCursor>,
 }
+/// Saves complete quartz-rules/1 text; zero creates or restores a key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleSetsEditRequest {
+    pub key: String,
+    pub base_version: u32,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_receipt: Option<String>,
+}
+/// Changes enablement of a user set and its effective subtree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleSetsSetEnabledRequest {
+    pub key: String,
+    pub base_version: NonZeroU32,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_receipt: Option<String>,
+}
+/// One observed revision in a complete sibling ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleSetSibling {
+    pub key: String,
+    pub base_version: NonZeroU32,
+}
+/// Replaces the entire same-parent, same-kind sibling order atomically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleSetsReorderRequest {
+    pub siblings: Vec<RuleSetSibling>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_receipt: Option<String>,
+}
+/// Deletes a childless user set while retaining its history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleSetsDeleteRequest {
+    pub key: String,
+    pub base_version: NonZeroU32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_receipt: Option<String>,
+}
+/// Copies historical contents into a new current revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleSetsRevertRequest {
+    pub key: String,
+    pub base_version: NonZeroU32,
+    pub version: NonZeroU32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_receipt: Option<String>,
+}
+/// A committed revision, including the revision recording a deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutatedRuleSet {
+    pub key: String,
+    pub version: u32,
+    pub deleted: bool,
+}
+/// Atomic mutation result with the same registry digest used by rule reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleSetsWriteResponse {
+    pub sets: Vec<MutatedRuleSet>,
+    pub versions: QueryVersions,
+}
+/// Immutable portion of an existing rule-set identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleSetIdentityField {
+    Kind,
+    Parent,
+}
+/// Located content diagnostic; parameters contain only structured values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleDiagnostic {
+    pub code: String,
+    pub path: String,
+    pub location: Option<RuleDiagnosticLocation>,
+    pub params: std::collections::BTreeMap<String, String>,
+}
+/// One-based source coordinates without source text or local file paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleDiagnosticLocation {
+    pub line: usize,
+    pub column: usize,
+}
+/// Maximum UTF-8 bytes in one rule-set edit or import (04 §6.3.3).
+pub const MAX_RULE_TEXT_BYTES: usize = 192 * 1024;
+/// Maximum diagnostics in one validation response (04 §6.3.3).
+pub const MAX_RULE_DIAGNOSTICS: usize = 100;
+
 /// Authority of a rule set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

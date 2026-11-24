@@ -320,13 +320,17 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 | `rule_sets.versions` | `{key, cursor?}` | `{revisions:[{version,parent_version,created_utc_ms,note}], versions, next_cursor}`；包含删除前历史 |
 | `rule_sets.edit` | `{key, base_version, text, preview_receipt?}`，text 为完整 `quartz-rules/1` 文本 | `{sets:[{key,version,deleted}], versions}` |
 | `rule_sets.set_enabled` | `{key, base_version, enabled, preview_receipt?}` | 同上；子树的有效启用状态随之变化 |
-| `rule_sets.reorder` | `{siblings:[{key,base_version}], preview_receipt?}`，完整同父同 kind 列表，数组即最终顺序 | 同上；全部版本检查与写入原子完成 |
+| `rule_sets.reorder` | `{siblings:[{key,base_version}], preview_receipt?}`，完整同父同 kind 用户集列表，数组即最终顺序；根级仅包含该 kind 的活跃用户根集 | 同上；全部版本检查与写入原子完成 |
 | `rule_sets.delete` | `{key, base_version, preview_receipt?}` | 同上；仅可删除无子级的用户集，保留历史 |
 | `rule_sets.revert` | `{key, base_version, version, preview_receipt?}`，version 为历史来源 | 同上；生成新的当前修订 |
 
 tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树返回的该值用作历史 scope.privacy_version。三个读取操作允许 UI、CLI，均按 200 KiB 页和不透明游标返回；`versions` 覆盖注册表全部修订、启停、排序与元数据输入。tree 按同级顺序、key 的前序遍历，versions 按版本降序，own 按文件顺序，effective 先按生效顺序列有效规则，再按树与文件顺序列被停用或覆盖的条目。entries 包含 `entry_kind`（`rule | override | disable`）、`content`（格式文档对应条目的字段）、`provenance`（定义与覆盖的 key/version/id 链）和 `state`（`effective | disabled | overridden | target_missing`）；告警使用稳定代码 `target_deleted | upstream_changed | conflict` 与目标规则引用。单条目编码超过 128 KiB 时校验报 `E-RULE-VALUE`，不产生无法分页的修订。
 
 写入仅允许 UI。`base_version = 0` 仅用于 edit/import 创建不存在或已删除的 key；恢复已删除 key 时沿用历史身份，版本从最后修订继续递增。其余写入必须使用当前非零版本。text 中 `[set].key` 必须等于请求 key；保留 key 的类型和父级身份校验先于隐私预览回执校验。版本检查先于写入；过期返回 `rule_set_stale`，客户端读取确认结果，保留草稿，不用新基础版本自动重放。所有影响隐私保留动作的写入（包括启停、排序、删除与回退）都适用第 6.3.2 节回执要求。
+
+内置 key 的编辑、启停、排序、删除和回退统一返回 `rule_set_read_only {key}`，在内容和基础版本检查前拒绝。text 的 key 与请求 key 不同返回 `bad_request`；已有 key 的 kind 或 parent 不同返回 `rule_set_identity`，field 为对应身份字段。创建或沿用历史身份恢复时，parent 的语法无效、缺失、已删除或父链成环返回 `rule_validation_failed`，诊断为定位到 `set.parent` 的 `E-RULE-PARENT`。排序列表为空、重复、不完整或混入其他父级或 kind 的节点返回 `bad_request`；无重复列表按 key 顺序检查基础版本，首个冲突使用 `rule_set_stale`。根级排序覆盖该 kind 的全部活跃用户根集，省略内置根集；内置根集固定排在所有用户根集之前，用户根集的 sibling_order 从 1 开始，子级排序从 0 开始。删除有子级的用户集返回 `rule_set_has_children`。
+
+写入成功的 sets 按 key 排序，包含本次写入的全部节点；deleted 为 true 时 version 是记录删除的新修订。versions 与规则集读取使用相同的注册表摘要。结果不分页；写入前按 u32 最大版本号为结果预留空间，超过 200 KiB 返回 `bad_request`。提交失败保持当前快照和版本摘要，提交成功后替换快照、通知采集重新求值，并发布订阅与托盘所用的版本变化。
 
 ```jsonc
 // 新建默认分类覆盖集；一次请求只修改一个 key
@@ -336,6 +340,8 @@ tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树�
 ```
 
 ### 6.3.2 预览、期限与回执
+
+预览回执签发在 M4-E2 实现。在此之前，所有用户 privacy-kind 规则集的编辑、导入、启停、排序、删除和回退均返回 `preview_required`，包括已提供 preview_receipt 的请求；分类和提取规则集写入可用。身份和基础版本校验先于此门控。启动时安装内置规则修订沿用内置升级流程。
 
 `rules.preview`（UI）和 `rules_text.preview`（UI、CLI）共用请求 `{mutation, start_date, end_date, expected_versions, deadline_ms?, sample_limit?, cursor?}`。日期为 1–7 个逻辑日，界面默认截至所选日的 7 日；`expected_versions` 取同范围 `query.range` 的摘要。`mutation = {op, body}` 为拟提交写操作的完整内容，省略 `preview_receipt`；rules.preview 接受 rule_sets 写操作，rules_text.preview 接受 rules_text.import。预览在临时规则快照上求值，不保存草稿。
 

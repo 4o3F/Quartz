@@ -52,9 +52,24 @@ impl DiagnosticCode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum LocationKind {
+    #[default]
+    Text,
+    Database,
+}
+
+impl LocationKind {
+    fn is_text(&self) -> bool {
+        *self == Self::Text
+    }
+}
+
 /// A byte span and one-based line and Unicode scalar column in a source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceLocation {
+    #[serde(default, skip_serializing_if = "LocationKind::is_text")]
+    kind: LocationKind,
     /// Source file path, or a database revision identifier for installed rules.
     pub file: PathBuf,
     /// Half-open byte range in the original UTF-8 source.
@@ -65,9 +80,14 @@ pub struct SourceLocation {
     pub column: usize,
 }
 impl SourceLocation {
+    /// Whether this location retains coordinates from original rule text.
+    pub fn has_source_span(&self) -> bool {
+        self.kind == LocationKind::Text
+    }
     /// Identifies persisted contents when their original text spans are unavailable.
     pub fn database(key: &super::RuleSetKey, version: u32) -> Self {
         Self {
+            kind: LocationKind::Database,
             file: format!("database:{key}@{version}").into(),
             bytes: 0..0,
             line: 1,
@@ -78,6 +98,7 @@ impl SourceLocation {
     pub(super) fn new(file: &str, source: &str, bytes: Range<usize>) -> Self {
         let prefix = &source[..bytes.start.min(source.len())];
         Self {
+            kind: LocationKind::Text,
             file: file.into(),
             line: prefix.bytes().filter(|b| *b == b'\n').count() + 1,
             column: prefix
@@ -119,5 +140,23 @@ impl fmt::Display for Diagnostic {
             self.location.line,
             self.location.column
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn source_location_kind_survives_round_trips_and_does_not_depend_on_file_names() {
+        let text = SourceLocation::new("database:user.test@1", "", 0..0);
+        let database = SourceLocation::database(&"user.test".parse().expect("key"), 1);
+        assert!(text.has_source_span());
+        assert!(!database.has_source_span());
+        for location in [text, database] {
+            let encoded = serde_json::to_value(&location).expect("location JSON");
+            let decoded: SourceLocation =
+                serde_json::from_value(encoded).expect("location round trip");
+            assert_eq!(decoded, location);
+        }
     }
 }

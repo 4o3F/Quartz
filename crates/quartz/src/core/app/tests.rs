@@ -1768,3 +1768,65 @@ fn failed_persistence_recovers_without_any_new_capture_observation() {
     );
     let _directory = runtime.shutdown();
 }
+
+#[test]
+fn committed_classification_edit_immediately_splits_capture_without_another_observation() {
+    use crate::core::app::MainCommand;
+    use crate::persistence::dispatch::WriteRequest;
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    runtime.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
+    runtime.wait(|command| {
+        matches!(
+            command,
+            MainCommand::Effect(CaptureEffect::ReviewForeground)
+        )
+    });
+    runtime.observe(crate::store::capture::test_support::foreground(
+        1,
+        "fixture title",
+    ));
+    runtime.wait(|command| {
+        matches!(
+            command,
+            MainCommand::CaptureSnapshot {
+                state: CaptureState::Tracking(_),
+                foreground: Some(_),
+                ..
+            }
+        )
+    });
+    runtime.clock.advance(100);
+    runtime.observe(crate::store::capture::test_support::foreground(
+        1,
+        "fixture title",
+    ));
+    let text = "format='quartz-rules/1'\n[set]\nkey='user.capture'\nkind='classification'\nname='Classification'\nparent='builtin.classification'\n[[rule]]\nid='test'\nlabel='Test'\ncategory='builtin:learning'\nwhen=[{field='app.exe_name',op='equals',value='app.exe'}]\n";
+    let request = WriteRequest::decode(
+        quartz_protocol::Op::RuleSetsEdit,
+        serde_json::json!({"key":"user.capture","base_version":0,"text":text}),
+    )
+    .expect("typed write");
+    let reply = runtime
+        .workers
+        .writes
+        .submit(request)
+        .expect("mutation admission");
+    runtime.wait(|command| matches!(command, MainCommand::PolicyChanged));
+    let response = reply
+        .blocking_recv()
+        .expect("reply")
+        .expect("committed edit");
+    assert!(matches!(
+        response,
+        crate::persistence::dispatch::WriteResponse::Rules(_)
+    ));
+    runtime.observe(CaptureEvent::Stop(StopChange::Begin(StopReason::Paused)));
+    runtime.wait(|command| matches!(command,MainCommand::CaptureSnapshot {state:CaptureState::Stopped {reasons,..},..} if reasons.contains(&StopReason::Paused)));
+    let directory = runtime.shutdown();
+    assert_eq!(
+        Inspection::open(directory.path()).policy_boundary_count(),
+        1,
+        "one immediate boundary for the classification commit"
+    );
+}

@@ -4,16 +4,29 @@ use crate::store::{settings::AccessSettingError, versions::BumpVersionError};
 use quartz_protocol::{ErrorKind, ProtocolError};
 
 #[derive(Debug)]
-pub(super) enum WriteFailure {
+pub(crate) enum WriteFailure {
     Database(DatabaseFailure),
     Version(VersionFailure),
     Setting(SettingFailure),
     Identity,
     StoredCategory,
     StoredAnnotation,
+    Rule(RuleFailure),
 }
 #[derive(Debug)]
-pub(super) enum DatabaseFailure {
+pub(crate) enum RuleFailure {
+    MissingId,
+    PreconditionMismatch,
+    CommitEpoch,
+    CommitSnapshot,
+    SnapshotCompile,
+    SnapshotEffective,
+    SnapshotTree,
+    SnapshotIdentity,
+    SnapshotUpstream,
+}
+#[derive(Debug)]
+pub(crate) enum DatabaseFailure {
     Constraint(diesel::result::DatabaseErrorKind),
     MissingRow,
     QueryBuilder,
@@ -27,7 +40,7 @@ pub(super) enum DatabaseFailure {
     Unrecognized,
 }
 #[derive(Debug)]
-pub(super) enum SettingFailure {
+pub(crate) enum SettingFailure {
     Json,
     Deadline,
     DayStartOffset,
@@ -35,14 +48,46 @@ pub(super) enum SettingFailure {
     MetadataVersion,
 }
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum VersionFailure {
+pub(crate) enum VersionFailure {
     DayExhausted,
     MetadataExhausted,
     InvalidRange,
     AnnotationWork,
 }
 impl WriteFailure {
-    pub(super) fn database(error: &diesel::result::Error) -> Self {
+    pub(crate) fn rule_persist(error: &crate::store::rules::ExecuteRuleWritesError) -> Self {
+        use crate::store::rules::ExecuteRuleWritesError;
+        match error {
+            ExecuteRuleWritesError::Database { source } => Self::database(source),
+            ExecuteRuleWritesError::MissingId => Self::Rule(RuleFailure::MissingId),
+            ExecuteRuleWritesError::PreconditionMismatch { .. } => {
+                Self::Rule(RuleFailure::PreconditionMismatch)
+            }
+        }
+    }
+    pub(crate) fn rule_commit(
+        error: &quartz_domain::rules::registry::CommitRuleDecisionError,
+    ) -> Self {
+        use quartz_domain::rules::registry::CommitRuleDecisionError;
+        Self::Rule(match error {
+            CommitRuleDecisionError::StaleEpoch { .. } => RuleFailure::CommitEpoch,
+            CommitRuleDecisionError::Snapshot { .. } => RuleFailure::CommitSnapshot,
+        })
+    }
+    pub(crate) fn rule_snapshot(
+        error: &quartz_domain::rules::registry::BuildRuleSnapshotError,
+    ) -> Self {
+        use quartz_domain::rules::registry::BuildRuleSnapshotError;
+        Self::Rule(match error {
+            BuildRuleSnapshotError::Compile { .. } => RuleFailure::SnapshotCompile,
+            BuildRuleSnapshotError::Effective { .. } => RuleFailure::SnapshotEffective,
+            BuildRuleSnapshotError::Tree { .. } => RuleFailure::SnapshotTree,
+            BuildRuleSnapshotError::Identity { .. } => RuleFailure::SnapshotIdentity,
+            BuildRuleSnapshotError::Upstream { .. } => RuleFailure::SnapshotUpstream,
+        })
+    }
+
+    pub(crate) fn database(error: &diesel::result::Error) -> Self {
         use diesel::result::Error;
         let kind = match error {
             Error::DatabaseError(kind, _) => DatabaseFailure::Constraint(*kind),
@@ -63,7 +108,7 @@ impl WriteFailure {
         };
         Self::Database(kind)
     }
-    pub(super) fn version(error: &BumpVersionError) -> Self {
+    pub(crate) fn version(error: &BumpVersionError) -> Self {
         match error {
             BumpVersionError::Database { source } => Self::database(source),
             BumpVersionError::Setting { source } => Self::setting(source),
@@ -73,7 +118,7 @@ impl WriteFailure {
             BumpVersionError::AnnotationWork => Self::Version(VersionFailure::AnnotationWork),
         }
     }
-    pub(super) fn setting(error: &AccessSettingError) -> Self {
+    pub(crate) fn setting(error: &AccessSettingError) -> Self {
         match error {
             AccessSettingError::Database { source } => Self::database(source),
             AccessSettingError::Version { source } => Self::version(source),
@@ -86,7 +131,7 @@ impl WriteFailure {
             AccessSettingError::MetadataVersion => Self::Setting(SettingFailure::MetadataVersion),
         }
     }
-    pub(super) fn into_protocol_error(self) -> ProtocolError {
+    pub(crate) fn into_protocol_error(self) -> ProtocolError {
         let kind = match &self {
             Self::Version(VersionFailure::DayExhausted | VersionFailure::MetadataExhausted) => {
                 ErrorKind::VersionExhausted
@@ -107,6 +152,10 @@ impl WriteFailure {
             | Self::Identity
             | Self::StoredCategory
             | Self::StoredAnnotation => ErrorKind::Internal,
+            Self::Rule(rule) => {
+                tracing::error!(failure = ?rule, "rule write failed");
+                return ProtocolError::new(ErrorKind::Internal);
+            }
         };
         tracing::error!(failure = ?self, "database write failed");
         ProtocolError::new(kind)

@@ -1,0 +1,44 @@
+{
+  "edit": {
+    "key": "user.local",
+    "base_version": 0,
+    "text": "format='quartz-rules/1'\n[set]\nkey='user.local'\nkind='classification'\nname='Rules'\n"
+  },
+  "set_enabled": {
+    "key": "user.local",
+    "base_version": 1,
+    "enabled": false
+  },
+  "reorder": {
+    "siblings": [
+      {
+        "key": "user.b",
+        "base_version": 2
+      },
+      {
+        "key": "user.a",
+        "base_version": 3
+      }
+    ]
+  },
+  "delete": {
+    "key": "user.local",
+    "base_version": 1
+  },
+  "revert": {
+    "key": "user.local",
+    "base_version": 4,
+    "version": 1,
+    "preview_receipt": "receipt:opaque"
+  },
+  "response": {
+    "sets": [
+      {
+        "key": "user.local",
+        "version": 5,
+        "deleted": false
+      }
+    ],
+    "versions": "registry-inputs"
+  }
+}

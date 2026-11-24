@@ -32,6 +32,8 @@ pub(crate) enum OpenRegistryShellError {
 pub(crate) enum RunRegistryCommandError {
     #[snafu(display("rule command was rejected"))]
     Decide { source: DecideRegistryCommandError },
+    #[snafu(display("privacy writes require a preview receipt"))]
+    PreviewRequired,
     #[snafu(display("rule writes did not commit"))]
     Persist { source: ExecuteRuleWritesError },
     #[snafu(display("could not publish committed rule state"))]
@@ -40,7 +42,6 @@ pub(crate) enum RunRegistryCommandError {
 
 #[derive(Debug)]
 pub(crate) struct RegistryResult {
-    #[cfg_attr(not(test), expect(dead_code, reason = "M4 rule editing over IPC"))]
     pub reply: RegistrySuccess,
     pub event: Option<RulesChanged>,
 }
@@ -154,6 +155,15 @@ impl RegistryShell {
             outcome,
         } = decision.into_parts();
         let reply = reply.context(run_error::DecideSnafu)?;
+        // E2 will authorize exact mutations with connection-bound preview receipts.
+        if writes.iter().any(|write| {
+            !matches!(
+                write,
+                quartz_domain::rules::registry::RuleSetWrite::InstallBuiltin(_)
+            ) && write.update().set.header.kind == rules::RuleKind::Privacy
+        }) {
+            return Err(RunRegistryCommandError::PreviewRequired);
+        }
         let event = if let Some(mut outcome) = outcome {
             let now = now.get().as_millisecond();
             store
@@ -197,6 +207,21 @@ mod tests {
         text::NfcText,
     };
     use std::collections::BTreeMap;
+
+    fn persist_existing_overlay(
+        shell: &RegistryShell,
+        store: &mut Store,
+        now: quartz_domain::capture::UtcInstant,
+        command: RegistryCommand,
+    ) {
+        let decision = shell.core().decide(command).into_parts();
+        decision.reply.expect("existing overlay fixture");
+        store
+            .rule_transaction(|transaction| {
+                transaction.execute(&decision.writes, now.get().as_millisecond())
+            })
+            .expect("persist pre-existing overlay");
+    }
 
     #[test]
     fn classification_revision_two_upgrades_revision_one_and_preserves_overlay() {
@@ -499,7 +524,7 @@ pattern='\ANote: (?P<document>[^\r\n]+)\z'
         let mut store = Store::open(&data).expect("store");
         store.seed_categories().expect("builtin categories");
         let now = quartz_domain::capture::UtcInstant::try_from(0).expect("UTC");
-        let mut shell = RegistryShell::open_with_builtins(
+        let shell = RegistryShell::open_with_builtins(
             &mut store,
             now,
             &[
@@ -515,14 +540,14 @@ pattern='\ANote: (?P<document>[^\r\n]+)\z'
         assert_eq!(shell.snapshots().load().epoch().get(), 0);
         let builtin_key = "builtin.privacy".parse().expect("builtin key");
         assert_eq!(shell.core().state().sets[&builtin_key].current.version, 1);
-        shell
-            .run(
-                &mut store,
-                now,
-                RegistryCommand::Apply {
-                    key: "user.overlay".parse().expect("overlay key"),
-                    file: "overlay.toml".into(),
-                    text: r"format='quartz-rules/1'
+        persist_existing_overlay(
+            &shell,
+            &mut store,
+            now,
+            RegistryCommand::Apply {
+                key: "user.overlay".parse().expect("overlay key"),
+                file: "overlay.toml".into(),
+                text: r"format='quartz-rules/1'
 [set]
 key='user.overlay'
 kind='privacy'
@@ -534,11 +559,10 @@ label='User replacement'
 preset='excluded'
 when=[{field='app.exe_name',op='equals',value='quartz-test.exe'}]
 "
-                    .into(),
-                    base_version: 0,
-                },
-            )
-            .expect("persist user overlay");
+                .into(),
+                base_version: 0,
+            },
+        );
         drop(shell);
         let upgraded = RegistryShell::open_with_builtins(
             &mut Store::open(&data).expect("reopen store"),

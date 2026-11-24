@@ -4148,6 +4148,11 @@ fn write_exhaustion_returns_documented_code_and_rolls_back() {
         AnnotationId, AnnotationKind, AnnotationValues, AnnotationsCreateRequest, CreateAnnotation,
     };
     let mut fixture = QueryFixture::new(0);
+    let mut registry = crate::rules::registry::RegistryShell::open(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+    )
+    .expect("registry");
     let uuid = AnnotationId(
         "abcdef00-0000-4000-8000-000000000001"
             .parse()
@@ -4184,6 +4189,7 @@ fn write_exhaustion_returns_documented_code_and_rolls_back() {
         &mut fixture.store,
         quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
         None,
+        &mut registry,
     )
     .expect_err("exhaustion");
     assert_eq!(error.kind.code(), "version_exhausted");
@@ -4218,6 +4224,7 @@ fn write_exhaustion_returns_documented_code_and_rolls_back() {
         &mut fixture.store,
         quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
         None,
+        &mut registry,
     )
     .expect_err("exhaustion");
     assert_eq!(error.kind.code(), "version_exhausted");
@@ -4236,6 +4243,11 @@ fn write_failures_log_typed_causes_without_user_content() {
     use diesel::connection::SimpleConnection;
     use std::io::{Read, Seek};
     let mut fixture = QueryFixture::new(0);
+    let mut registry = crate::rules::registry::RegistryShell::open(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+    )
+    .expect("registry");
     fixture.store.writer.batch_execute("CREATE TRIGGER reject_note BEFORE INSERT ON annotations BEGIN SELECT RAISE(ABORT, 'private user content'); END; CREATE TRIGGER reject_category BEFORE INSERT ON categories BEGIN SELECT RAISE(ABORT, 'private user content'); END;").expect("inject failures");
     let mut log = tempfile::tempfile().expect("log");
     let subscriber = tracing::Dispatch::new(
@@ -4261,6 +4273,7 @@ fn write_failures_log_typed_causes_without_user_content() {
                 &mut fixture.store,
                 quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
                 None,
+                &mut registry,
             )
         })
         .expect_err("injected failure");
@@ -4355,6 +4368,11 @@ fn broken_annotation_storage_invariants_return_internal_and_log_safe_causes() {
     }
     for fault in [Fault::DanglingCategory, Fault::MissingWrittenRow] {
         let mut fixture = QueryFixture::new(0);
+        let mut registry = crate::rules::registry::RegistryShell::open(
+            &mut fixture.store,
+            quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+        )
+        .expect("registry");
         let request = quartz_protocol::AnnotationsCreateRequest {
             entities: vec![quartz_protocol::CreateAnnotation {
                 uuid: quartz_protocol::AnnotationId(
@@ -4401,7 +4419,7 @@ fn broken_annotation_storage_invariants_return_internal_and_log_safe_causes() {
                 serde_json::to_value(request).expect("request"),
             )
             .expect("decode")
-            .execute(&mut fixture.store, now, None)
+            .execute(&mut fixture.store, now, None, &mut registry)
         })
         .expect_err("stored invariant");
         assert_eq!(error.kind, ErrorKind::Internal);
@@ -4631,6 +4649,11 @@ fn settings_metadata_exhaustion_returns_version_exhausted_and_rolls_back() {
     use crate::persistence::dispatch::WriteRequest;
     use crate::store::schema::settings;
     let mut fixture = QueryFixture::new(0);
+    let mut registry = crate::rules::registry::RegistryShell::open(
+        &mut fixture.store,
+        quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
+    )
+    .expect("registry");
     let original = fixture.store.ui_settings().expect("original settings");
     diesel::update(settings::table.filter(settings::key.eq("metadata_version")))
         .set(settings::value.eq(i64::MAX.to_string()))
@@ -4651,6 +4674,7 @@ fn settings_metadata_exhaustion_returns_version_exhausted_and_rolls_back() {
         &mut fixture.store,
         quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
         Some(system),
+        &mut registry,
     )
     .expect_err("exhausted settings write");
     assert_eq!(error.kind, ErrorKind::VersionExhausted);
@@ -4668,4 +4692,121 @@ fn settings_metadata_exhaustion_returns_version_exhausted_and_rolls_back() {
     );
     let effects = fixture.store.take_committed_versions();
     assert!(effects.facts.is_empty() && effects.metadata_version.is_none());
+}
+
+#[test]
+fn committed_rule_mutations_stale_issued_rule_and_day_page_cursors() {
+    use crate::rules::{
+        read::{ReadInputs, ReadRequest, ReadResponse},
+        registry::RegistryShell,
+        write::RuleMutation,
+    };
+    use quartz_protocol::{
+        RuleKind, RuleSetsEditRequest, RuleSetsGetRequest, RuleSetsTreeRequest, RuleView,
+    };
+    const FACT_COUNT: i64 = 2000;
+    const KEY_PADDING: usize = 80 * 1024;
+    const RULES_PER_SET: usize = 24;
+    const VALUE_BYTES: usize = 3000;
+    let mut fixture = QueryFixture::new(FACT_COUNT);
+    let now = quartz_domain::capture::UtcInstant::try_from(0).expect("UTC");
+    let mut registry = RegistryShell::open(&mut fixture.store, now).expect("rules");
+    let root = "user.cursor-root";
+    RuleMutation::Edit(RuleSetsEditRequest {
+        key: root.into(),
+        base_version: 0,
+        text: format!(
+            "format='quartz-rules/1'\n[set]\nkey='{root}'\nkind='classification'\nname='Root'\n"
+        ),
+        preview_receipt: None,
+    })
+    .execute(&mut registry, &mut fixture.store, now)
+    .expect("root");
+    let entries:String=(0..RULES_PER_SET).map(|index|format!("[[rule]]\nid='rule-{index}'\nlabel='Rule'\ncategory='builtin:learning'\nwhen=[{{field='app.exe_name',op='equals',value='{}'}}]\n","x".repeat(VALUE_BYTES))).collect();
+    for suffix in ["a", "b", "c"] {
+        let key = format!("user.cursor-{suffix}-{}", "x".repeat(KEY_PADDING));
+        let text = format!(
+            "format='quartz-rules/1'\n[set]\nkey='{key}'\nkind='classification'\nname='Child'\nparent='{root}'\n{entries}"
+        );
+        assert!(text.len() <= quartz_protocol::MAX_RULE_TEXT_BYTES);
+        RuleMutation::Edit(RuleSetsEditRequest {
+            key,
+            base_version: 0,
+            text,
+            preview_receipt: None,
+        })
+        .execute(&mut registry, &mut fixture.store, now)
+        .expect("bounded child");
+    }
+    let old = registry.snapshots().load();
+    let metadata_version = fixture.store.rule_read_metadata().expect("metadata");
+    let old_inputs = || ReadInputs {
+        snapshot: old.clone(),
+        metadata_version,
+    };
+    let mut get = RuleSetsGetRequest {
+        key: root.into(),
+        version: None,
+        view: RuleView::Effective,
+        cursor: None,
+    };
+    let ReadResponse::Get(first_get) = ReadRequest::Get(get.clone())
+        .execute(old_inputs())
+        .expect("get page")
+    else {
+        panic!("get response")
+    };
+    get.cursor = Some(first_get.next_cursor.expect("issued get continuation"));
+    let mut tree = RuleSetsTreeRequest {
+        kind: RuleKind::Classification,
+        cursor: None,
+    };
+    let ReadResponse::Tree(first_tree) = ReadRequest::Tree(tree.clone())
+        .execute(old_inputs())
+        .expect("tree page")
+    else {
+        panic!("tree response")
+    };
+    tree.cursor = Some(first_tree.next_cursor.expect("issued tree continuation"));
+    let QueryRequest::Day(mut day) = fixture.request_day() else {
+        panic!("day request")
+    };
+    let QueryResponse::Day(first_day) = fixture
+        .run(QueryRequest::Day(day.clone()))
+        .expect("day page")
+    else {
+        panic!("day response")
+    };
+    day.cursor = Some(first_day.next_cursor.expect("issued day continuation"));
+    RuleMutation::Edit(RuleSetsEditRequest {key:"user.after-cursor".into(),base_version:0,text:"format='quartz-rules/1'\n[set]\nkey='user.after-cursor'\nkind='classification'\nname='Changed'\n".into(),preview_receipt:None}).execute(&mut registry,&mut fixture.store,now).expect("committed mutation");
+    for request in [
+        ReadRequest::Get(get.clone()),
+        ReadRequest::Tree(tree.clone()),
+    ] {
+        let error = request
+            .execute(ReadInputs {
+                snapshot: registry.snapshots().load(),
+                metadata_version,
+            })
+            .expect_err("cursor changed after commit");
+        assert_eq!(error.kind, ErrorKind::StaleCursor);
+    }
+    assert!(matches!(
+        fixture.run(QueryRequest::Day(day)),
+        Err(RunQueryError::StaleCursor)
+    ));
+    let ReadResponse::Get(continued) = ReadRequest::Get(get)
+        .execute(old_inputs())
+        .expect("retained snapshot continuation")
+    else {
+        panic!("get response")
+    };
+    assert_eq!(continued.versions, first_get.versions);
+    let ReadResponse::Tree(continued) = ReadRequest::Tree(tree)
+        .execute(old_inputs())
+        .expect("retained tree continuation")
+    else {
+        panic!("tree response")
+    };
+    assert_eq!(continued.versions, first_tree.versions);
 }

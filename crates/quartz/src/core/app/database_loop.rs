@@ -366,6 +366,14 @@ impl DatabaseLoop {
         self.store.limit_write_wait(Duration::MAX);
         if result.is_ok() {
             self.publish_versions()?;
+            if matches!(
+                result,
+                Ok(crate::persistence::dispatch::WriteResponse::Rules(_))
+            ) {
+                self.feedback
+                    .send(Feedback::RulesChanged)
+                    .map_err(|_| RunDatabaseLoopError::Feedback)?;
+            }
         }
         if settings_changed
             && let Ok(crate::persistence::dispatch::WriteResponse::Settings(response)) = &result
@@ -392,7 +400,7 @@ impl DatabaseLoop {
         let now = self.now().map_err(|_| {
             quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::Internal)
         })?;
-        request.execute(&mut self.store, now.utc, system)
+        request.execute(&mut self.store, now.utc, system, &mut self.registry)
     }
     fn registry_command(
         &mut self,
@@ -858,6 +866,827 @@ mod tests {
             .block_on(reply.receive())
             .expect("read-only rule query still completes");
         inspection.restore_writes();
+    }
+
+    impl Fixture {
+        fn take_rule_publication(&mut self) {
+            assert!(matches!(
+                self._feedback.try_recv(),
+                Ok(Feedback::RulesChanged)
+            ));
+            assert!(
+                self._feedback.is_empty(),
+                "exactly one capture notification"
+            );
+        }
+        fn rule_text(key: &str, kind: &str, parent: &str) -> String {
+            format!(
+                "format='quartz-rules/1'\n[set]\nkey='{key}'\nkind='{kind}'\nname='Rules'\nparent='{parent}'\n"
+            )
+        }
+        fn edit_rule(
+            &mut self,
+            key: &str,
+            base_version: u32,
+        ) -> Result<serde_json::Value, quartz_protocol::ProtocolError> {
+            self.ipc(quartz_protocol::Op::RuleSetsEdit, serde_json::json!({"key":key,"base_version":base_version,"text":Self::rule_text(key,"classification","builtin.classification")}))
+        }
+    }
+    #[test]
+    fn rule_edits_create_revise_and_reject_committed_retries() {
+        let mut fixture = Fixture::new();
+        let created = fixture.edit_rule("user.test", 0).expect("create");
+        assert_eq!(
+            created["sets"],
+            serde_json::json!([{"key":"user.test","version":1,"deleted":false}])
+        );
+        fixture.take_rule_publication();
+        let revised = fixture.edit_rule("user.test", 1).expect("revise");
+        fixture.take_rule_publication();
+        assert_eq!(revised["sets"][0]["version"], 2);
+        assert_eq!(
+            fixture
+                .edit_rule("user.test", 1)
+                .expect_err("retry is stale")
+                .kind,
+            quartz_protocol::ErrorKind::RuleSetStale {
+                key: "user.test".into(),
+                current_version: quartz_protocol::RuleSetVersion(2)
+            }
+        );
+    }
+    #[test]
+    fn privacy_edits_require_preview_without_publishing_or_writing() {
+        let mut fixture = Fixture::new();
+        let before = fixture.database.registry.snapshots().load();
+        for receipt in [serde_json::Value::Null, serde_json::json!("unissued")] {
+            let error = fixture.ipc(quartz_protocol::Op::RuleSetsEdit, serde_json::json!({"key":"user.privacy","base_version":0,"text":Fixture::rule_text("user.privacy","privacy","builtin.privacy"),"preview_receipt":receipt})).expect_err("preview unavailable");
+            assert_eq!(error.kind.code(), "preview_required");
+            assert!(Arc::ptr_eq(
+                &before,
+                &fixture.database.registry.snapshots().load()
+            ));
+            assert_eq!(
+                fixture
+                    .database
+                    .store
+                    .rule_sets()
+                    .load()
+                    .expect("stored state")
+                    .sets
+                    .len(),
+                before.state().sets.len()
+            );
+            assert!(fixture._feedback.is_empty());
+            assert!(
+                !fixture
+                    ._versions
+                    .updates
+                    .has_changed()
+                    .expect("version publisher")
+            );
+        }
+    }
+
+    impl Fixture {
+        fn rule_digest(&mut self) -> quartz_protocol::QueryVersions {
+            crate::rules::read::ReadInputs {
+                snapshot: self.database.registry.snapshots().load(),
+                metadata_version: self.database.store.rule_read_metadata().expect("metadata"),
+            }
+            .versions()
+        }
+        fn assert_rule_failure(
+            &mut self,
+            op: quartz_protocol::Op,
+            body: serde_json::Value,
+            kind: quartz_protocol::ErrorKind,
+        ) {
+            let snapshot = self.database.registry.snapshots().load();
+            let stored = self
+                .database
+                .store
+                .rule_sets()
+                .load()
+                .expect("stored rules");
+            let digest = self.rule_digest();
+            assert_eq!(
+                self.ipc(op, body).expect_err("rejected mutation").kind,
+                kind
+            );
+            assert!(Arc::ptr_eq(
+                &snapshot,
+                &self.database.registry.snapshots().load()
+            ));
+            let after = self
+                .database
+                .store
+                .rule_sets()
+                .load()
+                .expect("unchanged rules");
+            assert_eq!(after.sets.len(), stored.sets.len());
+            for (key, before) in stored.sets {
+                let after = &after.sets[&key];
+                assert_eq!(after.current.set, before.current.set);
+                assert_eq!(after.current.version, before.current.version);
+                assert_eq!(after.current.enabled, before.current.enabled);
+                assert_eq!(after.current.sibling_order, before.current.sibling_order);
+                assert_eq!(after.deletion, before.deletion);
+                assert_eq!(after.versions, before.versions);
+            }
+            assert_eq!(self.rule_digest(), digest);
+            assert!(self._feedback.is_empty());
+            assert!(!self._versions.updates.has_changed().expect("publisher"));
+        }
+        fn save_rule(&mut self, key: &str, kind: &str, parent: &str) {
+            self.ipc(quartz_protocol::Op::RuleSetsEdit, serde_json::json!({"key":key,"base_version":0,"text":Self::rule_text(key,kind,parent)})).expect("save set");
+            self.take_rule_publication();
+            self._versions.updates.borrow_and_update();
+        }
+        fn seed_privacy_history(&mut self) {
+            use quartz_domain::rules::registry::RuleRegistry;
+            let state = self
+                .database
+                .store
+                .rule_sets()
+                .load()
+                .expect("stored fixture");
+            let registry = RuleRegistry::from_state(state).expect("fixture registry");
+            let decision = registry
+                .decide(RegistryCommand::Apply {
+                    key: "user.privacy".parse().expect("key"),
+                    file: "fixture.toml".into(),
+                    text: Self::rule_text("user.privacy", "privacy", "builtin.privacy"),
+                    base_version: 0,
+                })
+                .into_parts();
+            decision.reply.expect("fixture decision");
+            self.database
+                .store
+                .rule_transaction(|transaction| transaction.execute(&decision.writes, 0))
+                .expect("seed existing privacy revision");
+            self.database.registry = RegistryShell::open(
+                &mut self.database.store,
+                UtcInstant::try_from(0).expect("UTC"),
+            )
+            .expect("load persisted fixture");
+            let channel = crate::query::versions::VersionPublisher::open(
+                &mut self.database.store,
+                self.database.registry.snapshots(),
+            )
+            .expect("fixture publisher");
+            self.database.versions = channel.publisher;
+            self._versions = channel.port;
+        }
+    }
+    #[test]
+    fn rule_mutations_commit_new_revisions_and_reject_retries() {
+        use quartz_protocol::{ErrorKind, Op, RuleSetVersion};
+        struct Case {
+            op: Op,
+            body: serde_json::Value,
+            deleted: bool,
+        }
+        let cases = [
+            Case {
+                op: Op::RuleSetsSetEnabled,
+                body: serde_json::json!({"key":"user.test","base_version":1,"enabled":false}),
+                deleted: false,
+            },
+            Case {
+                op: Op::RuleSetsReorder,
+                body: serde_json::json!({"siblings":[{"key":"user.test","base_version":1}]}),
+                deleted: false,
+            },
+            Case {
+                op: Op::RuleSetsDelete,
+                body: serde_json::json!({"key":"user.test","base_version":1}),
+                deleted: true,
+            },
+            Case {
+                op: Op::RuleSetsRevert,
+                body: serde_json::json!({"key":"user.test","base_version":1,"version":1}),
+                deleted: false,
+            },
+        ];
+        for case in cases {
+            let mut fixture = Fixture::new();
+            fixture.save_rule("user.test", "classification", "builtin.classification");
+            let response = fixture.ipc(case.op, case.body.clone()).expect("mutation");
+            assert_eq!(
+                response["sets"],
+                serde_json::json!([{"key":"user.test","version":2,"deleted":case.deleted}])
+            );
+            assert_eq!(
+                response["versions"],
+                serde_json::to_value(fixture.rule_digest()).expect("digest")
+            );
+            fixture.take_rule_publication();
+            fixture._versions.updates.borrow_and_update();
+            fixture.assert_rule_failure(
+                case.op,
+                case.body,
+                ErrorKind::RuleSetStale {
+                    key: "user.test".into(),
+                    current_version: RuleSetVersion(if case.deleted { 0 } else { 2 }),
+                },
+            );
+        }
+    }
+    #[test]
+    fn deleted_keys_restore_their_identity_and_continue_history() {
+        use quartz_protocol::{ErrorKind, Op, RuleSetIdentityField};
+        let mut fixture = Fixture::new();
+        fixture.save_rule("user.test", "classification", "builtin.classification");
+        fixture
+            .ipc(
+                Op::RuleSetsDelete,
+                serde_json::json!({"key":"user.test","base_version":1}),
+            )
+            .expect("delete");
+        fixture.take_rule_publication();
+        fixture._versions.updates.borrow_and_update();
+        fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":0,"text":Fixture::rule_text("user.test","privacy","builtin.classification")}),ErrorKind::RuleSetIdentity { key:"user.test".into(),field:RuleSetIdentityField::Kind });
+        fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":0,"text":Fixture::rule_text("user.test","classification","builtin.extraction")}),ErrorKind::RuleSetIdentity { key:"user.test".into(),field:RuleSetIdentityField::Parent });
+        let restored = fixture.edit_rule("user.test", 0).expect("restore");
+        assert_eq!(restored["sets"][0]["version"], 3);
+        fixture.take_rule_publication();
+        let state = fixture
+            .database
+            .store
+            .rule_sets()
+            .load()
+            .expect("retained history");
+        let entry = &state.sets[&"user.test".parse().expect("key")];
+        assert_eq!(entry.versions.len(), 3);
+        assert_eq!(
+            entry.current.set.header.kind,
+            quartz_domain::rules::RuleKind::Classification
+        );
+        assert_eq!(
+            entry.current.set.header.parent.as_deref(),
+            Some("builtin.classification")
+        );
+    }
+    #[test]
+    fn every_mutation_rejects_builtin_targets_before_content_or_preview() {
+        use quartz_protocol::{ErrorKind, Op};
+        struct Case {
+            op: Op,
+            body: serde_json::Value,
+        }
+        for case in [
+            Case {
+                op: Op::RuleSetsEdit,
+                body: serde_json::json!({"key":"builtin.privacy","base_version":0,"text":"invalid text"}),
+            },
+            Case {
+                op: Op::RuleSetsSetEnabled,
+                body: serde_json::json!({"key":"builtin.privacy","base_version":1,"enabled":false}),
+            },
+            Case {
+                op: Op::RuleSetsReorder,
+                body: serde_json::json!({"siblings":[{"key":"builtin.privacy","base_version":1}]}),
+            },
+            Case {
+                op: Op::RuleSetsDelete,
+                body: serde_json::json!({"key":"builtin.privacy","base_version":1}),
+            },
+            Case {
+                op: Op::RuleSetsRevert,
+                body: serde_json::json!({"key":"builtin.privacy","base_version":1,"version":1}),
+            },
+        ] {
+            Fixture::new().assert_rule_failure(
+                case.op,
+                case.body,
+                ErrorKind::RuleSetReadOnly {
+                    key: "builtin.privacy".into(),
+                },
+            );
+        }
+    }
+    #[test]
+    fn edits_reject_key_kind_and_parent_changes_before_preview() {
+        use quartz_protocol::{ErrorKind, Op, RuleSetIdentityField};
+        let mut fixture = Fixture::new();
+        fixture.save_rule("user.test", "classification", "builtin.classification");
+        fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":1,"text":Fixture::rule_text("user.other","classification","builtin.classification")}),ErrorKind::BadRequest);
+        fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":1,"text":Fixture::rule_text("user.test","privacy","builtin.classification"),"preview_receipt":"unissued"}),ErrorKind::RuleSetIdentity { key:"user.test".into(),field:RuleSetIdentityField::Kind });
+        fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":1,"text":Fixture::rule_text("user.test","classification","builtin.extraction")}),ErrorKind::RuleSetIdentity { key:"user.test".into(),field:RuleSetIdentityField::Parent });
+    }
+    #[test]
+    fn deletion_rejects_parents_with_active_children() {
+        let mut fixture = Fixture::new();
+        fixture.save_rule("user.parent", "classification", "builtin.classification");
+        fixture.save_rule("user.child", "classification", "user.parent");
+        fixture.assert_rule_failure(
+            quartz_protocol::Op::RuleSetsDelete,
+            serde_json::json!({"key":"user.parent","base_version":1}),
+            quartz_protocol::ErrorKind::RuleSetHasChildren {
+                key: "user.parent".into(),
+            },
+        );
+    }
+    #[test]
+    fn reorder_requires_complete_unique_siblings_and_reports_conflicts_by_key() {
+        use quartz_protocol::{ErrorKind, Op, RuleSetVersion};
+        let mut fixture = Fixture::new();
+        fixture.save_rule("user.a", "classification", "builtin.classification");
+        fixture.save_rule("user.b", "classification", "builtin.classification");
+        fixture.save_rule("user.foreign", "extraction", "builtin.extraction");
+        fixture.save_rule("user.child", "classification", "user.a");
+        for siblings in [
+            serde_json::json!([]),
+            serde_json::json!([{"key":"user.a","base_version":1}]),
+            serde_json::json!([{"key":"user.a","base_version":1},{"key":"user.a","base_version":1}]),
+            serde_json::json!([{"key":"user.a","base_version":1},{"key":"user.foreign","base_version":1}]),
+            serde_json::json!([{"key":"user.a","base_version":1},{"key":"user.child","base_version":1}]),
+        ] {
+            fixture.assert_rule_failure(
+                Op::RuleSetsReorder,
+                serde_json::json!({"siblings":siblings}),
+                ErrorKind::BadRequest,
+            );
+        }
+        let order = serde_json::json!({"siblings":[{"key":"user.b","base_version":1},{"key":"user.a","base_version":1}]});
+        let result = fixture
+            .ipc(Op::RuleSetsReorder, order)
+            .expect("complete final order");
+        assert_eq!(
+            result["sets"],
+            serde_json::json!([{"key":"user.a","version":2,"deleted":false},{"key":"user.b","version":2,"deleted":false}])
+        );
+        fixture.take_rule_publication();
+        fixture._versions.updates.borrow_and_update();
+        let snapshot = fixture.database.registry.snapshots().load();
+        assert_eq!(
+            snapshot.state().sets[&"user.b".parse().expect("key")]
+                .current
+                .sibling_order,
+            0
+        );
+        assert_eq!(
+            snapshot.state().sets[&"user.a".parse().expect("key")]
+                .current
+                .sibling_order,
+            1
+        );
+        fixture.assert_rule_failure(Op::RuleSetsReorder,serde_json::json!({"siblings":[{"key":"user.b","base_version":1},{"key":"user.a","base_version":1}]}),ErrorKind::RuleSetStale {key:"user.a".into(),current_version:RuleSetVersion(2)});
+        fixture.assert_rule_failure(Op::RuleSetsReorder,serde_json::json!({"siblings":[{"key":"user.b","base_version":1},{"key":"user.a","base_version":2}]}),ErrorKind::RuleSetStale {key:"user.b".into(),current_version:RuleSetVersion(2)});
+    }
+    #[test]
+    fn privacy_mutations_and_imports_require_preview_without_changing_history() {
+        use quartz_protocol::{ErrorKind, Op};
+        struct Case {
+            op: Op,
+            body: serde_json::Value,
+        }
+        let mut fixture = Fixture::new();
+        fixture.seed_privacy_history();
+        for receipt in [serde_json::Value::Null, serde_json::json!("unissued")] {
+            for mut case in [
+                Case {
+                    op: Op::RuleSetsEdit,
+                    body: serde_json::json!({"key":"user.privacy","base_version":1,"text":Fixture::rule_text("user.privacy","privacy","builtin.privacy")}),
+                },
+                Case {
+                    op: Op::RuleSetsSetEnabled,
+                    body: serde_json::json!({"key":"user.privacy","base_version":1,"enabled":false}),
+                },
+                Case {
+                    op: Op::RuleSetsReorder,
+                    body: serde_json::json!({"siblings":[{"key":"user.privacy","base_version":1}]}),
+                },
+                Case {
+                    op: Op::RuleSetsDelete,
+                    body: serde_json::json!({"key":"user.privacy","base_version":1}),
+                },
+                Case {
+                    op: Op::RuleSetsRevert,
+                    body: serde_json::json!({"key":"user.privacy","base_version":1,"version":1}),
+                },
+            ] {
+                case.body["preview_receipt"] = receipt.clone();
+                fixture.assert_rule_failure(case.op, case.body, ErrorKind::PreviewRequired);
+            }
+        }
+        let snapshot = fixture.database.registry.snapshots().load();
+        for preview_hash in [None, Some(snapshot.hashes().privacy.clone())] {
+            let error = fixture
+                .database
+                .registry
+                .run(
+                    &mut fixture.database.store,
+                    UtcInstant::try_from(0).expect("UTC"),
+                    RegistryCommand::Import {
+                        key: "user.privacy".parse().expect("key"),
+                        file: "fixture.toml".into(),
+                        text: Fixture::rule_text("user.privacy", "privacy", "builtin.privacy"),
+                        base_version: 1,
+                        preview_hash,
+                    },
+                )
+                .expect_err("import requires receipt issuance");
+            assert!(matches!(
+                error,
+                RunRegistryCommandError::PreviewRequired
+                    | RunRegistryCommandError::Decide {
+                        source:
+                            quartz_domain::rules::registry::DecideRegistryCommandError::StalePreview
+                    }
+            ));
+            assert!(Arc::ptr_eq(
+                &snapshot,
+                &fixture.database.registry.snapshots().load()
+            ));
+        }
+    }
+    #[test]
+    fn extraction_edits_and_reverts_restore_historical_contents_as_new_revisions() {
+        use quartz_protocol::Op;
+        let mut fixture = Fixture::new();
+        fixture.save_rule("user.extract", "extraction", "builtin.extraction");
+        let original = fixture.database.registry.snapshots().load();
+        let text = Fixture::rule_text("user.extract", "extraction", "builtin.extraction")
+            + "[[rule]]\nid='document'\nlabel='Document'\napp=[{field='app.exe_name',op='equals',value='test.exe'}]\npattern='(?P<document>.+)'\n";
+        fixture
+            .ipc(
+                Op::RuleSetsEdit,
+                serde_json::json!({"key":"user.extract","base_version":1,"text":text}),
+            )
+            .expect("extraction revision");
+        fixture.take_rule_publication();
+        assert_ne!(
+            original.hashes().extraction,
+            fixture
+                .database
+                .registry
+                .snapshots()
+                .load()
+                .hashes()
+                .extraction
+        );
+        fixture
+            .ipc(
+                Op::RuleSetsRevert,
+                serde_json::json!({"key":"user.extract","base_version":2,"version":1}),
+            )
+            .expect("historical revert");
+        fixture.take_rule_publication();
+        let snapshot = fixture.database.registry.snapshots().load();
+        let entry = &snapshot.state().sets[&"user.extract".parse().expect("key")];
+        assert_eq!(entry.current.version, 3);
+        assert_eq!(
+            entry.current.set.content,
+            original.state().sets[&"user.extract".parse().expect("key")]
+                .current
+                .set
+                .content
+        );
+        assert_eq!(entry.versions.len(), 3);
+    }
+    #[test]
+    fn failed_rule_transactions_roll_back_all_siblings_and_publish_nothing() {
+        use diesel::{Connection, connection::SimpleConnection};
+        use quartz_protocol::{ErrorKind, Op};
+        let mut fixture = Fixture::new();
+        fixture.save_rule("user.a", "classification", "builtin.classification");
+        fixture.save_rule("user.b", "classification", "builtin.classification");
+        fixture.subscribe_category_day();
+        let path = fixture._directory.path().join("quartz.db");
+        let mut connection =
+            diesel::sqlite::SqliteConnection::establish(path.to_str().expect("database path"))
+                .expect("isolated connection");
+        connection.batch_execute("CREATE TRIGGER reject_rule_revision BEFORE INSERT ON rule_set_versions WHEN NEW.set_id=(SELECT id FROM rule_sets WHERE key='user.b') BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").expect("fail second sibling");
+        fixture.assert_rule_failure(Op::RuleSetsReorder,serde_json::json!({"siblings":[{"key":"user.a","base_version":1},{"key":"user.b","base_version":1}]}),ErrorKind::Internal);
+        connection
+            .batch_execute("DROP TRIGGER reject_rule_revision")
+            .expect("restore writes");
+        fixture.ipc(Op::RuleSetsReorder,serde_json::json!({"siblings":[{"key":"user.b","base_version":1},{"key":"user.a","base_version":1}]})).expect("retry uncommitted request");
+        fixture.take_rule_publication();
+    }
+    #[test]
+    fn classification_commits_publish_once_and_toggle_effective_subtrees() {
+        use quartz_domain::rules::{Field, FieldSnapshot};
+        use quartz_protocol::Op;
+        let mut fixture = Fixture::new();
+        fixture.save_rule("user.parent", "classification", "builtin.classification");
+        let text = Fixture::rule_text("user.child", "classification", "user.parent")
+            + "[[rule]]\nid='test'\nlabel='Test'\ncategory='builtin:learning'\nwhen=[{field='app.exe_name',op='equals',value='test.exe'}]\n";
+        fixture.subscribe_category_day();
+        let before = fixture.database.registry.snapshots().load();
+        fixture
+            .ipc(
+                Op::RuleSetsEdit,
+                serde_json::json!({"key":"user.child","base_version":0,"text":text}),
+            )
+            .expect("child classification");
+        fixture.take_rule_publication();
+        fixture.assert_category_publication();
+        let snapshot = fixture.database.registry.snapshots().load();
+        assert_ne!(snapshot.epoch(), before.epoch());
+        assert_eq!(
+            fixture
+                .database
+                .store
+                .rule_sets()
+                .load()
+                .expect("commit visible")
+                .sets[&"user.child".parse().expect("key")]
+                .current
+                .version,
+            1
+        );
+        let fields = FieldSnapshot {
+            text: std::collections::BTreeMap::from([(
+                Field::ExeName,
+                quartz_domain::text::NfcText::new("test.exe"),
+            )]),
+            domain: None,
+        };
+        assert!(snapshot.classification().classify(&fields).is_some());
+        fixture
+            .ipc(
+                Op::RuleSetsSetEnabled,
+                serde_json::json!({"key":"user.parent","base_version":1,"enabled":false}),
+            )
+            .expect("disable parent");
+        fixture.take_rule_publication();
+        fixture.assert_category_publication();
+        assert!(
+            fixture
+                .database
+                .registry
+                .snapshots()
+                .load()
+                .classification()
+                .classify(&fields)
+                .is_none()
+        );
+        fixture
+            .ipc(
+                Op::RuleSetsSetEnabled,
+                serde_json::json!({"key":"user.parent","base_version":2,"enabled":true}),
+            )
+            .expect("enable parent");
+        fixture.take_rule_publication();
+        fixture.assert_category_publication();
+        assert!(
+            fixture
+                .database
+                .registry
+                .snapshots()
+                .load()
+                .classification()
+                .classify(&fields)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rule_text_and_mutation_results_stay_within_page_and_frame_limits() {
+        use quartz_protocol::{ErrorKind, MAX_RULE_TEXT_BYTES, Op, QUERY_PAGE_BYTES};
+        let mut fixture = Fixture::new();
+        let mut text = Fixture::rule_text("user.limit", "classification", "builtin.classification");
+        text.push_str(&" ".repeat(MAX_RULE_TEXT_BYTES - text.len()));
+        let body = serde_json::json!({"key":"user.limit","base_version":0,"text":text});
+        let request = quartz_protocol::Request {
+            id: quartz_protocol::RequestId(1),
+            op: Op::RuleSetsEdit,
+            body: body.clone(),
+        };
+        assert!(
+            quartz_protocol::encode_json(&request)
+                .expect("maximum text frame")
+                .len()
+                <= quartz_protocol::MAX_FRAME_LEN
+        );
+        let result = fixture
+            .ipc(Op::RuleSetsEdit, body)
+            .expect("maximum text accepted");
+        assert!(serde_json::to_vec(&result).expect("response").len() <= QUERY_PAGE_BYTES);
+        fixture.take_rule_publication();
+        fixture._versions.updates.borrow_and_update();
+        fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.limit","base_version":1,"text":" ".repeat(MAX_RULE_TEXT_BYTES+1)}),ErrorKind::BadRequest);
+        let long_key = "a".repeat(QUERY_PAGE_BYTES);
+        fixture.assert_rule_failure(
+            Op::RuleSetsReorder,
+            serde_json::json!({"siblings":[{"key":long_key,"base_version":1}]}),
+            ErrorKind::BadRequest,
+        );
+    }
+    #[test]
+    fn invalid_rule_text_returns_bounded_structured_diagnostics_without_publishing() {
+        use quartz_protocol::{ErrorKind, MAX_RULE_DIAGNOSTICS, Op, QUERY_PAGE_BYTES};
+        let mut fixture = Fixture::new();
+        let snapshot = fixture.database.registry.snapshots().load();
+        let mut text =
+            Fixture::rule_text("user.invalid", "classification", "builtin.classification");
+        for index in 0..=MAX_RULE_DIAGNOSTICS {
+            text.push_str(&format!("[[rule]]\nid='rule{index}'\nlabel='Rule'\ncategory='builtin:learning'\nwhen=[{{field='unavailable',op='equals',value='fixture-private-marker'}}]\n"));
+        }
+        let error = fixture
+            .ipc(
+                Op::RuleSetsEdit,
+                serde_json::json!({"key":"user.invalid","base_version":0,"text":text}),
+            )
+            .expect_err("invalid fields");
+        let wire = serde_json::to_vec(&error).expect("error frame");
+        assert!(wire.len() <= QUERY_PAGE_BYTES);
+        assert!(
+            !String::from_utf8(wire)
+                .expect("JSON")
+                .contains("fixture-private-marker")
+        );
+        let ErrorKind::RuleValidationFailed {
+            diagnostics,
+            truncated,
+        } = error.kind
+        else {
+            panic!("structured diagnostics required")
+        };
+        assert_eq!(diagnostics.len(), MAX_RULE_DIAGNOSTICS);
+        assert!(truncated);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code == "E-RULE-FIELD"
+                    && diagnostic.location.is_some()
+                    && diagnostic.params.is_empty())
+        );
+        assert!(Arc::ptr_eq(
+            &snapshot,
+            &fixture.database.registry.snapshots().load()
+        ));
+        assert!(fixture._feedback.is_empty());
+    }
+    #[test]
+    fn missing_targets_report_zero_current_version() {
+        use quartz_protocol::{ErrorKind, Op, RuleSetVersion};
+        struct Case {
+            op: Op,
+            body: serde_json::Value,
+        }
+        let mut fixture = Fixture::new();
+        for case in [
+            Case {
+                op: Op::RuleSetsEdit,
+                body: serde_json::json!({"key":"user.missing","base_version":1,"text":Fixture::rule_text("user.missing","classification","builtin.classification")}),
+            },
+            Case {
+                op: Op::RuleSetsSetEnabled,
+                body: serde_json::json!({"key":"user.missing","base_version":1,"enabled":true}),
+            },
+            Case {
+                op: Op::RuleSetsReorder,
+                body: serde_json::json!({"siblings":[{"key":"user.missing","base_version":1}]}),
+            },
+            Case {
+                op: Op::RuleSetsDelete,
+                body: serde_json::json!({"key":"user.missing","base_version":1}),
+            },
+            Case {
+                op: Op::RuleSetsRevert,
+                body: serde_json::json!({"key":"user.missing","base_version":1,"version":1}),
+            },
+        ] {
+            fixture.assert_rule_failure(
+                case.op,
+                case.body,
+                ErrorKind::RuleSetStale {
+                    key: "user.missing".into(),
+                    current_version: RuleSetVersion(0),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn reorder_errors_are_independent_of_input_key_order() {
+        use quartz_protocol::{ErrorKind, Op};
+        for keys in [
+            ["builtin.privacy", "builtin.classification"],
+            ["builtin.classification", "builtin.privacy"],
+        ] {
+            let siblings: Vec<_> = keys
+                .into_iter()
+                .map(|key| serde_json::json!({"key":key,"base_version":1}))
+                .collect();
+            Fixture::new().assert_rule_failure(
+                Op::RuleSetsReorder,
+                serde_json::json!({"siblings":siblings}),
+                ErrorKind::RuleSetReadOnly {
+                    key: "builtin.classification".into(),
+                },
+            );
+        }
+        for keys in [
+            ["builtin.privacy", "INVALID!"],
+            ["INVALID!", "builtin.privacy"],
+        ] {
+            let siblings: Vec<_> = keys
+                .into_iter()
+                .map(|key| serde_json::json!({"key":key,"base_version":1}))
+                .collect();
+            Fixture::new().assert_rule_failure(
+                Op::RuleSetsReorder,
+                serde_json::json!({"siblings":siblings}),
+                ErrorKind::BadRequest,
+            );
+        }
+    }
+    #[test]
+    fn parent_errors_in_new_sets_are_located_content_diagnostics() {
+        use quartz_protocol::{ErrorKind, Op};
+        for parent in ["user.missing", "user.deleted", "user.child", "INVALID!"] {
+            let mut fixture = Fixture::new();
+            fixture.save_rule("user.deleted", "classification", "builtin.classification");
+            fixture
+                .ipc(
+                    Op::RuleSetsDelete,
+                    serde_json::json!({"key":"user.deleted","base_version":1}),
+                )
+                .expect("delete parent");
+            fixture.take_rule_publication();
+            let snapshot = fixture.database.registry.snapshots().load();
+            let digest = fixture.rule_digest();
+            let error = fixture.ipc(Op::RuleSetsEdit,serde_json::json!({"key":"user.child","base_version":0,"text":Fixture::rule_text("user.child","classification",parent)})).expect_err("invalid parent");
+            let ErrorKind::RuleValidationFailed {
+                diagnostics,
+                truncated,
+            } = error.kind
+            else {
+                panic!("parent must return content diagnostics: {error:?}")
+            };
+            assert!(!truncated);
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].code, "E-RULE-PARENT");
+            assert_eq!(diagnostics[0].path, "set.parent");
+            assert_eq!(
+                diagnostics[0]
+                    .location
+                    .as_ref()
+                    .expect("source location")
+                    .line,
+                6
+            );
+            assert!(Arc::ptr_eq(
+                &snapshot,
+                &fixture.database.registry.snapshots().load()
+            ));
+            assert_eq!(digest, fixture.rule_digest());
+            assert!(fixture._feedback.is_empty());
+        }
+    }
+    #[test]
+    fn restored_sets_validate_retained_parents_and_keep_identity_checks_first() {
+        use quartz_protocol::{ErrorKind, Op, RuleSetIdentityField};
+        let mut fixture = Fixture::new();
+        fixture.save_rule("user.parent", "classification", "builtin.classification");
+        fixture.save_rule("user.child", "classification", "user.parent");
+        for key in ["user.child", "user.parent"] {
+            fixture
+                .ipc(
+                    Op::RuleSetsDelete,
+                    serde_json::json!({"key":key,"base_version":1}),
+                )
+                .expect("delete retained set");
+            fixture.take_rule_publication();
+        }
+        fixture._versions.updates.borrow_and_update();
+        for parent in ["user.missing", "user.child", "INVALID!"] {
+            fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.child","base_version":0,"text":Fixture::rule_text("user.child","classification",parent)}),ErrorKind::RuleSetIdentity {key:"user.child".into(),field:RuleSetIdentityField::Parent});
+        }
+        let error = fixture.ipc(Op::RuleSetsEdit,serde_json::json!({"key":"user.child","base_version":0,"text":Fixture::rule_text("user.child","classification","user.parent")})).expect_err("retained parent is deleted");
+        let ErrorKind::RuleValidationFailed { diagnostics, .. } = error.kind else {
+            panic!("retained parent must return content diagnostics: {error:?}")
+        };
+        assert_eq!(diagnostics[0].code, "E-RULE-PARENT");
+        assert_eq!(diagnostics[0].path, "set.parent");
+        assert_eq!(
+            diagnostics[0]
+                .location
+                .as_ref()
+                .expect("source location")
+                .line,
+            6
+        );
+    }
+    #[test]
+    fn committed_creates_reject_zero_version_retries_and_missing_revert_sources() {
+        use quartz_protocol::{ErrorKind, Op, RuleSetVersion};
+        let mut fixture = Fixture::new();
+        fixture.save_rule("user.test", "classification", "builtin.classification");
+        fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":0,"text":Fixture::rule_text("user.test","classification","builtin.classification")}),ErrorKind::RuleSetStale {key:"user.test".into(),current_version:RuleSetVersion(1)});
+        fixture.assert_rule_failure(
+            Op::RuleSetsRevert,
+            serde_json::json!({"key":"user.test","base_version":1,"version":2}),
+            ErrorKind::RuleSetNotFound {
+                key: "user.test".into(),
+                version: Some(2),
+            },
+        );
     }
 
     #[test]

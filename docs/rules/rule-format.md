@@ -323,7 +323,7 @@ error[E-RULE-TARGET]: user.my-tweaks: override[0].target: "builtin.classificatio
 | `E-RULE-FORMAT` | 缺少或不支持的 `format` 版本 |
 | `E-RULE-KEY` | 未知的键或缺少必填键 |
 | `E-RULE-SET` | `[set]` 无效：`key` 格式错误、使用了 `builtin.` 前缀、`kind` 未知、与父级 `kind` 不同 |
-| `E-RULE-PARENT` | 父规则集不存在，或形成环 |
+| `E-RULE-PARENT` | 父规则集 key 语法无效、父集不存在或已删除，或父链形成环 |
 | `E-RULE-TARGET` | `override`/`disable` 的目标不存在，或不在祖先链上 |
 | `E-RULE-CONFLICT` | 同一规则集重复修改一个 target，或与另一个非祖先规则集修改了同一条规则 |
 | `E-RULE-IMMUTABLE` | 修改或删除了判例，或在判例规则集中使用 `override`/`disable` |
@@ -333,6 +333,8 @@ error[E-RULE-TARGET]: user.my-tweaks: override[0].target: "builtin.classificatio
 | `E-RULE-REGEX` | 正则无法编译、超出大小限制或使用了不支持的语法 |
 | `E-RULE-REF` | 引用的分类、链或国策不存在，或分类显示名称有歧义 |
 | `E-RULE-DUP` | 规则集内 `id` 重复 |
+
+M4-E2 开始签发隐私预览回执；在此之前，用户隐私规则集的编辑、导入、启停、排序、删除和回退统一返回 `preview_required`，提供 preview_receipt 也不写入。
 
 M4 隐私保存必须携带对应预览回执，覆盖导入、编辑、启停、排序、删除与回退中影响保留动作的操作。回执绑定完整修改、基础与父链版本、事实/标注和元数据输入、预览范围，有效期五分钟；数据或草稿变化后重新预览。预览区分条件命中与最终有效贡献，隐私影响只计仍保留且将进一步隐藏的事实；历史清理另行预览确认。请求、取消、期限和错误以 [04 第 6.3.2–6.3.4 节](../design/04-ipc.md#632-预览期限与回执) 为准；E-RULE-* 是内容诊断，preview_required 等是 IPC 操作错误。M7 判例保存也须预览。
 

@@ -27,6 +27,8 @@ use std::{
 
 /// First persisted revision of a new user rule set.
 const INITIAL_REVISION: u32 = 1;
+/// Builtin roots precede every user root in the same family.
+const FIRST_USER_ROOT_ORDER: usize = 1;
 
 /// A client uses zero to request creation of a missing or deleted rule set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +109,29 @@ pub enum RegistryCommand {
         /// Embedded upstream revision supplied by the application.
         revision: u32,
     },
+}
+
+impl RegistryCommand {
+    fn check_user_targets(&self, state: &RegistryState) -> Result<(), DecideRegistryCommandError> {
+        match self {
+            Self::Apply { key, .. }
+            | Self::Import { key, .. }
+            | Self::Toggle { key, .. }
+            | Self::Delete { key, .. }
+            | Self::Revert { key, .. } => state.check_user_target(key),
+            Self::Reorder { siblings } => {
+                for key in siblings
+                    .iter()
+                    .map(|sibling| &sibling.key)
+                    .collect::<BTreeSet<_>>()
+                {
+                    state.check_user_target(key)?;
+                }
+                Ok(())
+            }
+            Self::InstallBuiltin { .. } => Ok(()),
+        }
+    }
 }
 
 /// Successful command reply, including its publication epoch and derived alerts.
@@ -192,7 +217,10 @@ pub enum DecideRegistryCommandError {
     IdentityMismatch,
     /// Builtin rules must be edited through a user overlay.
     #[snafu(display("builtin rules must be edited through a user overlay"))]
-    ReservedSet,
+    ReservedSet {
+        /// Builtin or reserved rule-set identity rejected by the command.
+        key: RuleSetKey,
+    },
     /// Ordering must include every sibling exactly once.
     #[snafu(display("ordering must include every sibling exactly once"))]
     InvalidOrdering,
@@ -468,6 +496,7 @@ impl RuleRegistry {
         Ok(RulesChanged { epoch })
     }
     fn try_decide(&self, command: RegistryCommand) -> Result<Decision, DecideRegistryCommandError> {
+        command.check_user_targets(&self.state)?;
         let current = self.snapshots.load();
         let epoch = current
             .epoch()
@@ -562,10 +591,14 @@ impl RuleRegistry {
             RegistryCommand::Reorder { siblings } => {
                 let mut seen = BTreeSet::new();
                 for sibling in &siblings {
-                    state.check_base(&sibling.key, sibling.base_version)?;
                     if !seen.insert(sibling.key.clone()) {
                         return Err(DecideRegistryCommandError::InvalidOrdering);
                     }
+                }
+                let mut ordered: Vec<_> = siblings.iter().collect();
+                ordered.sort_by(|left, right| left.key.cmp(&right.key));
+                for sibling in ordered {
+                    state.check_base(&sibling.key, sibling.base_version)?;
                 }
                 let first = siblings
                     .first()
@@ -576,6 +609,7 @@ impl RuleRegistry {
                     .iter()
                     .filter(|(_, entry)| {
                         entry.deletion == RuleSetDeletion::Active
+                            && entry.origin == RuleOrigin::User
                             && entry.current.set.header.parent == first.current.set.header.parent
                             && entry.current.set.header.kind == first.current.set.header.kind
                     })
@@ -584,7 +618,15 @@ impl RuleRegistry {
                 if seen != expected {
                     return Err(DecideRegistryCommandError::InvalidOrdering);
                 }
+                let first_order = if first.current.set.header.parent.is_none() {
+                    FIRST_USER_ROOT_ORDER
+                } else {
+                    0
+                };
                 for (order, sibling) in siblings.into_iter().enumerate() {
+                    let order = order
+                        .checked_add(first_order)
+                        .ok_or(DecideRegistryCommandError::RevisionOverflow)?;
                     let update = state.metadata(
                         &sibling.key,
                         None,
@@ -600,7 +642,7 @@ impl RuleRegistry {
             RegistryCommand::Delete { key, base_version } => {
                 state.check_base(&key, base_version)?;
                 if state.active(&key)?.origin == RuleOrigin::Builtin {
-                    return Err(DecideRegistryCommandError::ReservedSet);
+                    return Err(DecideRegistryCommandError::ReservedSet { key: key.clone() });
                 }
                 if state.sets.values().any(|entry| {
                     entry.deletion == RuleSetDeletion::Active
@@ -631,7 +673,7 @@ impl RuleRegistry {
                 }
                 if let Some(old) = state.sets.get(&key) {
                     if old.origin != RuleOrigin::Builtin {
-                        return Err(DecideRegistryCommandError::ReservedSet);
+                        return Err(DecideRegistryCommandError::ReservedSet { key: key.clone() });
                     }
                     if old.current.set.header.kind != set.header.kind {
                         return Err(DecideRegistryCommandError::ChangeRuleKind);
@@ -703,6 +745,17 @@ impl RuleRegistry {
 }
 
 impl RegistryState {
+    fn check_user_target(&self, key: &RuleSetKey) -> Result<(), DecideRegistryCommandError> {
+        if key.as_str().starts_with("builtin.")
+            || self
+                .sets
+                .get(key)
+                .is_some_and(|entry| entry.origin == RuleOrigin::Builtin)
+        {
+            return Err(DecideRegistryCommandError::ReservedSet { key: key.clone() });
+        }
+        Ok(())
+    }
     fn active(&self, key: &RuleSetKey) -> Result<&RuleSetState, DecideRegistryCommandError> {
         self.sets
             .get(key)
@@ -737,11 +790,11 @@ impl RegistryState {
             .parse()
             .context(command_error::IdentitySnafu)?;
         if key.as_str().starts_with("builtin.") {
-            return Err(DecideRegistryCommandError::ReservedSet);
+            return Err(DecideRegistryCommandError::ReservedSet { key: key.clone() });
         }
         let old = self.sets.get(&key);
         if old.is_some_and(|entry| entry.origin != RuleOrigin::User) {
-            return Err(DecideRegistryCommandError::ReservedSet);
+            return Err(DecideRegistryCommandError::ReservedSet { key: key.clone() });
         }
         if old.is_some_and(|entry| entry.current.set.header.parent != set.header.parent) {
             return Err(DecideRegistryCommandError::ReparentSet);
@@ -764,6 +817,30 @@ impl RegistryState {
         self.apply_update(&update);
         Ok(RuleSetWrite::CommitVersion(update))
     }
+    fn parent_version(&self, set: &RuleSet) -> Result<Option<u32>, DecideRegistryCommandError> {
+        let mut parent = set.header.parent.as_deref();
+        let mut visited = BTreeSet::from([set.header.key.as_str()]);
+        let mut version = None;
+        while let Some(name) = parent {
+            let invalid_parent = || DecideRegistryCommandError::Snapshot {
+                source: BuildRuleSnapshotError::Tree {
+                    diagnostics: vec![set.diagnostic(
+                        rules::DiagnosticCode::Parent,
+                        "set.parent",
+                        "parent ancestry is missing, invalid, or cyclic",
+                    )],
+                },
+            };
+            let key: RuleSetKey = name.parse().map_err(|_| invalid_parent())?;
+            if !visited.insert(name) {
+                return Err(invalid_parent());
+            }
+            let entry = self.active(&key).map_err(|_| invalid_parent())?;
+            version.get_or_insert(entry.current.version);
+            parent = entry.current.set.header.parent.as_deref();
+        }
+        Ok(version)
+    }
     fn content_update(
         &self,
         set: RuleSet,
@@ -777,22 +854,14 @@ impl RegistryState {
             .parse()
             .context(command_error::IdentitySnafu)?;
         let old = self.sets.get(&key);
-        let parent_version = set
-            .header
-            .parent
-            .as_ref()
-            .map(|parent| -> Result<u32, DecideRegistryCommandError> {
-                let parent = parent.parse().context(command_error::IdentitySnafu)?;
-                Ok(self.active(&parent)?.current.version)
-            })
-            .transpose()?;
+        let parent_version = self.parent_version(&set)?;
         let enabled = old
             .filter(|entry| entry.deletion == RuleSetDeletion::Active)
             .map_or(Enablement::Enabled, |entry| entry.current.enabled);
         let sibling_order = match old {
             Some(entry) => entry.current.sibling_order,
             None if origin == RuleOrigin::Builtin => 0,
-            None => i64::try_from(self.installed_sets().len())
+            None => i64::try_from(self.installed_sets().len().max(FIRST_USER_ROOT_ORDER))
                 .context(command_error::SiblingOrderOverflowSnafu)?,
         };
         Ok(RuleSetUpdate {

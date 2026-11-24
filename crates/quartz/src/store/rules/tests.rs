@@ -14,7 +14,7 @@ use std::{fs, sync::Arc};
 
 fn source(key: &str, label: &str) -> String {
     format!(
-        "format='quartz-rules/1'\n[set]\nkey='{key}'\nkind='privacy'\nname='Test'\n[[rule]]\nid='one'\nlabel='{label}'\npreset='title_hidden'\nwhen=[{{field='app.exe_name',op='equals',value='quartz-test.exe'}}]\n"
+        "format='quartz-rules/1'\n[set]\nkey='{key}'\nkind='classification'\nname='Test'\n[[rule]]\nid='one'\nlabel='{label}'\ncategory='builtin:learning'\nwhen=[{{field='app.exe_name',op='equals',value='quartz-test.exe'}}]\n"
     )
 }
 struct Fixture {
@@ -79,13 +79,30 @@ impl Fixture {
 #[test]
 fn batch_failure_rolls_back_all_writes_and_never_acknowledges_the_core() {
     let mut fixture = Fixture::new();
-    fixture.apply("user.a", "A", 0).expect("A");
-    fixture.apply("user.b", "B", 0).expect("B");
+    for key in ["user.a", "user.b"] {
+        let text = source(key, "Sibling").replace(
+            "name='Test'",
+            "name='Test'\nparent='builtin.classification'",
+        );
+        fixture
+            .shell
+            .run(
+                &mut fixture.store,
+                test_now(),
+                RegistryCommand::Apply {
+                    key: key.parse().expect("key"),
+                    file: "sibling.toml".into(),
+                    text,
+                    base_version: 0,
+                },
+            )
+            .expect("sibling fixture");
+    }
     let before = fixture.shell.snapshots().load();
     let count = fixture.version_count();
     let saved = fixture.persisted();
     fixture.connection().batch_execute("CREATE TRIGGER fail_second_revision BEFORE INSERT ON rule_set_versions WHEN NEW.set_id=(SELECT id FROM rule_sets WHERE key='user.b') BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END;").expect("failure injection");
-    let siblings = ["builtin.privacy", "user.a", "user.b"]
+    let siblings = ["user.a", "user.b"]
         .into_iter()
         .map(|key| SiblingRevision {
             key: key.parse().expect("key"),
@@ -279,7 +296,7 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
         &source("builtin.test", "Original"),
         ParseContext {
             origin: RuleOrigin::Builtin,
-            references: &ReferenceCatalog::default(),
+            references: &fixture.shell.core().state().references,
         },
     )
     .expect("builtin");
@@ -294,7 +311,7 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
             },
         )
         .expect("install");
-    let overlay = "format='quartz-rules/1'\n[set]\nkey='user.overlay'\nkind='privacy'\nname='Overlay'\nparent='builtin.test'\n[[override]]\ntarget='builtin.test/one'\nlabel='User replacement'\npreset='excluded'\nwhen=[{field='app.exe_name',op='equals',value='quartz-test.exe'}]\n";
+    let overlay = "format='quartz-rules/1'\n[set]\nkey='user.overlay'\nkind='classification'\nname='Overlay'\nparent='builtin.test'\n[[override]]\ntarget='builtin.test/one'\nlabel='User replacement'\ncategory='builtin:learning'\nwhen=[{field='app.exe_name',op='equals',value='quartz-test.exe'}]\n";
     fixture
         .shell
         .run(
@@ -314,7 +331,7 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
             &mut fixture.store,
             test_now(),
             RegistryCommand::Toggle {
-                key: "builtin.test".parse().expect("key"),
+                key: "user.overlay".parse().expect("key"),
                 base_version: 1,
                 enabled: Enablement::Disabled,
             },
@@ -334,7 +351,7 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
         .expect("upstream upgrade");
     assert_eq!(
         result.reply.versions[&"builtin.test".parse().expect("key")],
-        3
+        2
     );
     assert_eq!(result.reply.upstream_changes.len(), 1);
     assert_eq!(
@@ -350,7 +367,7 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
         state.sets[&"user.overlay".parse().expect("key")]
             .current
             .version,
-        1
+        2
     );
     assert_eq!(
         state
@@ -369,7 +386,7 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
         .select((rule_sets::current_version, rule_sets::builtin_revision))
         .first(&mut fixture.connection())
         .expect("separate local and upstream revisions");
-    assert_eq!(stored.current, 3);
+    assert_eq!(stored.current, 2);
     assert_eq!(stored.builtin, Some(2));
     let same = fixture
         .shell
@@ -470,9 +487,12 @@ fn startup_rebuild_degrades_uncompilable_user_or_builtin_sets_without_sql_decisi
             .first::<RuleSetVersionsRow>(&mut connection)
             .expect("revision");
         let mut content = row.decode_content().expect("content");
-        if let RuleBody::Privacy { when, .. } = &mut content.rule[0].body {
-            when[0].op = rules::Operator::Regex;
-            when[0].value = "(".into();
+        match &mut content.rule[0].body {
+            RuleBody::Privacy { when, .. } | RuleBody::Classification { when, .. } => {
+                when[0].op = rules::Operator::Regex;
+                when[0].value = "(".into();
+            }
+            _ => panic!("fixture contains classification or privacy conditions"),
         }
         diesel::update(rule_set_versions::table.find((id.expect("id"), 1i64)))
             .set((
@@ -662,9 +682,10 @@ fn existing_rule_updates_reject_identity_changes_and_roll_back() {
         fixture.apply("user.first", "Original", 0).expect("first");
         let original = source("user.identity", "Original");
         let original = match change {
-            IdentityChange::RemoveParent => {
-                original.replace("name='Test'", "name='Test'\nparent='builtin.privacy'")
-            }
+            IdentityChange::RemoveParent => original.replace(
+                "name='Test'",
+                "name='Test'\nparent='builtin.classification'",
+            ),
             _ => original,
         };
         fixture
@@ -710,7 +731,9 @@ fn existing_rule_updates_reject_identity_changes_and_roll_back() {
         };
         match change {
             IdentityChange::Kind => update.set.header.kind = RuleKind::Extraction,
-            IdentityChange::AddParent => update.set.header.parent = Some("builtin.privacy".into()),
+            IdentityChange::AddParent => {
+                update.set.header.parent = Some("builtin.classification".into())
+            }
             IdentityChange::RemoveParent => update.set.header.parent = None,
             IdentityChange::Source => {
                 update.origin = RuleOrigin::Builtin;

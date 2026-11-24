@@ -189,9 +189,9 @@ impl PageBudget {
 
 /// Counts encoded bytes without retaining a serialized copy.
 #[derive(Debug, Default)]
-struct JsonBytes(usize);
+pub(crate) struct JsonBytes(usize);
 impl JsonBytes {
-    fn measure(value: &impl Serialize) -> Result<usize, serde_json::Error> {
+    pub(crate) fn measure(value: &impl Serialize) -> Result<usize, serde_json::Error> {
         let mut writer = Self::default();
         serde_json::to_writer(&mut writer, value)?;
         Ok(writer.0)

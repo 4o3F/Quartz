@@ -45,11 +45,14 @@ pub use handshake::{
 pub use op::{ControlBody, ControlOp, Op, OpFamily};
 pub use role::{AuthorizeOpError, Role};
 pub use rules::{
-    RuleAction, RuleApp, RuleCondition, RuleEntryContent, RuleEntryKind, RuleEntryState, RuleField,
-    RuleKind, RuleMatch, RuleOperator, RuleProvenance, RuleSetCounts, RuleSetEntry, RuleSetNode,
-    RuleSetRevision, RuleSetSource, RuleSetWarning, RuleSetsGetRequest, RuleSetsGetResponse,
+    MAX_RULE_DIAGNOSTICS, MAX_RULE_TEXT_BYTES, MutatedRuleSet, RuleAction, RuleApp, RuleCondition,
+    RuleDiagnostic, RuleDiagnosticLocation, RuleEntryContent, RuleEntryKind, RuleEntryState,
+    RuleField, RuleKind, RuleMatch, RuleOperator, RuleProvenance, RuleSetCounts, RuleSetEntry,
+    RuleSetIdentityField, RuleSetNode, RuleSetRevision, RuleSetSibling, RuleSetSource,
+    RuleSetWarning, RuleSetsDeleteRequest, RuleSetsEditRequest, RuleSetsGetRequest,
+    RuleSetsGetResponse, RuleSetsReorderRequest, RuleSetsRevertRequest, RuleSetsSetEnabledRequest,
     RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsVersionsRequest, RuleSetsVersionsResponse,
-    RuleView, RuleWarningCode, RuleWebAction,
+    RuleSetsWriteResponse, RuleView, RuleWarningCode, RuleWebAction,
 };
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};
 pub use topic::{LocalDate, ParseTopicError, Subscribe, SubscribeResponse, Topic, Unsubscribe};

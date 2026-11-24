@@ -11,6 +11,7 @@ use tokio::sync::oneshot;
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
 pub(crate) enum WriteResponse {
+    Rules(quartz_protocol::RuleSetsWriteResponse),
     Annotations(quartz_protocol::AnnotationsResponse),
     Category(quartz_protocol::CategoryResponse),
     Categories(quartz_protocol::CategoriesListResponse),
@@ -22,7 +23,23 @@ impl WriteRequest {
         op: quartz_protocol::Op,
         body: serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
+        use crate::rules::write::RuleMutation;
         let request = match op {
+            quartz_protocol::Op::RuleSetsEdit => serde_json::from_value(body)
+                .map(RuleMutation::Edit)
+                .map(Self::Rules),
+            quartz_protocol::Op::RuleSetsSetEnabled => serde_json::from_value(body)
+                .map(RuleMutation::SetEnabled)
+                .map(Self::Rules),
+            quartz_protocol::Op::RuleSetsReorder => serde_json::from_value(body)
+                .map(RuleMutation::Reorder)
+                .map(Self::Rules),
+            quartz_protocol::Op::RuleSetsDelete => serde_json::from_value(body)
+                .map(RuleMutation::Delete)
+                .map(Self::Rules),
+            quartz_protocol::Op::RuleSetsRevert => serde_json::from_value(body)
+                .map(RuleMutation::Revert)
+                .map(Self::Rules),
             quartz_protocol::Op::CategoriesList => serde_json::from_value(body)
                 .map(CategoryRequest::List)
                 .map(Self::Categories),
@@ -68,8 +85,14 @@ impl WriteRequest {
         store: &mut Store,
         now: UtcInstant,
         system: Option<quartz_protocol::EffectiveUiSettings>,
+        registry: &mut crate::rules::registry::RegistryShell,
     ) -> Result<WriteResponse, ProtocolError> {
         let result = match self {
+            Self::Rules(request) => {
+                return request
+                    .execute(registry, store, now)
+                    .map(WriteResponse::Rules);
+            }
             Self::Categories(request) => return request.execute(store),
             Self::SettingsGet | Self::SettingsSet(_) => {
                 let system = system.ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?;
@@ -136,6 +159,7 @@ pub(crate) const WRITE_CHANNEL_CAPACITY: usize = 8;
 /// User writes executed serially by the database loop after capture commits.
 #[derive(Debug)]
 pub(crate) enum WriteRequest {
+    Rules(crate::rules::write::RuleMutation),
     SettingsGet,
     SettingsSet(quartz_protocol::SettingsSetRequest),
     Annotations(AnnotationWrite),
@@ -257,6 +281,27 @@ impl WritePort {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rule_requests_execute_through_registry_without_actor_special_cases() {
+        let directory = tempfile::tempdir().expect("isolated rules");
+        let mut store = Store::open(&crate::data_directory::DataDirectory::new(directory.path()))
+            .expect("store");
+        store.seed_categories().expect("categories");
+        let mut registry = crate::rules::registry::RegistryShell::open(
+            &mut store,
+            UtcInstant::try_from(0).expect("UTC"),
+        )
+        .expect("registry");
+        let request=WriteRequest::decode(quartz_protocol::Op::RuleSetsEdit,serde_json::json!({"key":"user.dispatch","base_version":0,"text":"format='quartz-rules/1'\n[set]\nkey='user.dispatch'\nkind='classification'\nname='Test'\n"})).expect("request");
+        request
+            .execute(
+                &mut store,
+                UtcInstant::try_from(0).expect("UTC"),
+                None,
+                &mut registry,
+            )
+            .expect("registry dispatch");
+    }
     #[test]
     fn full_write_channel_reports_busy_without_waiting() {
         let channel = WriteChannel::new();

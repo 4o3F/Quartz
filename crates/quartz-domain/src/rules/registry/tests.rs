@@ -205,7 +205,7 @@ fn toggle_reorder_revert_and_delete_have_explicit_atomic_write_descriptions() {
         siblings: siblings.clone(),
     });
     assert!(
-        matches!(decision.writes(), [RuleSetWrite::Reorder(b), RuleSetWrite::Reorder(a)] if b.sibling_order == 0 && a.sibling_order == 1)
+        matches!(decision.writes(), [RuleSetWrite::Reorder(b), RuleSetWrite::Reorder(a)] if b.sibling_order == 1 && a.sibling_order == 2)
     );
     fixture
         .commit(RegistryCommand::Reorder { siblings })
@@ -275,7 +275,7 @@ fn toggle_reorder_revert_and_delete_have_explicit_atomic_write_descriptions() {
 }
 
 #[test]
-fn upstream_changes_follow_parent_versions_and_builtin_revisions_ignore_metadata_edits() {
+fn upstream_changes_follow_saved_parents_after_overlay_metadata_edits() {
     let mut fixture = Fixture::new();
     fixture
         .commit(RegistryCommand::InstallBuiltin {
@@ -291,7 +291,7 @@ fn upstream_changes_follow_parent_versions_and_builtin_revisions_ignore_metadata
         .expect("leaf overlay");
     fixture
         .commit(RegistryCommand::Toggle {
-            key: "builtin.test".parse().expect("key"),
+            key: "user.parent".parse().expect("key"),
             base_version: 1,
             enabled: Enablement::Disabled,
         })
@@ -302,14 +302,14 @@ fn upstream_changes_follow_parent_versions_and_builtin_revisions_ignore_metadata
             revision: 2,
         })
         .expect("new upstream revision");
-    assert_eq!(reply.versions[&"builtin.test".parse().expect("key")], 3);
+    assert_eq!(reply.versions[&"builtin.test".parse().expect("key")], 2);
     let parent = reply
         .upstream_changes
         .iter()
         .find(|change| change.set_key().as_str() == "user.parent")
         .expect("root changed under parent");
     assert_eq!(parent.base_parent_version(), Some(1));
-    assert_eq!(parent.current_parent_version(), 3);
+    assert_eq!(parent.current_parent_version(), 2);
     assert_eq!(parent.state(), UpstreamState::UpstreamChanged);
     let mut removed = builtin("Removed");
     removed.content.rule.clear();
@@ -880,4 +880,98 @@ fn builtin_revision_cannot_change_family() {
         Err(DecideRegistryCommandError::ChangeRuleKind)
     ));
     assert!(decision.writes().is_empty());
+}
+
+#[test]
+fn builtin_metadata_mutations_are_rejected_without_writes_or_publication() {
+    let mut fixture = Fixture::new();
+    fixture
+        .commit(RegistryCommand::InstallBuiltin {
+            set: builtin("Builtin"),
+            revision: 1,
+        })
+        .expect("builtin");
+    let snapshot = fixture.core.snapshots().load();
+    for command in [
+        RegistryCommand::Toggle {
+            key: "builtin.test".parse().expect("key"),
+            base_version: 1,
+            enabled: Enablement::Disabled,
+        },
+        RegistryCommand::Reorder {
+            siblings: vec![SiblingRevision {
+                key: "builtin.test".parse().expect("key"),
+                base_version: 1,
+            }],
+        },
+    ] {
+        let decision = fixture.core.decide(command);
+        assert!(
+            matches!(decision.reply(),Err(DecideRegistryCommandError::ReservedSet {key}) if key.as_str() == "builtin.test")
+        );
+        assert!(decision.writes().is_empty());
+        assert!(Arc::ptr_eq(&snapshot, &fixture.core.snapshots().load()));
+    }
+}
+
+#[test]
+fn new_and_restored_sets_reject_invalid_ancestry_with_located_parent_diagnostics() {
+    enum TargetState {
+        New,
+        Deleted,
+    }
+    for target_state in [TargetState::New, TargetState::Deleted] {
+        for parent in ["user.missing", "INVALID!", "user.child", "user.ancestor"] {
+            let mut fixture = Fixture::new();
+            fixture
+                .commit(apply("user.child", "Child", 0))
+                .expect("seed child");
+            fixture
+                .commit(apply("user.ancestor", "Ancestor", 0))
+                .expect("seed ancestor");
+            let mut state = fixture.core.state().clone();
+            let child = state
+                .sets
+                .get_mut(&"user.child".parse().expect("key"))
+                .expect("child");
+            child.deletion = RuleSetDeletion::Deleted;
+            child.current.set.header.parent = Some(parent.into());
+            if parent == "user.ancestor" {
+                state
+                    .sets
+                    .get_mut(&"user.ancestor".parse().expect("key"))
+                    .expect("ancestor")
+                    .current
+                    .set
+                    .header
+                    .parent = Some("user.child".into());
+            }
+            if matches!(target_state, TargetState::New) {
+                state.sets.remove(&"user.child".parse().expect("key"));
+            }
+            // A missing or cyclic retained chain must be rejected before a candidate is published.
+            let mut registry = fixture.core;
+            registry.state = state;
+            let decision = registry.decide(RegistryCommand::Apply {
+                key: "user.child".parse().expect("key"),
+                file: "restore.toml".into(),
+                text: source("user.child", "Restored", Some(parent)),
+                base_version: 0,
+            });
+            let Err(DecideRegistryCommandError::Snapshot {
+                source: BuildRuleSnapshotError::Tree { diagnostics },
+            }) = decision.reply()
+            else {
+                panic!("parent diagnostic required: {:?}", decision.reply())
+            };
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].code, rules::DiagnosticCode::Parent);
+            assert_eq!(diagnostics[0].path, "set.parent");
+            assert_eq!(
+                diagnostics[0].location.file,
+                std::path::PathBuf::from("restore.toml")
+            );
+            assert!(decision.writes().is_empty());
+        }
+    }
 }
