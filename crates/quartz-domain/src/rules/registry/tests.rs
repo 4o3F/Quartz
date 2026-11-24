@@ -397,7 +397,7 @@ fn old_parent_revisions_survive_rejected_reparenting_and_parent_override_edits()
 }
 
 #[test]
-fn imports_bind_to_current_privacy_preview_and_builtin_revision_reuse_is_checked() {
+fn imports_prepare_user_revisions_and_builtin_revision_reuse_is_checked() {
     let mut fixture = Fixture::new();
     fixture
         .commit(RegistryCommand::InstallBuiltin {
@@ -405,7 +405,6 @@ fn imports_bind_to_current_privacy_preview_and_builtin_revision_reuse_is_checked
             revision: 1,
         })
         .expect("builtin");
-    let before = fixture.core.snapshots().load();
     let same = fixture.core.decide(RegistryCommand::InstallBuiltin {
         set: builtin("Original"),
         revision: 1,
@@ -420,27 +419,14 @@ fn imports_bind_to_current_privacy_preview_and_builtin_revision_reuse_is_checked
         conflict.reply(),
         Err(DecideRegistryCommandError::RevisionConflict)
     ));
-    let invalid = fixture.core.decide(RegistryCommand::Import {
-        key: "user.import".parse().expect("key"),
-        file: "import.toml".into(),
-        text: source("user.import", "Import", None),
-        base_version: 0,
-        preview_hash: None,
-    });
-    assert!(invalid.writes().is_empty());
-    assert!(matches!(
-        invalid.reply(),
-        Err(DecideRegistryCommandError::StalePreview)
-    ));
     fixture
         .commit(RegistryCommand::Import {
             key: "user.import".parse().expect("key"),
             file: "import.toml".into(),
             text: source("user.import", "Import", None),
             base_version: 0,
-            preview_hash: Some(before.hashes().privacy.clone()),
         })
-        .expect("preview bound import");
+        .expect("prepared import");
 }
 
 #[test]
@@ -706,14 +692,6 @@ fn retained_keys_reject_family_changes_on_apply_and_import() {
                     file: "changed.toml".into(),
                     text: text.clone(),
                     base_version,
-                    preview_hash: None,
-                },
-                RegistryCommand::Import {
-                    key: "user.family".parse().expect("key"),
-                    file: "changed.toml".into(),
-                    text: text.clone(),
-                    base_version,
-                    preview_hash: Some(ContentHash::of("stale")),
                 },
             ] {
                 let before = fixture.core.snapshots().load();

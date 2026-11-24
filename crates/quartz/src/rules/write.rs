@@ -17,13 +17,36 @@ use quartz_domain::{
 };
 use quartz_protocol::{self as wire, ErrorKind, ProtocolError};
 
-#[derive(Debug, Clone)]
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "op", content = "body")]
 pub(crate) enum RuleMutation {
+    #[serde(rename = "rule_sets.edit")]
     Edit(wire::RuleSetsEditRequest),
+    #[serde(rename = "rules_text.import")]
+    Import(wire::RuleSetsEditRequest),
+    #[serde(rename = "rule_sets.set_enabled")]
     SetEnabled(wire::RuleSetsSetEnabledRequest),
+    #[serde(rename = "rule_sets.reorder")]
     Reorder(wire::RuleSetsReorderRequest),
+    #[serde(rename = "rule_sets.delete")]
     Delete(wire::RuleSetsDeleteRequest),
+    #[serde(rename = "rule_sets.revert")]
     Revert(wire::RuleSetsRevertRequest),
+}
+impl std::fmt::Debug for RuleMutation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let operation = match self {
+            Self::Edit(_) => "rule_sets.edit",
+            Self::Import(_) => "rules_text.import",
+            Self::SetEnabled(_) => "rule_sets.set_enabled",
+            Self::Reorder(_) => "rule_sets.reorder",
+            Self::Delete(_) => "rule_sets.delete",
+            Self::Revert(_) => "rule_sets.revert",
+        };
+        f.debug_struct("RuleMutation")
+            .field("operation", &operation)
+            .finish_non_exhaustive()
+    }
 }
 enum TargetAccess<'registry> {
     Write,
@@ -81,13 +104,81 @@ impl From<wire::RulePreviewMutation> for RuleMutation {
 impl From<wire::RulesTextPreviewMutation> for RuleMutation {
     fn from(mutation: wire::RulesTextPreviewMutation) -> Self {
         let wire::RulesTextPreviewMutation::Import(request) = mutation;
-        wire::RulePreviewMutation::Edit(request).into()
+        Self::Import(wire::RuleSetsEditRequest {
+            key: request.key,
+            base_version: request.base_version,
+            text: request.text,
+            preview_receipt: None,
+        })
     }
 }
 impl RuleMutation {
+    pub(crate) fn digest(&self) -> Result<String, ProtocolError> {
+        use super::digest::{DigestDomain, ReceiptDigest};
+        let mut digest = ReceiptDigest::new(DigestDomain::Mutation);
+        match self {
+            Self::Edit(request) | Self::Import(request) => {
+                digest.text(if matches!(self, Self::Edit(_)) {
+                    "rule_sets.edit"
+                } else {
+                    "rules_text.import"
+                })?;
+                digest.text(&request.key)?;
+                digest.revision(request.base_version);
+                digest.text(&request.text)?;
+            }
+            Self::SetEnabled(request) => {
+                digest.text("rule_sets.set_enabled")?;
+                digest.text(&request.key)?;
+                digest.revision(request.base_version.get());
+                digest.text(if request.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                })?;
+            }
+            Self::Reorder(request) => {
+                digest.text("rule_sets.reorder")?;
+                for sibling in &request.siblings {
+                    digest.text(&sibling.key)?;
+                    digest.revision(sibling.base_version.get());
+                }
+            }
+            Self::Delete(request) => {
+                digest.text("rule_sets.delete")?;
+                digest.text(&request.key)?;
+                digest.revision(request.base_version.get());
+            }
+            Self::Revert(request) => {
+                digest.text("rule_sets.revert")?;
+                digest.text(&request.key)?;
+                digest.revision(request.base_version.get());
+                digest.revision(request.version.get());
+            }
+        }
+        Ok(digest.finish())
+    }
+    fn authorization(
+        &self,
+        receipts: Option<super::receipts::ReceiptContext>,
+    ) -> Result<super::receipts::ReceiptAuthorization, ProtocolError> {
+        let receipt = match self {
+            Self::Edit(request) | Self::Import(request) => request.preview_receipt.clone(),
+            Self::SetEnabled(request) => request.preview_receipt.clone(),
+            Self::Reorder(request) => request.preview_receipt.clone(),
+            Self::Delete(request) => request.preview_receipt.clone(),
+            Self::Revert(request) => request.preview_receipt.clone(),
+        };
+        Ok(super::receipts::ReceiptAuthorization::new(
+            receipts,
+            receipt,
+            self.digest()?,
+        ))
+    }
+
     pub(crate) fn target_key(&self) -> Result<&str, ProtocolError> {
         match self {
-            Self::Edit(request) => Ok(&request.key),
+            Self::Edit(request) | Self::Import(request) => Ok(&request.key),
             Self::SetEnabled(request) => Ok(&request.key),
             Self::Delete(request) => Ok(&request.key),
             Self::Revert(request) => Ok(&request.key),
@@ -105,6 +196,16 @@ impl RuleMutation {
         store: &mut Store,
         now: UtcInstant,
     ) -> Result<wire::RuleSetsWriteResponse, ProtocolError> {
+        self.execute_with_receipts(registry, store, now, None)
+    }
+    pub(crate) fn execute_with_receipts(
+        self,
+        registry: &mut RegistryShell,
+        store: &mut Store,
+        now: UtcInstant,
+        receipts: Option<super::receipts::ReceiptContext>,
+    ) -> Result<wire::RuleSetsWriteResponse, ProtocolError> {
+        let authorization = self.authorization(receipts)?;
         let prepared = self.prepare(TargetAccess::Write)?;
         prepared.targets.check_response_budget()?;
         // Read fallible response dependencies before committing.
@@ -112,7 +213,7 @@ impl RuleMutation {
             .rule_read_metadata()
             .map_err(|error| WriteFailure::setting(&error).into_protocol_error())?;
         let result = registry
-            .run_ipc(store, now, prepared.command)
+            .run_ipc_authorized(store, now, prepared.command, authorization)
             .map_err(|error| prepared.targets.targets_error(error))?;
         let snapshot = registry.snapshots().load();
         debug_assert_eq!(result.reply.epoch, snapshot.epoch());
@@ -190,7 +291,7 @@ impl RuleMutation {
         let mut keys = Vec::new();
         let mut historical_version = None;
         let command = match self {
-            Self::Edit(request) => {
+            Self::Edit(request) | Self::Import(request) => {
                 let key = Self::key(request.key)?;
                 keys.push(key.clone());
                 RegistryCommand::Apply {
@@ -307,6 +408,7 @@ impl MutationTargets {
             .to_string();
         let kind = match error {
             RunRegistryCommandError::PreviewRequired => ErrorKind::PreviewRequired,
+            RunRegistryCommandError::Receipt { error } => return error,
             RunRegistryCommandError::TextTooLarge => ErrorKind::BadRequest,
             RunRegistryCommandError::Persist { source } => {
                 return WriteFailure::rule_persist(&source).into_protocol_error();
@@ -340,7 +442,6 @@ impl MutationTargets {
                     key,
                     version: self.historical_version,
                 },
-                DecideRegistryCommandError::StalePreview => ErrorKind::PreviewRequired,
                 DecideRegistryCommandError::RevisionOverflow
                 | DecideRegistryCommandError::EpochOverflow
                 | DecideRegistryCommandError::SiblingOrderOverflow { .. } => {

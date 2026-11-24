@@ -158,12 +158,13 @@ impl Store {
         rules::RuleSets::new(&mut self.writer)
     }
 
-    pub(crate) fn rule_transaction<T>(
+    pub(crate) fn rule_transaction<T, E>(
         &mut self,
-        execute: impl FnOnce(
-            &mut rules::RuleSetTransaction<'_>,
-        ) -> Result<T, rules::ExecuteRuleWritesError>,
-    ) -> Result<T, rules::ExecuteRuleWritesError> {
+        execute: impl FnOnce(&mut rules::RuleSetTransaction<'_>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<diesel::result::Error>,
+    {
         self.write(|tx| execute(&mut rules::RuleSetTransaction::new(tx.connection)))
     }
 

@@ -160,6 +160,26 @@ impl OutboxHandle {
             reservation,
         })
     }
+    pub(crate) fn receipt_response(
+        &self,
+        response: Response,
+        grant: crate::rules::receipts::ReceiptGrant,
+    ) -> Result<(), QueueFrameError> {
+        let payload = encode_json(&Envelope::Response(response))
+            .map_err(|source| QueueFrameError::Encode { source })?;
+        let reservation = self.reserve(payload.len())?;
+        let permit = self.mailbox.try_reserve().map_err(|_| {
+            self.close();
+            QueueFrameError::Closed
+        })?;
+        // The mailbox cannot expose the token until the receipt has been installed.
+        grant.delivered().map_err(|_| QueueFrameError::Closed)?;
+        permit.send(OutboxMessage::Response {
+            payload,
+            reservation,
+        });
+        Ok(())
+    }
     pub(crate) fn control(&self, body: ControlBody) -> Result<(), QueueFrameError> {
         // Reserve the maximum sequence width; actual wire bytes can only be smaller.
         let payload = Self::event(Topic::Control, EventSeq(u64::MAX), &body)?;

@@ -44,7 +44,7 @@ pub(crate) enum ConnectionPeer {
     Host,
 }
 impl ConnectionPeer {
-    fn role(self) -> Role {
+    pub(crate) fn role(self) -> Role {
         match self {
             Self::Ui(_) => Role::Ui,
             Self::Cli => Role::Cli,

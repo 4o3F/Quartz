@@ -34,6 +34,10 @@ pub(crate) enum RunRegistryCommandError {
     Decide { source: DecideRegistryCommandError },
     #[snafu(display("privacy writes require a preview receipt"))]
     PreviewRequired,
+    #[snafu(display("privacy preview confirmation was rejected"))]
+    Receipt {
+        error: quartz_protocol::ProtocolError,
+    },
     #[snafu(display("canonical rule text exceeds the IPC text limit"))]
     TextTooLarge,
     #[snafu(display("rule writes did not commit"))]
@@ -181,15 +185,16 @@ impl RegistryShell {
         now: quartz_domain::capture::UtcInstant,
         command: RegistryCommand,
     ) -> Result<RegistryResult, RunRegistryCommandError> {
-        self.run_with_budget(store, now, command, TextBudget::Unrestricted)
+        self.run_with_budget(store, now, command, TextBudget::Unrestricted, None)
     }
-    pub(crate) fn run_ipc(
+    pub(super) fn run_ipc_authorized(
         &mut self,
         store: &mut Store,
         now: quartz_domain::capture::UtcInstant,
         command: RegistryCommand,
+        authorization: super::receipts::ReceiptAuthorization,
     ) -> Result<RegistryResult, RunRegistryCommandError> {
-        self.run_with_budget(store, now, command, TextBudget::Ipc)
+        self.run_with_budget(store, now, command, TextBudget::Ipc, Some(authorization))
     }
     fn run_with_budget(
         &mut self,
@@ -197,6 +202,7 @@ impl RegistryShell {
         now: quartz_domain::capture::UtcInstant,
         command: RegistryCommand,
         budget: TextBudget,
+        authorization: Option<super::receipts::ReceiptAuthorization>,
     ) -> Result<RegistryResult, RunRegistryCommandError> {
         let decision = self.registry.decide(command);
         let DecisionParts {
@@ -208,20 +214,24 @@ impl RegistryShell {
         if matches!(budget, TextBudget::Ipc) {
             Self::check_text_budget(&writes)?;
         }
-        // E2 will authorize exact mutations with connection-bound preview receipts.
-        if writes.iter().any(|write| {
+        let requires_preview = writes.iter().any(|write| {
             !matches!(
                 write,
                 quartz_domain::rules::registry::RuleSetWrite::InstallBuiltin(_)
             ) && write.update().set.header.kind == rules::RuleKind::Privacy
-        }) {
-            return Err(RunRegistryCommandError::PreviewRequired);
-        }
+        });
+
         let event = if let Some(mut outcome) = outcome {
             let now = now.get().as_millisecond();
-            store
-                .rule_transaction(|transaction| transaction.execute(&writes, now))
-                .context(run_error::PersistSnafu)?;
+            match (requires_preview, authorization) {
+                (true, Some(authorization)) => {
+                    authorization.commit(store, &self.snapshots().load(), &writes, now)?
+                }
+                (true, None) => return Err(RunRegistryCommandError::PreviewRequired),
+                (false, _) => store
+                    .rule_transaction(|transaction| transaction.execute(&writes, now))
+                    .context(run_error::PersistSnafu)?,
+            }
             outcome.record_commit_time(&writes, now);
             Some(
                 self.registry

@@ -297,9 +297,13 @@ pub struct RulePreviewSample {
     pub before: RulePreviewOutput,
     pub after: RulePreviewOutput,
 }
-/// Additive response; receipts and expiry are introduced by M4-E2.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Completed preview page, with privacy confirmation on its first page.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RulesPreviewResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_receipt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_utc_ms: Option<i64>,
     pub rules: Vec<RulePreviewStatistics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub totals: Option<RulePreviewTotals>,
@@ -308,6 +312,17 @@ pub struct RulesPreviewResponse {
     pub samples: Vec<RulePreviewSample>,
     pub versions: QueryVersions,
     pub next_cursor: Option<QueryCursor>,
+}
+impl std::fmt::Debug for RulesPreviewResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RulesPreviewResponse")
+            .field("preview_receipt", &"[redacted]")
+            .field("expires_utc_ms", &self.expires_utc_ms)
+            .field("rules", &self.rules.len())
+            .field("samples", &self.samples.len())
+            .field("versions", &self.versions)
+            .finish_non_exhaustive()
+    }
 }
 /// Text and editor previews return the same result shape.
 pub type RulesTextPreviewResponse = RulesPreviewResponse;

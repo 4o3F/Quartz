@@ -273,6 +273,9 @@ impl std::fmt::Debug for RuleSetTransaction<'_> {
     }
 }
 impl<'connection> RuleSetTransaction<'connection> {
+    pub(super) fn connection(&mut self) -> &mut SqliteConnection {
+        self.connection
+    }
     pub(super) fn new(connection: &'connection mut SqliteConnection) -> Self {
         Self { connection }
     }

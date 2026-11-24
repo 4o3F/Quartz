@@ -234,6 +234,7 @@ impl ConnectionSession {
                         core_version: status.core_version.clone(),
                         capabilities: vec![
                             quartz_protocol::Capability::RequestsCancelV1,
+                            quartz_protocol::Capability::RulesPreviewV1,
                             quartz_protocol::Capability::CategoriesV1,
                             quartz_protocol::Capability::QueryDocumentsV1,
                             quartz_protocol::Capability::QueryUnclassifiedV1,
@@ -338,6 +339,7 @@ impl ConnectionSession {
                         crate::query::QueryRequest::decode(request.op, request.body),
                     ),
                     Op::RulesTextValidate
+                    | Op::RulesTextImport
                     | Op::RuleSetsEdit
                     | Op::RuleSetsSetEnabled
                     | Op::RuleSetsReorder
@@ -364,7 +366,6 @@ impl ConnectionSession {
                     Op::Hello => Action::error(Some(id), ErrorKind::BadRequest),
                     Op::RulesExplain
                     | Op::RulesTextDiff
-                    | Op::RulesTextImport
                     | Op::DataDelete
                     | Op::BrowserHello
                     | Op::BrowserState
@@ -837,6 +838,7 @@ mod tests {
             hello.capabilities,
             vec![
                 quartz_protocol::Capability::RequestsCancelV1,
+                quartz_protocol::Capability::RulesPreviewV1,
                 quartz_protocol::Capability::CategoriesV1,
                 quartz_protocol::Capability::QueryDocumentsV1,
                 quartz_protocol::Capability::QueryUnclassifiedV1,

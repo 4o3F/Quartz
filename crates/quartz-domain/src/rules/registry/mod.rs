@@ -15,8 +15,8 @@ pub use state::{
 };
 
 use crate::rules::{
-    self, ContentHash, Enablement, InstalledSet, ParseContext, ParseRuleSetError, RuleKind,
-    RuleOrigin, RuleSet, RuleSetKey, RuleWriteCode,
+    self, Enablement, InstalledSet, ParseContext, ParseRuleSetError, RuleKind, RuleOrigin, RuleSet,
+    RuleSetKey, RuleWriteCode,
 };
 use snafu::{ResultExt, Snafu};
 use snapshot::BuildPolicy;
@@ -65,7 +65,7 @@ pub enum RegistryCommand {
         /// Current revision observed by the client; zero denotes a new or deleted key.
         base_version: u32,
     },
-    /// Imports text after validating its base revision and privacy preview.
+    /// Prepares imported text; the persistence shell checks privacy authorization.
     Import {
         /// Stable key of the rule set affected by this value.
         key: RuleSetKey,
@@ -75,8 +75,6 @@ pub enum RegistryCommand {
         text: String,
         /// Current revision observed by the client; zero denotes a new or deleted key.
         base_version: u32,
-        /// Privacy input hash returned by the corresponding preview.
-        preview_hash: Option<ContentHash>,
     },
     /// Appends a revision with the requested subtree enablement.
     Toggle {
@@ -230,9 +228,6 @@ pub enum DecideRegistryCommandError {
     /// Ordering must include every sibling exactly once.
     #[snafu(display("ordering must include every sibling exactly once"))]
     InvalidOrdering,
-    /// Privacy import requires a current preview.
-    #[snafu(display("privacy import requires a current preview"))]
-    StalePreview,
     /// Rule revision exceeds the supported range.
     #[snafu(display("rule revision exceeds the supported range"))]
     RevisionOverflow,
@@ -588,7 +583,6 @@ impl RuleRegistry {
                 file,
                 text,
                 base_version,
-                preview_hash,
             } => {
                 state.check_base(&key, base_version)?;
                 let set = RuleSet::parse(
@@ -604,11 +598,6 @@ impl RuleRegistry {
                     return Err(DecideRegistryCommandError::IdentityMismatch);
                 }
                 let write = state.save_text(set, RuleOrigin::User)?;
-                if write.update().set.header.kind == RuleKind::Privacy
-                    && preview_hash.as_ref() != Some(&current.hashes().privacy)
-                {
-                    return Err(DecideRegistryCommandError::StalePreview);
-                }
                 writes.push(write);
             }
             RegistryCommand::Revert {

@@ -241,3 +241,9 @@ fn privacy_preview_fixture_preserves_stored_retention_totals() {
     let totals = fixture()["response"]["totals"].clone();
     assert_eq!(totals["before"], totals["after"]);
 }
+
+#[test]
+fn preview_response_debug_redacts_receipt() {
+    let response: RulesPreviewResponse = serde_json::from_value(json!({"rules":[],"samples":[],"versions":"v","next_cursor":null,"preview_receipt":"private-receipt-marker"})).expect("response");
+    assert!(!format!("{response:?}").contains("private-receipt-marker"));
+}

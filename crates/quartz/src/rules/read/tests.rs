@@ -555,7 +555,6 @@ fn oversized_effective_results_split_and_import_invalidates_all_read_cursors() {
         file: "import.toml".into(),
         text: Fixture::source("user.unrelated", None, &Fixture::rule("imported", 50)),
         base_version: 0,
-        preview_hash: None,
     });
     let inputs = fixture.inputs();
     assert_ne!(inputs.versions(), old_versions);

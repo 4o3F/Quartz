@@ -243,3 +243,48 @@ fn rule_text_contracts_preserve_fixtures_and_accept_additive_responses() {
             .is_err()
     );
 }
+
+#[test]
+fn rule_write_debug_redacts_receipts_and_source_text() {
+    let bodies = [
+        json!({"key":"user.debug","base_version":0,"text":"private-text-marker","preview_receipt":"private-receipt-marker"}),
+        json!({"key":"user.debug","base_version":1,"enabled":true,"preview_receipt":"private-receipt-marker"}),
+        json!({"siblings":[{"key":"user.debug","base_version":1}],"preview_receipt":"private-receipt-marker"}),
+        json!({"key":"user.debug","base_version":1,"preview_receipt":"private-receipt-marker"}),
+        json!({"key":"user.debug","base_version":1,"version":1,"preview_receipt":"private-receipt-marker"}),
+    ];
+    let values = [
+        format!(
+            "{:?}",
+            serde_json::from_value::<RuleSetsEditRequest>(bodies[0].clone()).expect("edit")
+        ),
+        format!(
+            "{:?}",
+            serde_json::from_value::<RuleSetsSetEnabledRequest>(bodies[1].clone()).expect("enable")
+        ),
+        format!(
+            "{:?}",
+            serde_json::from_value::<RuleSetsReorderRequest>(bodies[2].clone()).expect("reorder")
+        ),
+        format!(
+            "{:?}",
+            serde_json::from_value::<RuleSetsDeleteRequest>(bodies[3].clone()).expect("delete")
+        ),
+        format!(
+            "{:?}",
+            serde_json::from_value::<RuleSetsRevertRequest>(bodies[4].clone()).expect("revert")
+        ),
+        format!(
+            "{:?}",
+            RulesTextValidateRequest {
+                key: "user.debug".into(),
+                base_version: 0,
+                text: "private-text-marker".into()
+            }
+        ),
+    ];
+    for debug in values {
+        assert!(!debug.contains("private-receipt-marker"));
+        assert!(!debug.contains("private-text-marker"));
+    }
+}

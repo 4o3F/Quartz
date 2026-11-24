@@ -637,7 +637,6 @@ mod tests {
                         file: "test.toml".into(),
                         text,
                         base_version: 0,
-                        preview_hash: None,
                     },
                     reply,
                 )
@@ -924,11 +923,19 @@ mod tests {
     }
     #[test]
     fn privacy_edits_require_preview_without_publishing_or_writing() {
+        use quartz_protocol::ErrorKind;
         let mut fixture = Fixture::new();
         let before = fixture.database.registry.snapshots().load();
         for receipt in [serde_json::Value::Null, serde_json::json!("unissued")] {
             let error = fixture.ipc(quartz_protocol::Op::RuleSetsEdit, serde_json::json!({"key":"user.privacy","base_version":0,"text":Fixture::rule_text("user.privacy","privacy","builtin.privacy"),"preview_receipt":receipt})).expect_err("preview unavailable");
-            assert_eq!(error.kind.code(), "preview_required");
+            assert_eq!(
+                error.kind,
+                if receipt.is_null() {
+                    ErrorKind::PreviewRequired
+                } else {
+                    ErrorKind::PreviewExpired
+                }
+            );
             assert!(Arc::ptr_eq(
                 &before,
                 &fixture.database.registry.snapshots().load()
@@ -1275,11 +1282,19 @@ mod tests {
                 },
             ] {
                 case.body["preview_receipt"] = receipt.clone();
-                fixture.assert_rule_failure(case.op, case.body, ErrorKind::PreviewRequired);
+                fixture.assert_rule_failure(
+                    case.op,
+                    case.body,
+                    if receipt.is_null() {
+                        ErrorKind::PreviewRequired
+                    } else {
+                        ErrorKind::PreviewExpired
+                    },
+                );
             }
         }
         let snapshot = fixture.database.registry.snapshots().load();
-        for preview_hash in [None, Some(snapshot.hashes().privacy.clone())] {
+        {
             let error = fixture
                 .database
                 .registry
@@ -1291,18 +1306,10 @@ mod tests {
                         file: "fixture.toml".into(),
                         text: Fixture::rule_text("user.privacy", "privacy", "builtin.privacy"),
                         base_version: 1,
-                        preview_hash,
                     },
                 )
                 .expect_err("import requires receipt issuance");
-            assert!(matches!(
-                error,
-                RunRegistryCommandError::PreviewRequired
-                    | RunRegistryCommandError::Decide {
-                        source:
-                            quartz_domain::rules::registry::DecideRegistryCommandError::StalePreview
-                    }
-            ));
+            assert!(matches!(error, RunRegistryCommandError::PreviewRequired));
             assert!(Arc::ptr_eq(
                 &snapshot,
                 &fixture.database.registry.snapshots().load()

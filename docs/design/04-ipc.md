@@ -326,7 +326,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树返回的该值用作历史 scope.privacy_version。三个读取操作允许 UI、CLI，均按 200 KiB 页和不透明游标返回；`versions` 覆盖注册表全部修订、启停、排序与元数据输入。tree 按同级顺序、key 的前序遍历，versions 按版本降序，own 按文件顺序，effective 先按生效顺序列有效规则，再按树与文件顺序列被停用或覆盖的条目。entries 包含 `entry_kind`（`rule | override | disable`）、`content`（格式文档对应条目的字段）、`provenance`（定义与覆盖的 key/version/id 链）和 `state`（`effective | disabled | overridden | target_missing`）；告警使用稳定代码 `target_deleted | upstream_changed | conflict` 与目标规则引用。单条目编码超过 128 KiB 时校验报 `E-RULE-VALUE`，不产生无法分页的修订。
 
-写入仅允许 UI。`base_version = 0` 仅用于 edit/import 创建不存在或已删除的 key；恢复已删除 key 时沿用历史身份，版本从最后修订继续递增。其余写入必须使用当前非零版本。text 中 `[set].key` 必须等于请求 key；保留 key 的类型和父级身份校验先于隐私预览回执校验。版本检查先于写入；过期返回 `rule_set_stale`，客户端读取确认结果，保留草稿，不用新基础版本自动重放。所有影响隐私保留动作的写入（包括启停、排序、删除与回退）都适用第 6.3.2 节回执要求。
+写入仅允许 UI。`base_version = 0` 仅用于 edit/import 创建不存在或已删除的 key；恢复已删除 key 时沿用历史身份，版本从最后修订继续递增。其余写入必须使用当前非零版本。text 中 `[set].key` 必须等于请求 key；保留 key 的类型和父级身份校验先于隐私预览回执校验。版本检查先于写入；过期返回 `rule_set_stale`，客户端读取确认结果，保留草稿，不用新基础版本自动重放。用户 privacy-kind 规则集的 edit、import、set_enabled、reorder、delete 和 revert 均适用第 6.3.2 节回执要求，包括禁用节点和生效内容未变化的修订；排序按目标节点的 kind 判断。分类和提取规则集写入不要求回执。
 
 内置 key 的编辑、启停、排序、删除和回退统一返回 `rule_set_read_only {key}`，在内容和基础版本检查前拒绝。text 的 key 与请求 key 不同返回 `bad_request`；已有 key 的 kind 或 parent 不同返回 `rule_set_identity`，field 为对应身份字段。创建或沿用历史身份恢复时，parent 的语法无效、缺失、已删除或父链成环返回 `rule_validation_failed`，诊断为定位到 `set.parent` 的 `E-RULE-PARENT`。排序列表为空、重复、不完整或混入其他父级或 kind 的节点返回 `bad_request`；无重复列表按 key 顺序检查基础版本，首个冲突使用 `rule_set_stale`。根级排序覆盖该 kind 的全部活跃用户根集，省略内置根集；内置根集固定排在所有用户根集之前，用户根集的 sibling_order 从 1 开始，子级排序从 0 开始。删除有子级的用户集返回 `rule_set_has_children`。
 
@@ -341,7 +341,7 @@ tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树�
 
 ### 6.3.2 预览、期限与回执
 
-预览回执签发在 M4-E2 实现。在此之前，所有用户 privacy-kind 规则集的编辑、导入、启停、排序、删除和回退均返回 `preview_required`，包括已提供 preview_receipt 的请求；分类和提取规则集写入可用。身份和基础版本校验先于此门控。启动时安装内置规则修订沿用内置升级流程。
+两个预览端点仅为 privacy-kind 修改签发保存回执；分类和提取预览省略回执与到期时刻。身份、基础版本、内容和树校验先于回执校验。启动时安装内置规则修订沿用内置升级流程，不要求用户回执。
 
 `rules.preview`（UI）和 `rules_text.preview`（UI、CLI）共用请求 `{mutation, start_date, end_date, expected_versions, deadline_ms?, sample_limit?, cursor?}`。日期为 1–7 个逻辑日，界面默认截至所选日的 7 日；`expected_versions` 取同范围 `query.range` 的摘要。`mutation = {op, body}` 为拟提交写操作的完整内容，省略 `preview_receipt`；rules.preview 接受 rule_sets 写操作，rules_text.preview 接受 rules_text.import。预览在临时规则快照上求值，不保存草稿。
 
@@ -352,7 +352,7 @@ tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树�
 - 提取预览的 samples 附 `before` / `after` 提取输出；隐私预览另返全局及逐规则 `further_hidden:{segments,fields,duration_ms}`，只计现存事实中将进一步降级的范围，包含非活跃事实。segments 是去重后的受影响切片数，fields 按 app/window_title/web 字段动作计数；时长按切片累计一次。
 - `sample_limit` 默认且最多 50，可为 0。样本为 `{start_utc_ms,end_utc_ms,clock_segment_id,rule,before,after}`，before/after 只含该 kind 的允许字段；先按 UTC、时钟段、事实主键、规则引用选取前 N 项，再分页，翻页不补选更多；单页含规则统计和样本的总编码不超过 200 KiB。只展示当前与草稿都允许显示的字段，隐私预览不借样本暴露将隐藏的原文。全部统计完成后才签发回执，第一页返回回执与到期时刻。
 
-E1 提供两个预览操作和 `requests.cancel`，声明 `requests.cancel.v1`。`rules.preview.v1` 还覆盖隐私保存回执校验，须在 E2 完成后声明；E1 响应省略 `preview_receipt` 与 `expires_utc_ms`。规则命令行接线安排在 E5。
+核心声明 `requests.cancel.v1` 和 `rules.preview.v1`；后者覆盖两个预览端点和隐私保存回执校验。规则命令行接线安排在 E5。
 
 `expected_versions` 使用同日期范围、`bucket="day"` 的 `query.range` 摘要，dimensions 不影响该摘要。受理后先在只读事务中检查输入摘要与游标，再通过实际写入的决策路径编译草稿。游标绑定预览操作、完整 mutation 的 SHA-256 摘要、日期、expected_versions、期限、样本数量和输入版本；正文按原始字符串字节参与摘要。任何规则集新修订均使游标过期，包括生效内容未变化的修订。两个快照共享一次数据库只读事务，各逻辑日使用相同事实、活动与标注边界，批次最多 256 行或片段，批次间由现有数据库循环优先处理采集写入。分页编码与跳过续页项也按最多 256 项一批执行，文档引用仅对当页候选项生成。
 
@@ -360,7 +360,14 @@ rules 列出草稿中该类型的生效规则，保留零命中项。规则预�
 
 样本 before/after 按类型分别为 `{category}`、`{extraction}` 或 `{app,window_title,web}`；隐私样本中的三项为保留动作。提取输出同时受事实已保存的保留级别、当前隐私规则和草稿隐私规则约束，任一方隐藏应用或标题时，两侧提取输出全部置空；任一方隐藏应用时，两侧分类样本返回未分类。样本不携带窗口标题原文。排序键中的事实主键由核心内部保留，响应不增加该字段。全局统计与前 N 项样本选择完成后才开始分页，续页不增加样本。
 
-隐私保存回执为不透明字符串，有效期 5 分钟；每连接最多保留 8 份，超出逐出最旧项，断开或核心重启即失效。回执绑定角色与连接、确切 mutation（包括原始文本字节或编辑内容、目标 key、操作与 base_version）、父链版本、三类规则输入、元数据、事实/标注版本和日期范围。提交时原子复核；缺失、过期或任一依赖变化分别返回 `preview_required`、`preview_expired`、`preview_mismatch`。保存成功消费回执；成功响应丢失后先读取当前版本，不能凭旧回执新增版本。CLI 预览可用于诊断，但 CLI 没有保存权限。
+隐私保存回执由操作系统随机源生成，不含草稿或输入数据，只在核心内存保存。有效期 5 分钟，以单调时钟判断到期；`expires_utc_ms` 供客户端显示，不作为核心校验时钟。每连接最多保留 8 份，超出逐出最旧项，断开或核心重启即失效。
+
+回执绑定角色与连接、确切 mutation（包括原始文本字节或编辑内容、目标 key、操作与 base_version）、父链版本、三类规则输入、元数据、事实/标注版本和日期范围。确切 mutation 按操作及各类型化字段直接计算带域标记、长度前缀的 SHA-256，不包含 preview_receipt；操作名独立参与摘要，edit 与 import 不能互用，原文保留原始 UTF-8 字节。输入摘要覆盖三类生效规则、所有规则集当前修订（包含完整父链及生效内容未变的修订）、元数据、统计策略、时区、日起点、范围内各来源的事实和标注版本，以及文档样本引用依赖的日期范围。
+
+角色权限在受理时检查，身份、基础版本、内容与树校验先于收据校验。收据错误的优先顺序固定为：角色权限 `forbidden` → 缺失回执 `preview_required` → 无法识别、已消费、断开或到期 `preview_expired` → 修改不一致 `preview_mismatch {reason:"mutation"}` → 统计范围或文档引用范围的 UTC 边界变化 `preview_mismatch {reason:"range"}` → 其他输入变化 `preview_mismatch {reason:"inputs"}`。保存请求沿用回执记录的逻辑日期范围；时区或日起点变化导致任一范围边界变化或无法表示时，按 range 处理。事务内还会在实际写入前复核单调到期时间。不匹配不消费回执，重新预览可取得新回执。
+
+
+生成中的回执不占用八份已交付回执的容量；取消、到期或发送队列受理失败不逐出已有回执。发送端先预留队列容量，再安装回执并逐出最旧项，最后使包含令牌的响应进入发送队列。保存时只在内存校验及消费期间持有连接收据锁，SQLite 写入事务使用校验通过的不可变收据副本，原子重读并校验输入；事务提交成功后消费回执。连接在事务期间断开或回执被逐出时，已提交的修改仍按成功处理；提交后只消费仍与该副本相同的回执，不重新插入。成功响应丢失后先读取当前版本，不能凭旧回执新增版本。CLI 预览可用于诊断，但没有保存权限。
 
 ```jsonc
 // rules_text.preview body；expected_versions 从同范围 query.range 取得

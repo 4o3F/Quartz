@@ -40,8 +40,38 @@ std::thread_local! {static PREVIEW_WORK: std::cell::Cell<PreviewWork> = const {s
 mod page;
 use page::{PageProgress, PageSources, PreviewPage, PreviewReferences};
 
+/// Builds both date ranges used by preview statistics and document references.
+#[derive(Debug)]
+pub(crate) struct PreviewCalendar {
+    calendar: DayWalker,
+    reference_range: QueryRange,
+}
+impl PreviewCalendar {
+    pub(crate) fn new(
+        start_date: wire::LocalDate,
+        end_date: wire::LocalDate,
+        offset: super::calendar::DayStartOffset,
+        zone: jiff::tz::TimeZone,
+    ) -> Result<Self, RunQueryError> {
+        let calendar = DayWalker::new(start_date, end_date, offset, zone.clone())?;
+        let reference_range =
+            super::details::EntityCalendar::in_zone(end_date.yesterday()?, offset, zone)?.range;
+        Ok(Self {
+            calendar,
+            reference_range,
+        })
+    }
+    pub(crate) fn range(&self) -> QueryRange {
+        self.calendar.range
+    }
+    pub(crate) fn reference_range(&self) -> QueryRange {
+        self.reference_range
+    }
+}
+
 pub(crate) struct PreviewRequest {
     mutation: RuleMutation,
+    pub(crate) receipts: Option<crate::rules::receipts::ReceiptContext>,
     start_date: wire::LocalDate,
     end_date: wire::LocalDate,
     expected_versions: wire::QueryVersions,
@@ -97,6 +127,7 @@ impl PreviewRequest {
             sample_limit: usize::try_from(request.sample_limit.unwrap_or_default().get())
                 .expect("sample limit fits usize"),
             mutation: request.mutation.into(),
+            receipts: None,
             start_date: request.start_date,
             end_date: request.end_date,
             expected_versions: request.expected_versions,
@@ -250,6 +281,8 @@ struct AnalyzeDay {
 #[derive(Debug)]
 pub(crate) struct PreviewJob {
     snapshot: ReadSnapshot,
+    receipt: Option<PendingReceipt>,
+    receipt_grant: Option<crate::rules::receipts::ReceiptGrant>,
     before: Arc<RuleSnapshot>,
     after: Arc<RuleSnapshot>,
     kind: domain::RuleKind,
@@ -271,6 +304,11 @@ pub(crate) struct PreviewJob {
     hidden: wire::FurtherHidden,
     samples: BTreeMap<SampleOrder, wire::RulePreviewSample>,
     sample_limit: usize,
+}
+#[derive(Debug)]
+struct PendingReceipt {
+    context: crate::rules::receipts::ReceiptContext,
+    binding: crate::rules::receipts::ReceiptBinding,
 }
 impl PreviewJob {
     pub(crate) fn start(
@@ -306,10 +344,33 @@ impl PreviewJob {
                 ..prepared.state.clone()
             }
             .digest(prepared.reference_range)?;
+            let receipt = if kind == domain::RuleKind::Privacy && prepared.position.is_first() {
+                request
+                    .receipts
+                    .clone()
+                    .map(|context| {
+                        crate::rules::receipts::ReceiptBinding::new(
+                            request.mutation.digest()?,
+                            &before,
+                            &prepared.state,
+                            crate::rules::receipts::ReceiptDates {
+                                start_date: request.start_date,
+                                end_date: request.end_date,
+                                range: prepared.calendar.range,
+                                reference_range: prepared.reference_range,
+                            },
+                        )
+                        .map(|binding| PendingReceipt { context, binding })
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
             Ok(PreparedDraft {
                 prepared,
                 after,
                 kind,
+                receipt,
             })
         });
         match result {
@@ -317,6 +378,7 @@ impl PreviewJob {
                 prepared,
                 after,
                 kind,
+                receipt,
             }) => {
                 let mut statistics = BTreeMap::new();
                 let mut privacy_actions = BTreeMap::new();
@@ -351,6 +413,8 @@ impl PreviewJob {
                 };
                 Ok(Self {
                     snapshot,
+                    receipt,
+                    receipt_grant: None,
                     before,
                     after,
                     kind,
@@ -392,18 +456,15 @@ impl PreviewJob {
         snapshot.begin()?;
         let settings = snapshot.settings()?;
         let zone = RunQueryError::system_time_zone(jiff::tz::TimeZone::try_system)?;
-        let mut calendar = DayWalker::new(
+        let PreviewCalendar {
+            mut calendar,
+            reference_range,
+        } = PreviewCalendar::new(
             request.start_date,
             request.end_date,
             settings.day_start_offset,
             zone.clone(),
         )?;
-        let reference_range = super::details::EntityCalendar::in_zone(
-            request.end_date.yesterday()?,
-            settings.day_start_offset,
-            zone.clone(),
-        )?
-        .range;
         let state = VersionState {
             days: snapshot
                 .versions(reference_range)?
@@ -420,15 +481,7 @@ impl PreviewJob {
         let mut digest = Sha256::new();
         digest.update(input_versions.0.as_bytes());
         digest.update(before_versions.0.as_bytes());
-        for (key, entry) in &before.state().sets {
-            digest.update(
-                u64::try_from(key.as_str().len())
-                    .expect("key length fits u64")
-                    .to_le_bytes(),
-            );
-            digest.update(key.as_str().as_bytes());
-            digest.update(entry.current.version.to_le_bytes());
-        }
+        digest.update(crate::rules::digest::ReceiptDigest::revisions(before)?.as_bytes());
         let versions = wire::QueryVersions(quartz_domain::text::encode_hex(&digest.finalize()));
         if request.expected_versions != input_versions {
             return Err(ProtocolError::new(if request.cursor.is_some() {
@@ -548,7 +601,14 @@ impl PreviewJob {
                 PageProgress::More => self.stage = Stage::Page(page),
                 PageProgress::Complete => {
                     self.control.check()?;
-                    return Ok(Some(QueryResponse::Preview(page.finish())));
+                    let mut response = page.finish();
+                    if let Some(receipt) = self.receipt.take() {
+                        let issued = receipt.context.issue(receipt.binding)?;
+                        self.receipt_grant = Some(issued.grant);
+                        response.preview_receipt = Some(issued.token);
+                        response.expires_utc_ms = Some(issued.expires_utc_ms);
+                    }
+                    return Ok(Some(QueryResponse::Preview(response)));
                 }
             },
             Stage::Complete => return Err(RunQueryError::InvalidRuleEntry),
@@ -802,6 +862,11 @@ impl PreviewJob {
             std::mem::take(&mut self.before_totals).finish(self.position, &self.control)?;
         let after = std::mem::take(&mut self.after_totals).finish(self.position, &self.control)?;
         let response = wire::RulesPreviewResponse {
+            preview_receipt: self
+                .receipt
+                .as_ref()
+                .map(|_| "0".repeat(crate::rules::receipts::RECEIPT_TOKEN_CHARS)),
+            expires_utc_ms: self.receipt.as_ref().map(|_| i64::MAX),
             rules: Vec::new(),
             totals: Some(wire::RulePreviewTotals {
                 before: Totals::empty(before.active_ms),
@@ -830,12 +895,16 @@ impl PreviewJob {
             },
         )
     }
+    pub(crate) fn take_receipt_grant(&mut self) -> Option<crate::rules::receipts::ReceiptGrant> {
+        self.receipt_grant.take()
+    }
     pub(crate) fn finish(self) -> Result<ReadOnlyStore, RunQueryError> {
         Ok(self.snapshot.finish()?)
     }
 }
 #[derive(Debug)]
 struct PreparedDraft {
+    receipt: Option<PendingReceipt>,
     prepared: PreparedPreview,
     after: Arc<RuleSnapshot>,
     kind: domain::RuleKind,

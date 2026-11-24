@@ -59,7 +59,7 @@ pub struct RuleSetsVersionsRequest {
     pub cursor: Option<QueryCursor>,
 }
 /// Saves complete quartz-rules/1 text; zero creates or restores a key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsEditRequest {
     pub key: String,
@@ -68,14 +68,35 @@ pub struct RuleSetsEditRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_receipt: Option<String>,
 }
+impl std::fmt::Debug for RuleSetsEditRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleSetsEditRequest")
+            .field("key", &self.key)
+            .field("base_version", &self.base_version)
+            .field("text", &"[redacted]")
+            .field("preview_receipt", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Validates text against an observed installed revision without saving it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RulesTextValidateRequest {
     pub key: String,
     pub base_version: u32,
     pub text: String,
 }
+impl std::fmt::Debug for RulesTextValidateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RulesTextValidateRequest")
+            .field("key", &self.key)
+            .field("base_version", &self.base_version)
+            .field("text", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Content diagnostics from a contextual dry run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RulesTextValidateResponse {
@@ -101,7 +122,7 @@ pub struct RulesTextExportResponse {
     pub next_cursor: Option<QueryCursor>,
 }
 /// Changes enablement of a user set and its effective subtree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsSetEnabledRequest {
     pub key: String,
@@ -110,6 +131,17 @@ pub struct RuleSetsSetEnabledRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_receipt: Option<String>,
 }
+impl std::fmt::Debug for RuleSetsSetEnabledRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleSetsSetEnabledRequest")
+            .field("key", &self.key)
+            .field("base_version", &self.base_version)
+            .field("enabled", &self.enabled)
+            .field("preview_receipt", &"[redacted]")
+            .finish()
+    }
+}
+
 /// One observed revision in a complete sibling ordering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -118,15 +150,24 @@ pub struct RuleSetSibling {
     pub base_version: NonZeroU32,
 }
 /// Replaces the entire same-parent, same-kind sibling order atomically.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsReorderRequest {
     pub siblings: Vec<RuleSetSibling>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_receipt: Option<String>,
 }
+impl std::fmt::Debug for RuleSetsReorderRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleSetsReorderRequest")
+            .field("siblings", &self.siblings)
+            .field("preview_receipt", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Deletes a childless user set while retaining its history.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsDeleteRequest {
     pub key: String,
@@ -134,8 +175,18 @@ pub struct RuleSetsDeleteRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_receipt: Option<String>,
 }
+impl std::fmt::Debug for RuleSetsDeleteRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleSetsDeleteRequest")
+            .field("key", &self.key)
+            .field("base_version", &self.base_version)
+            .field("preview_receipt", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Copies historical contents into a new current revision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsRevertRequest {
     pub key: String,
@@ -144,6 +195,17 @@ pub struct RuleSetsRevertRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_receipt: Option<String>,
 }
+impl std::fmt::Debug for RuleSetsRevertRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleSetsRevertRequest")
+            .field("key", &self.key)
+            .field("base_version", &self.base_version)
+            .field("version", &self.version)
+            .field("preview_receipt", &"[redacted]")
+            .finish()
+    }
+}
+
 /// A committed revision, including the revision recording a deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutatedRuleSet {
