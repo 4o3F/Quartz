@@ -7,7 +7,7 @@ mod hooks;
 mod identity;
 mod version;
 use apartment::CaptureApartment;
-pub(super) use hooks::{ForegroundCommand, ForegroundPort, ObserveForegroundError};
+pub(super) use hooks::{ForegroundCommand, ForegroundPort, HookHealth, ObserveForegroundError};
 use identity::Resolver;
 
 mod window;

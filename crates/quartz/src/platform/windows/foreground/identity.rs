@@ -166,9 +166,21 @@ impl ProcessMetadata {
         }
     }
 }
+#[derive(Clone)]
+enum DisplayName {
+    Frame(String),
+    Process(String),
+}
+impl DisplayName {
+    fn text(&self) -> &str {
+        match self {
+            Self::Frame(name) | Self::Process(name) => name,
+        }
+    }
+}
 pub(crate) struct Resolver {
     processes: BoundedCache<ProcessKey, ProcessMetadata>,
-    names: BoundedCache<String, String>,
+    names: BoundedCache<String, DisplayName>,
     failures: u64,
 }
 pub(crate) use crate::core::foreground::Resolution;
@@ -305,9 +317,40 @@ impl Resolver {
         })
     }
     fn frame_application(&mut self, aumid: Aumid) -> ApplicationMetadata {
+        self.frame_application_with(aumid, Aumid::display_name)
+    }
+    fn frame_application_with(
+        &mut self,
+        aumid: Aumid,
+        shell: impl FnOnce(
+            &Aumid,
+        ) -> Result<
+            super::frame_aumid::AppDisplayName,
+            super::frame_aumid::ReadAppDisplayNameError,
+        >,
+    ) -> ApplicationMetadata {
         let key = AppIdentity::Aumid(aumid.as_str().to_owned()).key();
-        let display_name = aumid.resolve_display_name(self.names.find(&key).map(String::as_str));
+        use super::frame_aumid::{FrameDisplayName, FrameDisplayNameSource};
+        let selected =
+            FrameDisplayName::select(self.names.find(&key).map(DisplayName::text), || {
+                shell(&aumid)
+            });
+        let source = selected.source();
+        tracing::debug!(name_source = ?source, "application identity resolved from frame");
+        let display_name = selected.into_name(&aumid);
+        if source == FrameDisplayNameSource::AppsFolder {
+            self.names
+                .insert(key, DisplayName::Frame(display_name.clone()));
+        }
         ApplicationMetadata::from_frame(aumid, display_name)
+    }
+    fn process_display_name(&mut self, key: String, read: impl FnOnce() -> String) -> String {
+        if let Some(DisplayName::Process(name)) = self.names.find(&key) {
+            return name.clone();
+        }
+        let name = read();
+        self.names.insert(key, DisplayName::Process(name.clone()));
+        name
     }
     fn process(&mut self, process: ProcessId) -> Option<Metadata> {
         match self.resolve_process(process) {
@@ -357,21 +400,16 @@ impl Resolver {
             .ok_or(ResolveProcessError::CreationTime)?
             .to_owned();
         let app_key = identity.key();
-        let display_name = match self.names.find(&app_key) {
-            Some(name) => name.clone(),
-            None => {
-                let name = match version::FileDescription::read(&image_path) {
-                    Ok(Some(description)) => description.into_string(),
-                    Ok(None) => exe_name.clone(),
-                    Err(error) => {
-                        tracing::warn!(kind = ?error.kind(), "application description unavailable; using executable filename");
-                        exe_name.clone()
-                    }
-                };
-                self.names.insert(app_key, name.clone());
-                name
+        let display_name = self.process_display_name(app_key, || {
+            match version::FileDescription::read(&image_path) {
+                Ok(Some(description)) => description.into_string(),
+                Ok(None) => exe_name.clone(),
+                Err(error) => {
+                    tracing::warn!(kind = ?error.kind(), "application description unavailable; using executable filename");
+                    exe_name.clone()
+                }
             }
-        };
+        });
         let millis = (i128::from(key.created) - UNIX_EPOCH_TICKS)
             .div_euclid(i128::from(TICKS_PER_MILLISECOND));
         let created = UtcInstant::try_from(
@@ -456,12 +494,35 @@ mod tests {
     use super::*;
     use crate::core::foreground::EventKind;
     #[test]
+    fn successful_shell_names_are_cached_and_process_names_supersede_them() {
+        let aumid =
+            Aumid::from_utf16(&"Package!App".encode_utf16().collect::<Vec<_>>()).expect("AUMID");
+        let mut resolver = Resolver::new();
+        let first = resolver.frame_application_with(aumid.clone(), |_| {
+            super::super::frame_aumid::AppDisplayName::new("Shell name".into())
+        });
+        assert_eq!(first.display_name, "Shell name");
+        let cached = resolver
+            .frame_application_with(aumid.clone(), |_| panic!("Shell lookup must be cached"));
+        assert_eq!(cached.display_name, "Shell name");
+        let key = AppIdentity::Aumid(aumid.as_str().to_owned()).key();
+        assert_eq!(
+            resolver.process_display_name(key, || "Process name".into()),
+            "Process name"
+        );
+        let upgraded = resolver.frame_application_with(aumid, |_| panic!("process name is cached"));
+        assert_eq!(upgraded.display_name, "Process name");
+    }
+
+    #[test]
     fn frame_identity_reuses_cached_display_name_without_process_metadata() {
         let units: Vec<_> = "Package!App".encode_utf16().collect();
         let aumid = Aumid::from_utf16(&units).expect("valid test AUMID");
         let identity = AppIdentity::Aumid(aumid.as_str().to_owned());
         let mut resolver = Resolver::new();
-        resolver.names.insert(identity.key(), "Settings".into());
+        resolver
+            .names
+            .insert(identity.key(), DisplayName::Process("Settings".into()));
         let cached = resolver.frame_application(aumid);
         assert_eq!(cached.identity, identity);
         assert_eq!(cached.source, MetadataSource::Frame);

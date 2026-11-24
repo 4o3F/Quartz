@@ -26,8 +26,6 @@ pub(in crate::platform::windows) enum AppMessage {
     TrayCallback = WM_APP + 1,
     WakeCore = WM_APP + 2,
     WakeWorkers = WM_APP + 3,
-    OpenUi = WM_APP + 4,
-    UiFirstFrame = WM_APP + 5,
 }
 
 impl AppMessage {
@@ -36,8 +34,6 @@ impl AppMessage {
             value if value == u32::from(Self::TrayCallback) => Some(Self::TrayCallback),
             value if value == u32::from(Self::WakeCore) => Some(Self::WakeCore),
             value if value == u32::from(Self::WakeWorkers) => Some(Self::WakeWorkers),
-            value if value == u32::from(Self::OpenUi) => Some(Self::OpenUi),
-            value if value == u32::from(Self::UiFirstFrame) => Some(Self::UiFirstFrame),
             _ => None,
         }
     }
@@ -56,9 +52,18 @@ impl TrayNotification {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::platform::windows) enum CallbackFailure {
+    SystemObservation,
+    SessionSettlement,
+    TimerObservation,
+    TimerClock,
+}
+
 /// Main-loop actions translated from window and notification icon messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CoreEvent {
+pub(in crate::platform::windows) enum CoreEvent {
+    Fatal(CallbackFailure),
     OpenUi,
     ShowTrayMenu,
     Hover,
@@ -79,12 +84,7 @@ impl CoreEvent {
                 NIN_POPUPOPEN | WindowsAndMessaging::WM_MOUSEMOVE => Some(Self::Hover),
                 _ => None,
             },
-            Some(
-                AppMessage::WakeCore
-                | AppMessage::WakeWorkers
-                | AppMessage::OpenUi
-                | AppMessage::UiFirstFrame,
-            ) => None,
+            Some(AppMessage::WakeCore | AppMessage::WakeWorkers) => None,
             None if message == taskbar_created => Some(Self::RestoreTray),
             None if message == WindowsAndMessaging::WM_SETTINGCHANGE => Some(Self::CalendarChanged),
             None if matches!(message, WM_CLOSE | WM_DESTROY) => Some(Self::Quit),
@@ -127,6 +127,7 @@ struct WindowState {
     taskbar_created: u32,
     events: RefCell<VecDeque<CoreEvent>>,
     ingress: RefCell<Option<super::super::sources::SystemIngress>>,
+    commands: RefCell<Option<crate::core::app::MainReceiver>>,
 }
 
 impl WindowState {
@@ -140,11 +141,23 @@ impl WindowState {
             taskbar_created,
             events: RefCell::new(VecDeque::new()),
             ingress: RefCell::new(None),
+            commands: RefCell::new(None),
         }
     }
 
     fn enqueue(&self, event: CoreEvent) {
         let mut events = self.events.borrow_mut();
+        if matches!(event, CoreEvent::EndSession | CoreEvent::Fatal(_)) {
+            events.clear();
+            events.push_front(event);
+            return;
+        }
+        if events
+            .iter()
+            .any(|event| matches!(event, CoreEvent::EndSession | CoreEvent::Fatal(_)))
+        {
+            return;
+        }
         // Semantic actions are deduplicated; the one-shot timer has at most one pending deadline.
         if !events.contains(&event) {
             if event == CoreEvent::Quit {
@@ -155,6 +168,33 @@ impl WindowState {
         }
     }
 
+    fn wake_workers(&self, end_menu: impl FnOnce()) {
+        if self
+            .commands
+            .borrow()
+            .as_ref()
+            .is_some_and(|commands| commands.has_fatal())
+        {
+            end_menu();
+        }
+    }
+    fn take_terminal(&self) -> Option<CoreEvent> {
+        let mut events = self.events.borrow_mut();
+        if events
+            .front()
+            .is_some_and(|event| matches!(event, CoreEvent::EndSession | CoreEvent::Fatal(_)))
+        {
+            return events.pop_front();
+        }
+        None
+    }
+    fn fail(&self, failure: CallbackFailure, error: impl std::fmt::Display) {
+        tracing::error!(?failure, %error, "core callback failed; orderly shutdown requested");
+        if let Some(ingress) = self.ingress.borrow().as_ref() {
+            ingress.stop();
+        }
+        self.enqueue(CoreEvent::Fatal(failure));
+    }
     fn drain_events(&self) -> Vec<CoreEvent> {
         // Return owned events so no RefCell borrow survives a nested Windows message loop.
         self.events.borrow_mut().drain(..).collect()
@@ -248,6 +288,15 @@ impl Window {
         *self.state.ingress.borrow_mut() = Some(ingress);
     }
 
+    pub(in crate::platform::windows) fn attach_commands(
+        &self,
+        commands: crate::core::app::MainReceiver,
+    ) {
+        *self.state.commands.borrow_mut() = Some(commands);
+    }
+    pub(in crate::platform::windows) fn take_terminal(&self) -> Option<CoreEvent> {
+        self.state.take_terminal()
+    }
     pub(in crate::platform::windows) fn raw(&self) -> HWND {
         self.handle
     }
@@ -282,6 +331,16 @@ impl Drop for Window {
 /// Borrowed handle valid only while Windows is dispatching the current callback.
 struct CallbackWindow(HWND);
 impl CallbackWindow {
+    fn end_menu(&self) {
+        // SAFETY: Called only by the menu-owning main thread's native callback.
+        if let Err(error) = unsafe { WindowsAndMessaging::EndMenu() } {
+            tracing::debug!(%error, "no modal tray menu to end");
+        }
+    }
+    fn fail(&self, state: &WindowState, failure: CallbackFailure, error: impl std::fmt::Display) {
+        state.fail(failure, error);
+        self.end_menu();
+    }
     /// Dispatches a message using the owning window's borrowed callback state.
     ///
     /// # Safety
@@ -334,8 +393,7 @@ impl CallbackWindow {
                     && let Some(ingress) = state.ingress.borrow().as_ref()
                     && let Err(error) = ingress.message(message, wparam)
                 {
-                    tracing::error!(%error, "could not observe system message; exiting core");
-                    std::process::exit(1);
+                    self.fail(state, CallbackFailure::SystemObservation, error);
                 }
                 if message == WM_QUERYENDSESSION {
                     return LRESULT(1);
@@ -344,10 +402,11 @@ impl CallbackWindow {
                     if let Some(ingress) = state.ingress.borrow().as_ref()
                         && let Err(error) = ingress.end_session()
                     {
-                        tracing::error!(%error, "could not settle capture before session end; exiting core");
-                        std::process::exit(1);
+                        self.fail(state, CallbackFailure::SessionSettlement, error);
+                        return LRESULT(0);
                     }
                     state.enqueue(CoreEvent::EndSession);
+                    self.end_menu();
                     return LRESULT(0);
                 }
                 if message == WM_TIMER {
@@ -356,6 +415,14 @@ impl CallbackWindow {
                         // Cancellation is best-effort; a nested dispatch may already have cancelled it.
                         let _ = WindowsAndMessaging::KillTimer(Some(window), wparam.0);
                     }
+                    if state
+                        .ingress
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|ingress| ingress.is_stopped())
+                    {
+                        return LRESULT(0);
+                    }
                     use crate::core::sources::ClockReader;
                     match super::super::sources::SystemClock.read() {
                         Ok(at) => {
@@ -363,14 +430,13 @@ impl CallbackWindow {
                                 && let Err(error) = ingress
                                     .observe_at(at, quartz_domain::capture::CaptureEvent::Wake)
                             {
-                                tracing::error!(%error, "could not deliver timer observation; exiting core");
-                                std::process::exit(1);
+                                self.fail(state, CallbackFailure::TimerObservation, error);
+                                return LRESULT(0);
                             }
                             state.enqueue(CoreEvent::Deadline(at));
                         }
                         Err(error) => {
-                            tracing::error!(%error, "could not timestamp timer");
-                            state.enqueue(CoreEvent::Quit);
+                            self.fail(state, CallbackFailure::TimerClock, error);
                         }
                     }
                     return LRESULT(0);
@@ -393,6 +459,7 @@ impl CallbackWindow {
                     return LRESULT(0);
                 }
                 if AppMessage::from_raw(message).is_some() {
+                    state.wake_workers(|| self.end_menu());
                     return LRESULT(0);
                 }
             }
@@ -419,6 +486,48 @@ unsafe extern "system" fn window_procedure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fatal_worker_wake_ends_a_modeled_modal_menu_without_draining_commands() {
+        let state = WindowState::new(WM_APP);
+        let commands =
+            crate::core::app::MainReceiver::fatal_for_test(crate::core::app::Worker::Capture);
+        *state.commands.borrow_mut() = Some(commands.clone());
+        let ended = std::cell::Cell::new(false);
+        state.wake_workers(|| ended.set(true));
+        assert!(ended.get(), "injected menu backend is interrupted");
+        assert!(
+            commands.has_fatal(),
+            "the main loop still owns fatal handling and cleanup"
+        );
+    }
+
+    #[test]
+    fn session_settlement_preempts_queued_observations_and_effects() {
+        let state = WindowState::new(WM_APP);
+        state.enqueue(CoreEvent::Hover);
+        state.enqueue(CoreEvent::Deadline(
+            crate::store::capture::test_support::at(0),
+        ));
+        state.enqueue(CoreEvent::EndSession);
+        state.enqueue(CoreEvent::OpenUi);
+        assert_eq!(state.take_terminal(), Some(CoreEvent::EndSession));
+        assert!(state.drain_events().is_empty());
+    }
+    #[test]
+    fn injected_delivery_failure_becomes_a_typed_fatal_event() {
+        let state = WindowState::new(WM_APP);
+        state.enqueue(CoreEvent::Hover);
+        state.fail(
+            CallbackFailure::TimerObservation,
+            crate::core::app::ObserveCaptureError::Disconnected,
+        );
+        assert_eq!(
+            state.take_terminal(),
+            Some(CoreEvent::Fatal(CallbackFailure::TimerObservation))
+        );
+        assert!(state.drain_events().is_empty());
+    }
+
     #[test]
     fn settings_broadcast_requests_calendar_refresh_without_a_capture_event() {
         assert!(matches!(

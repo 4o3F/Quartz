@@ -1,8 +1,8 @@
 //! Composition root and one teardown path for partial startup and normal exit.
 
 use super::{
-    CaptureSender, JoinWorkersError, MainCommand, RequestShutdownError, SHUTDOWN_TIMEOUT,
-    ShutdownPort, StartWorkersError, Workers,
+    CaptureSender, JoinWorkersError, RequestShutdownError, SHUTDOWN_TIMEOUT, ShutdownPort,
+    StartWorkersError, Workers,
 };
 use crate::{
     core::{
@@ -142,10 +142,12 @@ pub(crate) struct CoreRuntime {
 }
 impl DataDirectory {
     /// Installs core logging before platform instance acquisition and tray creation.
-    pub(crate) fn initialize_core_logging(&self) -> Result<(), crate::logging::InitFileLogError> {
-        self.init_file_log(crate::logging::LogTarget::Core)?;
-        crate::logging::install_core_panic_log();
-        Ok(())
+    pub(crate) fn initialize_core_logging(
+        &self,
+    ) -> Result<crate::logging::FileLogGuard, crate::logging::InitFileLogError> {
+        let guard = self.init_file_log(crate::logging::LogTarget::Core)?;
+        crate::logging::install_core_panic_log(guard.panic_log());
+        Ok(guard)
     }
 }
 impl CoreRuntime {
@@ -263,7 +265,7 @@ impl CoreRuntime {
     pub(crate) fn shutdown_port(&self) -> ShutdownPort {
         self.workers().shutdown_port()
     }
-    pub(crate) fn commands(&self) -> &crossbeam_channel::Receiver<MainCommand> {
+    pub(crate) fn commands(&self) -> &super::MainReceiver {
         &self.workers().commands
     }
     fn workers(&self) -> &Workers {

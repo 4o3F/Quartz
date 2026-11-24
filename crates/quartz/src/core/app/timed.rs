@@ -188,6 +188,7 @@ mod tests {
             let overloaded = Arc::new(AtomicBool::new(false));
             let clock = Arc::new(FakeClock(Mutex::new(at(10))));
             let port = CaptureSender {
+                life: Default::default(),
                 sender,
                 overloaded: overloaded.clone(),
             }

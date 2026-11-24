@@ -7,8 +7,14 @@ use super::{
 use quartz_domain::capture::{
     BacklogFailure, CaptureParts, CaptureWrite, MonoInstant, Timestamp, WriteBacklog, limits,
 };
-use quartz_domain::capture::{BatchId, StoredGap, WriteBatch};
-use std::sync::{Arc, Mutex, MutexGuard};
+use quartz_domain::capture::{BacklogOutcome, BatchId, StoredGap, WriteBatch};
+use std::{
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
+
+/// Retry ten times within the one-second confirmation budget (02 §4.3).
+const PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub(crate) struct WriteQueue(Arc<Mutex<QueueState>>);
@@ -17,6 +23,7 @@ struct QueueState {
     backlog: WriteBacklog,
     state: PersistenceState,
     shutdown: Option<super::QueueShutdown>,
+    retry: Option<MonoInstant>,
 }
 #[derive(Debug)]
 pub(super) enum TransactionPlan {
@@ -38,6 +45,7 @@ impl WriteQueue {
             backlog: WriteBacklog::new(),
             state: PersistenceState::Ready,
             shutdown: None,
+            retry: None,
         })))
     }
     fn lock(&self) -> MutexGuard<'_, QueueState> {
@@ -73,6 +81,11 @@ impl WriteQueue {
     }
     pub(super) fn due(&self, now: Timestamp) -> bool {
         let queue = self.lock();
+        if matches!(queue.state, PersistenceState::Failed { .. }) {
+            return queue
+                .next_deadline()
+                .is_some_and(|deadline| deadline <= now.mono);
+        }
         queue.backlog.first_gap().is_some()
             || queue.backlog.command_count() >= TRANSACTION_COMMANDS
             || queue.immediate()
@@ -117,19 +130,62 @@ impl WriteQueue {
             }
         }
         queue.backlog.failed(BacklogFailure::QueueFull);
+        queue.retry = None;
         queue.state = PersistenceState::Ready;
         queue.update_state();
     }
-    pub(super) fn failed(&self, error: ExecuteCaptureBatchError) -> PersistenceOutcome {
+    pub(super) fn retry_after(&self, now: Timestamp) -> BacklogOutcome {
+        let mut queue = self.lock();
+        let outcome = if queue
+            .backlog
+            .oldest_queued_at()
+            .is_none_or(|queued| queued.mono <= now.mono)
+        {
+            queue.backlog.advance(now)
+        } else {
+            BacklogOutcome::default()
+        };
+        queue.update_state();
+        queue.schedule_retry(now);
+        outcome
+    }
+    #[cfg(test)]
+    pub(super) fn failed(
+        &self,
+        error: ExecuteCaptureBatchError,
+        now: Timestamp,
+    ) -> PersistenceOutcome {
+        let outcome = self.mark_failed(error);
+        self.lock().schedule_retry(now);
+        outcome
+    }
+    pub(super) fn mark_failed(&self, error: ExecuteCaptureBatchError) -> PersistenceOutcome {
         let mut queue = self.lock();
         queue.backlog.release_reservation();
         queue.backlog.failed(BacklogFailure::Database);
         let commands = queue.backlog.command_count();
         queue.state = PersistenceState::Failed { commands };
+        queue.retry = None;
         PersistenceOutcome::Failed { commands, error }
     }
 }
 impl QueueState {
+    fn schedule_retry(&mut self, now: Timestamp) {
+        let retry = now
+            .mono
+            .checked_add(PERSISTENCE_RETRY_INTERVAL)
+            .expect("validated clock has room for persistence retry");
+        let confirmation = self
+            .backlog
+            .batches()
+            .flat_map(|batch| &batch.writes)
+            .filter_map(CaptureWrite::checkpoint)
+            .map(|point| point.commit_by_mono)
+            .filter(|deadline| *deadline > now.mono)
+            .min();
+        self.retry = Some(confirmation.map_or(retry, |deadline| retry.min(deadline)));
+    }
+
     fn immediate(&self) -> bool {
         self.backlog
             .batches()
@@ -152,7 +208,11 @@ impl QueueState {
 
     fn next_deadline(&self) -> Option<MonoInstant> {
         if matches!(self.state, PersistenceState::Failed { .. }) {
-            return self.backlog.next_deadline();
+            return self
+                .retry
+                .into_iter()
+                .chain(self.backlog.next_deadline())
+                .min();
         }
         let batching = self.backlog.oldest_queued_at().map(|at| {
             at.mono
@@ -357,6 +417,44 @@ mod tests {
                 commands
             ]
         }
+    }
+
+    #[test]
+    fn failed_writes_retry_before_confirmation_expiry_and_after_gap_conversion() {
+        let queue = WriteQueue::new();
+        let mut script = Script::new();
+        let parts = script.parts(vec![script.checkpoint(Script::at(0))], Script::range(0, 1));
+        let _ = queue.accept(parts, Script::at(1));
+        let _ = queue.prepare(Script::at(1));
+        let fail = |at| {
+            queue.failed(
+                ExecuteCaptureBatchError::Database {
+                    source: diesel::result::Error::RollbackTransaction,
+                },
+                Script::at(at),
+            )
+        };
+        let _ = fail(1);
+        assert_eq!(queue.next_deadline(), Some(Script::at(101).mono));
+        assert!(!queue.due(Script::at(100)), "no busy retry loop");
+        assert!(queue.due(Script::at(101)), "retry without new observations");
+        let _ = queue.prepare(Script::at(950));
+        let _ = fail(950);
+        assert_eq!(
+            queue.next_deadline(),
+            Some(Script::at(1000).mono),
+            "retry can still attempt confirmation before expiry"
+        );
+        let expired = queue.prepare(Script::at(1001));
+        assert!(matches!(expired.plan, TransactionPlan::Repair { .. }));
+        let _ = fail(1001);
+        assert_eq!(
+            queue.next_deadline(),
+            Some(Script::at(1101).mono),
+            "repair retains a retry even with no batches"
+        );
+        assert!(!queue.due(Script::at(1002)));
+        assert!(queue.due(Script::at(1101)));
     }
 
     #[test]

@@ -129,7 +129,7 @@ impl std::fmt::Debug for ReadAppDisplayNameError {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct AppDisplayName(String);
 impl AppDisplayName {
-    fn new(name: String) -> Result<Self, ReadAppDisplayNameError> {
+    pub(super) fn new(name: String) -> Result<Self, ReadAppDisplayNameError> {
         if name.is_empty() {
             Err(ReadAppDisplayNameError::EmptyName)
         } else {
@@ -165,18 +165,18 @@ impl Drop for ShellName {
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FrameDisplayNameSource {
+pub(super) enum FrameDisplayNameSource {
     Cached,
     AppsFolder,
     Aumid,
 }
-enum FrameDisplayName {
+pub(super) enum FrameDisplayName {
     Cached(String),
     AppsFolder(AppDisplayName),
     Aumid(ReadAppDisplayNameError),
 }
 impl FrameDisplayName {
-    fn select(
+    pub(super) fn select(
         cached: Option<&str>,
         shell: impl FnOnce() -> Result<AppDisplayName, ReadAppDisplayNameError>,
     ) -> Self {
@@ -188,14 +188,14 @@ impl FrameDisplayName {
             },
         }
     }
-    fn source(&self) -> FrameDisplayNameSource {
+    pub(super) fn source(&self) -> FrameDisplayNameSource {
         match self {
             Self::Cached(_) => FrameDisplayNameSource::Cached,
             Self::AppsFolder(_) => FrameDisplayNameSource::AppsFolder,
             Self::Aumid(_) => FrameDisplayNameSource::Aumid,
         }
     }
-    fn into_name(self, aumid: &Aumid) -> String {
+    pub(super) fn into_name(self, aumid: &Aumid) -> String {
         match self {
             Self::Cached(name) => name,
             Self::AppsFolder(name) => name.0,
@@ -226,11 +226,6 @@ impl Aumid {
             .map(ShellName)
             .map_err(|source| ReadAppDisplayNameError::ReadName { source })?;
         name.decode()
-    }
-    pub(super) fn resolve_display_name(&self, cached: Option<&str>) -> String {
-        let selected = FrameDisplayName::select(cached, || self.display_name());
-        tracing::debug!(name_source = ?selected.source(), "application identity resolved from frame");
-        selected.into_name(self)
     }
 }
 

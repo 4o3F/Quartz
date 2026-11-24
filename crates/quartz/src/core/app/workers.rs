@@ -1,7 +1,7 @@
 //! Startup ownership transfer and bounded worker completion.
 
 use super::{
-    CONTROL_CAPACITY, CaptureSender, DatabaseCommand, Feedback, MainCommand, MainPort, Observation,
+    CONTROL_CAPACITY, CaptureSender, DatabaseCommand, Feedback, MainPort, Observation,
     SHUTDOWN_TIMEOUT, Shutdown, ShutdownPort, WORKER_COUNT, Worker, WorkerFailure, WorkerGuard,
 };
 use super::{capture_loop::CaptureLoop, database_loop::DatabaseLoop};
@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use crate::{persistence::OpenedPersistence, store::capture::CaptureStartup};
-use crossbeam_channel::{Receiver, Sender, bounded, select_biased};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use quartz_domain::capture::{
     CaptureCore, CaptureStep, RunEndReason, StartCaptureError, StartedCapture, Timestamp, limits,
 };
@@ -73,7 +73,7 @@ pub(crate) enum JoinWorkersError {
 
 pub(crate) struct Workers {
     pub sender: CaptureSender,
-    pub commands: Receiver<MainCommand>,
+    pub commands: super::MainReceiver,
     pub writes: crate::persistence::dispatch::WritePort,
     pub queries: crate::query::dispatch::QueryPort,
     pub versions: crate::query::versions::VersionPort,
@@ -96,7 +96,7 @@ struct WorkerChannels {
     observations: Channel<Observation>,
     database: Channel<DatabaseCommand>,
     feedback: Channel<Feedback>,
-    main: Channel<MainCommand>,
+    main: super::MainChannel,
     shutdown: Channel<Shutdown>,
     completed: Channel<Result<(), WorkerFailure>>,
     finished: Channel<()>,
@@ -108,7 +108,7 @@ impl WorkerChannels {
             observations: Channel::bounded(limits::MAIN_QUEUE_CAPACITY),
             database: Channel::bounded(CONTROL_CAPACITY),
             feedback: Channel::bounded(limits::WRITE_QUEUE_CAPACITY),
-            main: Channel::bounded(super::MAIN_NOTIFICATION_CAPACITY),
+            main: super::MainChannel::new(super::MAIN_NOTIFICATION_CAPACITY),
             shutdown: Channel::bounded(CONTROL_CAPACITY),
             completed: Channel::bounded(WORKER_COUNT),
             finished: Channel::bounded(WORKER_COUNT),
@@ -275,6 +275,7 @@ impl Workers {
         let db = channels.spawn_database(database, main.clone())?;
         let mut workers = Self {
             sender: CaptureSender {
+                life: channels.main.receiver.capture_life(),
                 sender: channels.observations.sender.clone(),
                 overloaded: Arc::clone(&channels.overloaded),
             },
@@ -304,8 +305,8 @@ impl Workers {
     }
     pub(crate) fn shutdown_port(&self) -> ShutdownPort {
         ShutdownPort {
+            life: self.sender.life.clone(),
             sender: self.shutdown.clone(),
-            commands: self.commands.clone(),
             finished: self.finished.clone(),
         }
     }
@@ -327,6 +328,7 @@ impl Workers {
         })
     }
     fn request_stop(&self, stop: Shutdown) -> Result<(), RequestShutdownError> {
+        self.sender.stop();
         self.shutdown.try_send(stop).map_err(|error| match error {
             crossbeam_channel::TrySendError::Full(_) => RequestShutdownError::Full,
             crossbeam_channel::TrySendError::Disconnected(_) => RequestShutdownError::Disconnected,
@@ -334,10 +336,9 @@ impl Workers {
     }
     pub(crate) fn join(mut self) -> Result<(), JoinWorkersError> {
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-        let mut commands = self.commands.clone();
         let mut outcome = Ok(());
         for _ in &self.handles {
-            if let Err(error) = self.wait_completion(&mut commands, deadline)? {
+            if let Err(error) = self.wait_completion(deadline)? {
                 outcome = Err(JoinWorkersError::Failed {
                     source: Box::new(error),
                 });
@@ -350,18 +351,15 @@ impl Workers {
     }
     fn wait_completion(
         &self,
-        commands: &mut Receiver<MainCommand>,
         deadline: Instant,
     ) -> Result<Result<(), WorkerFailure>, JoinWorkersError> {
-        loop {
-            if Instant::now() >= deadline {
-                return Err(JoinWorkersError::Deadline);
-            }
-            select_biased! {
-                recv(self.completed) -> result => return result.map_err(|source| JoinWorkersError::Receive { source }),
-                recv(commands) -> result => { if result.is_err() { *commands = crossbeam_channel::never(); } },
-                default(deadline.saturating_duration_since(Instant::now())) => return Err(JoinWorkersError::Deadline),
-            }
-        }
+        self.completed
+            .recv_deadline(deadline)
+            .map_err(|error| match error {
+                crossbeam_channel::RecvTimeoutError::Timeout => JoinWorkersError::Deadline,
+                crossbeam_channel::RecvTimeoutError::Disconnected => JoinWorkersError::Receive {
+                    source: crossbeam_channel::RecvError,
+                },
+            })
     }
 }

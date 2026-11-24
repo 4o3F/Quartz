@@ -11,7 +11,7 @@ use windows::Win32::{
             NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, NOTIFYICONDATAW_0,
         },
         WindowsAndMessaging::{
-            self, HMENU, IDI_APPLICATION, IDI_WARNING, TPM_NONOTIFY, TPM_RETURNCMD,
+            self, HICON, HMENU, IDI_APPLICATION, IDI_WARNING, TPM_NONOTIFY, TPM_RETURNCMD,
             TPM_RIGHTBUTTON, WM_NULL,
         },
     },
@@ -44,8 +44,6 @@ pub(in crate::platform::windows) enum AddTrayIconError {
 /// Failures while encoding or applying a notification icon's tooltip.
 #[derive(Debug, Snafu)]
 pub(in crate::platform::windows) enum UpdateTrayTooltipError {
-    #[snafu(display("could not load tray state icon (LoadIconW)"))]
-    LoadUpdateIcon { source: windows::core::Error },
     #[snafu(display("could not encode tray tooltip"))]
     FormatTooltip { source: FormatTrayTooltipError },
     #[snafu(display("could not update tray tooltip (Shell_NotifyIconW, NIM_MODIFY)"))]
@@ -138,11 +136,44 @@ impl TrayMenuItem {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct Presentation {
+    icon: super::TrayIconState,
+    tooltip: TrayTooltipText,
+}
+#[derive(Default)]
+struct PresentationCache(Option<Presentation>);
+impl PresentationCache {
+    fn apply<E>(
+        &mut self,
+        presentation: Presentation,
+        notify: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        if self.0.as_ref() == Some(&presentation) {
+            return Ok(());
+        }
+        notify()?;
+        self.0 = Some(presentation);
+        Ok(())
+    }
+}
+struct TrayRegistration {
+    data: NOTIFYICONDATAW,
+}
+impl TrayRegistration {
+    fn apply_update(&mut self, update: NOTIFYICONDATAW) {
+        self.data.szTip = update.szTip;
+        self.data.hIcon = update.hIcon;
+    }
+}
 pub(super) struct TrayIcon {
     pub(super) content: super::TrayContent,
-    data: NOTIFYICONDATAW,
+    registration: TrayRegistration,
     language: quartz_i18n::Language,
     variants: super::variants::IconVariants,
+    normal: HICON,
+    warning: HICON,
+    presentation: PresentationCache,
     window: windows::Win32::Foundation::HWND,
 }
 
@@ -168,29 +199,37 @@ impl TrayIcon {
         // SAFETY: IDI_APPLICATION names a shared system icon; it must not be destroyed by the caller.
         let icon = unsafe { WindowsAndMessaging::LoadIconW(None, IDI_APPLICATION) }
             .context(LoadIconSnafu)?;
+        // SAFETY: IDI_WARNING names a shared system resource and is never destroyed here.
+        let warning =
+            unsafe { WindowsAndMessaging::LoadIconW(None, IDI_WARNING) }.context(LoadIconSnafu)?;
         let variants = super::variants::IconVariants::new(icon).context(GenerateIconsSnafu)?;
-        let tray = Self {
+        let mut tray = Self {
             content: super::TrayContent::default(),
             variants,
+            normal: icon,
+            warning,
+            presentation: PresentationCache::default(),
             language,
-            data: NOTIFYICONDATAW {
-                cbSize: const { super::super::structure_size::<NOTIFYICONDATAW>() },
-                hWnd: window.raw(),
-                uID: ICON_ID,
-                uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP,
-                uCallbackMessage: u32::from(AppMessage::TrayCallback),
-                hIcon: icon,
-                szTip: TrayTooltipText::try_from(
-                    quartz_i18n::MessageKey::new("app.name")
-                        .in_language(language)
-                        .as_ref(),
-                )
-                .context(FormatInitialTooltipSnafu)?
-                .into_buffer(),
-                Anonymous: NOTIFYICONDATAW_0 {
-                    uVersion: NOTIFYICON_VERSION_4,
+            registration: TrayRegistration {
+                data: NOTIFYICONDATAW {
+                    cbSize: const { super::super::structure_size::<NOTIFYICONDATAW>() },
+                    hWnd: window.raw(),
+                    uID: ICON_ID,
+                    uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP,
+                    uCallbackMessage: u32::from(AppMessage::TrayCallback),
+                    hIcon: icon,
+                    szTip: TrayTooltipText::try_from(
+                        quartz_i18n::MessageKey::new("app.name")
+                            .in_language(language)
+                            .as_ref(),
+                    )
+                    .context(FormatInitialTooltipSnafu)?
+                    .into_buffer(),
+                    Anonymous: NOTIFYICONDATAW_0 {
+                        uVersion: NOTIFYICON_VERSION_4,
+                    },
+                    ..Default::default()
                 },
-                ..Default::default()
             },
             window: window.raw(),
         };
@@ -210,13 +249,14 @@ impl TrayIcon {
     ///
     /// # Errors
     /// Returns Shell icon-addition or version-selection failures.
-    pub(super) fn readd(&self) -> Result<(), AddTrayIconError> {
+    pub(super) fn readd(&mut self) -> Result<(), AddTrayIconError> {
+        self.presentation.0 = None;
         // SAFETY: The initialized data references our live window and a shared system icon.
-        if !unsafe { Shell::Shell_NotifyIconW(NIM_ADD, &self.data) }.as_bool() {
+        if !unsafe { Shell::Shell_NotifyIconW(NIM_ADD, &self.registration.data) }.as_bool() {
             return NotifyAddSnafu.fail();
         }
         // SAFETY: NIM_ADD succeeded; the version field specifies the supported v4 callback format.
-        if !unsafe { Shell::Shell_NotifyIconW(NIM_SETVERSION, &self.data) }.as_bool() {
+        if !unsafe { Shell::Shell_NotifyIconW(NIM_SETVERSION, &self.registration.data) }.as_bool() {
             return SetVersionSnafu.fail();
         }
         Ok(())
@@ -235,34 +275,30 @@ impl TrayIcon {
             ),
             _ => state.tooltip.text(self.language),
         };
-        self.data.szTip = TrayTooltipText::try_from(text.as_str())
-            .context(FormatTooltipSnafu)?
-            .into_buffer();
-        // SAFETY: Both icon identifiers name shared system resources.
-        self.data.hIcon = match state.icon {
-            super::TrayIconState::Grey => self.variants.grey(),
-            super::TrayIconState::Private => self.variants.private(),
-            // SAFETY: Both identifiers name shared system icon resources.
-            super::TrayIconState::Normal | super::TrayIconState::Warning => unsafe {
-                WindowsAndMessaging::LoadIconW(
-                    None,
-                    match state.icon {
-                        super::TrayIconState::Normal => IDI_APPLICATION,
-                        super::TrayIconState::Warning => IDI_WARNING,
-                        _ => unreachable!("generated icons handled above"),
-                    },
-                )
-            }
-            .context(LoadUpdateIconSnafu)?,
+        let tooltip = TrayTooltipText::try_from(text.as_str()).context(FormatTooltipSnafu)?;
+        let presentation = Presentation {
+            icon: state.icon,
+            tooltip,
         };
         let update = NOTIFYICONDATAW {
             uFlags: NIF_ICON | NIF_TIP | NIF_SHOWTIP,
-            ..self.data
+            szTip: presentation.tooltip.clone().into_buffer(),
+            hIcon: match state.icon {
+                super::TrayIconState::Grey => self.variants.grey(),
+                super::TrayIconState::Private => self.variants.private(),
+                super::TrayIconState::Normal => self.normal,
+                super::TrayIconState::Warning => self.warning,
+            },
+            ..self.registration.data
         };
-        // SAFETY: The update identifies the same live icon and contains a terminated tooltip.
-        if !unsafe { Shell::Shell_NotifyIconW(NIM_MODIFY, &update) }.as_bool() {
-            return NotifyModifySnafu.fail();
-        }
+        self.presentation.apply(presentation, || {
+            // SAFETY: The update references the live icon and a terminated tooltip.
+            if !unsafe { Shell::Shell_NotifyIconW(NIM_MODIFY, &update) }.as_bool() {
+                return NotifyModifySnafu.fail();
+            }
+            Ok(())
+        })?;
+        self.registration.apply_update(update);
         Ok(())
     }
 
@@ -318,7 +354,7 @@ impl Drop for TrayIcon {
     fn drop(&mut self) {
         // SAFETY: The window outlives the icon; deleting a missing icon is harmless after Explorer exits.
         // Best-effort teardown: Explorer may already have removed this icon.
-        let _ = unsafe { Shell::Shell_NotifyIconW(NIM_DELETE, &self.data) };
+        let _ = unsafe { Shell::Shell_NotifyIconW(NIM_DELETE, &self.registration.data) };
     }
 }
 
@@ -335,6 +371,70 @@ impl Drop for Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_update_preserves_callback_registration_for_explorer_readd() {
+        let mut registration = TrayRegistration {
+            data: NOTIFYICONDATAW {
+                uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP,
+                uCallbackMessage: u32::from(AppMessage::TrayCallback),
+                ..Default::default()
+            },
+        };
+        registration.apply_update(NOTIFYICONDATAW {
+            uFlags: NIF_ICON | NIF_TIP | NIF_SHOWTIP,
+            szTip: TrayTooltipText::try_from("updated")
+                .expect("tooltip")
+                .into_buffer(),
+            ..registration.data
+        });
+        assert!(
+            registration.data.uFlags.contains(NIF_MESSAGE),
+            "NIM_ADD must register callbacks after Explorer restarts"
+        );
+        assert_eq!(
+            registration.data.uCallbackMessage,
+            u32::from(AppMessage::TrayCallback)
+        );
+    }
+
+    #[test]
+    fn unchanged_successful_presentations_skip_native_notifications_and_failures_retry() {
+        let mut cache = PresentationCache::default();
+        let presentation = Presentation {
+            icon: super::super::TrayIconState::Normal,
+            tooltip: TrayTooltipText::try_from("").expect("empty tooltip"),
+        };
+        let mut calls = 0;
+        for _ in 0..20 {
+            cache
+                .apply(presentation.clone(), || {
+                    calls += 1;
+                    Ok::<_, ()>(())
+                })
+                .expect("apply");
+        }
+        assert_eq!(calls, 1);
+        let warning = Presentation {
+            icon: super::super::TrayIconState::Warning,
+            ..presentation
+        };
+        assert!(
+            cache
+                .apply(warning.clone(), || {
+                    calls += 1;
+                    Err(())
+                })
+                .is_err()
+        );
+        cache
+            .apply(warning, || {
+                calls += 1;
+                Ok::<_, ()>(())
+            })
+            .expect("retry failed native update");
+        assert_eq!(calls, 3);
+    }
 
     #[test]
     fn tray_menu_commands_round_trip_and_unknown_ids_are_absent() {

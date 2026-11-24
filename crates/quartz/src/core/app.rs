@@ -3,6 +3,9 @@
 pub(crate) mod annotation;
 mod capture_loop;
 mod database_loop;
+mod main_queue;
+pub(crate) use main_queue::MainReceiver;
+use main_queue::{MainChannel, MainSender};
 mod runtime;
 #[cfg(test)]
 mod tests;
@@ -10,7 +13,7 @@ mod timed;
 mod workers;
 use crate::persistence::PersistenceState;
 use crate::rules::registry::{RegistryResult, RunRegistryCommandError};
-use crossbeam_channel::{Receiver, Sender, TrySendError, select_biased};
+use crossbeam_channel::{Receiver, Sender, TrySendError};
 use quartz_domain::{
     capture::{CaptureEffect, CaptureEvent, CaptureState, RunEndReason, Timestamp},
     rules::registry::RegistryCommand,
@@ -126,8 +129,8 @@ impl std::fmt::Display for Worker {
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub(crate) enum SendMainCommandError {
-    #[snafu(display("main command delivery exceeded its deadline"))]
-    Deadline,
+    #[snafu(display("main command queue is full"))]
+    Full,
     #[snafu(display("main command receiver disconnected"))]
     Disconnected,
 }
@@ -164,45 +167,50 @@ pub(crate) enum WorkerFailure {
 
 #[derive(Clone)]
 pub(crate) struct MainPort {
-    sender: Sender<MainCommand>,
+    sender: MainSender,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 impl MainPort {
-    fn send_before(
-        &self,
-        command: MainCommand,
-        deadline: Instant,
-    ) -> Result<(), SendMainCommandError> {
-        self.sender
-            .send_deadline(command, deadline)
-            .map_err(|error| match error {
-                crossbeam_channel::SendTimeoutError::Timeout(_) => SendMainCommandError::Deadline,
-                crossbeam_channel::SendTimeoutError::Disconnected(_) => {
-                    SendMainCommandError::Disconnected
-                }
-            })?;
-        (self.wake)();
-        Ok(())
-    }
     fn send(&self, command: MainCommand) -> Result<(), SendMainCommandError> {
-        self.sender
-            .send(command)
-            .map_err(|_| SendMainCommandError::Disconnected)?;
+        self.sender.send(command)?;
         (self.wake)();
         Ok(())
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct CaptureLife(Arc<AtomicBool>);
+impl CaptureLife {
+    pub(crate) fn stop(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
 #[derive(Clone)]
 pub(crate) struct CaptureSender {
+    life: CaptureLife,
     sender: Sender<Observation>,
     overloaded: Arc<AtomicBool>,
 }
 impl CaptureSender {
+    pub(crate) fn stop(&self) {
+        self.life.stop();
+    }
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.life.is_stopped()
+    }
+
     pub(crate) fn observe(&self, observation: ObservedEvent) -> Result<(), ObserveCaptureError> {
         self.send(Observation::Event(observation))
     }
     fn admit(&self, observation: ObservedEvent) -> Result<(), quartz_protocol::ProtocolError> {
+        if self.is_stopped() {
+            return Err(quartz_protocol::ProtocolError::new(
+                quartz_protocol::ErrorKind::Busy,
+            ));
+        }
         self.sender
             .try_send(Observation::Event(observation))
             .map_err(|error| {
@@ -222,6 +230,9 @@ impl CaptureSender {
         self.send(Observation::Foreground(snapshot))
     }
     fn send(&self, observation: Observation) -> Result<(), ObserveCaptureError> {
+        if self.is_stopped() {
+            return Ok(());
+        }
         match self.sender.try_send(observation) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
@@ -235,13 +246,14 @@ impl CaptureSender {
 
 #[derive(Clone)]
 pub(crate) struct ShutdownPort {
+    life: CaptureLife,
     sender: Sender<Shutdown>,
-    commands: Receiver<MainCommand>,
     finished: Receiver<()>,
 }
 impl ShutdownPort {
     /// WM_ENDSESSION must wait for final persistence before its callback returns.
     pub(crate) fn close(&self, at: Timestamp) -> Result<(), CloseCaptureError> {
+        self.life.stop();
         let stop = Shutdown::new(at, RunEndReason::Shutdown);
         let deadline = stop.deadline;
         self.sender
@@ -252,27 +264,19 @@ impl ShutdownPort {
                     CloseCaptureError::Disconnected
                 }
             })?;
-        let mut commands = self.commands.clone();
         for _ in 0..WORKER_COUNT {
-            self.wait_finished(&mut commands, deadline)?;
+            self.finished
+                .recv_deadline(deadline)
+                .map_err(|error| match error {
+                    crossbeam_channel::RecvTimeoutError::Timeout => CloseCaptureError::Deadline,
+                    crossbeam_channel::RecvTimeoutError::Disconnected => {
+                        CloseCaptureError::Receive {
+                            source: crossbeam_channel::RecvError,
+                        }
+                    }
+                })?;
         }
         Ok(())
-    }
-    fn wait_finished(
-        &self,
-        commands: &mut Receiver<MainCommand>,
-        deadline: Instant,
-    ) -> Result<(), CloseCaptureError> {
-        loop {
-            if Instant::now() >= deadline {
-                return Err(CloseCaptureError::Deadline);
-            }
-            select_biased! {
-                recv(self.finished) -> result => return result.map_err(|source| CloseCaptureError::Receive { source }),
-                recv(commands) -> result => { if result.is_err() { *commands = crossbeam_channel::never(); } },
-                default(deadline.saturating_duration_since(Instant::now())) => return Err(CloseCaptureError::Deadline),
-            }
-        }
     }
 }
 
@@ -290,7 +294,7 @@ impl<T> SendDuringShutdown<T> for Sender<T> {
 impl SendDuringShutdown<MainCommand> for MainPort {
     fn send_during_shutdown(&self, command: MainCommand) {
         if let Err(error) = self.send(command) {
-            tracing::debug!(%error, "main receiver disconnected during worker shutdown");
+            tracing::debug!(%error, "could not deliver main notification during worker shutdown");
         }
     }
 }
@@ -323,16 +327,8 @@ impl Drop for WorkerGuard {
     fn drop(&mut self) {
         if thread::panicking() {
             tracing::error!(worker = ?self.worker, "worker panicked; stopping core");
-            // A full main queue cannot conceal a fatal worker failure.
-            if self
-                .main
-                .sender
-                .try_send(MainCommand::Fatal(self.worker))
-                .is_err()
-            {
-                std::process::exit(1);
-            }
-            (self.main.wake)();
+            self.main
+                .send_during_shutdown(MainCommand::Fatal(self.worker));
         }
     }
 }

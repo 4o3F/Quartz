@@ -210,6 +210,7 @@ impl WritePort {
         self.settings = Some(SettingsPorts { system, notify });
         self
     }
+    #[cfg(test)]
     pub(crate) async fn call(&self, request: WriteRequest) -> Result<WriteResponse, ProtocolError> {
         self.submit(request)?
             .await

@@ -385,7 +385,9 @@ fn shutdown_notifications_deliver_values_and_tolerate_closed_receivers() {
     drop(receiver);
     sender.send_during_shutdown(Worker::Database);
 
-    let (sender, receiver) = bounded(CONTROL_CAPACITY);
+    let channel = MainChannel::new(CONTROL_CAPACITY);
+    let sender = channel.sender;
+    let receiver = channel.receiver;
     let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let main = MainPort {
         sender,
@@ -422,7 +424,9 @@ fn resume_notifications_create_only_one_clock_segment() {
     let (_feedback, replies) = bounded(limits::WRITE_QUEUE_CAPACITY);
     let (_shutdown, stop) = bounded(CONTROL_CAPACITY);
     let (database, _writes) = bounded(CONTROL_CAPACITY);
-    let (main, _commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
+    let channel = crate::core::app::MainChannel::new(limits::MAIN_QUEUE_CAPACITY);
+    let main = channel.sender;
+    let _commands = channel.receiver;
     let snapshots = RuleRegistry::from_state(RegistryState::default())
         .expect("rules")
         .snapshots();
@@ -1492,6 +1496,7 @@ fn timed_ipc_admits_typed_capture_events_and_reports_busy_and_invalid_deadlines(
     let (sender, observed) = crossbeam_channel::bounded(1);
     let overloaded = Arc::new(AtomicBool::new(false));
     let ingress = CaptureSender {
+        life: Default::default(),
         sender,
         overloaded: overloaded.clone(),
     };
@@ -1702,4 +1707,55 @@ fn annotations_lost_response_retries_after_core_restart_without_duplicate_or_sec
                 .expect("real core shutdown before restart");
         }
     }
+}
+
+#[test]
+fn stopped_capture_suppresses_queued_timer_system_and_foreground_observations() {
+    let (sender, observed) = bounded(1);
+    let ingress = CaptureSender {
+        sender,
+        overloaded: Arc::default(),
+        life: Default::default(),
+    };
+    drop(observed);
+    assert!(
+        ingress
+            .observe(ObservedEvent {
+                at: at(0),
+                event: CaptureEvent::Wake
+            })
+            .is_err()
+    );
+    ingress.stop();
+    for event in [
+        CaptureEvent::Wake,
+        CaptureEvent::ClockChanged(ClockChange::Resume),
+        CaptureEvent::Session(SessionStatus::Ready(Default::default())),
+    ] {
+        ingress
+            .observe(ObservedEvent { at: at(0), event })
+            .expect("late observation suppressed after settlement");
+    }
+}
+
+#[test]
+fn failed_persistence_recovers_without_any_new_capture_observation() {
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let mut reader = runtime.reader();
+    reader.inject_write_failure();
+    runtime.observe(CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)));
+    runtime.wait(|command| {
+        matches!(
+            command,
+            MainCommand::Persistence(PersistenceState::Failed { .. })
+        )
+    });
+    reader.restore_writes();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    assert!(
+        reader.run(2).confirmed_utc_ms.is_some(),
+        "retry persisted the retained capture boundary"
+    );
+    let _directory = runtime.shutdown();
 }

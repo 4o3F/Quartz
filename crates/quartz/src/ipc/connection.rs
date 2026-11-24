@@ -3,10 +3,11 @@ use super::{
     ConnectionSession, ProcessId, Services, outbox::OutboxTask, registry::RegistryHandle,
     session::Action,
 };
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use quartz_protocol::{Envelope, ErrorKind, ProtocolError, decode_json, frame_codec};
-use std::{io, time::Duration};
+use std::{future::Future, io, pin::Pin, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::oneshot;
 use tokio_util::{
     bytes::BytesMut,
     codec::{FramedRead, LengthDelimitedCodec, LengthDelimitedCodecError},
@@ -14,6 +15,8 @@ use tokio_util::{
 
 /// Bound the final error response and close grace period (04 §2 error-and-close).
 const CLOSE_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
+/// Matches the client pending-request bound in architecture 01 §7.2.
+const MAX_PENDING_REQUESTS: usize = 64;
 /// Require a complete first hello frame within five seconds (04 §4).
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +30,64 @@ impl Default for ConnectionTimeouts {
             hello: HELLO_TIMEOUT,
             close_flush: CLOSE_FLUSH_TIMEOUT,
         }
+    }
+}
+
+type PendingReplies<'connection> =
+    FuturesUnordered<Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'connection>>>;
+enum PendingReply {
+    Write(oneshot::Receiver<Result<crate::persistence::dispatch::WriteResponse, ProtocolError>>),
+    Query(oneshot::Receiver<Result<crate::query::QueryResponse, ProtocolError>>),
+    Rules(crate::query::dispatch::RuleReadReply),
+    Subscribe(oneshot::Receiver<Result<(), super::outbox::QueueFrameError>>),
+    Unsubscribe(oneshot::Receiver<()>),
+}
+impl PendingReply {
+    async fn receive(
+        self,
+        id: quartz_protocol::RequestId,
+    ) -> io::Result<Option<quartz_protocol::Response>> {
+        let response = match self {
+            Self::Write(received) => Some(
+                match received
+                    .await
+                    .map_err(|_| ProtocolError::new(ErrorKind::Internal))
+                    .and_then(|result| result)
+                {
+                    Ok(body) => Action::success_response(id, body),
+                    Err(error) => Action::error_response(Some(id), error),
+                },
+            ),
+            Self::Query(received) => Some(
+                match received
+                    .await
+                    .map_err(|_| ProtocolError::new(ErrorKind::Internal))
+                    .and_then(|result| result)
+                {
+                    Ok(body) => Action::success_response(id, body),
+                    Err(error) => Action::error_response(Some(id), error),
+                },
+            ),
+            Self::Rules(received) => Some(match received.receive().await {
+                Ok(body) => Action::success_response(id, body),
+                Err(error) => Action::error_response(Some(id), error),
+            }),
+            Self::Subscribe(received) => {
+                received
+                    .await
+                    .map_err(io::Error::other)?
+                    .map_err(io::Error::other)?;
+                None
+            }
+            Self::Unsubscribe(received) => {
+                received.await.map_err(io::Error::other)?;
+                Some(Action::success_response(
+                    id,
+                    quartz_protocol::SubscribeResponse {},
+                ))
+            }
+        };
+        Ok(response)
     }
 }
 
@@ -64,9 +125,14 @@ impl Connection {
         let mut reader = FramedRead::new(read, frame_codec());
         let outbox = writer.handle.clone();
         let mut registration = None;
+        let mut requests = PendingReplies::new();
         loop {
             let received = tokio::select! {
                 () = outbox.closed() => return Ok(()),
+                completed = requests.next(), if !requests.is_empty() => {
+                    completed.expect("pending request exists")?;
+                    continue;
+                }
                 received = self.next_frame(&mut reader, session, hello_deadline) => received,
             };
             let action = match received {
@@ -153,48 +219,50 @@ impl Connection {
                     }
                 }),
                 Action::Write { id, request } => {
-                    Some(match self.services.writes.call(request).await {
-                        Ok(response) => Action::success_response(id, response),
-                        Err(error) => Action::error_response(Some(id), error),
-                    })
-                }
-                Action::Rules { id, request } => {
-                    Some(match self.services.queries.read_rules(request).await {
-                        Ok(response) => Action::success_response(id, response),
-                        Err(error) => Action::error_response(Some(id), error),
+                    self.admit_request(id, &outbox, &mut requests, || {
+                        self.services
+                            .writes
+                            .submit(request)
+                            .map(PendingReply::Write)
                     })
                 }
                 Action::Query { id, request } => {
-                    Some(match self.services.queries.call(request).await {
-                        Ok(response) => Action::success_response(id, response),
-                        Err(error) => Action::error_response(Some(id), error),
+                    self.admit_request(id, &outbox, &mut requests, || {
+                        self.services
+                            .queries
+                            .submit(request)
+                            .map(PendingReply::Query)
+                    })
+                }
+                Action::Rules { id, request } => {
+                    self.admit_request(id, &outbox, &mut requests, || {
+                        self.services
+                            .queries
+                            .submit_rule_read(request)
+                            .map(PendingReply::Rules)
+                    })
+                }
+                Action::Subscribe { id, subscription } => {
+                    let connection = registration.as_ref().expect("subscribe follows hello").id;
+                    self.admit_request(id, &outbox, &mut requests, || {
+                        self.registry
+                            .submit_subscribe(
+                                connection,
+                                subscription,
+                                Action::success_response(id, quartz_protocol::SubscribeResponse {}),
+                            )
+                            .map(PendingReply::Subscribe)
+                            .map_err(|_| ProtocolError::new(ErrorKind::Internal))
                     })
                 }
                 Action::Unsubscribe { id, subscription } => {
                     let connection = registration.as_ref().expect("unsubscribe follows hello").id;
-                    self.registry
-                        .unsubscribe(connection, subscription)
-                        .await
-                        .map_err(io::Error::other)?;
-                    Some(Action::success_response(
-                        id,
-                        quartz_protocol::SubscribeResponse {},
-                    ))
-                }
-                Action::Subscribe { id, subscription } => {
-                    let connection = registration
-                        .as_ref()
-                        .expect("subscription follows authenticated hello")
-                        .id;
-                    self.registry
-                        .subscribe(
-                            connection,
-                            subscription,
-                            Action::success_response(id, quartz_protocol::SubscribeResponse {}),
-                        )
-                        .await
-                        .map_err(io::Error::other)?;
-                    None
+                    self.admit_request(id, &outbox, &mut requests, || {
+                        self.registry
+                            .submit_unsubscribe(connection, subscription)
+                            .map(PendingReply::Unsubscribe)
+                            .map_err(|_| ProtocolError::new(ErrorKind::Internal))
+                    })
                 }
             };
             if let Some(response) = response {
@@ -205,6 +273,34 @@ impl Connection {
             }
         }
         Ok(())
+    }
+    fn admit_request<'connection>(
+        &'connection self,
+        id: quartz_protocol::RequestId,
+        outbox: &super::outbox::OutboxHandle,
+        requests: &mut PendingReplies<'connection>,
+        admit: impl FnOnce() -> Result<PendingReply, ProtocolError>,
+    ) -> Option<quartz_protocol::Response> {
+        if requests.len() >= MAX_PENDING_REQUESTS {
+            return Some(Action::error_response(
+                Some(id),
+                ProtocolError::new(ErrorKind::Busy),
+            ));
+        }
+        // Admission occurs before reading the next frame, independently of future polling order.
+        match admit() {
+            Err(error) => Some(Action::error_response(Some(id), error)),
+            Ok(reply) => {
+                let outbox = outbox.clone();
+                requests.push(Box::pin(async move {
+                    if let Some(response) = reply.receive(id).await? {
+                        outbox.response(response).map_err(io::Error::other)?;
+                    }
+                    Ok(())
+                }));
+                None
+            }
+        }
     }
     async fn next_frame<R: AsyncRead + Unpin>(
         &self,
@@ -242,7 +338,7 @@ impl Connection {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         ipc::{AllowedRoles, StatusPublisher},
@@ -287,6 +383,227 @@ mod tests {
             },
         }
     }
+    #[tokio::test]
+    async fn buffered_writes_are_admitted_in_frame_order_before_replies() {
+        let database = TestDatabase::start();
+        let status = StatusPublisher::new(quartz_protocol::InstanceId("ordered-writes".into()));
+        let writes = crate::ipc::WriteChannel::new();
+        let mut connection = connection(&database, &status);
+        connection.services.writes = writes.port;
+        let mut client = MemoryClient::connect(
+            connection,
+            HelloRole::Ui {
+                ui: quartz_protocol::UiHello {
+                    state: quartz_protocol::UiState::Visible,
+                },
+            },
+        )
+        .await;
+        client
+            .send_batch([
+                quartz_protocol::Request {
+                    id: RequestId(2),
+                    op: quartz_protocol::Op::SettingsSet,
+                    body: serde_json::json!({"resident":{"enabled":false}}),
+                },
+                quartz_protocol::Request {
+                    id: RequestId(3),
+                    op: quartz_protocol::Op::SettingsSet,
+                    body: serde_json::json!({"resident":{"enabled":true}}),
+                },
+            ])
+            .await;
+        let mut admitted = Vec::new();
+        for expected in [
+            quartz_protocol::ResidentEnabled::Disabled,
+            quartz_protocol::ResidentEnabled::Enabled,
+        ] {
+            let command = tokio::time::timeout(HELLO_TIMEOUT, async {
+                loop {
+                    if let Ok(command) = writes.receiver.try_recv() {
+                        break command;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("write admitted without awaiting prior reply");
+            assert!(
+                matches!(command.request, crate::persistence::dispatch::WriteRequest::SettingsSet(update) if update.resident.is_some_and(|resident| resident.enabled == Some(expected)))
+            );
+            admitted.push(command);
+        }
+        for command in admitted {
+            command
+                .reply
+                .send(Ok(crate::persistence::dispatch::WriteResponse::Accepted(
+                    quartz_protocol::AcceptedBody,
+                )))
+                .expect("fake write reply");
+        }
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn buffered_subscribe_then_unsubscribe_leaves_no_date_subscription() {
+        let database = TestDatabase::start();
+        let status =
+            StatusPublisher::new(quartz_protocol::InstanceId("ordered-subscriptions".into()));
+        let mut fixture = crate::store::query::test_support::QueryFixture::new(1);
+        let snapshots =
+            quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+                .expect("rules")
+                .snapshots();
+        let mut versions =
+            crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
+                .expect("versions");
+        let mut connection = connection(&database, &status);
+        connection.services.versions = versions.port.clone();
+        connection.registry = connection.services.start_registry();
+        let mut client = MemoryClient::connect(
+            connection,
+            HelloRole::Ui {
+                ui: quartz_protocol::UiHello {
+                    state: quartz_protocol::UiState::Visible,
+                },
+            },
+        )
+        .await;
+        client
+            .send_batch([
+                quartz_protocol::Request {
+                    id: RequestId(2),
+                    op: quartz_protocol::Op::Subscribe,
+                    body: serde_json::json!({"topics":["day:2025-01-02"]}),
+                },
+                quartz_protocol::Request {
+                    id: RequestId(3),
+                    op: quartz_protocol::Op::Unsubscribe,
+                    body: serde_json::json!({"topics":["day:2025-01-02"]}),
+                },
+            ])
+            .await;
+        // Installation requests one date, then removal requests the empty date set.
+        for _ in 0..2 {
+            let command = tokio::time::timeout(HELLO_TIMEOUT, async {
+                loop {
+                    if let Ok(command) = versions.publisher.requests.try_recv() {
+                        break command;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ordered version subscription update");
+            versions.publisher.receive(command);
+        }
+        let mut responses = std::collections::BTreeSet::new();
+        while responses.len() < 2 {
+            if let Envelope::Response(response) = client.next().await {
+                assert!(matches!(response.outcome, ResponseOutcome::Ok { .. }));
+                responses.insert(response.id);
+            }
+        }
+        assert!(
+            versions.port.updates.borrow().days.is_empty(),
+            "unsubscribe must follow subscribe admission"
+        );
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn pending_request_limit_returns_busy_before_admission() {
+        let database = TestDatabase::start();
+        let status = StatusPublisher::new(quartz_protocol::InstanceId("request-limit".into()));
+        let connection = connection(&database, &status);
+        let writer = OutboxTask::spawn(tokio::io::sink());
+        let mut requests = PendingReplies::new();
+        for _ in 0..MAX_PENDING_REQUESTS {
+            requests.push(Box::pin(std::future::pending()));
+        }
+        let response = connection
+            .admit_request(RequestId(2), &writer.handle, &mut requests, || {
+                panic!("over-limit request must not enter an application queue")
+            })
+            .expect("busy response");
+        assert!(
+            matches!(response.outcome, ResponseOutcome::Err { error } if error.kind == ErrorKind::Busy)
+        );
+        assert_eq!(requests.len(), MAX_PENDING_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn pending_query_and_write_do_not_delay_status_or_disconnect_cancellation() {
+        let database = TestDatabase::start();
+        let status = StatusPublisher::new(quartz_protocol::InstanceId("pending-disconnect".into()));
+        let queries = crate::query::dispatch::QueryChannel::new();
+        let writes = crate::ipc::WriteChannel::new();
+        let mut connection = connection(&database, &status);
+        connection.services.queries = queries.port;
+        connection.services.writes = writes.port;
+        let mut client = MemoryClient::connect(connection, HelloRole::Cli).await;
+        for request in [
+            quartz_protocol::Request {
+                id: RequestId(2),
+                op: quartz_protocol::Op::QueryDay,
+                body: serde_json::json!({"local_date":"2025-01-02"}),
+            },
+            quartz_protocol::Request {
+                id: RequestId(3),
+                op: quartz_protocol::Op::SettingsGet,
+                body: serde_json::json!({}),
+            },
+        ] {
+            let payload =
+                quartz_protocol::encode_json(&Envelope::Request(request)).expect("request");
+            client
+                .frames
+                .send(payload.as_slice())
+                .await
+                .expect("queue request");
+        }
+        let pending_query = tokio::time::timeout(HELLO_TIMEOUT, async {
+            loop {
+                if let Ok(command) = queries.receiver.try_recv() {
+                    break command;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("query admitted");
+        let pending_write = tokio::time::timeout(HELLO_TIMEOUT, async {
+            loop {
+                if let Ok(command) = writes.receiver.try_recv() {
+                    break command;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("later write admitted without query completion");
+        tokio::time::timeout(
+            TEST_CLOSE_TIMEOUT,
+            client.request(4, quartz_protocol::Op::CoreStatus, serde_json::json!({})),
+        )
+        .await
+        .expect("status is independent of pending work");
+        tokio::time::timeout(TEST_CLOSE_TIMEOUT, client.close())
+            .await
+            .expect("disconnect is observed promptly");
+        let crate::query::dispatch::QueryCommand::Query { reply, .. } = pending_query else {
+            panic!("query command");
+        };
+        assert!(
+            reply.is_closed(),
+            "disconnect cancels read-only database work"
+        );
+        assert!(
+            pending_write.reply.is_closed(),
+            "disconnect drops the response without waiting for persistence"
+        );
+    }
+
     #[test]
     fn final_response_timeout_aborts_a_stalled_writer() {
         runtime().block_on(async {
@@ -422,12 +739,12 @@ mod tests {
         });
     }
     /// Real session/registry/outbox actors with in-memory pipes and no processes or windows.
-    struct MemoryClient {
+    pub(crate) struct MemoryClient {
         frames: Framed<tokio::io::DuplexStream, LengthDelimitedCodec>,
         task: tokio::task::JoinHandle<io::Result<()>>,
     }
     impl MemoryClient {
-        async fn connect(connection: Connection, role: HelloRole) -> Self {
+        pub(crate) async fn connect(connection: Connection, role: HelloRole) -> Self {
             let (server, client) = tokio::io::duplex(TEST_BUFFER_BYTES);
             let task = tokio::spawn(async move {
                 let (read, write) = split(server);
@@ -459,6 +776,28 @@ mod tests {
                 .await;
             client
         }
+        async fn send_batch<const COUNT: usize>(
+            &mut self,
+            requests: [quartz_protocol::Request; COUNT],
+        ) {
+            use tokio::io::AsyncWriteExt;
+            let mut frames = Vec::new();
+            for request in requests {
+                let payload = quartz_protocol::encode_json(&Envelope::Request(request))
+                    .expect("request frame");
+                frames.extend_from_slice(
+                    &u32::try_from(payload.len())
+                        .expect("test frame length")
+                        .to_le_bytes(),
+                );
+                frames.extend_from_slice(&payload);
+            }
+            self.frames
+                .get_mut()
+                .write_all(&frames)
+                .await
+                .expect("one buffered write for all frames");
+        }
         async fn next(&mut self) -> Envelope {
             let payload = tokio::time::timeout(HELLO_TIMEOUT, self.frames.next())
                 .await
@@ -467,7 +806,12 @@ mod tests {
                 .expect("frame");
             decode_json(&payload).expect("envelope")
         }
-        async fn request(&mut self, id: u64, op: quartz_protocol::Op, body: serde_json::Value) {
+        pub(crate) async fn request(
+            &mut self,
+            id: u64,
+            op: quartz_protocol::Op,
+            body: serde_json::Value,
+        ) {
             let payload =
                 quartz_protocol::encode_json(&Envelope::Request(quartz_protocol::Request {
                     id: RequestId(id),
@@ -502,7 +846,7 @@ mod tests {
                 "unselected connection must receive no control"
             );
         }
-        async fn close(self) {
+        pub(crate) async fn close(self) {
             drop(self.frames);
             self.task
                 .await

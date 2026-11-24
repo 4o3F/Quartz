@@ -11,8 +11,9 @@ use crate::core::{
     sources::{ClockReader, ReadClockError},
 };
 use crate::platform::windows::sources::SystemClock;
+use quartz_domain::capture::MonoInstant;
 use quartz_domain::capture::{CaptureEvent, HookTarget, ObservationSource, Timestamp, Title};
-use std::{cell::RefCell, marker::PhantomData, rc::Rc};
+use std::{cell::RefCell, marker::PhantomData, rc::Rc, time::Duration};
 use windows::Win32::{
     Foundation::{self, ERROR_SUCCESS, HWND},
     System::SystemInformation::GetTickCount,
@@ -28,6 +29,76 @@ use windows::Win32::{
 
 /// One process hook for title changes and one for destroys, capture 02 §1.1.
 const PROCESS_EVENT_COUNT: usize = 2;
+
+/// Foreground hook registration retry interval from capture 02 §1.1.
+const HOOK_RETRY_DELAY: Duration = Duration::from_secs(5);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(in crate::platform::windows) enum HookHealth {
+    #[default]
+    Healthy,
+    Degraded,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookInstallation {
+    Installed,
+    Deferred,
+}
+impl HookInstallation {
+    fn review<E>(self, read: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
+        match self {
+            Self::Installed => read(),
+            Self::Deferred => Ok(()),
+        }
+    }
+}
+struct HookRegistration<T> {
+    installed: Option<T>,
+    retry: Option<MonoInstant>,
+}
+impl<T> HookRegistration<T> {
+    fn new() -> Self {
+        Self {
+            installed: None,
+            retry: None,
+        }
+    }
+    fn install<E>(
+        &mut self,
+        now: MonoInstant,
+        install: impl FnOnce() -> Result<T, E>,
+    ) -> Result<HookInstallation, E> {
+        if self.retry.is_some_and(|retry| now < retry) {
+            return Ok(HookInstallation::Deferred);
+        }
+        match install() {
+            Ok(hooks) => {
+                self.installed = Some(hooks);
+                self.retry = None;
+                Ok(HookInstallation::Installed)
+            }
+            Err(error) => {
+                self.installed = None;
+                self.retry = Some(
+                    now.checked_add(HOOK_RETRY_DELAY)
+                        .expect("capture clock has room for hook retry"),
+                );
+                Err(error)
+            }
+        }
+    }
+    fn unbind(&mut self) -> HookInstallation {
+        self.installed = None;
+        self.retry = None;
+        HookInstallation::Installed
+    }
+    fn health(&self) -> HookHealth {
+        if self.retry.is_some() {
+            HookHealth::Degraded
+        } else {
+            HookHealth::Healthy
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive)]
 #[repr(u32)]
@@ -104,8 +175,14 @@ enum ProcessHooks {
     Bound { _hooks: [Hook; PROCESS_EVENT_COUNT] },
 }
 impl ProcessHooks {
-    fn install(target: HookTarget) -> Result<Self, ObserveForegroundError> {
+    fn target(target: HookTarget) -> HookTarget {
         match target {
+            HookTarget::Process { process, .. } if process.get() == 0 => HookTarget::Unbind,
+            target => target,
+        }
+    }
+    fn install(target: HookTarget) -> Result<Self, ObserveForegroundError> {
+        match Self::target(target) {
             HookTarget::Unbind => Ok(Self::Unbound),
             HookTarget::Process { process, .. } => Ok(Self::Bound {
                 _hooks: [
@@ -119,7 +196,7 @@ impl ProcessHooks {
 struct CallbackState {
     sender: CaptureSender,
     reads: ForegroundReads,
-    process_hooks: ProcessHooks,
+    process_hooks: HookRegistration<ProcessHooks>,
 }
 thread_local! {
     // Only the installing main thread accesses this state; no borrow spans a native read.
@@ -133,42 +210,65 @@ enum ReadTrigger {
     },
     Requested(ReadCause),
     Rebind(HookTarget),
+    RetryRebind,
 }
 impl ReadTrigger {
     fn cause(self) -> ReadCause {
         match self {
             Self::Requested(cause) => cause,
-            Self::Native { .. } | Self::Rebind(_) => ReadCause::Trigger,
+            Self::Native { .. } | Self::Rebind(_) | Self::RetryRebind => ReadCause::Trigger,
         }
     }
     fn native(self) -> Option<NativeEvent> {
         match self {
             Self::Native { event, .. } => Some(event),
-            Self::Requested(_) | Self::Rebind(_) => None,
+            Self::Requested(_) | Self::Rebind(_) | Self::RetryRebind => None,
         }
     }
     fn event_time_ms(self) -> Option<u32> {
         match self {
             Self::Native { event_time_ms, .. } => Some(event_time_ms),
-            Self::Requested(_) | Self::Rebind(_) => None,
+            Self::Requested(_) | Self::Rebind(_) | Self::RetryRebind => None,
         }
     }
     fn source(self) -> ObservationSource {
         match self {
             Self::Native { .. } => ObservationSource::Hook,
-            Self::Requested(_) | Self::Rebind(_) => ObservationSource::Review,
+            Self::Requested(_) | Self::Rebind(_) | Self::RetryRebind => ObservationSource::Review,
         }
     }
     fn kind(self) -> EventKind {
         match self {
             Self::Native { event, .. } => event.kind,
-            Self::Requested(_) | Self::Rebind(_) => EventKind::Review,
+            Self::Requested(_) | Self::Rebind(_) | Self::RetryRebind => EventKind::Review,
+        }
+    }
+    fn binding(
+        self,
+        current: &CurrentForeground,
+        process: quartz_domain::capture::ProcessId,
+    ) -> Option<HookTarget> {
+        match self {
+            Self::RetryRebind => Some(
+                if current.desktop == Desktop::Observable
+                    && current.window.get() != 0
+                    && process.get() != 0
+                {
+                    HookTarget::Process {
+                        window: current.window,
+                        process,
+                    }
+                } else {
+                    HookTarget::Unbind
+                },
+            ),
+            _ => self.rebind(),
         }
     }
     fn rebind(self) -> Option<HookTarget> {
         match self {
-            Self::Rebind(target) => Some(target),
-            Self::Native { .. } | Self::Requested(_) => None,
+            Self::Rebind(target) => Some(ProcessHooks::target(target)),
+            Self::Native { .. } | Self::Requested(_) | Self::RetryRebind => None,
         }
     }
 }
@@ -189,7 +289,7 @@ impl ReadRequest {
     }
 }
 pub(in crate::platform::windows) struct ForegroundPort {
-    global: Vec<Hook>,
+    global: HookRegistration<Vec<Hook>>,
     main_thread: PhantomData<Rc<()>>,
 }
 impl ForegroundPort {
@@ -197,7 +297,7 @@ impl ForegroundPort {
         sender: CaptureSender,
     ) -> Result<Self, ObserveForegroundError> {
         let mut port = Self {
-            global: Vec::new(),
+            global: HookRegistration::new(),
             main_thread: PhantomData,
         };
         CALLBACK.with(|slot| {
@@ -208,18 +308,80 @@ impl ForegroundPort {
             *slot.borrow_mut() = Some(CallbackState {
                 sender,
                 reads: ForegroundReads::default(),
-                process_hooks: ProcessHooks::Unbound,
+                process_hooks: HookRegistration::new(),
             });
         });
-        for event in [
-            EVENT_SYSTEM_FOREGROUND,
-            EVENT_SYSTEM_MINIMIZESTART,
-            EVENT_SYSTEM_MINIMIZEEND,
-            EVENT_SYSTEM_DESKTOPSWITCH,
-        ] {
-            port.global.push(Hook::install(event, 0)?);
-        }
+        let now = Self::clock()?.mono;
+        port.install_global(now);
         Ok(port)
+    }
+    fn install_global(&mut self, now: MonoInstant) -> HookInstallation {
+        match self.global.install(now, || {
+            [
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_MINIMIZESTART,
+                EVENT_SYSTEM_MINIMIZEEND,
+                EVENT_SYSTEM_DESKTOPSWITCH,
+            ]
+            .into_iter()
+            .map(|event| Hook::install(event, 0))
+            .collect()
+        }) {
+            Ok(installed) => installed,
+            Err(error) => {
+                tracing::warn!(%error, "foreground hooks unavailable; retry scheduled");
+                HookInstallation::Deferred
+            }
+        }
+    }
+    pub(in crate::platform::windows) fn retry_deadline(&self) -> Option<MonoInstant> {
+        self.global
+            .retry
+            .into_iter()
+            .chain(CALLBACK.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .and_then(|state| state.process_hooks.retry)
+            }))
+            .min()
+    }
+    pub(in crate::platform::windows) fn health(&self) -> HookHealth {
+        if self.global.health() == HookHealth::Degraded
+            || CALLBACK.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .is_some_and(|state| state.process_hooks.health() == HookHealth::Degraded)
+            })
+        {
+            HookHealth::Degraded
+        } else {
+            HookHealth::Healthy
+        }
+    }
+    pub(in crate::platform::windows) fn retry(
+        &mut self,
+        now: MonoInstant,
+    ) -> Result<(), ObserveForegroundError> {
+        if self.global.retry.is_some_and(|retry| retry <= now) {
+            self.install_global(now).review(|| {
+                Self::invalidate();
+                Self::read_current(ReadRequest::requested(Self::clock()?, ReadCause::Trigger))
+            })?;
+        }
+        let process_due = CALLBACK.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .and_then(|state| state.process_hooks.retry)
+                .is_some_and(|retry| retry <= now)
+        });
+        if process_due {
+            Self::invalidate();
+            Self::read_current(ReadRequest {
+                at: Self::clock()?,
+                trigger: ReadTrigger::RetryRebind,
+            })?;
+        }
+        Ok(())
     }
     pub(in crate::platform::windows) fn dispatch(
         &mut self,
@@ -298,6 +460,9 @@ impl ForegroundPort {
             return Ok(());
         };
         let sender = ingress.sender;
+        if sender.is_stopped() {
+            return Ok(());
+        }
         Self::report_untriggered(&sender, request.at, ingress.untriggered)?;
         // SAFETY: This only returns an opaque handle; event HWNDs never select the sampled window.
         let window = Window::from_native(unsafe { WindowsAndMessaging::GetForegroundWindow() });
@@ -363,10 +528,10 @@ impl ForegroundPort {
         };
         tracing::debug!(sampled_hwnd = current.window.get(), ?desktop,
             ?cause, decision = ?event_decision, "foreground review sampled");
-        let rebind = request
-            .trigger
-            .rebind()
-            .map(|target| current.accepts_rebind(target, window.process()));
+        // A retry derives its target from this fresh read, never from the failed installation.
+        let process = window.process();
+        let target = request.trigger.binding(&current, process);
+        let rebind = target.map(|target| current.accepts_rebind(target, process));
         Self::report_untriggered(&sender, request.at, outcome.untriggered)?;
         if outcome.decision == ReadDecision::Changed {
             Self::deliver(sender.foreground(Snapshot {
@@ -380,10 +545,26 @@ impl ForegroundPort {
                 desktop,
             }))?;
         }
-        if let Some(target) = request.trigger.rebind() {
+        if let Some(target) = target {
             match rebind.expect("rebind request checked against current state") {
                 RebindDecision::Accept => {
-                    let prepared = ProcessHooks::install(target)?;
+                    let mut registration = CALLBACK.with(|slot| {
+                        std::mem::replace(
+                            &mut slot
+                                .borrow_mut()
+                                .as_mut()
+                                .expect("live foreground port")
+                                .process_hooks,
+                            HookRegistration::new(),
+                        )
+                    });
+                    // Native installation and retirement may dispatch callbacks; release the RefCell borrow first.
+                    let installed = match target {
+                        HookTarget::Unbind => Ok(registration.unbind()),
+                        HookTarget::Process { .. } => {
+                            registration.install(read_at.mono, || ProcessHooks::install(target))
+                        }
+                    };
                     let retired = CALLBACK.with(|slot| {
                         std::mem::replace(
                             &mut slot
@@ -391,10 +572,18 @@ impl ForegroundPort {
                                 .as_mut()
                                 .expect("live foreground port")
                                 .process_hooks,
-                            prepared,
+                            registration,
                         )
                     });
                     drop(retired);
+                    match installed {
+                        Ok(HookInstallation::Installed) => {}
+                        Ok(HookInstallation::Deferred) => return Ok(()),
+                        Err(error) => {
+                            tracing::warn!(%error, "foreground process hooks unavailable; retry scheduled");
+                            return Ok(());
+                        }
+                    }
                     // Close the registration gap through the same comparison path.
                     Self::read_current(ReadRequest::requested(Self::clock()?, ReadCause::Trigger))?;
                 }
@@ -429,7 +618,7 @@ impl Drop for ForegroundPort {
     fn drop(&mut self) {
         let state = CALLBACK.with(|slot| slot.borrow_mut().take());
         drop(state);
-        self.global.clear();
+        self.global.installed = None;
     }
 }
 unsafe extern "system" fn callback(
@@ -482,6 +671,130 @@ mod tests {
     use super::*;
     use crate::core::foreground::{SELF_CHILD, WINDOW_OBJECT};
     use quartz_domain::capture::WindowHandle;
+
+    #[test]
+    fn deferred_and_failed_installations_preserve_the_foreground_baseline() {
+        let reads = std::cell::Cell::new(0);
+        let mut registration = HookRegistration::<()>::new();
+        let now = MonoInstant::from_millis(0);
+        let attempted = registration.install(now, || Err::<(), _>("fake global failure"));
+        attempted
+            .unwrap_or(HookInstallation::Deferred)
+            .review(|| {
+                reads.set(reads.get() + 1);
+                Ok::<_, ()>(())
+            })
+            .expect("failed installation has no follow-up read");
+        let deferred = registration
+            .install(now, || -> Result<(), &str> { panic!("backoff") })
+            .expect("deferred");
+        deferred
+            .review(|| {
+                reads.set(reads.get() + 1);
+                Ok::<_, ()>(())
+            })
+            .expect("deferred installation has no follow-up read");
+        assert_eq!(reads.get(), 0);
+        HookInstallation::Installed
+            .review(|| {
+                reads.set(reads.get() + 1);
+                Ok::<_, ()>(())
+            })
+            .expect("successful follow-up read");
+        assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
+    fn zero_process_retry_unbinds_and_backoff_does_not_suppress_unbind() {
+        use quartz_domain::capture::{ProcessId, WindowHandle};
+        let current = CurrentForeground {
+            desktop: Desktop::Observable,
+            window: WindowHandle::new(1),
+            title: Title::unreadable(),
+            affinity: DisplayAffinity::Unavailable,
+        };
+        let invalid = HookTarget::Process {
+            window: current.window,
+            process: ProcessId::new(0),
+        };
+        assert_eq!(
+            ReadTrigger::RetryRebind.binding(&current, ProcessId::new(0)),
+            Some(HookTarget::Unbind)
+        );
+        assert_eq!(ProcessHooks::target(invalid), HookTarget::Unbind);
+        assert_eq!(
+            current.accepts_rebind(invalid, ProcessId::new(0)),
+            RebindDecision::ReadCurrent
+        );
+        let mut registration = HookRegistration::<()>::new();
+        let now = MonoInstant::from_millis(0);
+        assert!(
+            registration
+                .install(now, || Err::<(), _>("fake failure"))
+                .is_err()
+        );
+        assert_eq!(
+            registration
+                .install(now, || Ok::<_, &str>(()))
+                .expect("defer"),
+            HookInstallation::Deferred
+        );
+        assert_eq!(registration.unbind(), HookInstallation::Installed);
+        assert_eq!(registration.health(), HookHealth::Healthy);
+        assert!(registration.retry.is_none());
+    }
+
+    #[test]
+    fn hook_failure_degrades_and_retries_with_fresh_foreground_validation() {
+        use quartz_domain::capture::{ProcessId, WindowHandle};
+        let mut registration = HookRegistration::new();
+        let start = MonoInstant::from_millis(0);
+        assert!(
+            registration
+                .install(start, || Err::<HookTarget, _>("injected installer failure"))
+                .is_err()
+        );
+        assert_eq!(registration.health(), HookHealth::Degraded);
+        let retry = registration.retry.expect("bounded retry deadline");
+        registration
+            .install(start, || -> Result<_, &str> {
+                panic!("must wait for retry deadline")
+            })
+            .expect("retry deferred");
+        let current = CurrentForeground {
+            desktop: Desktop::Observable,
+            window: WindowHandle::new(2),
+            title: Title::unreadable(),
+            affinity: DisplayAffinity::Unavailable,
+        };
+        let target = ReadTrigger::RetryRebind
+            .binding(&current, ProcessId::new(22))
+            .expect("fresh target");
+        assert_eq!(
+            current.accepts_rebind(target, ProcessId::new(22)),
+            RebindDecision::Accept
+        );
+        registration
+            .install(retry, || Ok::<_, &str>(target))
+            .expect("recover");
+        assert_eq!(registration.health(), HookHealth::Healthy);
+        assert!(registration.retry.is_none());
+        assert_eq!(
+            registration.installed,
+            Some(HookTarget::Process {
+                window: WindowHandle::new(2),
+                process: ProcessId::new(22)
+            })
+        );
+        let stale = HookTarget::Process {
+            window: WindowHandle::new(1),
+            process: ProcessId::new(11),
+        };
+        assert_eq!(
+            current.accepts_rebind(stale, ProcessId::new(22)),
+            RebindDecision::ReadCurrent
+        );
+    }
 
     #[test]
     fn read_trigger_derives_origin_kind_and_optional_native_event_time() {

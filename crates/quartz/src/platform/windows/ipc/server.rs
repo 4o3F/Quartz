@@ -20,15 +20,18 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions},
-    sync::{mpsc, oneshot, watch},
+    sync::{Semaphore, mpsc, oneshot, watch},
     task::JoinSet,
 };
 use windows::Win32::{Foundation::HANDLE, System::Pipes::GetNamedPipeClientProcessId};
 
 /// Maximum simultaneous connections from 04 §1, including clients awaiting hello.
 const PIPE_INSTANCES: usize = 8;
-/// Core blocking-pool ceiling from 01 §7.2; the pipe tasks do not use that pool.
+/// Core blocking-pool ceiling from 01 §7.2, shared by authentication and rule reads.
 const MAX_BLOCKING_THREADS: usize = 2;
+/// Reserve one blocking worker for authenticated rule reads (01 §7.2).
+const RULE_READ_BLOCKING_RESERVE: usize = 1;
+const AUTHENTICATION_PARALLELISM: usize = MAX_BLOCKING_THREADS - RULE_READ_BLOCKING_RESERVE;
 /// Bounded non-blocking main-thread control commands (01 §6).
 const CONTROL_MAILBOX_CAPACITY: usize = 64;
 /// Yield while a bounded shutdown flush completes (01 §6).
@@ -135,6 +138,7 @@ impl PipeServer {
             listener: Arc::new(PipeListener {
                 name: config.name,
                 owner: config.owner,
+                authentication: AuthenticationPool::new(),
             }),
             timeouts: config.timeouts,
             services: config.services,
@@ -249,6 +253,7 @@ enum InstanceOrder {
 struct PipeListener {
     name: PipeName,
     owner: ProcessIdentity,
+    authentication: AuthenticationPool,
 }
 impl PipeListener {
     fn create(&self, order: InstanceOrder) -> Result<NamedPipeServer, CreatePipeInstanceError> {
@@ -320,7 +325,10 @@ impl IoThread {
             tracing::warn!("pipe startup caller left before startup completed");
             return Ok(());
         }
+        drop(_entered);
         runtime.block_on(self.serve(pipes));
+        // Running filesystem calls cannot be cancelled; their bounded permits remain owned until completion.
+        runtime.shutdown_background();
         Ok(())
     }
     fn slot(&self, registry: &RegistryHandle, life: &watch::Receiver<ServerLife>) -> Slot {
@@ -439,6 +447,46 @@ enum ServerLife {
     Stopping,
 }
 
+struct AuthenticationPool(Arc<Semaphore>);
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+enum AuthenticatePeerError {
+    #[snafu(display("pipe peer authentication exceeded the hello deadline"))]
+    Deadline,
+    #[snafu(display("pipe authentication pool is closed"))]
+    Closed { source: tokio::sync::AcquireError },
+    #[snafu(display("pipe authentication task failed"))]
+    Join { source: tokio::task::JoinError },
+    #[snafu(display("pipe peer identity check failed"))]
+    Check { source: CheckPeerError },
+}
+impl AuthenticationPool {
+    fn new() -> Self {
+        Self(Arc::new(Semaphore::new(AUTHENTICATION_PARALLELISM)))
+    }
+    async fn check<T: Send + 'static>(
+        &self,
+        deadline: tokio::time::Instant,
+        authenticate: impl FnOnce() -> Result<T, CheckPeerError> + Send + 'static,
+    ) -> Result<T, AuthenticatePeerError> {
+        tokio::time::timeout_at(deadline, async {
+            let permit = Arc::clone(&self.0)
+                .acquire_owned()
+                .await
+                .map_err(|source| AuthenticatePeerError::Closed { source })?;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                authenticate()
+            })
+            .await
+            .map_err(|source| AuthenticatePeerError::Join { source })?
+            .map_err(|source| AuthenticatePeerError::Check { source })
+        })
+        .await
+        .map_err(|_| AuthenticatePeerError::Deadline)?
+    }
+}
+
 struct Slot {
     services: Services,
     registry: RegistryHandle,
@@ -509,11 +557,21 @@ impl Slot {
                 call: "GetNamedPipeClientProcessId",
                 source,
             })
-            .and_then(|()| self.listener.owner.check(pid))
-            .map(|peer| match peer {
-                quartz_pipe::PeerExecutable::Quartz => crate::ipc::AllowedRoles::Quartz,
-                quartz_pipe::PeerExecutable::Host => crate::ipc::AllowedRoles::Host,
-            });
+            .map_err(|source| AuthenticatePeerError::Check { source });
+        let peer = match peer {
+            Ok(()) => {
+                let listener = Arc::clone(&self.listener);
+                self.listener
+                    .authentication
+                    .check(hello_deadline, move || listener.owner.check(pid))
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+        .map(|peer| match peer {
+            quartz_pipe::PeerExecutable::Quartz => crate::ipc::AllowedRoles::Quartz,
+            quartz_pipe::PeerExecutable::Host => crate::ipc::AllowedRoles::Host,
+        });
         match peer {
             Ok(allowed) => {
                 let mut session = ConnectionSession::new(allowed);
@@ -592,6 +650,154 @@ mod tests {
     const TEST_CLOSE_TIMEOUT: Duration = Duration::from_millis(20);
     /// Bounds instance replacement independently of the production hello deadline.
     const TEST_RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+    #[test]
+    fn hung_authentication_leaves_rule_read_capacity_and_bounds_new_client_waits() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .max_blocking_threads(MAX_BLOCKING_THREADS)
+            .build()
+            .expect("production-size blocking pool");
+        runtime.block_on(async {
+            let database = crate::query::dispatch::test_support::TestDatabase::start();
+            let pool = Arc::new(AuthenticationPool::new());
+            let mut releases = Vec::new();
+            let mut tasks = Vec::new();
+            for _ in 0..AUTHENTICATION_PARALLELISM {
+                let (release, blocked) = crossbeam_channel::bounded(1);
+                let (entered, started) = oneshot::channel();
+                releases.push(release);
+                let pool = Arc::clone(&pool);
+                tasks.push(tokio::spawn(async move {
+                    pool.check(
+                        tokio::time::Instant::now() + TEST_CLOSE_TIMEOUT,
+                        move || {
+                            let _ = entered.send(());
+                            let _ = blocked.recv_timeout(TEST_RECONNECT_TIMEOUT * 3);
+                            Ok(())
+                        },
+                    )
+                    .await
+                }));
+                started
+                    .await
+                    .expect("fake authentication occupies its worker");
+            }
+            let result = tokio::time::timeout(
+                TEST_RECONNECT_TIMEOUT,
+                database
+                    .port
+                    .read_rules(crate::rules::read::ReadRequest::Tree(
+                        quartz_protocol::RuleSetsTreeRequest {
+                            kind: quartz_protocol::RuleKind::Privacy,
+                            cursor: None,
+                        },
+                    )),
+            )
+            .await;
+            let waiting = pool
+                .check(
+                    tokio::time::Instant::now() + TEST_CLOSE_TIMEOUT,
+                    || -> Result<(), CheckPeerError> {
+                        panic!("hung authentication retains its permit");
+                    },
+                )
+                .await;
+            for release in releases {
+                let _ = release.send(());
+            }
+            for task in tasks {
+                let _ = task.await.expect("authentication timeout");
+            }
+            result
+                .expect("authenticated rule read keeps its own blocking capacity")
+                .expect("rule read");
+            assert!(
+                matches!(waiting, Err(AuthenticatePeerError::Deadline)),
+                "new clients leave at their authentication deadline"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn authentication_capacity_wait_obeys_deadline_without_starting_native_work() {
+        let pool = AuthenticationPool::new();
+        let permits = Arc::clone(&pool.0)
+            .acquire_many_owned(
+                u32::try_from(AUTHENTICATION_PARALLELISM).expect("authentication limit"),
+            )
+            .await
+            .expect("reserve pool");
+        let result = pool
+            .check(
+                tokio::time::Instant::now() + TEST_CLOSE_TIMEOUT,
+                || -> Result<(), CheckPeerError> {
+                    panic!("native authentication cannot start without capacity");
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(AuthenticatePeerError::Deadline)));
+        drop(permits);
+        assert_eq!(pool.0.available_permits(), AUTHENTICATION_PARALLELISM);
+    }
+
+    #[tokio::test]
+    async fn delayed_authentication_keeps_an_active_connection_responsive_and_times_out() {
+        let fixture = slot();
+        let connection = Connection {
+            services: fixture.slot.services.clone(),
+            registry: fixture.slot.registry.clone(),
+            timeouts: ConnectionTimeouts::default(),
+            peer_pid: crate::ipc::ProcessId::new(1),
+        };
+        let mut client = crate::ipc::connection::tests::MemoryClient::connect(
+            connection,
+            quartz_protocol::HelloRole::Cli,
+        )
+        .await;
+        let pool = Arc::new(AuthenticationPool::new());
+        let (release, waiting) = crossbeam_channel::bounded(1);
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let checking = Arc::clone(&pool);
+        let delayed = tokio::spawn(async move {
+            checking
+                .check(
+                    tokio::time::Instant::now() + TEST_RECONNECT_TIMEOUT,
+                    move || {
+                        let _ = entered.send(Instant::now());
+                        waiting
+                            .recv_timeout(TEST_RECONNECT_TIMEOUT + TEST_RECONNECT_TIMEOUT)
+                            .expect("release fake authenticator");
+                        Ok(())
+                    },
+                )
+                .await
+        });
+        let started = started.await.expect("blocking authenticator started");
+        assert!(
+            started.elapsed() < TEST_RECONNECT_TIMEOUT,
+            "native authentication must not suspend the I/O scheduler"
+        );
+        tokio::time::timeout(
+            TEST_CLOSE_TIMEOUT,
+            client.request(2, quartz_protocol::Op::CoreStatus, serde_json::json!({})),
+        )
+        .await
+        .expect("second active connection remains responsive");
+        assert!(matches!(
+            delayed.await.expect("authentication task"),
+            Err(AuthenticatePeerError::Deadline)
+        ));
+        assert_eq!(
+            pool.0.available_permits(),
+            AUTHENTICATION_PARALLELISM - 1,
+            "timed-out native work retains its concurrency permit"
+        );
+        release
+            .send(())
+            .expect("release timed-out native authentication");
+        client.close().await;
+    }
 
     async fn connect(name: &PipeName) -> NamedPipeClient {
         tokio::time::timeout(TEST_RECONNECT_TIMEOUT, async {
@@ -770,6 +976,7 @@ mod tests {
                 listener: Arc::new(PipeListener {
                     name: PipeName::for_test(suffix),
                     owner: ProcessIdentity::current().expect("test identity"),
+                    authentication: AuthenticationPool::new(),
                 }),
                 timeouts: ConnectionTimeouts {
                     hello: ConnectionTimeouts::default().hello,

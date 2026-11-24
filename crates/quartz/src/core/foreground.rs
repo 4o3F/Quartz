@@ -82,9 +82,12 @@ impl CurrentForeground {
     pub(crate) fn accepts_rebind(&self, target: HookTarget, owner: ProcessId) -> RebindDecision {
         let matches = match target {
             HookTarget::Process { window, process } => {
-                self.desktop == Desktop::Observable && self.window == window && owner == process
+                self.desktop == Desktop::Observable
+                    && self.window == window
+                    && process.get() != 0
+                    && owner == process
             }
-            HookTarget::Unbind => self.observable_window().is_none(),
+            HookTarget::Unbind => self.observable_window().is_none() || owner.get() == 0,
         };
         if matches {
             RebindDecision::Accept

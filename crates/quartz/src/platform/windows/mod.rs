@@ -43,9 +43,13 @@ pub(crate) use language::detect_ui_language;
 
 /// Largest finite Win32 wait: INFINITE is a sentinel, and each wake re-evaluates the deadline.
 const MAX_LOGICAL_DAY_WAIT: u32 = INFINITE - 1;
+/// Every wait includes the wake event; the optional UI process follows it.
+const MAIN_WAKE_HANDLE_COUNT: usize = 1;
 
 #[derive(Debug, Snafu)]
 enum RunCoreError {
+    #[snafu(display("could not create core wake event"))]
+    CreateWake { source: windows::core::Error },
     #[snafu(display("could not resolve Windows session identity"))]
     ReadSessionId { source: windows::core::Error },
     #[snafu(display("could not create installation identity"))]
@@ -77,6 +81,12 @@ enum RunCoreError {
 #[derive(Debug, Snafu)]
 #[snafu(module(wait_error))]
 enum WaitCoreEventsError {
+    #[snafu(display("core callback failed: {failure:?}"))]
+    Callback {
+        failure: tray::window::CallbackFailure,
+    },
+    #[snafu(display("could not wake core message loop"))]
+    Wake { source: ports::WakeMainThreadError },
     #[snafu(display("could not wait for core messages (MsgWaitForMultipleObjects)"))]
     Wait { source: windows::core::Error },
     #[snafu(display("could not observe system event"))]
@@ -163,6 +173,8 @@ enum TrayRefresh {
 /// Owns child-process tracking while the core runs on the main thread.
 #[derive(Debug)]
 pub(crate) struct CoreProcess {
+    log: Option<logging::FileLogGuard>,
+    hooks: foreground::HookHealth,
     ui: UiState<process::UiProcess>,
     ui_open_started: Option<std::time::Instant>,
     capture: Option<CaptureState>,
@@ -182,6 +194,8 @@ struct PendingAnnotation {
 impl CoreProcess {
     pub(crate) fn new() -> Self {
         Self {
+            log: None,
+            hooks: Default::default(),
             ui: UiState::default(),
             ui_open_started: None,
             capture: None,
@@ -208,9 +222,11 @@ impl CoreProcess {
     }
     fn start(&mut self, autostart: Autostart) -> Result<(), RunCoreError> {
         let data_directory = DataDirectory::resolve().context(DataDirectorySnafu)?;
-        data_directory
-            .initialize_core_logging()
-            .context(InitLogSnafu)?;
+        self.log = Some(
+            data_directory
+                .initialize_core_logging()
+                .context(InitLogSnafu)?,
+        );
         let _instance = match data_directory
             .acquire_instance()
             .context(AcquireInstanceSnafu)?
@@ -237,23 +253,26 @@ impl CoreProcess {
             system_language,
         )
         .context(CreateTraySnafu)?;
-        let ports = PlatformPorts::windows(system_language)?;
+        let wake = ports::MainWake::new(tray.raw_window())?;
+        let ports = PlatformPorts::windows(system_language, &wake)?;
         let mut runtime = CoreRuntime::start(&data_directory, ports).context(StartRuntimeSnafu)?;
         if let Err(error) = tray.set_language(runtime.status.ui_settings().ui_language) {
             tracing::error!(%error, "could not apply initial tray language");
         }
         self.summary = Some(runtime.summary.clone());
         tray.attach_summary(runtime.summary.clone());
+        tray.attach_commands(runtime.commands().clone());
         let ingress = SystemIngress::new(runtime.sender(), runtime.shutdown_port());
         tray.attach_capture(ingress.clone());
         let mut sources = Sources::start(tray.raw_window(), ingress).context(ObserveSystemSnafu)?;
+        self.hooks = sources.hook_health();
         self.refresh_tray(&mut tray, &runtime.status, TrayRefresh::Startup);
         self.ui.configure_resident(
             runtime.status.ui_settings().resident.enabled,
             std::time::Instant::now(),
         );
         tracing::info!(?autostart, "core message loop started");
-        let result = self.message_loop(&mut tray, &mut runtime, &mut sources);
+        let result = self.message_loop(&mut tray, &mut runtime, &mut sources, &wake);
         self.ui.begin_shutdown();
         let exit = CoreExit::from_loop(&result).runtime_exit();
         let stopped = runtime.shutdown(exit);
@@ -275,9 +294,19 @@ impl CoreProcess {
         tray: &mut Tray,
         runtime: &mut CoreRuntime,
         sources: &mut Sources,
+        wake: &ports::MainWake,
     ) -> Result<CoreExit, WaitCoreEventsError> {
         let status = &runtime.status;
         loop {
+            if let Some(exit) = Self::exit_before_work(
+                || Self::terminal_event(tray, sources),
+                || wake.take_failure(),
+            )? {
+                return Ok(exit);
+            }
+            if let Some(worker) = runtime.commands().take_fatal() {
+                return Err(WaitCoreEventsError::WorkerFailed { worker });
+            }
             let mut message = MSG::default();
             // SAFETY: message is writable MSG storage. Drain the entire queue before waiting again,
             // including system events that can wake MsgWaitForMultipleObjects without queued input.
@@ -294,6 +323,12 @@ impl CoreProcess {
                     let _ = WindowsAndMessaging::TranslateMessage(&message);
                     WindowsAndMessaging::DispatchMessageW(&message);
                 }
+                if let Some(exit) = Self::terminal_event(tray, sources)? {
+                    return Ok(exit);
+                }
+                if let Some(worker) = runtime.commands().take_fatal() {
+                    return Err(WaitCoreEventsError::WorkerFailed { worker });
+                }
             }
             if let Some(effective) = runtime.ui_commands.take_settings_change() {
                 self.handle_ui_command(UiCommand::SettingsChanged(effective), tray, runtime);
@@ -304,10 +339,17 @@ impl CoreProcess {
             while let Ok(command) = runtime.commands().try_recv() {
                 self.handle_main_command(command, tray, status, sources)?;
             }
+            self.hooks = sources.hook_health();
             self.poll_annotation();
             self.refresh_tray(tray, status, TrayRefresh::Capture);
             loop {
                 let events = tray.commands();
+                if let Some(exit) = Self::terminal_event(tray, sources)? {
+                    return Ok(exit);
+                }
+                if let Some(worker) = runtime.commands().take_fatal() {
+                    return Err(WaitCoreEventsError::WorkerFailed { worker });
+                }
                 if events.is_empty() {
                     break;
                 }
@@ -330,7 +372,17 @@ impl CoreProcess {
             if let Some(control) = self.ui.expire_prewarm(now) {
                 runtime.target_ui(control.connection, control.op);
             }
-            let handles = self.ui.process().map(|process| [process.raw()]);
+            let handles = [
+                wake.raw(),
+                self.ui
+                    .process()
+                    .map_or(wake.raw(), |process| process.raw()),
+            ];
+            let handles = if self.ui.process().is_some() {
+                handles.as_slice()
+            } else {
+                &handles[..MAIN_WAKE_HANDLE_COUNT]
+            };
             let logical_wait = status.update_logical_day(
                 RefreshLogicalDay::CheckDeadline,
                 &sources::SystemClock,
@@ -353,7 +405,7 @@ impl CoreProcess {
             // message or process exit on this thread needs neither polling nor a worker thread.
             let result = unsafe {
                 WindowsAndMessaging::MsgWaitForMultipleObjects(
-                    handles.as_ref().map(|handles| handles.as_slice()),
+                    Some(handles),
                     false,
                     wait_ms,
                     QS_ALLINPUT,
@@ -362,7 +414,11 @@ impl CoreProcess {
             if result == WAIT_FAILED {
                 return Err(windows::core::Error::from_thread()).context(wait_error::WaitSnafu);
             }
-            if handles.is_some() && result == WAIT_OBJECT_0 {
+            if handles.len() > MAIN_WAKE_HANDLE_COUNT
+                && result.0
+                    == WAIT_OBJECT_0.0
+                        + u32::try_from(MAIN_WAKE_HANDLE_COUNT).expect("wait index fits DWORD")
+            {
                 if let Some(process) = self.ui.process() {
                     process.log_exit();
                 }
@@ -375,6 +431,31 @@ impl CoreProcess {
                     self.refresh_tray(tray, status, TrayRefresh::UiExited);
                 }
             }
+        }
+    }
+    fn exit_before_work(
+        terminal: impl FnOnce() -> Result<Option<CoreExit>, WaitCoreEventsError>,
+        wake_failure: impl FnOnce() -> Option<ports::WakeMainThreadError>,
+    ) -> Result<Option<CoreExit>, WaitCoreEventsError> {
+        if let Some(exit) = terminal()? {
+            return Ok(Some(exit));
+        }
+        if let Some(source) = wake_failure() {
+            return Err(WaitCoreEventsError::Wake { source });
+        }
+        Ok(None)
+    }
+    fn terminal_event(
+        tray: &Tray,
+        sources: &Sources,
+    ) -> Result<Option<CoreExit>, WaitCoreEventsError> {
+        match tray.take_terminal().or_else(|| sources.take_terminal()) {
+            Some(tray::window::CoreEvent::EndSession) => Ok(Some(CoreExit::SessionEnded)),
+            Some(tray::window::CoreEvent::Fatal(failure)) => {
+                Err(WaitCoreEventsError::Callback { failure })
+            }
+            Some(_) => unreachable!("only terminal events are taken"),
+            None => Ok(None),
         }
     }
     fn refresh_logical_day(&self, status: &StatusPublisher, change: RefreshLogicalDay) {
@@ -505,6 +586,7 @@ impl CoreProcess {
             }
             MainCommand::Effect(effect) => self.handle_capture_effect(effect, sources)?,
         }
+        self.hooks = sources.hook_health();
         self.refresh_tray(tray, status, TrayRefresh::Capture);
         Ok(())
     }
@@ -513,6 +595,9 @@ impl CoreProcess {
         effect: CaptureEffect,
         sources: &mut Sources,
     ) -> Result<(), WaitCoreEventsError> {
+        if sources.is_stopped() {
+            return Ok(());
+        }
         match effect {
             CaptureEffect::StateChanged(_) => {
                 unreachable!("state arrives through CaptureSnapshot")
@@ -577,9 +662,14 @@ impl CoreProcess {
             TrayCommand::CalendarChanged => {
                 self.refresh_logical_day(status, RefreshLogicalDay::ResetZone)
             }
+            TrayCommand::Fatal(failure) => return Err(WaitCoreEventsError::Callback { failure }),
             TrayCommand::Exit => return Ok(Some(CoreExit::UserExit)),
             TrayCommand::EndSession => return Ok(Some(CoreExit::SessionEnded)),
-            TrayCommand::Deadline(at) => sources.fired(at).context(wait_error::ObserveSnafu)?,
+            TrayCommand::Deadline(at) => {
+                sources.fired(at).context(wait_error::ObserveSnafu)?;
+                self.hooks = sources.hook_health();
+                self.refresh_tray(tray, status, TrayRefresh::Capture);
+            }
             TrayCommand::OpenUi => self.open_ui(tray, status, runtime),
             TrayCommand::Hover => {
                 let now = std::time::Instant::now();
@@ -675,10 +765,12 @@ impl CoreProcess {
         } else {
             TrayTooltip::Ready
         };
-        if let Err(error) = tray.update(
-            TrayState::from_status(status.stop_reason(), tooltip)
-                .with_timed(status.timed_policies(), status.ui_settings().locale),
-        ) {
+        let mut state = TrayState::from_status(status.stop_reason(), tooltip)
+            .with_timed(status.timed_policies(), status.ui_settings().locale);
+        if self.hooks == foreground::HookHealth::Degraded {
+            state.icon = TrayIconState::Warning;
+        }
+        if let Err(error) = tray.update(state) {
             match refresh {
                 TrayRefresh::Startup => tracing::error!(?error, "could not update tray state"),
                 TrayRefresh::FirstFrame => {
@@ -790,6 +882,15 @@ impl TrayState {
 mod tests {
     use super::*;
     use std::error::Error;
+
+    #[test]
+    fn settled_session_preempts_a_concurrent_native_wake_failure() {
+        let exit = CoreProcess::exit_before_work(
+            || Ok(Some(CoreExit::SessionEnded)),
+            || panic!("settled session must not read a wake failure"),
+        );
+        assert!(matches!(exit, Ok(Some(CoreExit::SessionEnded))));
+    }
 
     #[test]
     fn logical_day_wait_clamps_finite_values_below_the_infinite_sentinel() {

@@ -143,25 +143,25 @@ impl RegistryHandle {
             registry: self.clone(),
         })
     }
-    pub(crate) async fn unsubscribe(
+    pub(crate) fn submit_unsubscribe(
         &self,
         id: ConnectionId,
         subscription: quartz_protocol::Unsubscribe,
-    ) -> Result<(), QueueRegistryError> {
-        let (reply, receive) = oneshot::channel();
+    ) -> Result<oneshot::Receiver<()>, QueueRegistryError> {
+        let (reply, received) = oneshot::channel();
         self.send(RegistryMessage::Unsubscribe {
             id,
             subscription,
             reply,
         })?;
-        receive.await.map_err(|_| QueueRegistryError)
+        Ok(received)
     }
-    pub(crate) async fn subscribe(
+    pub(crate) fn submit_subscribe(
         &self,
         id: ConnectionId,
         subscription: Subscribe,
         response: Response,
-    ) -> Result<(), QueueFrameError> {
+    ) -> Result<oneshot::Receiver<Result<(), QueueFrameError>>, QueueFrameError> {
         let (reply, received) = oneshot::channel();
         self.send(RegistryMessage::Subscribe {
             id,
@@ -170,7 +170,18 @@ impl RegistryHandle {
             reply,
         })
         .map_err(|_| QueueFrameError::Closed)?;
-        received.await.map_err(|_| QueueFrameError::Closed)?
+        Ok(received)
+    }
+    #[cfg(test)]
+    pub(crate) async fn subscribe(
+        &self,
+        id: ConnectionId,
+        subscription: Subscribe,
+        response: Response,
+    ) -> Result<(), QueueFrameError> {
+        self.submit_subscribe(id, subscription, response)?
+            .await
+            .map_err(|_| QueueFrameError::Closed)?
     }
     pub(crate) fn target_control(
         &self,

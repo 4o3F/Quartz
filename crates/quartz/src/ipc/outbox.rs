@@ -101,6 +101,7 @@ enum OutboxLife {
 struct LatestEvents {
     state: Option<StateSnapshot>,
     days: BTreeMap<quartz_protocol::LocalDate, quartz_protocol::DayChanged>,
+    day_clocks: BTreeMap<quartz_protocol::LocalDate, Option<tokio::time::Instant>>,
 }
 
 /// Reliable mailbox entries own their byte reservations before enqueueing.
@@ -170,6 +171,7 @@ impl OutboxHandle {
             Topic::State => latest.state = None,
             Topic::Day(date) => {
                 latest.days.remove(&date);
+                latest.day_clocks.remove(&date);
             }
             Topic::Control => {}
         });
@@ -180,6 +182,7 @@ impl OutboxHandle {
     }
     pub(crate) fn day(&self, changed: quartz_protocol::DayChanged) {
         self.latest.send_modify(|latest| {
+            latest.day_clocks.entry(changed.date).or_default();
             latest.days.insert(changed.date, changed);
         });
     }
@@ -245,7 +248,6 @@ impl OutboxTask {
             handle: handle.clone(),
             sequence: EventSeq(0),
             state_clock: StatePushClock::default(),
-            day_clocks: BTreeMap::new(),
         };
         let task = tokio::spawn(actor.run(write));
         Self {
@@ -290,7 +292,6 @@ struct OutboxActor {
     handle: OutboxHandle,
     sequence: EventSeq,
     state_clock: StatePushClock,
-    day_clocks: BTreeMap<quartz_protocol::LocalDate, tokio::time::Instant>,
 }
 impl OutboxActor {
     fn next_sequence(&mut self) -> EventSeq {
@@ -346,7 +347,14 @@ impl OutboxActor {
             let due_date = pending
                 .days
                 .keys()
-                .find(|date| self.day_clocks.get(date).is_none_or(|next| now >= *next))
+                .find(|date| {
+                    pending
+                        .day_clocks
+                        .get(date)
+                        .copied()
+                        .flatten()
+                        .is_none_or(|next| now >= next)
+                })
                 .copied();
             if let Some(date) = due_date {
                 let mut changed = None;
@@ -362,18 +370,28 @@ impl OutboxActor {
                         .handle
                         .reserve(payload.len())
                         .map_err(io::Error::other)?;
+                    let scheduled = tokio::time::Instant::now() + DAY_PUSH_INTERVAL;
+                    self.handle.latest.send_modify(|latest| {
+                        latest.day_clocks.insert(date, Some(scheduled));
+                    });
                     writer.send(payload.as_slice()).await?;
-                    self.day_clocks
-                        .insert(date, tokio::time::Instant::now() + DAY_PUSH_INTERVAL);
+                    self.handle.latest.send_modify(|latest| {
+                        if latest.day_clocks.get(&date) == Some(&Some(scheduled)) {
+                            latest.day_clocks.insert(
+                                date,
+                                Some(tokio::time::Instant::now() + DAY_PUSH_INTERVAL),
+                            );
+                        }
+                    });
                     drop(reservation);
                 }
                 continue;
             }
-            let deadline = self
+            let deadline = pending
                 .day_clocks
                 .iter()
                 .filter(|entry| pending.days.contains_key(entry.0))
-                .map(|entry| *entry.1)
+                .filter_map(|entry| *entry.1)
                 .chain(pending.state.as_ref().and(self.state_clock.next))
                 .min();
             tokio::select! {
@@ -426,6 +444,40 @@ enum WriteProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn unsubscribe_discards_throttle_and_resubscribe_pushes_immediately() {
+        use futures_util::StreamExt;
+        let (write, read) = tokio::io::duplex(4096);
+        let writer = OutboxTask::spawn(write);
+        let date = "2025-01-02".parse().expect("date");
+        let changed = quartz_protocol::DayChanged {
+            date,
+            versions: quartz_protocol::QueryVersions("initial".into()),
+        };
+        let mut reader = tokio_util::codec::FramedRead::new(read, frame_codec());
+        writer.handle.day(changed.clone());
+        reader.next().await.expect("first event").expect("frame");
+        tokio::task::yield_now().await;
+        assert!(writer.handle.latest.borrow().day_clocks.contains_key(&date));
+        writer.handle.unsubscribe(Topic::Day(date));
+        assert!(
+            writer.handle.latest.borrow().day_clocks.is_empty(),
+            "unsubscribed dates retain no throttle state"
+        );
+        let before = tokio::time::Instant::now();
+        writer.handle.day(changed);
+        reader
+            .next()
+            .await
+            .expect("new subscription snapshot")
+            .expect("frame");
+        assert_eq!(
+            tokio::time::Instant::now(),
+            before,
+            "new subscription does not inherit old throttle"
+        );
+    }
+
     #[test]
     fn exact_budget_fits_and_one_more_byte_is_rejected_without_growth() {
         let mut budget = SendBudget::default();

@@ -1,6 +1,11 @@
 //! Entry-layer tracing setup.
 
 #[cfg(any(windows, test))]
+mod rolling;
+#[cfg(any(windows, test))]
+pub(crate) use rolling::{FileLogGuard, PanicLog};
+
+#[cfg(any(windows, test))]
 use crate::data_directory::DataDirectory;
 use snafu::Snafu;
 use tracing_subscriber::EnvFilter;
@@ -11,7 +16,6 @@ use snafu::ResultExt;
 use std::{
     fs::{self, File, OpenOptions},
     path::PathBuf,
-    sync::Mutex,
 };
 
 #[cfg(any(windows, test))]
@@ -44,6 +48,11 @@ impl std::fmt::Display for LogTarget {
 #[cfg(any(windows, test))]
 #[derive(Debug, Snafu)]
 pub(crate) enum InitFileLogError {
+    #[snafu(display("could not start {target} log writer"))]
+    StartWriter {
+        target: LogTarget,
+        source: std::io::Error,
+    },
     #[snafu(display("could not create {target} log directory {} (create_dir_all)", path.display()))]
     CreateDirectory {
         target: LogTarget,
@@ -65,17 +74,24 @@ pub(crate) enum InitFileLogError {
 
 #[cfg(any(windows, test))]
 impl DataDirectory {
-    /// Opens the target's append-only log and installs a synchronous subscriber.
-    pub(crate) fn init_file_log(&self, target: LogTarget) -> Result<(), InitFileLogError> {
+    /// Installs bounded log admission; a dedicated thread writes and rotates files.
+    pub(crate) fn init_file_log(
+        &self,
+        target: LogTarget,
+    ) -> Result<FileLogGuard, InitFileLogError> {
         let file = self.open_file_log(target)?;
+        let log = rolling::RollingLog::new(self.logs().join(target.file_name()), file)
+            .context(StartWriterSnafu { target })?;
+        let worker = FileLogGuard::start(log).context(StartWriterSnafu { target })?;
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(filter())
             .with_ansi(false)
-            .with_writer(Mutex::new(file))
+            .with_writer(worker.writer)
             .finish();
         tracing::subscriber::set_global_default(subscriber)
             .map_err(InitTracingError::from)
-            .context(InstallSubscriberSnafu { target })
+            .context(InstallSubscriberSnafu { target })?;
+        Ok(worker.guard)
     }
 }
 
@@ -125,10 +141,11 @@ pub(super) fn init() -> Result<(), InitTracingError> {
 
 /// Logs before unwinding or aborting without including potentially sensitive panic payloads.
 #[cfg(any(windows, test))]
-pub(crate) fn install_core_panic_log() {
-    std::panic::set_hook(Box::new(|info| {
-        let thread = std::thread::current();
-        tracing::error!(thread = thread.name(), location = ?info.location(), "core thread panicked");
+pub(crate) fn install_core_panic_log(log: PanicLog) {
+    std::panic::set_hook(Box::new(move |_info| {
+        if let Err(error) = log.record() {
+            eprintln!("could not persist panic diagnostic before abort: {error}");
+        }
     }));
 }
 

@@ -36,6 +36,7 @@ impl Default for TrayState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TrayCommand {
     CalendarChanged,
+    Fatal(window::CallbackFailure),
     OpenUi,
     Hover,
     Annotate(crate::core::app::annotation::AnnotationChoice),
@@ -118,6 +119,12 @@ impl Tray {
     pub(super) fn attach_capture(&self, ingress: super::sources::SystemIngress) {
         self.window.attach_capture(ingress);
     }
+    pub(super) fn attach_commands(&self, commands: crate::core::app::MainReceiver) {
+        self.window.attach_commands(commands);
+    }
+    pub(super) fn take_terminal(&self) -> Option<CoreEvent> {
+        self.window.take_terminal()
+    }
     pub(super) fn update(&mut self, state: TrayState) -> Result<(), UpdateTrayStateError> {
         self.icon.update(state).context(UpdateTrayStateSnafu)?;
         self.state = state;
@@ -136,6 +143,7 @@ impl Tray {
         let mut commands = Vec::new();
         for event in self.window.drain_events() {
             match event {
+                CoreEvent::Fatal(failure) => commands.push(TrayCommand::Fatal(failure)),
                 CoreEvent::CalendarChanged => commands.push(TrayCommand::CalendarChanged),
                 CoreEvent::EndSession => commands.push(TrayCommand::EndSession),
                 CoreEvent::Deadline(at) => commands.push(TrayCommand::Deadline(at)),

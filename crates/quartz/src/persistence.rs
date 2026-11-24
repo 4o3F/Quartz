@@ -174,6 +174,28 @@ impl Persistence {
     pub(crate) fn is_due(&self, now: Timestamp) -> bool {
         self.queue.due(now)
     }
+    /// Failure retry time is sampled after SQLite has returned, including lock waits.
+    pub(crate) fn flush_with_clock<E>(
+        &mut self,
+        store: &mut Store,
+        now: Timestamp,
+        checkpoints: CheckpointCollection,
+        read: impl FnOnce() -> Result<Timestamp, E>,
+    ) -> Result<PersistenceResult, E> {
+        let mut result = self.flush_transaction(store, now, checkpoints);
+        if result.failure().is_some() {
+            let failed_at = read()?;
+            result.append_outcome(self.queue.retry_after(failed_at));
+            if let PersistenceOutcome::Failed { commands, .. } = &mut result.outcome {
+                *commands = match self.queue.state() {
+                    PersistenceState::Failed { commands } => commands,
+                    _ => unreachable!("failed transaction retains failed queue state"),
+                };
+            }
+        }
+        Ok(result)
+    }
+    #[cfg(test)]
     pub(crate) fn flush_due(
         &mut self,
         store: &mut Store,
@@ -187,7 +209,19 @@ impl Persistence {
         }
     }
     /// Pins a bounded prefix under the queue lock, then executes SQLite with that lock released.
+    #[cfg(test)]
     pub(crate) fn flush(
+        &mut self,
+        store: &mut Store,
+        now: Timestamp,
+        checkpoints: CheckpointCollection,
+    ) -> PersistenceResult {
+        self.flush_with_clock(store, now, checkpoints, || {
+            Ok::<_, std::convert::Infallible>(now)
+        })
+        .expect("infallible fixture clock")
+    }
+    fn flush_transaction(
         &mut self,
         store: &mut Store,
         now: Timestamp,
@@ -196,7 +230,7 @@ impl Persistence {
         let prepared = self.queue.prepare(now);
         let mut result = prepared.result;
         if let Err(error) = self.execute_plan(store, &prepared.plan) {
-            result.outcome = self.queue.failed(error);
+            result.outcome = self.queue.mark_failed(error);
             return result;
         }
         self.queue.committed(&prepared.plan);

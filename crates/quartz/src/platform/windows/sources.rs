@@ -105,20 +105,46 @@ pub(super) enum ObserveSystemError {
 pub(super) struct SystemIngress {
     sender: CaptureSender,
     shutdown: ShutdownPort,
+    settlement: std::rc::Rc<std::cell::Cell<SessionSettlement>>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionSettlement {
+    Pending,
+    Ended,
 }
 impl SystemIngress {
+    pub(super) fn stop(&self) {
+        self.sender.stop();
+    }
+    pub(super) fn is_stopped(&self) -> bool {
+        self.sender.is_stopped()
+    }
+
     pub(super) fn new(sender: CaptureSender, shutdown: ShutdownPort) -> Self {
-        Self { sender, shutdown }
+        Self {
+            sender,
+            shutdown,
+            settlement: std::rc::Rc::new(std::cell::Cell::new(SessionSettlement::Pending)),
+        }
     }
     pub(super) fn end_session(&self) -> Result<(), ObserveSystemError> {
+        if self.settlement.get() == SessionSettlement::Ended {
+            return Ok(());
+        }
+        self.stop();
         let at = SystemClock
             .read()
             .map_err(|source| ObserveSystemError::Clock { source })?;
         self.shutdown
             .close(at)
-            .map_err(|source| ObserveSystemError::Close { source })
+            .map_err(|source| ObserveSystemError::Close { source })?;
+        self.settlement.set(SessionSettlement::Ended);
+        Ok(())
     }
     pub(super) fn observe(&self, event: CaptureEvent) -> Result<(), ObserveSystemError> {
+        if self.is_stopped() {
+            return Ok(());
+        }
         let at = SystemClock
             .read()
             .map_err(|source| ObserveSystemError::Clock { source })?;
@@ -134,6 +160,9 @@ impl SystemIngress {
             .map_err(|source| ObserveSystemError::Deliver { source })
     }
     pub(super) fn message(&self, message: u32, wparam: WPARAM) -> Result<(), ObserveSystemError> {
+        if self.is_stopped() {
+            return Ok(());
+        }
         let at = SystemClock
             .read()
             .map_err(|source| ObserveSystemError::Clock { source })?;
@@ -236,13 +265,27 @@ impl Sources {
             core_deadline: None,
         })
     }
+    pub(super) fn take_terminal(&self) -> Option<super::tray::window::CoreEvent> {
+        self.session_window.take_terminal()
+    }
+    pub(super) fn is_stopped(&self) -> bool {
+        self.ingress.is_stopped()
+    }
     pub(super) fn foreground(
         &mut self,
         command: super::foreground::ForegroundCommand,
     ) -> Result<(), ObserveSystemError> {
+        if self.is_stopped() {
+            return Ok(());
+        }
         self.foreground
             .dispatch(command)
-            .map_err(|source| ObserveSystemError::Foreground { source })
+            .map_err(|source| ObserveSystemError::Foreground { source })?;
+        self.arm(
+            SystemClock
+                .read()
+                .map_err(|source| ObserveSystemError::Clock { source })?,
+        )
     }
     pub(super) fn query_session(&mut self) -> Result<(), ObserveSystemError> {
         let now = SystemClock
@@ -293,6 +336,7 @@ impl Sources {
             .core_deadline
             .into_iter()
             .chain(self.session.retry())
+            .chain(self.foreground.retry_deadline())
             .min()
         {
             let delay = deadline
@@ -327,7 +371,13 @@ impl Sources {
         if self.session.retry().is_some_and(|retry| retry <= at.mono) {
             self.query_session()?;
         }
+        self.foreground
+            .retry(at.mono)
+            .map_err(|source| ObserveSystemError::Foreground { source })?;
         self.arm(at)
+    }
+    pub(super) fn hook_health(&self) -> super::foreground::HookHealth {
+        self.foreground.health()
     }
     pub(super) fn check_idle(&self) -> Result<(), ObserveSystemError> {
         let mut info = LASTINPUTINFO {

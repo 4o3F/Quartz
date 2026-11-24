@@ -436,11 +436,14 @@ fn main() -> ExitCode {
             core_error,
             backup_path,
         }) => {
-            let core_error = match init_ui_diagnostics() {
-                Ok(()) => core_error,
+            let mut core_error = core_error;
+            let _log = match init_ui_diagnostics() {
+                Ok(guard) => Some(guard),
                 Err(error) => {
                     tracing::error!(?error, "could not initialize UI diagnostics");
-                    core_error.or(Some(quartz_protocol::CoreErrorCode::CoreStartFailed))
+                    core_error =
+                        core_error.or(Some(quartz_protocol::CoreErrorCode::CoreStartFailed));
+                    None
                 }
             };
             let options = if let Some(code) = core_error {
@@ -488,7 +491,7 @@ enum StartUiError {
 }
 
 #[cfg(windows)]
-fn init_ui_diagnostics() -> Result<(), StartUiError> {
+fn init_ui_diagnostics() -> Result<logging::FileLogGuard, StartUiError> {
     let directory = data_directory::DataDirectory::resolve().context(UiDataDirectorySnafu)?;
     directory
         .init_file_log(logging::LogTarget::Ui)

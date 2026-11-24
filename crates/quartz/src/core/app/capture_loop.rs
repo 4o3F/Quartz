@@ -533,6 +533,7 @@ mod tests {
         let (sender, observed) = bounded(limits::MAIN_QUEUE_CAPACITY);
         let overloaded = Arc::new(AtomicBool::new(false));
         let ingress = CaptureSender {
+            life: Default::default(),
             sender,
             overloaded: Arc::clone(&overloaded),
         };
@@ -557,7 +558,9 @@ mod tests {
         let (_feedback, replies) = bounded(CONTROL_CAPACITY);
         let (_shutdown, stop) = bounded(CONTROL_CAPACITY);
         let (database, _writes) = bounded(CONTROL_CAPACITY);
-        let (main, commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let channel = crate::core::app::MainChannel::new(limits::MAIN_QUEUE_CAPACITY);
+        let main = channel.sender;
+        let commands = channel.receiver;
         let mut capture = CaptureLoop {
             pending_control: None,
             discard_remaining: 0,
@@ -659,7 +662,9 @@ mod tests {
         let (shutdown, stop) = bounded(CONTROL_CAPACITY);
         // Keep this receiver alive without reading it, like a database busy with SQLite.
         let (database, busy_database) = bounded(CONTROL_CAPACITY);
-        let (main, published) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let channel = crate::core::app::MainChannel::new(limits::MAIN_QUEUE_CAPACITY);
+        let main = channel.sender;
+        let published = channel.receiver;
         let (reported, commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
         let before_discard = sender.clone();
         let rules = RuleRegistry::from_state(RegistryState::default())
@@ -828,6 +833,7 @@ mod tests {
         let (sender, observed) = bounded(limits::MAIN_QUEUE_CAPACITY);
         let overloaded = Arc::new(AtomicBool::new(false));
         let ingress = CaptureSender {
+            life: Default::default(),
             sender,
             overloaded: overloaded.clone(),
         };
@@ -843,7 +849,9 @@ mod tests {
         let (_feedback, replies) = bounded(CONTROL_CAPACITY);
         let (_shutdown, stop) = bounded(CONTROL_CAPACITY);
         let (database, _writes) = bounded(CONTROL_CAPACITY);
-        let (main, commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let channel = crate::core::app::MainChannel::new(limits::MAIN_QUEUE_CAPACITY);
+        let main = channel.sender;
+        let commands = channel.receiver;
         let mut capture = CaptureLoop {
             core: started.core,
             run,
@@ -883,6 +891,7 @@ mod tests {
             .expect("second overload");
         assert!(capture.pending_control.is_some());
         assert_eq!(capture.observed.len(), 2);
+        let mut applied_policies = Vec::new();
         for _ in 0..3 {
             let CaptureWork::Observation(observation) =
                 capture.next_work().expect("retained control")
@@ -892,6 +901,7 @@ mod tests {
             capture
                 .observe(observation, &mut super::super::tests::FakeResolver)
                 .expect("apply retained control at current time");
+            applied_policies.push(capture.core.published_timed_policies());
         }
         let policies = capture.core.published_timed_policies();
         assert_eq!(policies.pause_until_utc_ms, None);
@@ -911,11 +921,15 @@ mod tests {
             })
             .collect();
         assert!(
-            snapshots
+            applied_policies
                 .iter()
                 .any(|snapshot| snapshot.pause_until_utc_ms == Some(100))
         );
-        assert_eq!(snapshots.last(), Some(&policies));
+        assert_eq!(
+            snapshots,
+            [policies],
+            "the main thread receives the latest replaceable state"
+        );
     }
     #[test]
     fn cross_producer_observations_and_shutdown_use_the_accepted_boundary() {
@@ -928,7 +942,9 @@ mod tests {
         let (feedback, replies) = bounded(CONTROL_CAPACITY);
         let (_shutdown, stop) = bounded(CONTROL_CAPACITY);
         let (database, _writes) = bounded(CONTROL_CAPACITY);
-        let (main, _commands) = bounded(limits::MAIN_QUEUE_CAPACITY);
+        let channel = crate::core::app::MainChannel::new(limits::MAIN_QUEUE_CAPACITY);
+        let main = channel.sender;
+        let _commands = channel.receiver;
         let mut capture = CaptureLoop {
             core: started.core,
             run,

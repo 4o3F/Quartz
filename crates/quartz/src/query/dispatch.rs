@@ -34,12 +34,27 @@ impl QueryChannel {
         }
     }
 }
+pub(crate) struct RuleReadReply {
+    request: crate::rules::read::ReadRequest,
+    received: oneshot::Receiver<Result<crate::rules::read::ReadInputs, ProtocolError>>,
+}
+impl RuleReadReply {
+    pub(crate) async fn receive(self) -> Result<crate::rules::read::ReadResponse, ProtocolError> {
+        let inputs = self
+            .received
+            .await
+            .map_err(|_| ProtocolError::new(ErrorKind::Internal))??;
+        tokio::task::spawn_blocking(move || self.request.execute(inputs))
+            .await
+            .map_err(|_| ProtocolError::new(ErrorKind::Internal))?
+    }
+}
 impl QueryPort {
-    /// Captures registry and metadata inputs on the database actor, then projects off-thread.
-    pub(crate) async fn read_rules(
+    /// Admits the input read before any asynchronous reply wait.
+    pub(crate) fn submit_rule_read(
         &self,
         request: crate::rules::read::ReadRequest,
-    ) -> Result<crate::rules::read::ReadResponse, ProtocolError> {
+    ) -> Result<RuleReadReply, ProtocolError> {
         let (reply, received) = oneshot::channel();
         self.sender
             .try_send(QueryCommand::RuleInputs { reply })
@@ -49,12 +64,14 @@ impl QueryPort {
                     crossbeam_channel::TrySendError::Disconnected(_) => ErrorKind::Internal,
                 })
             })?;
-        let inputs = received
-            .await
-            .map_err(|_| ProtocolError::new(ErrorKind::Internal))??;
-        tokio::task::spawn_blocking(move || request.execute(inputs))
-            .await
-            .map_err(|_| ProtocolError::new(ErrorKind::Internal))?
+        Ok(RuleReadReply { request, received })
+    }
+    #[cfg(test)]
+    pub(crate) async fn read_rules(
+        &self,
+        request: crate::rules::read::ReadRequest,
+    ) -> Result<crate::rules::read::ReadResponse, ProtocolError> {
+        self.submit_rule_read(request)?.receive().await
     }
 
     pub(crate) async fn call(&self, request: QueryRequest) -> Result<QueryResponse, ProtocolError> {

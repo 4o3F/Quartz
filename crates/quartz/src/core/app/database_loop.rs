@@ -227,7 +227,7 @@ impl DatabaseLoop {
         }
     }
     fn drain_ready(&mut self) -> Result<DrainProgress, RunDatabaseLoopError> {
-        if !matches!(self.persistence.state(), PersistenceState::Buffered { .. }) {
+        if matches!(self.persistence.state(), PersistenceState::Ready) {
             return Ok(DrainProgress::Waiting);
         }
         let now = self
@@ -237,11 +237,20 @@ impl DatabaseLoop {
             return Ok(DrainProgress::Waiting);
         }
         self.flush_and_publish(now)?;
-        Ok(DrainProgress::Drained)
+        Ok(
+            if matches!(self.persistence.state(), PersistenceState::Failed { .. }) {
+                DrainProgress::Waiting
+            } else {
+                DrainProgress::Drained
+            },
+        )
     }
     fn flush_and_publish(&mut self, now: Timestamp) -> Result<(), RunDatabaseLoopError> {
         let checkpoints = self.checkpoint_collection();
-        let result = self.persistence.flush(&mut self.store, now, checkpoints);
+        let result = self
+            .persistence
+            .flush_with_clock(&mut self.store, now, checkpoints, || self.clock.read())
+            .map_err(|source| RunDatabaseLoopError::Clock { source })?;
         Self::ensure_progress(&result)
             .map_err(|source| RunDatabaseLoopError::Stalled { source })?;
         self.publish(result)
@@ -301,10 +310,13 @@ impl DatabaseLoop {
                     .now()
                     .map_err(|source| RunDatabaseLoopError::Clock { source })?;
                 let checkpoints = self.checkpoint_collection();
-                let result = self
-                    .persistence
-                    .flush_due(&mut self.store, now, checkpoints);
-                self.publish(result)?;
+                if self.persistence.is_due(now) {
+                    let result = self
+                        .persistence
+                        .flush_with_clock(&mut self.store, now, checkpoints, || self.clock.read())
+                        .map_err(|source| RunDatabaseLoopError::Clock { source })?;
+                    self.publish(result)?;
+                }
             }
             Some(DatabaseCommand::Registry { command, reply }) => {
                 self.registry_command(*command, reply)?
@@ -407,7 +419,12 @@ impl DatabaseLoop {
             })
     }
     fn flush_shutdown(&mut self, request: QueueShutdown) -> Result<(), ShutdownDatabaseError> {
-        self.flush_shutdown_with(request, Persistence::flush)
+        let clock = Arc::clone(&self.clock);
+        self.flush_shutdown_with(request, |persistence, store, now, checkpoints| {
+            persistence
+                .flush_with_clock(store, now, checkpoints, || clock.read())
+                .map_err(|source| ShutdownDatabaseError::Clock { source })
+        })
     }
     fn flush_shutdown_with(
         &mut self,
@@ -417,7 +434,7 @@ impl DatabaseLoop {
             &mut Store,
             Timestamp,
             CheckpointCollection,
-        ) -> PersistenceResult,
+        ) -> Result<PersistenceResult, ShutdownDatabaseError>,
     ) -> Result<(), ShutdownDatabaseError> {
         loop {
             if Instant::now() >= request.deadline {
@@ -432,7 +449,7 @@ impl DatabaseLoop {
             self.store
                 .limit_write_wait(request.deadline.saturating_duration_since(Instant::now()));
             let checkpoints = self.checkpoint_collection();
-            let result = flush(&mut self.persistence, &mut self.store, now, checkpoints);
+            let result = flush(&mut self.persistence, &mut self.store, now, checkpoints)?;
             Self::ensure_progress(&result)
                 .map_err(|source| ShutdownDatabaseError::Stalled { source })?;
             if let DatabaseProgress::Ended = self.settle_shutdown(result, request.deadline)? {
@@ -447,7 +464,7 @@ impl DatabaseLoop {
     ) -> Result<DatabaseProgress, ShutdownDatabaseError> {
         self.trace_commit_latency(&result);
         self.main
-            .send_before(MainCommand::Persistence(result.state()), deadline)?;
+            .send_during_shutdown(MainCommand::Persistence(result.state()));
         if Instant::now() >= deadline {
             return Err(ShutdownDatabaseError::Deadline);
         }
@@ -497,7 +514,7 @@ mod tests {
         _versions: crate::query::versions::VersionPort,
         database: DatabaseLoop,
         _directory: tempfile::TempDir,
-        _commands: Receiver<MainCommand>,
+        _commands: super::super::MainReceiver,
         _feedback: Receiver<Feedback>,
     }
     const CATEGORY_UUID: &str = "00000000-0000-4000-8000-000000000123";
@@ -677,6 +694,170 @@ mod tests {
                 "committed change is consumed once"
             );
         }
+    }
+
+    #[test]
+    fn shutdown_acknowledges_capture_when_the_main_notification_queue_is_full() {
+        let fixture = Fixture::new();
+        fixture
+            .database
+            .main
+            .send(MainCommand::PolicyChanged)
+            .expect("saturate main queue");
+        let mut result = stalled_result();
+        result.outcome = PersistenceOutcome::Ready;
+        assert!(matches!(
+            fixture
+                .database
+                .settle_shutdown(result, Instant::now() + SHUTDOWN_TIMEOUT),
+            Ok(DatabaseProgress::Ended)
+        ));
+        assert!(matches!(
+            fixture
+                ._feedback
+                .try_recv()
+                .expect("capture shutdown acknowledgement"),
+            Feedback::Ended
+        ));
+    }
+
+    #[test]
+    fn slow_failure_uses_completion_clock_and_leaves_other_channels_serviceable() {
+        use crate::store::capture::test_support::{Inspection, at};
+        use quartz_domain::capture::{
+            CaptureCore, CaptureEvent, CaptureInput, RunId, SessionStatus, StopChange, StopReason,
+        };
+        struct TransactionClock {
+            reads: std::sync::atomic::AtomicUsize,
+        }
+        impl ClockReader for TransactionClock {
+            fn read(&self) -> Result<Timestamp, ReadClockError> {
+                Ok(at(
+                    if self
+                        .reads
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        == 0
+                    {
+                        1000
+                    } else {
+                        3000
+                    },
+                ))
+            }
+        }
+        let mut fixture = Fixture::new();
+        let mut started = CaptureCore::start(RunId::new(1), at(0)).expect("capture");
+        let _ = fixture
+            .database
+            .persistence
+            .accept(started.step.into_parts(RunId::new(1)), at(0));
+        let initial = fixture.database.persistence.flush(
+            &mut fixture.database.store,
+            at(0),
+            CheckpointCollection::Skip,
+        );
+        assert!(initial.failure().is_none());
+        let ready = started
+            .core
+            .step(CaptureInput {
+                at: at(0),
+                rules: fixture.database.registry.snapshots().load(),
+                event: CaptureEvent::Session(SessionStatus::Ready(Default::default())),
+            })
+            .expect("session");
+        let _ = fixture
+            .database
+            .persistence
+            .accept(ready.into_parts(RunId::new(1)), at(0));
+        let initial = fixture.database.persistence.flush(
+            &mut fixture.database.store,
+            at(0),
+            CheckpointCollection::Skip,
+        );
+        assert!(initial.failure().is_none());
+        let stopped = started
+            .core
+            .step(CaptureInput {
+                at: at(1),
+                rules: fixture.database.registry.snapshots().load(),
+                event: CaptureEvent::Stop(StopChange::Begin(StopReason::Locked)),
+            })
+            .expect("stopped boundary");
+        let _ = fixture
+            .database
+            .persistence
+            .accept(stopped.into_parts(RunId::new(1)), at(1));
+        fixture.database.writes = crossbeam_channel::never();
+        let mut inspection = Inspection::open(fixture._directory.path());
+        inspection.inject_write_failure();
+        fixture.database.clock = Arc::new(TransactionClock {
+            reads: Default::default(),
+        });
+        assert!(
+            matches!(fixture.database.drain_ready(), Ok(DrainProgress::Waiting)),
+            "failure must return to channel servicing"
+        );
+        assert_eq!(
+            fixture.database.persistence.next_deadline(),
+            Some(at(3100).mono)
+        );
+        assert!(
+            !fixture.database.persistence.is_due(at(3000)),
+            "no back-to-back failure retries"
+        );
+        let writes = crate::ipc::WriteChannel::new();
+        let mut response = writes
+            .port
+            .submit(crate::persistence::dispatch::WriteRequest::BumpMetadata {
+                outcome: crate::persistence::dispatch::TestCommit::Commit,
+            })
+            .expect("admit user write");
+        fixture
+            .database
+            .write_command(writes.receiver.try_recv().expect("write"))
+            .expect("service write");
+        assert_eq!(
+            response
+                .try_recv()
+                .expect("prompt reply")
+                .expect_err("failed persistence is busy")
+                .kind,
+            quartz_protocol::ErrorKind::Busy
+        );
+        let queries = crate::query::dispatch::QueryChannel::new();
+        fixture.database.queries = queries.receiver;
+        let reply = queries
+            .port
+            .submit_rule_read(crate::rules::read::ReadRequest::Tree(
+                quartz_protocol::RuleSetsTreeRequest {
+                    kind: quartz_protocol::RuleKind::Privacy,
+                    cursor: None,
+                },
+            ))
+            .expect("admit read");
+        let DatabaseInput::Query(command) = fixture
+            .database
+            .wait_for_input()
+            .expect("read remains serviceable")
+        else {
+            panic!("query must precede future retry");
+        };
+        fixture
+            .database
+            .runner
+            .start(
+                &mut fixture.database.store,
+                command,
+                fixture.database.registry.snapshots().load(),
+            )
+            .expect("service read");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("reply runtime");
+        runtime
+            .block_on(reply.receive())
+            .expect("read-only rule query still completes");
+        inspection.restore_writes();
     }
 
     #[test]
@@ -1135,7 +1316,9 @@ mod tests {
             .expect("persistence");
             let (_, writes) = bounded(CONTROL_CAPACITY);
             let (feedback, received_feedback) = bounded(CONTROL_CAPACITY);
-            let (sender, commands) = bounded(CONTROL_CAPACITY);
+            let channel = crate::core::app::MainChannel::new(CONTROL_CAPACITY);
+            let sender = channel.sender;
+            let commands = channel.receiver;
             store.seed_categories().expect("builtin categories");
             let registry = RegistryShell::open(&mut store, UtcInstant::try_from(0).expect("UTC"))
                 .expect("registry");
@@ -1193,7 +1376,7 @@ mod tests {
         let mut attempts = 0;
         let result = fixture.database.flush_shutdown_with(request, |_, _, _, _| {
             attempts += 1;
-            stalled_result()
+            Ok(stalled_result())
         });
         assert!(matches!(result, Err(ShutdownDatabaseError::Stalled { .. })));
         assert_eq!(attempts, 1);
