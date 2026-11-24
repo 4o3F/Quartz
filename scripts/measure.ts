@@ -10,6 +10,8 @@ import {
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 const MiB = 1024 * 1024;
+/** Window for the core pipe to start accepting clients after its tray window appears. */
+const SETTINGS_STARTUP_MS = 10_000;
 const messages = { close: 0x10, trayCallback: 0x8001, select: 0x400 };
 export type Mode = "resident" | "on-demand" | "core-only";
 export type Scenario =
@@ -205,6 +207,19 @@ async function main(): Promise<void> {
     return found.length;
   };
   const settings = async (resident: boolean) => {
+    // The core window can appear before its pipe accepts clients; retry within the startup window.
+    const deadline = performance.now() + SETTINGS_STARTUP_MS;
+    for (;;) {
+      const failure = await trySettings(resident);
+      if (failure === undefined) return;
+      if (performance.now() >= deadline) throw failure;
+      if (core && windows.wait(core, 0)) {
+        throw new Error("Core exited unexpectedly");
+      }
+      await sleep(250);
+    }
+  };
+  const trySettings = async (resident: boolean) => {
     const result = await new Deno.Command(exe, {
       args: [
         "settings",
@@ -217,11 +232,9 @@ async function main(): Promise<void> {
       stdout: "piped",
       stderr: "piped",
     }).output();
-    if (!result.success) {
-      throw new Error(
-        `settings set failed: ${new TextDecoder().decode(result.stderr)}`,
-      );
-    }
+    return result.success ? undefined : new Error(
+      `settings set failed: ${new TextDecoder().decode(result.stderr)}`,
+    );
   };
   const acquireUi = async () => {
     await waitFor(() => {
