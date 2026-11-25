@@ -43,7 +43,7 @@ idna = { version = "1.1.0", default-features = false, features = ["alloc", "comp
 quartz-domain = { path = "crates/quartz-domain" }
 num-traits = { version = "0.2.19", default-features = false }
 regex = "1.13.2"
-toml = { version = "1.2.2", default-features = false, features = ["std", "serde", "parse"] }
+toml = { version = "1.2.3", default-features = false, features = ["std", "serde", "parse"] }
 quartz-protocol = { path = "crates/quartz-protocol" }
 quartz-i18n = { path = "crates/quartz-i18n" }
 quartz-pipe = { path = "crates/quartz-pipe" }
