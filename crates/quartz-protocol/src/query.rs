@@ -231,6 +231,15 @@ impl CursorPosition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CursorQuery {
+    /// Complete comparison digest and shared preview inputs.
+    RulesTextDiff {
+        comparison_digest: String,
+        start_date: LocalDate,
+        end_date: LocalDate,
+        expected_versions: QueryVersions,
+        deadline_ms: crate::PreviewDeadlineMs,
+        sample_limit: crate::PreviewSampleLimit,
+    },
     /// Editor draft digest and exact preview inputs; position spans all result lists.
     RulesPreview {
         mutation_digest: String,

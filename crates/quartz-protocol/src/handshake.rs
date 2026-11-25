@@ -285,6 +285,9 @@ pub enum Capability {
     /// Rule previews and privacy-save receipt verification.
     #[serde(rename = "rules.preview.v1")]
     RulesPreviewV1,
+    /// Rule text validation, comparison, import, and export.
+    #[serde(rename = "rules_text.v1")]
+    RulesTextV1,
     /// Browser activity reporting version 1.
     #[serde(rename = "browser.v1")]
     BrowserV1,

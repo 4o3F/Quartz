@@ -4,6 +4,12 @@ use crate::{QueryCursor, QueryVersions, Uuid};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 
+mod diff;
+pub use diff::{
+    DiffMutation, RuleComparison, RuleDiffCategoryDelta, RuleDiffChange, RuleDiffChangeKind,
+    RuleDiffEntry, RuleDiffImpact, RuleDiffSet, RuleDiffSides, RulesTextDiffRequest,
+    RulesTextDiffResponse,
+};
 mod preview;
 pub use preview::{
     FurtherHidden, PREVIEW_DEFAULT_DEADLINE_MS, PREVIEW_MAX_DAYS, PREVIEW_MAX_DEADLINE_MS,

@@ -235,6 +235,7 @@ impl ConnectionSession {
                         capabilities: vec![
                             quartz_protocol::Capability::RequestsCancelV1,
                             quartz_protocol::Capability::RulesPreviewV1,
+                            quartz_protocol::Capability::RulesTextV1,
                             quartz_protocol::Capability::CategoriesV1,
                             quartz_protocol::Capability::QueryDocumentsV1,
                             quartz_protocol::Capability::QueryUnclassifiedV1,
@@ -313,7 +314,7 @@ impl ConnectionSession {
                             Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
                         }
                     }
-                    Op::RulesPreview | Op::RulesTextPreview => {
+                    Op::RulesPreview | Op::RulesTextPreview | Op::RulesTextDiff => {
                         match crate::query::preview::PreviewRequest::decode(
                             request.op,
                             request.body,
@@ -365,7 +366,6 @@ impl ConnectionSession {
                     }
                     Op::Hello => Action::error(Some(id), ErrorKind::BadRequest),
                     Op::RulesExplain
-                    | Op::RulesTextDiff
                     | Op::DataDelete
                     | Op::BrowserHello
                     | Op::BrowserState
@@ -839,6 +839,7 @@ mod tests {
             vec![
                 quartz_protocol::Capability::RequestsCancelV1,
                 quartz_protocol::Capability::RulesPreviewV1,
+                quartz_protocol::Capability::RulesTextV1,
                 quartz_protocol::Capability::CategoriesV1,
                 quartz_protocol::Capability::QueryDocumentsV1,
                 quartz_protocol::Capability::QueryUnclassifiedV1,
@@ -1295,7 +1296,7 @@ mod tests {
         }
     }
     #[test]
-    fn preview_roles_and_nested_bodies_are_checked_before_worker_admission() {
+    fn rule_previews_and_comparisons_check_roles_and_nested_bodies_before_worker_admission() {
         let status =
             crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("preview-roles".into()));
         for role in [
@@ -1305,7 +1306,7 @@ mod tests {
             ReadyRole::Cli,
             ReadyRole::Host,
         ] {
-            for op in [Op::RulesPreview, Op::RulesTextPreview] {
+            for op in [Op::RulesPreview, Op::RulesTextPreview, Op::RulesTextDiff] {
                 let mut session = ConnectionSession {
                     state: State::Ready(role),
                     allowed: AllowedRoles::Quartz,
@@ -1316,6 +1317,18 @@ mod tests {
                     "rules_text.import"
                 };
                 let body = serde_json::json!({"mutation":{"op":mutation_op,"body":{"key":"user.preview","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":"opaque"});
+                let body = if op == Op::RulesTextDiff {
+                    let mut comparison_body = body.clone();
+                    comparison_body["comparison"] =
+                        serde_json::json!({"kind":"draft","mutation":body["mutation"].clone()});
+                    comparison_body
+                        .as_object_mut()
+                        .expect("request")
+                        .remove("mutation");
+                    comparison_body
+                } else {
+                    body
+                };
                 let allowed = role.role().authorize(op).is_ok();
                 let action = session.receive(
                     request(2, op, body.clone()),
@@ -1333,7 +1346,13 @@ mod tests {
                 }
                 if allowed {
                     let mut invalid = body;
-                    invalid["mutation"]["body"]["preview_receipt"] = serde_json::json!("forbidden");
+                    if op == Op::RulesTextDiff {
+                        invalid["comparison"]["mutation"]["body"]["preview_receipt"] =
+                            serde_json::json!("forbidden");
+                    } else {
+                        invalid["mutation"]["body"]["preview_receipt"] =
+                            serde_json::json!("forbidden");
+                    }
                     assert_eq!(
                         session
                             .receive(request(3, op, invalid), &status.subscribe().borrow().status)

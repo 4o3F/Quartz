@@ -175,14 +175,27 @@ impl<Mutation> RulePreviewRequest<Mutation> {
     /// # Errors
     /// Rejects empty, reversed, or longer-than-seven-day ranges.
     pub fn validate_dates(&self) -> Result<(), ValidatePreviewDatesError> {
-        let mut date = self.start_date;
+        PreviewDates {
+            start: self.start_date,
+            end: self.end_date,
+        }
+        .validate()
+    }
+}
+pub(super) struct PreviewDates {
+    pub start: LocalDate,
+    pub end: LocalDate,
+}
+impl PreviewDates {
+    pub(super) fn validate(&self) -> Result<(), ValidatePreviewDatesError> {
+        let mut date = self.start;
         for _ in 0..PREVIEW_MAX_DAYS {
-            if date >= self.end_date {
+            if date >= self.end {
                 break;
             }
             date = date.tomorrow().map_err(|_| ValidatePreviewDatesError)?;
         }
-        if self.start_date < self.end_date && date == self.end_date {
+        if self.start < self.end && date == self.end {
             Ok(())
         } else {
             Err(ValidatePreviewDatesError)

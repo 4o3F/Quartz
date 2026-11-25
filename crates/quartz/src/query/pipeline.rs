@@ -709,6 +709,13 @@ impl Pipeline {
     }
 }
 impl DerivedSegment {
+    pub(super) fn classification_rule(&self) -> Option<&str> {
+        match &self.category_source {
+            CategorySource::Rule(source) => Some(source.as_str()),
+            CategorySource::Annotation(_) | CategorySource::Unclassified => None,
+        }
+    }
+
     fn apply_offline(&mut self, annotation: &QueryAnnotation, classification: ClassificationId) {
         self.activity = Activity::OfflineActivity(annotation.id.clone());
         self.classification = classification;
