@@ -181,7 +181,7 @@ impl ReadInputs {
             end += character.len_utf8();
         }
         if end == start {
-            return Err(Self::internal());
+            return Err(ProtocolError::new(ErrorKind::PageTooLarge));
         }
         response.text = text[start..end].into();
         if end < text.len() {

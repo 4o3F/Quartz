@@ -45,13 +45,15 @@ pub use handshake::{
 pub use op::{ControlBody, ControlOp, Op, OpFamily};
 pub use role::{AuthorizeOpError, Role};
 pub use rules::{
-    DiffMutation, FurtherHidden, MAX_RULE_DIAGNOSTICS, MAX_RULE_TEXT_BYTES, MutatedRuleSet,
-    PREVIEW_DEFAULT_DEADLINE_MS, PREVIEW_MAX_DAYS, PREVIEW_MAX_DEADLINE_MS, PREVIEW_MAX_SAMPLES,
-    ParsePreviewDeadlineError, ParsePreviewSampleLimitError, PreviewCategoryRank,
-    PreviewDeadlineMs, PreviewDelete, PreviewReorder, PreviewRevert, PreviewSampleLimit,
-    PreviewSetEnabled, RuleAction, RuleApp, RuleComparison, RuleCondition, RuleConditionMatch,
-    RuleDiagnostic, RuleDiagnosticLocation, RuleDiffCategoryDelta, RuleDiffChange,
-    RuleDiffChangeKind, RuleDiffEntry, RuleDiffImpact, RuleDiffSet, RuleDiffSides,
+    DiffMutation, ExplainCategorySource, ExplainFragment, ExplainInstant, ExplainNode,
+    ExplainNodeKind, ExplainPrivacy, ExplainRange, ExplainReason, ExplainSelection, ExplainSet,
+    ExplainShadowOrder, ExplainState, FurtherHidden, MAX_RULE_DIAGNOSTICS, MAX_RULE_TEXT_BYTES,
+    MutatedRuleSet, PREVIEW_DEFAULT_DEADLINE_MS, PREVIEW_MAX_DAYS, PREVIEW_MAX_DEADLINE_MS,
+    PREVIEW_MAX_SAMPLES, ParsePreviewDeadlineError, ParsePreviewSampleLimitError,
+    PreviewCategoryRank, PreviewDeadlineMs, PreviewDelete, PreviewReorder, PreviewRevert,
+    PreviewSampleLimit, PreviewSetEnabled, RuleAction, RuleApp, RuleComparison, RuleCondition,
+    RuleConditionMatch, RuleDiagnostic, RuleDiagnosticLocation, RuleDiffCategoryDelta,
+    RuleDiffChange, RuleDiffChangeKind, RuleDiffEntry, RuleDiffImpact, RuleDiffSet, RuleDiffSides,
     RuleEffectiveContribution, RuleEntryContent, RuleEntryKind, RuleEntryState, RuleField,
     RuleKind, RuleMatch, RuleOperator, RulePreviewMutation, RulePreviewOutput, RulePreviewRequest,
     RulePreviewSample, RulePreviewSideTotals, RulePreviewStatistics, RulePreviewTotals,
@@ -60,10 +62,11 @@ pub use rules::{
     RuleSetsEditRequest, RuleSetsGetRequest, RuleSetsGetResponse, RuleSetsReorderRequest,
     RuleSetsRevertRequest, RuleSetsSetEnabledRequest, RuleSetsTreeRequest, RuleSetsTreeResponse,
     RuleSetsVersionsRequest, RuleSetsVersionsResponse, RuleSetsWriteResponse, RuleView,
-    RuleWarningCode, RuleWebAction, RulesPreviewRequest, RulesPreviewResponse,
-    RulesTextDiffRequest, RulesTextDiffResponse, RulesTextExportRequest, RulesTextExportResponse,
-    RulesTextPreviewMutation, RulesTextPreviewRequest, RulesTextPreviewResponse,
-    RulesTextValidateRequest, RulesTextValidateResponse, ValidatePreviewDatesError,
+    RuleWarningCode, RuleWebAction, RulesExplainRequest, RulesExplainResponse, RulesPreviewRequest,
+    RulesPreviewResponse, RulesTextDiffRequest, RulesTextDiffResponse, RulesTextExportRequest,
+    RulesTextExportResponse, RulesTextPreviewMutation, RulesTextPreviewRequest,
+    RulesTextPreviewResponse, RulesTextValidateRequest, RulesTextValidateResponse,
+    ValidatePreviewDatesError,
 };
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};
 pub use topic::{LocalDate, ParseTopicError, Subscribe, SubscribeResponse, Topic, Unsubscribe};

@@ -308,6 +308,12 @@ impl Classifier {
         self.cache.insert(key, id);
         id
     }
+    pub(super) fn active_category(
+        &self,
+        category: &CategoryUuid,
+    ) -> Option<&Arc<quartz_protocol::Category>> {
+        self.categories.get(category)
+    }
     fn evaluate(&self, row: &Foreground, extraction: Option<&ExtractedTitle>) -> Classification {
         let app = row.visible_app().map(|app| app.id);
         match self
@@ -317,7 +323,7 @@ impl Classifier {
             .classify_foreground(row, extraction.map(|value| &value.fields))
         {
             None => Classification::unclassified(),
-            Some(matched) => match self.categories.get(&matched.category) {
+            Some(matched) => match self.active_category(&matched.category) {
                 Some(category) => Classification {
                     category: CategoryRef::Classified {
                         category: category.clone(),

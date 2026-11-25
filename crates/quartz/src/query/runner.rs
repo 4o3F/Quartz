@@ -18,25 +18,28 @@ struct StartedQuery {
     control: super::control::QueryControl,
 }
 enum RunningJob {
+    Explain(Box<super::explain::ExplainJob>),
     Query(Box<QueryJob>),
     Preview(Box<super::preview::PreviewJob>),
 }
 impl RunningJob {
     fn take_receipt_grant(&mut self) -> Option<crate::rules::receipts::ReceiptGrant> {
         match self {
-            Self::Query(_) => None,
+            Self::Query(_) | Self::Explain(_) => None,
             Self::Preview(job) => job.take_receipt_grant(),
         }
     }
 
     fn advance(&mut self) -> Result<Option<QueryResponse>, RunQueryError> {
         match self {
+            Self::Explain(job) => job.advance(),
             Self::Query(job) => job.advance(),
             Self::Preview(job) => job.advance(),
         }
     }
     fn finish(self) -> Result<crate::store::ReadOnlyStore, RunQueryError> {
         match self {
+            Self::Explain(job) => job.finish(),
             Self::Query(job) => job.finish(),
             Self::Preview(job) => job.finish(),
         }
@@ -94,6 +97,16 @@ impl QueryRunner {
                     .check()
                     .and_then(|()| QueryJob::start(&mut reader, request, rules))
                     .map(|job| RunningJob::Query(Box::new(job)));
+                StartedQuery {
+                    result,
+                    reply,
+                    control,
+                }
+            }
+            QueryCommand::Explain { request, reply } => {
+                let control = request.control.clone();
+                let result = super::explain::ExplainJob::start(&mut reader, request, rules)
+                    .map(|job| RunningJob::Explain(Box::new(job)));
                 StartedQuery {
                     result,
                     reply,

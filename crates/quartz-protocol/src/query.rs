@@ -231,6 +231,14 @@ impl CursorPosition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CursorQuery {
+    RulesExplain {
+        selection: crate::ExplainSelection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clock_segment_id: Option<ClockSegmentId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_versions: Option<QueryVersions>,
+        deadline_ms: crate::PreviewDeadlineMs,
+    },
     /// Complete comparison digest and shared preview inputs.
     RulesTextDiff {
         comparison_digest: String,

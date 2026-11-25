@@ -10,6 +10,7 @@ mod diff;
 #[cfg(any(windows, test))]
 pub(crate) mod dispatch;
 pub(crate) mod documents;
+pub(crate) mod explain;
 mod facts;
 pub(crate) mod preview;
 #[cfg(test)]
@@ -62,8 +63,8 @@ pub(crate) enum RunQueryError {
     Cancelled,
     #[snafu(display("read-only query exceeded its deadline"))]
     DeadlineExceeded,
-    #[snafu(display("preview request was rejected"))]
-    Preview {
+    #[snafu(display("query protocol request was rejected"))]
+    RejectQueryError {
         error: quartz_protocol::ProtocolError,
     },
     #[snafu(display("segment detail range exceeds its bound or has invalid endpoints"))]
@@ -99,6 +100,8 @@ pub(crate) enum RunQueryError {
     },
     #[snafu(display("one query item exceeds the page size"))]
     PageTooLarge,
+    #[snafu(display("query job has an invalid computation state"))]
+    AdvanceQueryError,
     #[snafu(display("stored rule entry violates the read contract"))]
     InvalidRuleEntry,
     #[snafu(display("could not read query snapshot: {source}"))]
@@ -147,7 +150,7 @@ impl RunQueryError {
         match self {
             Self::Cancelled => ErrorKind::Cancelled,
             Self::DeadlineExceeded => ErrorKind::DeadlineExceeded,
-            Self::Preview { error } => error.kind.clone(),
+            Self::RejectQueryError { error } => error.kind.clone(),
             Self::InvalidRange | Self::Calendar { .. } => ErrorKind::InvalidRange,
             Self::InvalidCursor
             | Self::InvalidDetailRange
@@ -156,13 +159,14 @@ impl RunQueryError {
             | Self::InvalidRangeRequest => ErrorKind::BadRequest,
             Self::StaleDocumentRef => ErrorKind::StaleDocumentRef,
             Self::StaleCursor => ErrorKind::StaleCursor,
+            Self::PageTooLarge => ErrorKind::PageTooLarge,
             Self::ReadFirstWeekdayError
             | Self::InvalidDayOffset
             | Self::ReaderUnavailable
             | Self::Cleanup { .. }
             | Self::RecoverReader { .. }
             | Self::Derive { .. }
-            | Self::PageTooLarge
+            | Self::AdvanceQueryError
             | Self::InvalidRuleEntry
             | Self::Read { .. }
             | Self::ReadSystemTimeZoneError { .. }
@@ -251,6 +255,7 @@ impl QueryRequest {
 pub(crate) enum QueryResponse {
     Preview(quartz_protocol::RulesPreviewResponse),
     Diff(quartz_protocol::RulesTextDiffResponse),
+    Explain(quartz_protocol::RulesExplainResponse),
     Annotations(quartz_protocol::QueryAnnotationsResponse),
     Facts(QueryFactsResponse),
     Day(QueryDayResponse),
@@ -983,6 +988,7 @@ impl QueryJob {
             }
 
             QueryResponse::Preview(_)
+            | QueryResponse::Explain(_)
             | QueryResponse::Diff(_)
             | QueryResponse::Annotations(_)
             | QueryResponse::Day(_)

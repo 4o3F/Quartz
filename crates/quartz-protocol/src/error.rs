@@ -33,6 +33,8 @@ pub enum ErrorKind {
     HandshakeRequired,
     /// The declared frame payload exceeds the byte limit.
     FrameTooLarge,
+    /// One result item exceeds the encoded query page budget.
+    PageTooLarge,
     /// The client and core protocol ranges do not overlap.
     ProtoMismatch {
         /// Core-supported inclusive protocol range.
@@ -108,6 +110,7 @@ impl ErrorKind {
             Self::NotImplemented => "not_implemented",
             Self::HandshakeRequired => "handshake_required",
             Self::FrameTooLarge => "frame_too_large",
+            Self::PageTooLarge => "page_too_large",
             Self::ProtoMismatch { .. } => "proto_mismatch",
             Self::Forbidden => "forbidden",
             Self::InvalidRange => "invalid_range",
@@ -167,6 +170,7 @@ mod tests {
             "not_implemented",
             "handshake_required",
             "frame_too_large",
+            "page_too_large",
             "proto_mismatch",
             "forbidden",
             "invalid_range",

@@ -72,6 +72,11 @@ impl FieldSnapshot {
         }
         snapshot
     }
+    /// Returns the retained comparison value, bounded by the evaluator's field limit.
+    pub fn retained_value(&self, field: Field) -> Option<String> {
+        self.value(field)
+            .map(|value| bounded_text(value).to_owned())
+    }
     fn value(&self, field: Field) -> Option<&str> {
         if field == Field::Domain {
             self.domain.as_ref().map(DomainName::as_ascii)

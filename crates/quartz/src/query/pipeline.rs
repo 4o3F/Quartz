@@ -82,7 +82,7 @@ pub(crate) struct DerivedSegment {
     retained_foreground: Option<ForegroundIndex>,
     classification: ClassificationId,
     pub activity: Activity,
-    category_source: CategorySource,
+    pub(super) category_source: CategorySource,
     pub interval_id: Option<FactId>,
     pub pending_idle: Option<QueryRange>,
 }
@@ -137,10 +137,40 @@ impl SegmentFacts {
     pub(super) fn provides_category(&self, segment: &DerivedSegment, rule: &str) -> bool {
         matches!(&segment.category_source, CategorySource::Rule(source) if source.as_str() == rule)
     }
+    pub(super) fn explain_fields(
+        &self,
+        segment: &DerivedSegment,
+    ) -> quartz_domain::rules::FieldSnapshot {
+        let Some(row) = self.explain_foreground(segment) else {
+            return Default::default();
+        };
+        let extraction = segment
+            .foreground
+            .and_then(|index| self.rows[index.0].extraction.as_deref());
+        quartz_domain::rules::FieldSnapshot::from_foreground(
+            row,
+            quartz_domain::rules::Field::ALL.iter().copied(),
+            extraction.map(|value| &value.fields),
+        )
+    }
+    pub(super) fn explain_classification_rule(&self, segment: &DerivedSegment) -> Option<String> {
+        let index = segment.foreground?;
+        match &self.rows[index.0].source {
+            CategorySource::Rule(rule) => Some(rule.as_str().into()),
+            CategorySource::Annotation(_) | CategorySource::Unclassified => None,
+        }
+    }
     pub(super) fn preview_fields(
         &self,
         segment: &DerivedSegment,
         rules: &quartz_domain::rules::CompiledRules,
+    ) -> quartz_domain::rules::FieldSnapshot {
+        self.fields(segment, rules.fields())
+    }
+    fn fields(
+        &self,
+        segment: &DerivedSegment,
+        required: impl IntoIterator<Item = quartz_domain::rules::Field>,
     ) -> quartz_domain::rules::FieldSnapshot {
         let Some(row) = self.retained_foreground(segment) else {
             return Default::default();
@@ -150,7 +180,7 @@ impl SegmentFacts {
             .and_then(|index| self.rows[index.0].extraction.as_deref());
         quartz_domain::rules::FieldSnapshot::from_foreground(
             row,
-            rules.fields(),
+            required,
             extraction.map(|value| &value.fields),
         )
     }
@@ -161,6 +191,15 @@ impl SegmentFacts {
                 InputRow::Foreground(row) => row,
                 _ => unreachable!("retained index references a foreground fact"),
             })
+    }
+    pub(super) fn explain_foreground(&self, segment: &DerivedSegment) -> Option<&Foreground> {
+        self.foreground(segment)
+    }
+    pub(super) fn accepts_category(
+        &self,
+        category: &quartz_domain::categories::CategoryUuid,
+    ) -> bool {
+        self.classifier.active_category(category).is_some()
     }
     fn foreground(&self, segment: &DerivedSegment) -> Option<&Foreground> {
         segment

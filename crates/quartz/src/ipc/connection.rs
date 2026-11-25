@@ -265,6 +265,15 @@ impl Connection {
                         None => Action::success_response(id, quartz_protocol::AcceptedBody),
                     })
                 }
+                Action::Explain { id, request } => {
+                    let control = request.control.clone();
+                    self.admit_request(id, &outbox, &mut requests, &tracker, Some(control), || {
+                        self.services
+                            .queries
+                            .submit_explain(request)
+                            .map(PendingReply::Query)
+                    })
+                }
                 Action::Preview { id, mut request } => {
                     request.receipts = Some(
                         receipt_owner
@@ -1500,5 +1509,32 @@ pub(crate) mod tests {
         assert_eq!(body["sets"][0]["version"], 1);
         first.close().await;
         second.close().await;
+    }
+    #[tokio::test]
+    async fn oversized_explanation_headers_return_page_too_large_over_the_wire() {
+        let mut fixture = crate::store::query::test_support::QueryFixture::new(1);
+        let at = fixture.start + 500;
+        fixture.retain_privacy_attribution(
+            "user.privacy/old@1",
+            &"x".repeat(quartz_protocol::QUERY_PAGE_BYTES),
+        );
+        let database = TestDatabase::with_fixture(fixture);
+        let status = StatusPublisher::new(quartz_protocol::InstanceId("explain-page-limit".into()));
+        let mut client =
+            MemoryClient::connect(connection(&database, &status), HelloRole::Cli).await;
+        client
+            .send_batch([quartz_protocol::Request {
+                id: RequestId(2),
+                op: quartz_protocol::Op::RulesExplain,
+                body: serde_json::json!({"at_utc_ms":at}),
+            }])
+            .await;
+        let Envelope::Response(response) = client.next().await else {
+            panic!("explain response");
+        };
+        assert!(
+            matches!(response.outcome,ResponseOutcome::Err {error} if error.kind == ErrorKind::PageTooLarge)
+        );
+        client.close().await;
     }
 }

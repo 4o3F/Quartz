@@ -76,6 +76,7 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 | `preview_required` | 隐私写入或历史清理缺少预览回执 | 无 |
 | `preview_expired` | 回执无法识别、已到期、被逐出或核心已重启 | 无 |
 | `preview_mismatch` | 回执与本次确认不一致 | `reason`：`mutation`、`inputs`、`range` 或 `backups` |
+| `page_too_large` | 所有分页读取中，单个结果项或固定字段超过 200 KiB 页预算；包括 query.*、规则预览与差异、规则集读取和文本导出 | 无 |
 | `deadline_exceeded` | 只读工作超过本次期限 | 无 |
 | `cancelled` | 只读工作被取消 | 无 |
 | `delete_scope_unsupported` | 当前里程碑不支持此删除范围 | `scope`，请求的 kind |
@@ -384,7 +385,7 @@ rules 列出草稿中该类型的生效规则，保留零命中项。规则预�
 | `rules_text.import` | `{key,base_version,text,preview_receipt?}` → 与 edit 相同；以 key 匹配，隐私写入要求对应 import 预览回执 |
 | `rules_text.export` | `{key,version?,cursor?}` → `{text,versions,next_cursor}`；按 UTF-8 字符边界分页，按顺序拼接为规范 `quartz-rules/1` 文本，保留条目顺序、override/disable，分类用 UUID |
 | `rules_text.diff` | `{comparison,start_date,end_date,expected_versions,deadline_ms?,sample_limit?,cursor?}` → `{changes,impact,samples,sides?,versions,next_cursor}` |
-| `rules.explain` | `{at_utc_ms,clock_segment_id?,cursor?}` 或 `{start_utc_ms,end_utc_ms,clock_segment_id?,cursor?}` → `{fragments,versions,next_cursor}` |
+| `rules.explain` | `{at_utc_ms,clock_segment_id?,expected_versions?,deadline_ms?,cursor?}` 或 `{start_utc_ms,end_utc_ms,clock_segment_id?,expected_versions?,deadline_ms?,cursor?}` → `{fragments,versions,next_cursor}` |
 
 text 为 UTF-8，单个规则集的规范导出文本与导入输入均最多 192 KiB，并仍受 256 KiB JSON 帧上限约束；超长用 `bad_request`。诊断为 `{code,path,location:{line,column},params}`，行列从 1 开始，无法定位时 location 为 null；code 使用规则格式第 4.2 节的 `E-RULE-*`，不包含翻译后的句子。validate 以 valid=false 返回诊断；其他操作的校验失败使用 `rule_validation_failed`，同样限制 100 项与 200 KiB 并带 `truncated`。
 
@@ -400,7 +401,15 @@ versions 的 changes 比较所选 key 两个修订的自身条目，结果影响
 
 impact 的 category_deltas 只列最终活跃时长不同的分类，按分类标识排序（未分类在前）；document_changes 按共同流水线的保留事实切片统计文档身份变化，使用 03 第 5.2 节的应用、文档、项目和配置身份；further_hidden 统计实际仍保留、before 规则允许显示而 after 规则进一步隐藏的字段；其他启用树已经隐藏的字段不再计入。两侧样本使用更严格的隐私投影，投影后输出相同的切片不列为样本。三侧 entries 每项为 `{entry_kind,content}`，content 是规范规则字段，集合与条目按父链和原始条目顺序分页；续页重复所属集合的 key 和 version，空集合保留空 entries。changes、category_deltas、samples 和所有 side entries 共用 200 KiB 页预算与一个游标。document_changes 和 further_hidden 只在第一页出现。游标绑定完整 comparison 摘要、日期、样本上限、期限、expected_versions 和所有当前修订，任何新修订均使其过期。`quartz rules diff` 命令行接线安排在 M4-E5。
 
-explain 范围为正时长且最多 48 小时；单时刻解释包含该时刻的全部事实，时钟回拨产生多个结果时分别返回 clock_segment_id，客户端可用此字段缩小选择。不同结果分片返回，按时间轴边界顺序分页；片段内以规则集 → 规则 → 条件列出实际或缺失字段、条件真假、提取与分类来源、标注优先级、历史隐私归因，以及生效、遮蔽、停用、被覆盖状态。fragments 每项为 `{start_utc_ms,end_utc_ms,clock_segment_id,category,category_source,extraction,privacy,nodes}`，privacy 使用历史存储的规则 ID 与标签。nodes 为扁平树节点 `{path,kind,rule,condition_index,field,value,missing,matched,state}`，path 是从根起的整数索引数组，kind 为 set/rule/condition；不适用字段为 null。state 为 effective/shadowed/disabled/overridden，条件节点以 matched 给出真假。节点按树与条件顺序分页，续页重复所属片段的范围与来源，nodes 只返回剩余部分。保留字段上限与隐私投影沿用原始详情。
+explain 范围为正时长且最多 48 小时，非法范围返回 `bad_request`；两种选择使用严格的互斥对象。单时刻解释包含该时刻的全部事实，时钟回拨产生多个结果时分别返回 clock_segment_id，客户端可用此字段缩小选择。单时刻先在同一只读事务中定位包含该时刻的事实，再扫描这些事实覆盖的范围，返回包含该时刻的边界片段。定位扫描仅由选中时钟段的前台事实扩展；未指定 clock_segment_id 时，offline_activity 也可扩展范围。note、dismissed_away、category_override 和 active_override 不扩展扫描。扫描上下文固定限制在所选时刻前后各 24 小时，超过上下文的边界在此处裁剪；范围选择将边界片段裁剪到请求范围。空白范围返回空 fragments；离线人工活动也可形成片段，其 clock_segment_id 可为 null。片段顺序沿用 query.segment_detail 的时钟段顺序：按时钟段起始 UTC、时钟段 ID，再按段内边界排列；没有采集时钟的离线活动沿用共同流水线的插入顺序。相邻片段仅在 UTC 首尾相接、clock_segment_id 相同，且 category、category_source、extraction、privacy 和完整 nodes 逐字段相等时合并；事实主键不参与相等判断。
+
+fragments 每项为 `{start_utc_ms,end_utc_ms,clock_segment_id,category,category_source,extraction,privacy,nodes}`。category 与同一事实快照和当前规则下 query.day、query.segment_detail 的最终分类一致。category_source 为 `{kind:"rule",rule}`、`{kind:"annotation",annotation,otherwise_rule}` 或 `{kind:"unclassified"}`；otherwise_rule 是人工标注覆盖前共同分类流水线选中的规则，没有则为 null。extraction 使用 query.segment_detail 的 TitleExtraction 结构，只在提取规则产生结果时返回；没有匹配规则或采集级别不允许提取时为 null，通用回退身份仍可作为分类条件的实际值。privacy 为 `{rule,label_key,label}`，从最终前台事实存储的 privacy_rule_id、privacy_label_key、privacy_label 读取，三者均无值时为 null。offline_activity 使用标注处理后与 query.segment_detail 相同的前台投影：extraction、privacy、otherwise_rule 均为 null，条件 value 为 null，各规则使用 stage_unavailable。
+
+nodes 为扁平树节点 `{path,kind,rule,condition_index,field,value,missing,matched,state,stage,set,reason,provenance,pattern_matched}`。path 是从根起的整数索引数组，kind 为 set/rule/condition；不适用的标量字段为 null。根节点先列提取规则集，再列分类规则集，stage 明确标为 extraction/classification；同阶段按规则集树的同级顺序与 key 前序排列，集合内先列原始条目顺序的规则，再列子集合，条件保持原始顺序。set 节点携带 `set:{key,version}`；rule 节点携带带修订的 rule 引用和从定义到覆盖的 `provenance:[{key,version,id}]`。覆盖和停用指令的效果标在受影响规则上。启动时因父级缺失或循环而停用的集合列为根节点；编译失败的非生效规则仍保留停用节点与条件字段，matched 和 pattern_matched 为 null。非生效规则每个请求编译一次，所有片段共用编译结果。提取规则在 app 条件后追加标题正则条件，field 为 title.raw、condition_index 为 null；rule 节点的 pattern_matched 另给出正则匹配结果。
+
+state 为 effective/shadowed/disabled/overridden；effective 表示规则参与求值，未匹配时 reason.kind 为 did_not_match，获选时为 selected。遮蔽原因为 `{kind:"shadowed",by_rule,order}`，order 为 priority/depth/order；人工标注覆盖获选规则时使用 `{kind:"annotation",annotation}`。祖先或自身集合停用使用 set_disabled，覆盖和停用指令分别使用 `{kind:"overridden",by_set}` 和 `{kind:"disabled",by_set}`；缺失目标使用 target_missing，事实采集级别或事实类型不允许该阶段时使用 stage_unavailable。获选规则引用已归档或缺失的分类时，按共同分类器的有效分类检查返回 disabled/category_unavailable；人工标注不会将该规则标为其覆盖来源。条件节点以 matched 给出包含 negate 后的真假；value 仅包含求值器实际读取的保留字段，遵守同一 NFC 与 4096 UTF-16 单元上限，缺失字段为 value=null、missing=true。规则正文中的条件比较值、正则文本和标签不进入解释树。
+
+节点按 path 的字典序、各片段按上述时间轴顺序共用 200 KiB 页预算，计入 JSON 转义、片段头、游标与信封预留。续页重复所属片段的范围与来源，nodes 只返回剩余部分；单项无法放入空页时返回 page_too_large。游标只包含选择、clock_segment_id、expected_versions 和规范化期限，不嵌套请求 cursor；省略 deadline_ms 与显式默认值等价。游标绑定这些参数、事实版本、规则读取摘要中的所有修订及元数据；规则生效内容未变化的新修订也使游标过期。可选 expected_versions 使用相同 UTC 范围 query.segment_detail 或 query.timeline 的摘要；单时刻使用 `[at_utc_ms,at_utc_ms+1)`。首次输入不符返回 stale_inputs，续页不符返回 stale_cursor；游标参数或位置非法返回 bad_request。单时刻游标还绑定定位后扫描范围的版本；设置与时区在请求开始时读取一次，并用于两个范围的版本摘要。deadline_ms、requests.cancel、断线取消和不返回部分成功沿用第 6.3.2 节；省略 expected_versions 时直接读取当前快照。`quartz rules explain` 命令行接线安排在 M4-E5。
 
 ### 6.3.4 历史隐私清理
 

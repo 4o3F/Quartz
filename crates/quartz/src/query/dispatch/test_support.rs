@@ -59,7 +59,7 @@ impl TestDatabase {
                     recv(channel.receiver) -> query => match query {
                         Ok(QueryCommand::Query {request, reply}) => { let result = fixture.run(request).map_err(|error| ProtocolError::new(error.kind())); let _ = reply.send(result); }
                         Ok(QueryCommand::RuleInputs {reply}) => { let result = fixture.store.rule_read_metadata().map(|metadata_version| crate::rules::read::ReadInputs {snapshot: snapshots.load(), metadata_version}).map_err(|_| ProtocolError::new(ErrorKind::Internal)); let _ = reply.send(result); }
-                        Ok(command @ (QueryCommand::Preview {..} | QueryCommand::Controlled {..})) => {
+                        Ok(command @ (QueryCommand::Explain {..} | QueryCommand::Preview {..} | QueryCommand::Controlled {..})) => {
                             let mut runner = crate::query::runner::QueryRunner::default();
                             runner.start(&mut fixture.store, command, &registry).expect("start controlled query");
                             while runner.is_running() { runner.step(&mut fixture.store).expect("step controlled query"); }

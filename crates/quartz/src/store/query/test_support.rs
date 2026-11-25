@@ -354,3 +354,120 @@ impl QueryFixture {
             .expect("fixture capture level");
     }
 }
+
+impl QueryFixture {
+    pub(crate) fn retain_privacy_attribution(&mut self, rule: &str, label: &str) {
+        let mut row = intervals::table
+            .first::<IntervalsRow>(&mut self.store.writer)
+            .expect("fact");
+        row.privacy_rule_id = Some(rule.into());
+        row.privacy_label_key = Some("privacy.fixture".into());
+        row.privacy_label = Some(label.into());
+        diesel::update(intervals::table.filter(intervals::id.eq(row.id)))
+            .set(&row)
+            .execute(&mut self.store.writer)
+            .expect("stored attribution");
+    }
+    pub(crate) fn repeat_clock_for_last_fact(&mut self) {
+        let mut clock = clock_segments::table
+            .first::<ClockSegmentsRow>(&mut self.store.writer)
+            .expect("clock");
+        clock.id = Some(2);
+        diesel::insert_into(clock_segments::table)
+            .values(&clock)
+            .execute(&mut self.store.writer)
+            .expect("repeated clock");
+        let mut row = intervals::table
+            .filter(intervals::id.eq(self.count))
+            .first::<IntervalsRow>(&mut self.store.writer)
+            .expect("last fact");
+        row.clock_segment_id = 2;
+        row.start_utc_ms = self.start;
+        row.end_utc_ms = Some(self.start + FACT_MS);
+        row.start_mono_ms = 0;
+        row.end_mono_ms = Some(FACT_MS);
+        diesel::update(intervals::table.filter(intervals::id.eq(row.id)))
+            .set(&row)
+            .execute(&mut self.store.writer)
+            .expect("repeated fact");
+    }
+    pub(crate) fn share_first_application(&mut self) {
+        diesel::update(intervals::table)
+            .set(intervals::app_id.eq(Some(1_i64)))
+            .execute(&mut self.store.writer)
+            .expect("shared application");
+    }
+}
+
+impl QueryFixture {
+    pub(crate) fn replace_retained_title(&mut self, title: &str) {
+        diesel::update(titles::table)
+            .set(titles::text.eq(title))
+            .execute(&mut self.store.writer)
+            .expect("retained title");
+    }
+}
+
+impl QueryFixture {
+    pub(crate) fn archive_learning_category(&mut self) {
+        use crate::store::schema::categories;
+        diesel::update(categories::table.filter(categories::builtin_key.eq("learning")))
+            .set(categories::archived.eq(1))
+            .execute(&mut self.store.writer)
+            .expect("archive category");
+    }
+}
+
+impl QueryFixture {
+    pub(crate) fn mask_gap(&mut self, start: i64, end: i64) {
+        diesel::insert_into(capture_gaps::table)
+            .values(CaptureGapsRow {
+                id: None,
+                run_id: 1,
+                clock_segment_id: 1,
+                start_utc_ms: self.start + start,
+                end_utc_ms: self.start + end,
+                start_mono_ms: start,
+                end_mono_ms: end,
+                reason: enums::GapReason::EventOverload,
+            })
+            .execute(&mut self.store.writer)
+            .expect("gap mask");
+    }
+    pub(crate) fn extend_first_fact_into_previous_day(&mut self) {
+        let extension = self.start.rem_euclid(UTC_DAY_MS) + FACT_MS;
+        let mut clock = clock_segments::table
+            .first::<ClockSegmentsRow>(&mut self.store.writer)
+            .expect("clock");
+        clock.start_utc_ms -= extension;
+        clock.end_mono_ms = clock.end_mono_ms.map(|end| end + extension);
+        diesel::update(clock_segments::table.filter(clock_segments::id.eq(clock.id)))
+            .set(&clock)
+            .execute(&mut self.store.writer)
+            .expect("extended clock");
+        let mut row = intervals::table
+            .first::<IntervalsRow>(&mut self.store.writer)
+            .expect("fact");
+        row.start_utc_ms -= extension;
+        row.end_mono_ms = row.end_mono_ms.map(|end| end + extension);
+        row.duration_ms = row.duration_ms.map(|duration| duration + extension);
+        diesel::update(intervals::table.filter(intervals::id.eq(row.id)))
+            .set(&row)
+            .execute(&mut self.store.writer)
+            .expect("extended fact");
+    }
+    pub(crate) fn bump_previous_fact_day(&mut self) {
+        let day = self.start.div_euclid(UTC_DAY_MS) - 1;
+        diesel::insert_into(data_day_versions::table)
+            .values((
+                data_day_versions::source.eq(DataSource::Intervals),
+                data_day_versions::utc_date.eq(day),
+                data_day_versions::version.eq(1_i64),
+            ))
+            .on_conflict((data_day_versions::source, data_day_versions::utc_date))
+            .do_update()
+            .set(data_day_versions::version.eq(data_day_versions::version + 1_i64))
+            .execute(&mut self.store.writer)
+            .expect("previous day version");
+    }
+}

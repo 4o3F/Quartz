@@ -4,6 +4,12 @@ use crate::{QueryCursor, QueryVersions, Uuid};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 
+mod explain;
+pub use explain::{
+    ExplainCategorySource, ExplainFragment, ExplainInstant, ExplainNode, ExplainNodeKind,
+    ExplainPrivacy, ExplainRange, ExplainReason, ExplainSelection, ExplainSet, ExplainShadowOrder,
+    ExplainState, RulesExplainRequest, RulesExplainResponse,
+};
 mod diff;
 pub use diff::{
     DiffMutation, RuleComparison, RuleDiffCategoryDelta, RuleDiffChange, RuleDiffChangeKind,

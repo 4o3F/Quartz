@@ -186,7 +186,7 @@ impl PreviewParameters for wire::RulesTextPreviewRequest {
 }
 impl From<ProtocolError> for RunQueryError {
     fn from(error: ProtocolError) -> Self {
-        Self::Preview { error }
+        Self::RejectQueryError { error }
     }
 }
 
