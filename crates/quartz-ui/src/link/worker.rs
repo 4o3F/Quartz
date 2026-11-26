@@ -660,6 +660,8 @@ impl Worker {
                             | Op::AnnotationsUpdate
                             | Op::AnnotationsDelete
                             | Op::TrackingResume
+                            | Op::RuleSetsSetEnabled
+                            | Op::RuleSetsDelete
                     )
                     && let Some(loader) = &self.day
                 {

@@ -1164,6 +1164,8 @@ mod tests {
             placement: crate::layout::PanelPlacement::Closed,
             panel_focus: (),
             root_focus: (),
+            rules: crate::model::RulesPage::new(),
+            rules_focus: (),
             ranking: Default::default(),
             lanes: LaneMode::Swimlanes,
             range: RangeChoice::Zoomed(

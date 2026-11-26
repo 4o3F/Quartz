@@ -10,6 +10,7 @@ mod pending;
 #[cfg(feature = "preview")]
 mod preview;
 mod ranking;
+mod rules;
 mod stat_grid;
 mod timeline;
 mod today;
@@ -271,6 +272,8 @@ pub(crate) struct AppShell<Focus = FocusHandle> {
     panel_focus: Focus,
     /// Focus of the main area, where it returns when the panel closes.
     root_focus: Focus,
+    rules: crate::model::RulesPage,
+    rules_focus: Focus,
     ranking: RankingKind,
     lanes: LaneMode,
     range: RangeChoice,
@@ -324,6 +327,8 @@ impl AppShell {
             placement: PanelPlacement::Closed,
             panel_focus: cx.focus_handle(),
             root_focus: cx.focus_handle(),
+            rules: crate::model::RulesPage::new(),
+            rules_focus: cx.focus_handle(),
             ranking: RankingKind::default(),
             lanes: LaneMode::Swimlanes,
             range: init.range,
@@ -442,6 +447,9 @@ impl AppShell {
             self.page = page;
             self.hover = None;
             self.cancel_details(cx);
+            if page == Page::Rules {
+                self.open_rules_page(cx);
+            }
             cx.notify();
         }
     }
@@ -486,7 +494,8 @@ impl Render for AppShell {
         };
         let page = match self.page {
             Page::Today => self.render_today(&ui, &frame, cx).into_any_element(),
-            page @ (Page::Week | Page::Rules | Page::Settings) => {
+            Page::Rules => self.render_rules(&ui, &frame, cx).into_any_element(),
+            page @ (Page::Week | Page::Settings) => {
                 self.render_placeholder(&ui, page).into_any_element()
             }
         };
@@ -519,6 +528,12 @@ impl Render for AppShell {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" && this.calendar.take().is_some() {
                     cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if this.page == Page::Rules
+                    && this.handle_rules_key(event, cx) == rules::KeyHandled::Handled
+                {
                     cx.stop_propagation();
                 }
             }))

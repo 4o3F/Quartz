@@ -9,7 +9,8 @@ use super::message::{Arg, ArgValue, Msg};
 #[cfg(windows)]
 use crate::model::RankingKind;
 use crate::model::{
-    BuiltinCategory, CategoryName, ClassificationSource, Day, MINUTES_PER_HOUR, RuleCondition,
+    BuiltinCategory, CategoryName, ClassificationSource, ConditionItem, ConditionPolarity, Day,
+    EntryConditionSummary, MINUTES_PER_HOUR, PrivacyEffectSummary, RuleCondition, RuleEntryLabel,
     SECONDS_PER_MINUTE, Share, StateKind,
 };
 
@@ -328,6 +329,123 @@ impl Formatter {
         )
     }
 
+    /// Display label of a rule-set entry in the current interface language.
+    #[must_use]
+    pub(crate) fn rule_entry_label(self, label: &RuleEntryLabel) -> String {
+        match label {
+            RuleEntryLabel::Text(text) => text.clone(),
+            RuleEntryLabel::Key(key) => self
+                .language
+                .translate(quartz_i18n::MessageKey::new(key))
+                .into_owned(),
+            RuleEntryLabel::Identifier(id) => id.clone(),
+            RuleEntryLabel::Unnamed => self.text(Msg::RulesEntryUnnamed),
+        }
+    }
+
+    /// Formats one protocol condition with optional negation.
+    #[must_use]
+    pub(crate) fn protocol_condition(self, item: &ConditionItem) -> String {
+        let base = self.text_with(
+            Msg::DetailsCondition,
+            &[
+                Arg::Field.with(rule_field_str(item.field)),
+                Arg::Operator.with(rule_operator_str(item.op)),
+                Arg::Value.with(&format!("{:?}", item.value)),
+            ],
+        );
+        match item.polarity {
+            ConditionPolarity::Positive => base,
+            ConditionPolarity::Negated => {
+                self.text_with(Msg::RulesEntryNotCondition, &[Arg::Condition.with(&base)])
+            }
+        }
+    }
+
+    /// Summarizes a rule entry's matching conditions and effect for display in the detail list.
+    #[must_use]
+    pub(crate) fn entry_condition_summary(self, summary: &EntryConditionSummary) -> String {
+        match summary {
+            EntryConditionSummary::DisableTarget { target, reason } => {
+                let base = self.text_with(Msg::RulesEntryDisables, &[Arg::Value.with(target)]);
+                match reason {
+                    Some(reason) => format!("{base} · {reason}"),
+                    None => base,
+                }
+            }
+            EntryConditionSummary::Conditions {
+                combinator,
+                items,
+                privacy,
+            } => {
+                let mut parts = Vec::new();
+                if !items.is_empty() {
+                    let joined = items
+                        .iter()
+                        .map(|item| self.protocol_condition(item))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let msg = match combinator {
+                        quartz_protocol::RuleMatch::All => Msg::RulesEntryMatchAll,
+                        quartz_protocol::RuleMatch::Any => Msg::RulesEntryMatchAny,
+                    };
+                    parts.push(self.text_with(msg, &[Arg::Condition.with(&joined)]));
+                }
+                if let Some(effect) = privacy {
+                    parts.push(self.privacy_effect(effect));
+                }
+                if parts.is_empty() {
+                    self.text(Msg::RulesEntryNoConditions)
+                } else {
+                    parts.join(" · ")
+                }
+            }
+            EntryConditionSummary::Extraction {
+                app_conditions,
+                pattern,
+            } => {
+                let mut parts = Vec::new();
+                if !app_conditions.is_empty() {
+                    let joined = app_conditions
+                        .iter()
+                        .map(|item| self.protocol_condition(item))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    parts.push(
+                        self.text_with(Msg::RulesEntryMatchAll, &[Arg::Condition.with(&joined)]),
+                    );
+                }
+                if let Some(pattern) = pattern {
+                    parts.push(self.text_with(
+                        Msg::RulesEntryExtractionPattern,
+                        &[Arg::Value.with(pattern)],
+                    ));
+                }
+                if parts.is_empty() {
+                    self.text(Msg::RulesEntryNoConditions)
+                } else {
+                    parts.join(" · ")
+                }
+            }
+            EntryConditionSummary::Empty => self.text(Msg::RulesEntryNoConditions),
+        }
+    }
+
+    fn privacy_effect(self, effect: &PrivacyEffectSummary) -> String {
+        let mut fields = Vec::new();
+        if let Some(app) = effect.app {
+            fields.push(format!("app={}", rule_action_str(app)));
+        }
+        if let Some(title) = effect.window_title {
+            fields.push(format!("title={}", rule_action_str(title)));
+        }
+        if let Some(web) = effect.web {
+            fields.push(format!("web={}", rule_web_action_str(web)));
+        }
+        let joined = fields.join(", ");
+        self.text_with(Msg::RulesEntryPrivacyEffect, &[Arg::Value.with(&joined)])
+    }
+
     /// The hour number on the compact chart axis; the axis omits minutes and the day period.
     pub(crate) fn hour_tick(self, hour: u32) -> String {
         hour.to_string()
@@ -388,6 +506,54 @@ fn fill_placeholders(template: &str, values: &[ArgValue<'_>]) -> String {
     }
     text.push_str(rest);
     text
+}
+
+const fn rule_field_str(field: quartz_protocol::RuleField) -> &'static str {
+    use quartz_protocol::RuleField;
+    match field {
+        RuleField::ExeName => "app.exe_name",
+        RuleField::IdentityKey => "app.identity_key",
+        RuleField::DisplayName => "app.display_name",
+        RuleField::WindowClass => "window.class",
+        RuleField::RawTitle => "title.raw",
+        RuleField::NormalizedTitle => "title.normalized",
+        RuleField::Document => "doc.document",
+        RuleField::Project => "doc.project",
+        RuleField::Profile => "doc.profile",
+        RuleField::Domain => "web.domain",
+        RuleField::TabTitle => "web.tab_title",
+        RuleField::BrowserProfile => "browser.profile_label",
+        RuleField::Category => "category",
+        RuleField::Tendency => "category.tendency",
+        RuleField::Activity => "activity",
+    }
+}
+
+const fn rule_operator_str(op: quartz_protocol::RuleOperator) -> &'static str {
+    use quartz_protocol::RuleOperator;
+    match op {
+        RuleOperator::Equals => "equals",
+        RuleOperator::Contains => "contains",
+        RuleOperator::StartsWith => "starts_with",
+        RuleOperator::EndsWith => "ends_with",
+        RuleOperator::Regex => "regex",
+        RuleOperator::DomainSuffix => "domain_suffix",
+    }
+}
+
+const fn rule_action_str(action: quartz_protocol::RuleAction) -> &'static str {
+    match action {
+        quartz_protocol::RuleAction::Keep => "keep",
+        quartz_protocol::RuleAction::Drop => "drop",
+    }
+}
+
+const fn rule_web_action_str(action: quartz_protocol::RuleWebAction) -> &'static str {
+    match action {
+        quartz_protocol::RuleWebAction::Full => "full",
+        quartz_protocol::RuleWebAction::DomainOnly => "domain_only",
+        quartz_protocol::RuleWebAction::None => "none",
+    }
 }
 
 #[cfg(test)]
@@ -558,5 +724,49 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             kinds.into_iter().map(|kind| EN.state_name(kind)).collect();
         assert_eq!(names.len(), kinds.len());
+    }
+
+    #[test]
+    fn rule_entry_labels_and_condition_summaries_format_in_each_language() {
+        assert_eq!(
+            EN.rule_entry_label(&RuleEntryLabel::Key("privacy.label.private_window".into())),
+            "Private window"
+        );
+        assert_eq!(
+            ZH.rule_entry_label(&RuleEntryLabel::Key("privacy.label.private_window".into())),
+            "无痕窗口"
+        );
+        assert_eq!(
+            EN.rule_entry_label(&RuleEntryLabel::Unnamed),
+            "Unnamed rule"
+        );
+
+        let cond = EntryConditionSummary::Conditions {
+            combinator: quartz_protocol::RuleMatch::All,
+            items: vec![ConditionItem {
+                field: quartz_protocol::RuleField::ExeName,
+                op: quartz_protocol::RuleOperator::Equals,
+                value: "code.exe".into(),
+                polarity: ConditionPolarity::Negated,
+            }],
+            privacy: Some(PrivacyEffectSummary {
+                app: Some(quartz_protocol::RuleAction::Keep),
+                window_title: Some(quartz_protocol::RuleAction::Drop),
+                web: Some(quartz_protocol::RuleWebAction::DomainOnly),
+            }),
+        };
+        let rendered = EN.entry_condition_summary(&cond);
+        assert!(rendered.contains("NOT app.exe_name equals \"code.exe\""));
+        assert!(rendered.contains("title=drop"));
+        assert!(rendered.contains("web=domain_only"));
+
+        let disable = EntryConditionSummary::DisableTarget {
+            target: "builtin.classification/wechat".into(),
+            reason: Some("Handled elsewhere".into()),
+        };
+        assert_eq!(
+            EN.entry_condition_summary(&disable),
+            "Disables builtin.classification/wechat · Handled elsewhere"
+        );
     }
 }

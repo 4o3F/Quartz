@@ -6,6 +6,8 @@ mod worker;
 mod annotation;
 mod day;
 mod details;
+#[cfg(windows)]
+mod rules;
 use crate::failure::Failure;
 #[cfg(windows)]
 pub(crate) use annotation::AwayAction;

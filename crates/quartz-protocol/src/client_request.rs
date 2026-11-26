@@ -50,6 +50,8 @@ requests! {
     crate::RulesPreviewRequest => RulesPreview => crate::RulesPreviewResponse,
     crate::RulesTextValidateRequest => RulesTextValidate => crate::RulesTextValidateResponse,
     crate::RulesTextExportRequest => RulesTextExport => crate::RulesTextExportResponse,
+    crate::RuleSetsTreeRequest => RuleSetsTree => crate::RuleSetsTreeResponse,
+    crate::RuleSetsGetRequest => RuleSetsGet => crate::RuleSetsGetResponse,
     crate::RuleSetsEditRequest => RuleSetsEdit => crate::RuleSetsWriteResponse,
     crate::RuleSetsSetEnabledRequest => RuleSetsSetEnabled => crate::RuleSetsWriteResponse,
     crate::RuleSetsDeleteRequest => RuleSetsDelete => crate::RuleSetsWriteResponse,

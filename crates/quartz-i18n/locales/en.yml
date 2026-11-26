@@ -506,3 +506,126 @@ today.pending.failed:
   en: "Couldn’t mark this time as %{name}. Try again."
 annotation.preset.rest:
   en: Rest
+rules.tree.title:
+  en: "Rule sets"
+rules.tree.empty:
+  en: "No rule sets available"
+rules.tree.truncated:
+  en: "Showing first %{count} rule sets; list was truncated."
+rules.kind.classification:
+  en: "Classification"
+rules.kind.extraction:
+  en: "Extraction"
+rules.kind.privacy:
+  en: "Privacy"
+rules.source.builtin:
+  en: "Built-in"
+rules.source.user:
+  en: "User"
+rules.badge.disabled:
+  en: "Disabled"
+rules.badge.overridden:
+  en: "Overridden"
+rules.counts.added:
+  en: "+%{count}"
+rules.counts.overridden:
+  en: "~%{count}"
+rules.counts.disabled:
+  en: "−%{count}"
+rules.warning.target_deleted:
+  en: "Target deleted"
+rules.warning.conflict:
+  en: "Conflict"
+rules.version:
+  en: "v%{value}"
+rules.detail.select_prompt:
+  en: "Select a rule set to inspect its entries."
+rules.detail.loading:
+  en: "Loading rule set…"
+rules.detail.empty:
+  en: "This rule set has no entries."
+rules.detail.truncated:
+  en: "Showing first %{count} entries; list was truncated."
+rules.detail.parent:
+  en: "Parent: %{name}"
+rules.detail.parent_version:
+  en: "Parent: %{name} (v%{value})"
+rules.detail.entries_heading:
+  en: "Entries (%{count})"
+rules.detail.builtin_readonly:
+  en: "Built-in rule sets are read-only. Override or disable individual rules in a child user rule set."
+rules.detail.disabled_by_parent:
+  en: "Disabled because a parent rule set is disabled."
+rules.action.enable:
+  en: "Enable"
+rules.action.disable:
+  en: "Disable"
+rules.action.delete:
+  en: "Delete"
+rules.action.delete_confirm_prompt:
+  en: "Delete rule set %{name}?"
+rules.action.delete_confirm:
+  en: "Confirm delete"
+rules.action.cancel:
+  en: "Cancel"
+rules.action.delete_has_children:
+  en: "Remove child rule sets before deleting this set."
+rules.action.reload:
+  en: "Reload"
+rules.load_failed.title:
+  en: "Couldn’t load rule sets"
+rules.load_failed.message:
+  en: "Retry to load rule sets again."
+rules.detail_failed.title:
+  en: "Couldn’t load rule set details"
+rules.detail_failed.message:
+  en: "Retry to load this rule set again."
+rules.stale.title:
+  en: "Rule sets changed"
+rules.stale.message:
+  en: "Rule sets changed while loading or updating. Reload to see the latest state."
+rules.mutation_failed.readonly:
+  en: "Built-in rule sets cannot be modified directly."
+rules.mutation_failed.has_children:
+  en: "Cannot delete a rule set that still has child sets."
+rules.mutation_failed.not_found:
+  en: "This rule set no longer exists. Reload to refresh the list."
+rules.mutation_failed.generic:
+  en: "Could not update this rule set. Try again."
+rules.entry.kind.rule:
+  en: "Rule"
+rules.entry.kind.override:
+  en: "Override"
+rules.entry.kind.disable:
+  en: "Disable"
+rules.entry.state.effective:
+  en: "Effective"
+rules.entry.state.disabled:
+  en: "Disabled"
+rules.entry.state.overridden:
+  en: "Overridden"
+rules.entry.state.target_missing:
+  en: "Target missing"
+rules.entry.unnamed:
+  en: "Unnamed rule"
+rules.entry.priority:
+  en: "Priority %{priority}"
+rules.entry.provenance:
+  en: "Source: %{value}"
+rules.entry.disables:
+  en: "Disables %{value}"
+rules.entry.match_all:
+  en: "Match all: %{condition}"
+rules.entry.match_any:
+  en: "Match any: %{condition}"
+rules.entry.extraction_pattern:
+  en: "Pattern: %{value}"
+rules.entry.privacy_effect:
+  en: "Privacy: %{value}"
+rules.entry.not_condition:
+  en: "NOT %{condition}"
+rules.entry.no_conditions:
+  en: "No conditions"
+rules.entry.target:
+  en: "Target: %{value}"
+

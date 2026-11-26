@@ -506,3 +506,126 @@ today.pending.failed:
   zh-CN: "未能将这段时间记为“%{name}”，请重试。"
 annotation.preset.rest:
   zh-CN: 休息
+rules.tree.title:
+  zh-CN: "规则集"
+rules.tree.empty:
+  zh-CN: "没有可用的规则集"
+rules.tree.truncated:
+  zh-CN: "仅显示前 %{count} 个规则集，列表已截断。"
+rules.kind.classification:
+  zh-CN: "分类"
+rules.kind.extraction:
+  zh-CN: "文档提取"
+rules.kind.privacy:
+  zh-CN: "隐私"
+rules.source.builtin:
+  zh-CN: "内置"
+rules.source.user:
+  zh-CN: "用户"
+rules.badge.disabled:
+  zh-CN: "已停用"
+rules.badge.overridden:
+  zh-CN: "已被覆盖"
+rules.counts.added:
+  zh-CN: "+%{count}"
+rules.counts.overridden:
+  zh-CN: "~%{count}"
+rules.counts.disabled:
+  zh-CN: "−%{count}"
+rules.warning.target_deleted:
+  zh-CN: "目标已删除"
+rules.warning.conflict:
+  zh-CN: "规则冲突"
+rules.version:
+  zh-CN: "v%{value}"
+rules.detail.select_prompt:
+  zh-CN: "请选择一个规则集查看其条目。"
+rules.detail.loading:
+  zh-CN: "正在加载规则集…"
+rules.detail.empty:
+  zh-CN: "此规则集没有条目。"
+rules.detail.truncated:
+  zh-CN: "仅显示前 %{count} 条规则，列表已截断。"
+rules.detail.parent:
+  zh-CN: "父级：%{name}"
+rules.detail.parent_version:
+  zh-CN: "父级：%{name}（v%{value}）"
+rules.detail.entries_heading:
+  zh-CN: "条目（%{count}）"
+rules.detail.builtin_readonly:
+  zh-CN: "内置规则集为只读，请在子用户规则集中覆盖或停用单条规则。"
+rules.detail.disabled_by_parent:
+  zh-CN: "因父规则集已停用而暂停生效。"
+rules.action.enable:
+  zh-CN: "启用"
+rules.action.disable:
+  zh-CN: "停用"
+rules.action.delete:
+  zh-CN: "删除"
+rules.action.delete_confirm_prompt:
+  zh-CN: "确定删除规则集 %{name} 吗？"
+rules.action.delete_confirm:
+  zh-CN: "确认删除"
+rules.action.cancel:
+  zh-CN: "取消"
+rules.action.delete_has_children:
+  zh-CN: "请先删除子规则集，再删除此规则集。"
+rules.action.reload:
+  zh-CN: "重新加载"
+rules.load_failed.title:
+  zh-CN: "暂时无法加载规则集"
+rules.load_failed.message:
+  zh-CN: "请重试以重新加载规则集。"
+rules.detail_failed.title:
+  zh-CN: "暂时无法加载规则集详情"
+rules.detail_failed.message:
+  zh-CN: "请重试以重新加载此规则集。"
+rules.stale.title:
+  zh-CN: "规则集已更新"
+rules.stale.message:
+  zh-CN: "规则集在加载或操作期间发生了变更，请重新加载以查看最新状态。"
+rules.mutation_failed.readonly:
+  zh-CN: "内置规则集不能直接修改。"
+rules.mutation_failed.has_children:
+  zh-CN: "无法删除仍有子规则集的规则集。"
+rules.mutation_failed.not_found:
+  zh-CN: "该规则集已不存在，请重新加载列表。"
+rules.mutation_failed.generic:
+  zh-CN: "无法更新此规则集，请重试。"
+rules.entry.kind.rule:
+  zh-CN: "新增"
+rules.entry.kind.override:
+  zh-CN: "覆盖"
+rules.entry.kind.disable:
+  zh-CN: "停用"
+rules.entry.state.effective:
+  zh-CN: "生效"
+rules.entry.state.disabled:
+  zh-CN: "已停用"
+rules.entry.state.overridden:
+  zh-CN: "已被覆盖"
+rules.entry.state.target_missing:
+  zh-CN: "目标缺失"
+rules.entry.unnamed:
+  zh-CN: "未命名规则"
+rules.entry.priority:
+  zh-CN: "优先级 %{priority}"
+rules.entry.provenance:
+  zh-CN: "来源：%{value}"
+rules.entry.disables:
+  zh-CN: "停用 %{value}"
+rules.entry.match_all:
+  zh-CN: "全部满足：%{condition}"
+rules.entry.match_any:
+  zh-CN: "任一满足：%{condition}"
+rules.entry.extraction_pattern:
+  zh-CN: "提取正则：%{value}"
+rules.entry.privacy_effect:
+  zh-CN: "隐私策略：%{value}"
+rules.entry.not_condition:
+  zh-CN: "非 %{condition}"
+rules.entry.no_conditions:
+  zh-CN: "无条件"
+rules.entry.target:
+  zh-CN: "目标：%{value}"
+

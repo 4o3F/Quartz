@@ -299,6 +299,9 @@ impl AppShell {
             load_task: None,
             resume_task: None,
         });
+        if self.page == super::Page::Rules {
+            self.open_rules_page(cx);
+        }
         cx.notify();
     }
     pub(crate) fn state_changed(

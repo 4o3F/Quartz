@@ -9,6 +9,7 @@ pub(crate) mod live_details;
 mod palette;
 mod ranking;
 mod rule;
+pub(crate) mod rules;
 mod segment;
 mod state;
 mod summary;
@@ -36,6 +37,15 @@ pub(crate) use rule::Explanation;
 pub(crate) use rule::RuleCondition;
 #[cfg(any(test, feature = "preview"))]
 pub(crate) use rule::{Rule, RuleField, RuleId, RuleOperator};
+pub(crate) use rules::{
+    ConditionItem, ConditionPolarity, EntryConditionSummary, PrivacyEffectSummary, RuleEntryLabel,
+};
+#[cfg(windows)]
+pub(crate) use rules::{
+    DeleteConfirmation, FlatTreeRow, LoadState, MutationActivity, NodeEnablement, RuleEntryDetail,
+    RuleSetDetail, RuleSetEnablement, RuleTree, RuleTreeNode, RulesEffect, RulesKeyAction,
+    RulesMutation, RulesPage, TreeDirection,
+};
 pub(crate) use segment::{ClassificationSource, Segment, SegmentId};
 pub(crate) use state::{AwayLabel, ClockAnomaly, StateBlock, StateKind};
 pub(crate) use summary::{DaySummary, HourlyBar, Share};
