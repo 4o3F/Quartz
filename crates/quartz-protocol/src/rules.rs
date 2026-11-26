@@ -6,12 +6,9 @@ use std::num::NonZeroU32;
 
 mod preview;
 pub use preview::{
-    FurtherHidden, PREVIEW_MAX_DAYS, PREVIEW_MAX_SAMPLES, ParsePreviewSampleLimitError,
-    PreviewCategoryRank, PreviewDelete, PreviewSampleLimit, PreviewSetEnabled, RuleConditionMatch,
-    RuleEffectiveContribution, RulePreviewMutation, RulePreviewOutput, RulePreviewRequest,
-    RulePreviewSample, RulePreviewSideTotals, RulePreviewStatistics, RulePreviewTotals,
-    RulesPreviewRequest, RulesPreviewResponse, RulesTextPreviewMutation, RulesTextPreviewRequest,
-    RulesTextPreviewResponse, ValidatePreviewDatesError,
+    PREVIEW_MAX_DAYS, PREVIEW_MAX_SAMPLES, PreviewCategoryRank, RulePreviewMutation,
+    RulePreviewOutput, RulePreviewSample, RulePreviewSideTotals, RulePreviewStatistics,
+    RulePreviewTotals, RulesPreviewRequest, RulesPreviewResponse, ValidatePreviewDatesError,
 };
 
 /// Rule families available to the M4 editor.

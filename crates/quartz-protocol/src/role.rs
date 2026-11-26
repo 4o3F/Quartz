@@ -68,7 +68,6 @@ impl Op {
             | Self::RuleSetsGet
             | Self::RuleSetsTree
             | Self::RulesTextValidate
-            | Self::RulesTextPreview
             | Self::RulesTextExport => true,
             Self::Hello
             | Self::Subscribe
@@ -127,8 +126,8 @@ mod tests {
     #[test]
     fn every_role_and_operation_matches_the_independent_permission_table() {
         // Written as wire-name lists, independently of the production family helper.
-        let ui = "hello subscribe unsubscribe core.status ui.open ui.first_frame ui.hidden query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away query.annotations rule_sets.tree rule_sets.get rule_sets.set_enabled rule_sets.delete rule_sets.edit rules.preview rules_text.validate rules_text.preview rules_text.import rules_text.export categories.list categories.create categories.update categories.archive categories.reorder annotations.create annotations.update annotations.delete settings.get settings.set tracking.pause tracking.resume tracking.keep_alive privacy_mode.set";
-        let cli = "hello settings.get settings.set ui.open query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away query.annotations core.status rules_text.validate rules_text.preview rules_text.export rule_sets.tree rule_sets.get";
+        let ui = "hello subscribe unsubscribe core.status ui.open ui.first_frame ui.hidden query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away query.annotations rule_sets.tree rule_sets.get rule_sets.set_enabled rule_sets.delete rule_sets.edit rules.preview rules_text.validate rules_text.import rules_text.export categories.list categories.create categories.update categories.archive categories.reorder annotations.create annotations.update annotations.delete settings.get settings.set tracking.pause tracking.resume tracking.keep_alive privacy_mode.set";
+        let cli = "hello settings.get settings.set ui.open query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away query.annotations core.status rules_text.validate rules_text.export rule_sets.tree rule_sets.get";
         for role in [Role::Ui, Role::Cli] {
             let expected = match role {
                 Role::Ui => ui,

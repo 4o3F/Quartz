@@ -243,7 +243,7 @@ preset = "title_hidden"            # 与下面三项二选一
 |---|---|---|
 | `quartz rules check <文件>...` | 校验一个或多个规则文件，包括它们与已安装规则集组成的树 | 否（树检查使用本地已安装规则集的只读副本） |
 
-界面中有相同功能：导入时的校验与预览，以及规则集树视图。
+界面中有相同功能：通过 `rules.preview` 在 1–7 个逻辑日内预览草稿或导入文本的影响，以及规则集树视图。
 
 导出通过 `rules_text.export` 协议操作取得；`rules_text.validate` 对指定 key 与基础版本作上下文校验。
 
@@ -274,7 +274,7 @@ error[E-RULE-TARGET]: user.my-tweaks: override[0].target: "builtin.classificatio
 | `E-RULE-REF` | 引用的分类、链或国策不存在，或分类显示名称有歧义 |
 | `E-RULE-DUP` | 规则集内 `id` 重复 |
 
-界面保存隐私规则前显示预览并要求确认；核心不强制回执。
+界面保存隐私规则前通过 `rules.preview` 显示预览并要求确认；核心不强制回执。
 
 ### 4.3 内置规则更新
 

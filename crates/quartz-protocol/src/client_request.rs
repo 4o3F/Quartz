@@ -48,7 +48,6 @@ macro_rules! requests {
 }
 requests! {
     crate::RulesPreviewRequest => RulesPreview => crate::RulesPreviewResponse,
-    crate::RulesTextPreviewRequest => RulesTextPreview => crate::RulesTextPreviewResponse,
     crate::RulesTextValidateRequest => RulesTextValidate => crate::RulesTextValidateResponse,
     crate::RulesTextExportRequest => RulesTextExport => crate::RulesTextExportResponse,
     crate::RuleSetsEditRequest => RuleSetsEdit => crate::RuleSetsWriteResponse,

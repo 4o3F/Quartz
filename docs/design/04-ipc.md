@@ -64,7 +64,6 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 | `invalid_range` | 请求的日期或时间范围无效 | 无 |
 | `stale_cursor` | 查询输入版本变化，须重新分页 | 无 |
 | `rule_set_stale` | 提交的规则集基础版本已过期 | `key`、`current_version`（u32）；不存在或已删除时为 0 |
-| `stale_inputs` | 首次预览的输入版本已变化 | `current_versions`，当前范围的查询摘要 |
 | `stale_document_ref` | 文档引用依赖已变化 | 无；重新查询产生引用的范围 |
 | `rule_set_not_found` | 规则集不存在 | `key` |
 | `rule_set_read_only` | 请求修改内置规则集 | `key` |
@@ -72,7 +71,7 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 | `rule_set_identity` | 已有 key 的固定身份不一致 | `key`、`field`（`kind` 或 `parent`） |
 | `rule_validation_failed` | 规则文本或编辑内容未通过校验 | `diagnostics`、`truncated`，第 6.3.3 节的有界诊断列表 |
 | `version_exhausted` | 版本计数无法继续递增 | 无；事务未写入 |
-| `page_too_large` | 所有分页读取中，单个结果项或固定字段超过 200 KiB 页预算；包括 query.*、规则预览与差异、规则集读取和文本导出 | 无 |
+| `page_too_large` | 所有分页读取中，单个结果项或固定字段超过 200 KiB 页预算；包括 query.*、规则集读取和文本导出 | 无 |
 | `delete_scope_unsupported` | 当前里程碑不支持此删除范围 | `scope`，请求的 kind |
 | `delete_job_not_found` | 清理任务不存在 | `uuid` |
 | `delete_job_conflict` | 已有任务 UUID 对应另一份确认内容 | `uuid` |
@@ -87,7 +86,7 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 规则修订字段 `version`、`base_version`、`parent_version`、`current_version`、`builtin_revision` 统一为 u32；已保存版本范围为 1–4,294,967,295，创建哨兵为 0。协议范围与查询语义版本为 u32；日数据、元数据和统计策略计数为 u64，持久化上限为 i64::MAX。计数递增溢出返回 `version_exhausted`。UTC 毫秒、时长与数据库实体 ID 沿用 i64。JSON 以整数编码，客户端必须无损解码，不经浮点数中转。
 
-`classification_version`、`extractor_version`、`privacy_version` 为 64 个字符的小写十六进制 SHA-256 文本；响应 `versions` 为不透明字符串摘要，不是修订整数。它同时用于游标、文档引用与预览输入校验。
+`classification_version`、`extractor_version`、`privacy_version` 为 64 个字符的小写十六进制 SHA-256 文本；响应 `versions` 为不透明字符串摘要，不是修订整数。它同时用于游标与文档引用。
 
 ## 4. 握手
 
@@ -122,9 +121,9 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 | 角色 | 可用操作 |
 |---|---|
 | `ui` | 全部查询、订阅、设置、规则、标注、隐私模式；发送 `ui.open`、`ui.first_frame`、`ui.hidden` |
-| `cli` | `ui.open`、`settings.get`、`settings.set`；只读 `query.*`、`core.status`、`rules_text.validate`、`rules_text.preview`、`rules_text.export`、`rule_sets.tree`、`rule_sets.get`（用于诊断、测试脚本与规则编写） |
+| `cli` | `ui.open`、`settings.get`、`settings.set`；只读 `query.*`、`core.status`、`rules_text.validate`、`rules_text.export`、`rule_sets.tree`、`rule_sets.get`（用于诊断、测试脚本与规则编写） |
 
-新增功能模块使用独立的操作前缀与订阅主题（例如以后的自控协议使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节），权限表逐项授权；同一前缀下的读写操作可以有不同权限。`rules.preview`、`categories.*` 仅允许 `ui`；CLI 使用 `rules_text.preview`。
+新增功能模块使用独立的操作前缀与订阅主题（例如以后的自控协议使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节），权限表逐项授权；同一前缀下的读写操作可以有不同权限。`rules.preview`、`categories.*` 仅允许 `ui`。
 
 角色在握手时声明。host 必须通过同用户、同会话及 `quartz-host.exe` 完整路径的检查，握手中的扩展 ID 还必须在已登记列表中；失败则断开。浏览器种类由扩展在 `browser.hello` 自报，host 不依赖父进程名推断。Edge 通过 `cmd.exe` 中转启动也是合法路径。
 
@@ -229,7 +228,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 |---|---|
 | `rule_sets.tree/get/versions` | 规则集树、自身或生效内容、版本列表；第 6.3.1 节 |
 | `rule_sets.edit/set_enabled/reorder/delete/revert` | 带基础版本的原子写入；第 6.3.1 节 |
-| `rules.preview` / `rules_text.preview` | 编辑草稿或文本预览；第 6.3.2 节 |
+| `rules.preview` | 编辑草稿或导入文本预览；第 6.3.2 节 |
 | `rules_text.validate/import/export` | 文本校验、导入、导出；第 6.3.3 节 |
 | `data.delete.preview` / `data.delete` / `data.delete.status` | M4 仅隐私规则历史清理；第 6.3.4 节 |
 | `categories.list/create/update/reorder/archive` | 分类元数据与归档；第 6.3.5 节 |
@@ -311,25 +310,9 @@ tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树�
 
 ### 6.3.2 预览
 
-`rules.preview`（UI）和 `rules_text.preview`（UI、CLI）共用请求 `{mutation, start_date, end_date, expected_versions, sample_limit?, cursor?}`。日期为 1–7 个逻辑日，界面默认截至所选日的 7 日；`expected_versions` 取同范围 `query.range` 的摘要。`mutation = {op, body}` 为拟提交写操作的完整内容；rules.preview 接受 rule_sets 写操作，rules_text.preview 接受 rules_text.import。预览在临时规则快照上求值，不保存草稿。
+`rules.preview`（仅 `ui`）接受 `{mutation, start_date, end_date}`，日期为 1–7 个逻辑日，`mutation = {op, body}` 支持 `rule_sets.edit`、`rule_sets.set_enabled`、`rule_sets.delete` 与 `rules_text.import`。预览在只读数据库快照与临时草稿规则快照上通过与 `query.*` 相同的查询管线求值，不保存草稿并在批次间让出采集写入。
 
-- 初次请求的输入摘要变化返回 `stale_inputs`；翻页变化返回 `stale_cursor`。请求字段、草稿、范围和版本均进入游标；预览与正常页面共用提取、分类、活动和标注口径。
-- 响应为 `{rules, totals?, further_hidden?, samples, versions, next_cursor}`；全局 further_hidden 与 totals 的 active_ms 只在第一页返回，分组可续页。rules 每项含规则引用、`condition_match:{segments,duration_ms}`、`effective_contribution:{segments,active_ms}`；前者累计条件成立的保留事实切片（包括 idle、被其他规则遮蔽的切片），后者对分类规则只累计最终提供分类且未被标注覆盖的活跃切片；提取规则累计被选中提取结果的活跃切片；隐私规则累计其动作参与最终进一步降级的活跃采集窗口切片（`active` 或 `active_override`），同一切片可有多条隐私来源。`totals:{before,after}` 各含 `active_ms`、`categories:[{category,active_ms}]`、`applications`、`documents`，使用与 query.day 相同的排行行形状，按各自排序完整分页。after 使用草稿快照的最终结果，等于同输入与规则快照的今天页/排行口径，包含人工标注与离线活动。
-- 提取预览的 samples 附 `before` / `after` 提取输出；隐私预览另返全局及逐规则 `further_hidden:{segments,fields,duration_ms}`，只计现存事实中将进一步降级的范围，包含非活跃事实。segments 是去重后的受影响切片数，fields 按 app/window_title/web 字段动作计数；时长按切片累计一次。
-- `sample_limit` 默认且最多 50，可为 0。样本为 `{start_utc_ms,end_utc_ms,clock_segment_id,rule,before,after}`，before/after 只含该 kind 的允许字段；先按 UTC、时钟段、事实主键、规则引用选取前 N 项，再分页，翻页不补选更多；单页含规则统计和样本的总编码不超过 200 KiB。只展示当前与草稿都允许显示的字段，隐私预览不借样本暴露将隐藏的原文。
-
-`expected_versions` 使用同日期范围、`bucket="day"` 的 `query.range` 摘要，dimensions 不影响该摘要。受理后先在只读事务中检查输入摘要与游标，再通过实际写入的决策路径编译草稿。游标绑定预览操作、完整 mutation 的 SHA-256 摘要、日期、expected_versions、样本数量和输入版本；正文按原始字符串字节参与摘要。任何规则集新修订均使游标过期，包括生效内容未变化的修订。两个快照共享一次数据库只读事务，各逻辑日使用相同事实、活动与标注边界，批次最多 256 行或片段，批次间由现有数据库循环优先处理采集写入。分页编码与跳过续页项也按最多 256 项一批执行，文档引用仅对当页候选项生成。
-
-rules 列出草稿中该类型的生效规则，保留零命中项。规则预览以保留的窗口字段为输入，Excluded 与 NoForeground 不进入规则求值，提取另要求 Full；TitleHidden 的分类与隐私条件使用仍保留的字段。分类与提取中因匹配顺序被遮蔽的规则仍计条件命中。隐私 further_hidden 对照事实实际保留的字段计算；逐规则只计该规则动作参与最终降级的字段，相同字段可以有多条规则来源，全局切片与时长去重。totals 与相同角色、相同规则快照下的 query.day 保持一致，仅读取事实已经保存的采集保留级别；查询时不重新应用隐私规则。隐私草稿影响保存后的未来采集，以及 G 步骤中明确执行的历史清理，预览中不改变 totals 的字段保留或时长；进一步隐藏的影响计于 further_hidden。文档排行引用使用所选末日 query.day 的七日详情范围与对应侧的版本摘要；这些引用依赖也进入预览游标版本。
-
-样本 before/after 按类型分别为 `{category}`、`{extraction}` 或 `{app,window_title,web}`；隐私样本中的三项为保留动作。提取输出同时受事实已保存的保留级别、当前隐私规则和草稿隐私规则约束，任一方隐藏应用或标题时，两侧提取输出全部置空；任一方隐藏应用时，两侧分类样本返回未分类。样本不携带窗口标题原文。排序键中的事实主键由核心内部保留，响应不增加该字段。全局统计与前 N 项样本选择完成后才开始分页，续页不增加样本。
-
-```jsonc
-// rules_text.preview body；expected_versions 从同范围 query.range 取得
-{"mutation":{"op":"rules_text.import","body":{"key":"user.local.privacy","base_version":2,"text":"format = \"quartz-rules/1\"\n[set]\nkey = \"user.local.privacy\"\nkind = \"privacy\"\nname = \"本地隐私\"\nparent = \"builtin.privacy\"\n[[rule]]\nid = \"bank\"\npreset = \"title_hidden\"\nmatch = \"all\"\nwhen = [{ field = \"title.raw\", op = \"contains\", value = \"网银\" }]\n"}},"start_date":"2026-11-16","end_date":"2026-11-23","expected_versions":"opaque","sample_limit":50}
-// 确认后提交 rules_text.import
-{"key":"user.local.privacy","base_version":2,"text":"format = \"quartz-rules/1\"\n[set]\nkey = \"user.local.privacy\"\nkind = \"privacy\"\nname = \"本地隐私\"\nparent = \"builtin.privacy\"\n[[rule]]\nid = \"bank\"\npreset = \"title_hidden\"\nmatch = \"all\"\nwhen = [{ field = \"title.raw\", op = \"contains\", value = \"网银\" }]\n"}
-```
+响应为单个有界帧 `{rules, totals, document_change_count, further_hidden_count, samples, samples_truncated}`，无游标分页：`rules` 列出草稿生效规则的 `{rule, matched_count, matched_ms, effective_ms}`（区分条件命中与受遮蔽/标注后的有效活跃时长）；`totals: {before, after}` 返回与 `query.day` 一致的 `active_ms` 与分类统计；`document_change_count` 为活跃切片中提取文档身份发生变化的计数；`further_hidden_count` 为隐私草稿下现存保留字段将被进一步隐藏的事实切片总数；`samples` 最多返回 50 条按当前与草稿较严隐私口径脱敏的样本。若整帧超出 256 KiB 上限，核心优先截断 `samples` 并置 `samples_truncated: true`，不返回错误。
 
 ### 6.3.3 文本
 

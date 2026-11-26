@@ -319,31 +319,6 @@ impl QueryFixture {
             .execute(&mut self.store.writer)
             .expect("same timestamp foreground facts");
     }
-    pub(crate) fn zero_first_duration(&mut self) {
-        diesel::update(intervals::table.filter(intervals::id.eq(1)))
-            .set((
-                intervals::end_mono_ms.eq(Some(0)),
-                intervals::duration_ms.eq(Some(0)),
-            ))
-            .execute(&mut self.store.writer)
-            .expect("zero elapsed fixture slice");
-    }
-    pub(crate) fn exclude_windows(&mut self) {
-        self.redact_titles(enums::CaptureLevel::Excluded);
-    }
-    pub(crate) fn clear_foreground(&mut self) {
-        diesel::update(intervals::table)
-            .set((
-                intervals::kind.eq(IntervalKind::NoForeground),
-                intervals::no_foreground_reason.eq(Some(enums::NoForegroundReason::Empty)),
-                intervals::app_id.eq(None::<i64>),
-                intervals::window_instance_id.eq(None::<i64>),
-                intervals::title_id.eq(None::<i64>),
-                intervals::title_status.eq(TitleStatus::Empty),
-            ))
-            .execute(&mut self.store.writer)
-            .expect("no foreground fixture");
-    }
     pub(crate) fn hide_titles(&mut self) {
         self.redact_titles(enums::CaptureLevel::TitleHidden);
     }

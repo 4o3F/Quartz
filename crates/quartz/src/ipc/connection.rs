@@ -1048,21 +1048,37 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn cli_text_preview_executes_on_the_database_query_worker() {
+    async fn ui_preview_executes_on_the_database_query_worker() {
         use quartz_protocol::{Op, Request};
         let database = TestDatabase::start();
         let status = StatusPublisher::new(quartz_protocol::InstanceId("preview-worker".into()));
-        let mut client =
-            MemoryClient::connect(connection(&database, &status), HelloRole::Cli).await;
-        client.send_batch([Request {id:RequestId(2),op:Op::QueryRange,body:serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["category"]})}]).await;
-        let Envelope::Response(response) = client.next().await else {
-            panic!("range response")
-        };
-        let ResponseOutcome::Ok { body } = response.outcome else {
-            panic!("range success")
-        };
-        let versions = body["versions"].clone();
-        client.send_batch([Request {id:RequestId(3),op:Op::RulesTextPreview,body:serde_json::json!({"mutation":{"op":"rules_text.import","body":{"key":"user.worker","base_version":0,"text":"format='quartz-rules/1'\n[set]\nkey='user.worker'\nkind='classification'\nname='Worker'\n"}},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":versions})}]).await;
+        let mut client = MemoryClient::connect(
+            connection(&database, &status),
+            HelloRole::Ui {
+                ui: quartz_protocol::UiHello {
+                    state: quartz_protocol::UiState::Visible,
+                },
+            },
+        )
+        .await;
+        client
+            .send_batch([Request {
+                id: RequestId(2),
+                op: Op::RulesPreview,
+                body: serde_json::json!({
+                    "mutation": {
+                        "op": "rules_text.import",
+                        "body": {
+                            "key": "user.worker",
+                            "base_version": 0,
+                            "text": "format='quartz-rules/1'\n[set]\nkey='user.worker'\nkind='classification'\nname='Worker'\n"
+                        }
+                    },
+                    "start_date": "2025-01-02",
+                    "end_date": "2025-01-03"
+                }),
+            }])
+            .await;
         let Envelope::Response(response) = client.next().await else {
             panic!("preview response")
         };
@@ -1071,7 +1087,7 @@ pub(crate) mod tests {
         };
         let preview: quartz_protocol::RulesPreviewResponse =
             serde_json::from_value(body).expect("typed response");
-        assert_eq!(preview.totals.expect("totals").after.active_ms, Some(4000));
+        assert_eq!(preview.totals.after.active_ms, 4000);
         client.close().await;
     }
 }

@@ -1,21 +1,21 @@
 {
-  "editor": {
+  "edit": {
     "mutation": {"op":"rule_sets.edit","body":{"key":"user.preview","base_version":0,"text":"format='quartz-rules/1'\n[set]\nkey='user.preview'\nkind='classification'\nname='Preview'\n"}},
-    "start_date":"2026-11-16","end_date":"2026-11-23","expected_versions":"range-inputs","sample_limit":50
+    "start_date":"2026-11-16","end_date":"2026-11-23"
   },
-  "text": {
+  "import": {
     "mutation": {"op":"rules_text.import","body":{"key":"user.preview","base_version":0,"text":"format='quartz-rules/1'\n[set]\nkey='user.preview'\nkind='privacy'\nname='Preview'\n"}},
-    "start_date":"2026-11-16","end_date":"2026-11-23","expected_versions":"range-inputs"
+    "start_date":"2026-11-16","end_date":"2026-11-23"
   },
   "response": {
-    "rules":[{"rule":"user.preview/one@1","condition_match":{"segments":3,"duration_ms":3000},"effective_contribution":{"segments":1,"active_ms":1000},"further_hidden":{"segments":2,"fields":2,"duration_ms":2000}}],
+    "rules":[{"rule":"user.preview/one@1","matched_count":3,"matched_ms":3000,"effective_ms":1000}],
     "totals": {
-      "before":{"active_ms":1000,"categories":[{"category":{"kind":"unclassified"},"active_ms":1000}],"applications":[{"app":{"id":1,"exe_name":"code.exe","display_name":"Code","aumid":null},"active_ms":1000}],"documents":[{"document_ref":"opaque-document","app":1,"document":"main.rs","project":"Quartz","profile":null,"active_ms":1000}]},
-      "after":{"active_ms":1000,"categories":[{"category":{"kind":"unclassified"},"active_ms":1000}],"applications":[{"app":{"id":1,"exe_name":"code.exe","display_name":"Code","aumid":null},"active_ms":1000}],"documents":[{"document_ref":"opaque-document","app":1,"document":"main.rs","project":"Quartz","profile":null,"active_ms":1000}]}
+      "before":{"active_ms":1000,"categories":[{"category":{"kind":"unclassified"},"active_ms":1000}]},
+      "after":{"active_ms":1000,"categories":[{"category":{"kind":"unclassified"},"active_ms":1000}]}
     },
-    "further_hidden":{"segments":2,"fields":2,"duration_ms":2000},
+    "document_change_count":0,
+    "further_hidden_count":2,
     "samples":[{"start_utc_ms":0,"end_utc_ms":1000,"clock_segment_id":1,"rule":"user.preview/one@1","before":{"app":"keep","window_title":"keep","web":"full"},"after":{"app":"keep","window_title":"drop","web":"full"}}],
-    "versions":"range-inputs","next_cursor":null
-  },
-  "continuation":{"rules":[],"totals":{"before":{"categories":[],"applications":[],"documents":[]},"after":{"categories":[],"applications":[],"documents":[]}},"samples":[],"versions":"range-inputs","next_cursor":null}
+    "samples_truncated":false
+  }
 }

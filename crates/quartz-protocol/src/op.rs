@@ -110,9 +110,6 @@ pub enum Op {
     /// The `rules_text.validate` request.
     #[serde(rename = "rules_text.validate")]
     RulesTextValidate,
-    /// The `rules_text.preview` request.
-    #[serde(rename = "rules_text.preview")]
-    RulesTextPreview,
     /// The `rules_text.import` request.
     #[serde(rename = "rules_text.import")]
     RulesTextImport,
@@ -190,10 +187,9 @@ impl Op {
             | Self::RuleSetsDelete
             | Self::RuleSetsEdit => OpFamily::RuleSets,
             Self::RulesPreview => OpFamily::Rules,
-            Self::RulesTextValidate
-            | Self::RulesTextPreview
-            | Self::RulesTextImport
-            | Self::RulesTextExport => OpFamily::RulesText,
+            Self::RulesTextValidate | Self::RulesTextImport | Self::RulesTextExport => {
+                OpFamily::RulesText
+            }
             Self::CategoriesList
             | Self::CategoriesCreate
             | Self::CategoriesUpdate

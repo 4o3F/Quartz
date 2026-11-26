@@ -55,35 +55,11 @@ struct MutationTargets {
 impl From<wire::RulePreviewMutation> for RuleMutation {
     fn from(mutation: wire::RulePreviewMutation) -> Self {
         match mutation {
-            wire::RulePreviewMutation::Edit(request) => Self::Edit(wire::RuleSetsEditRequest {
-                key: request.key,
-                base_version: request.base_version,
-                text: request.text,
-            }),
-            wire::RulePreviewMutation::SetEnabled(request) => {
-                Self::SetEnabled(wire::RuleSetsSetEnabledRequest {
-                    key: request.key,
-                    base_version: request.base_version,
-                    enabled: request.enabled,
-                })
-            }
-            wire::RulePreviewMutation::Delete(request) => {
-                Self::Delete(wire::RuleSetsDeleteRequest {
-                    key: request.key,
-                    base_version: request.base_version,
-                })
-            }
+            wire::RulePreviewMutation::Edit(request) => Self::Edit(request),
+            wire::RulePreviewMutation::Import(request) => Self::Import(request),
+            wire::RulePreviewMutation::SetEnabled(request) => Self::SetEnabled(request),
+            wire::RulePreviewMutation::Delete(request) => Self::Delete(request),
         }
-    }
-}
-impl From<wire::RulesTextPreviewMutation> for RuleMutation {
-    fn from(mutation: wire::RulesTextPreviewMutation) -> Self {
-        let wire::RulesTextPreviewMutation::Import(request) = mutation;
-        Self::Import(wire::RuleSetsEditRequest {
-            key: request.key,
-            base_version: request.base_version,
-            text: request.text,
-        })
     }
 }
 impl RuleMutation {
@@ -1160,7 +1136,7 @@ mod tests {
     fn privacy_import_draft_and_save_succeed_and_take_effect() {
         let mut fixture = ValidationFixture::new();
         let text = "format='quartz-rules/1'\n[set]\nkey='user.private'\nkind='privacy'\nname='Private'\n[[rule]]\nid='hide'\nlabel='Hide'\npreset='title_hidden'\nwhen=[{field='app.exe_name',op='equals',value='secret.exe'}]\n";
-        let mutation: wire::RulesTextPreviewMutation = serde_json::from_value(serde_json::json!({"op":"rules_text.import","body":{"key":"user.private","base_version":0,"text":text}})).expect("import preview");
+        let mutation: wire::RulePreviewMutation = serde_json::from_value(serde_json::json!({"op":"rules_text.import","body":{"key":"user.private","base_version":0,"text":text}})).expect("import preview");
         let draft = RuleMutation::from(mutation.clone())
             .draft(&fixture.registry)
             .expect("privacy draft");

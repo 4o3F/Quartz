@@ -45,19 +45,16 @@ pub use handshake::{
 pub use op::{ControlBody, ControlOp, Op, OpFamily};
 pub use role::{AuthorizeOpError, Role};
 pub use rules::{
-    FurtherHidden, MAX_RULE_DIAGNOSTICS, MAX_RULE_TEXT_BYTES, MutatedRuleSet, PREVIEW_MAX_DAYS,
-    PREVIEW_MAX_SAMPLES, ParsePreviewSampleLimitError, PreviewCategoryRank, PreviewDelete,
-    PreviewSampleLimit, PreviewSetEnabled, RuleAction, RuleApp, RuleCondition, RuleConditionMatch,
-    RuleDiagnostic, RuleDiagnosticLocation, RuleEffectiveContribution, RuleEntryContent,
-    RuleEntryKind, RuleEntryState, RuleField, RuleKind, RuleMatch, RuleOperator,
-    RulePreviewMutation, RulePreviewOutput, RulePreviewRequest, RulePreviewSample,
+    MAX_RULE_DIAGNOSTICS, MAX_RULE_TEXT_BYTES, MutatedRuleSet, PREVIEW_MAX_DAYS,
+    PREVIEW_MAX_SAMPLES, PreviewCategoryRank, RuleAction, RuleApp, RuleCondition, RuleDiagnostic,
+    RuleDiagnosticLocation, RuleEntryContent, RuleEntryKind, RuleEntryState, RuleField, RuleKind,
+    RuleMatch, RuleOperator, RulePreviewMutation, RulePreviewOutput, RulePreviewSample,
     RulePreviewSideTotals, RulePreviewStatistics, RulePreviewTotals, RuleProvenance, RuleSetCounts,
     RuleSetEntry, RuleSetIdentityField, RuleSetNode, RuleSetSource, RuleSetWarning,
     RuleSetsDeleteRequest, RuleSetsEditRequest, RuleSetsGetRequest, RuleSetsGetResponse,
     RuleSetsSetEnabledRequest, RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsWriteResponse,
     RuleView, RuleWarningCode, RuleWebAction, RulesPreviewRequest, RulesPreviewResponse,
-    RulesTextExportRequest, RulesTextExportResponse, RulesTextPreviewMutation,
-    RulesTextPreviewRequest, RulesTextPreviewResponse, RulesTextValidateRequest,
+    RulesTextExportRequest, RulesTextExportResponse, RulesTextValidateRequest,
     RulesTextValidateResponse, ValidatePreviewDatesError,
 };
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};

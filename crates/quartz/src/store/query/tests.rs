@@ -4872,7 +4872,12 @@ fn abandoned_queries_do_not_take_the_reader_or_read_rule_metadata() {
             &registry,
         )
         .expect("abandoned query");
-    let request=crate::query::preview::PreviewRequest::decode(quartz_protocol::Op::RulesPreview,serde_json::json!({"mutation":{"op":"rule_sets.edit","body":{"key":"user.closed","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":"opaque"})).expect("preview request");
+    let request = crate::query::preview::PreviewRequest::decode(serde_json::json!({
+        "mutation": {"op": "rule_sets.edit", "body": {"key": "user.closed", "base_version": 0, "text": ""}},
+        "start_date": "2025-01-02",
+        "end_date": "2025-01-03",
+    }))
+    .expect("preview request");
     let (reply, received) = tokio::sync::oneshot::channel();
     drop(received);
     runner

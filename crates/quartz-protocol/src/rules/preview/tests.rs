@@ -1,5 +1,5 @@
 use super::*;
-use crate::{CoreRequest, Op, QueryCursor, Role};
+use crate::{CoreRequest, Op, Role};
 use serde_json::{Value, json};
 
 fn fixture() -> Value {
@@ -13,15 +13,14 @@ fn round_trip<T: serde::de::DeserializeOwned + Serialize>(value: Value) {
         value
     );
 }
+
 #[test]
 fn preview_requests_and_responses_preserve_wire_shapes() {
     let fixture = fixture();
-    round_trip::<RulesPreviewRequest>(fixture["editor"].clone());
-    round_trip::<RulesTextPreviewRequest>(fixture["text"].clone());
+    round_trip::<RulesPreviewRequest>(fixture["edit"].clone());
+    round_trip::<RulesPreviewRequest>(fixture["import"].clone());
     round_trip::<RulesPreviewResponse>(fixture["response"].clone());
-    round_trip::<RulesTextPreviewResponse>(fixture["continuation"].clone());
     assert_eq!(RulesPreviewRequest::OP, Op::RulesPreview);
-    assert_eq!(RulesTextPreviewRequest::OP, Op::RulesTextPreview);
     for output in [
         json!({"category":{"kind":"unclassified"}}),
         json!({"extraction":{"document":null,"project":null,"profile":null,"dirty":null,"normalized_title":null,"extractor_rule":null,"status":null}}),
@@ -30,28 +29,19 @@ fn preview_requests_and_responses_preserve_wire_shapes() {
         round_trip::<RulePreviewOutput>(output);
     }
 }
+
 #[test]
-fn preview_requests_reject_unknown_fields_at_every_mutation_level() {
-    for pointer in ["", "/mutation", "/mutation/body"] {
-        let mut request = fixture()["editor"].clone();
-        request.pointer_mut(pointer).expect("object")["extra"] = json!(true);
-        assert!(serde_json::from_value::<RulesPreviewRequest>(request).is_err());
-        let mut request = fixture()["text"].clone();
-        request.pointer_mut(pointer).expect("object")["extra"] = json!(true);
-        assert!(serde_json::from_value::<RulesTextPreviewRequest>(request).is_err());
+fn preview_requests_reject_unknown_fields_and_accept_all_mutations() {
+    for key in ["edit", "import"] {
+        for pointer in ["", "/mutation", "/mutation/body"] {
+            let mut request = fixture()[key].clone();
+            request.pointer_mut(pointer).expect("object")["extra"] = json!(true);
+            assert!(serde_json::from_value::<RulesPreviewRequest>(request).is_err());
+        }
     }
-    assert!(serde_json::from_value::<RulesPreviewRequest>(fixture()["text"].clone()).is_err());
-    assert!(
-        serde_json::from_value::<RulesTextPreviewRequest>(fixture()["editor"].clone()).is_err()
-    );
-    let duplicate =
-        r#"{"op":"rule_sets.delete","body":{"key":"user.x","base_version":1,"key":"user.y"}}"#;
-    assert!(serde_json::from_str::<RulePreviewMutation>(duplicate).is_err());
-}
-#[test]
-fn preview_accepts_all_rule_set_write_shapes() {
     for mutation in [
         json!({"op":"rule_sets.edit","body":{"key":"user.x","base_version":0,"text":"text"}}),
+        json!({"op":"rules_text.import","body":{"key":"user.x","base_version":0,"text":"text"}}),
         json!({"op":"rule_sets.set_enabled","body":{"key":"user.x","base_version":1,"enabled":false}}),
         json!({"op":"rule_sets.delete","body":{"key":"user.x","base_version":1}}),
     ] {
@@ -60,32 +50,16 @@ fn preview_accepts_all_rule_set_write_shapes() {
         unknown["body"]["extra"] = json!(true);
         assert!(serde_json::from_value::<RulePreviewMutation>(unknown).is_err());
     }
-    for removed in [
-        json!({"op":"rule_sets.reorder","body":{"siblings":[{"key":"user.x","base_version":1}]}}),
-        json!({"op":"rule_sets.revert","body":{"key":"user.x","base_version":1,"version":1}}),
-    ] {
-        assert!(serde_json::from_value::<RulePreviewMutation>(removed).is_err());
-    }
+    let duplicate =
+        r#"{"op":"rule_sets.delete","body":{"key":"user.x","base_version":1,"key":"user.y"}}"#;
+    assert!(serde_json::from_str::<RulePreviewMutation>(duplicate).is_err());
 }
+
 #[test]
-fn preview_samples_and_logical_dates_have_documented_bounds() {
-    assert_eq!(PreviewSampleLimit::default().get(), 50);
-    for value in [0, 50] {
-        assert_eq!(
-            PreviewSampleLimit::try_from(value)
-                .expect("valid samples")
-                .get(),
-            value
-        );
-    }
-    for value in [51, u32::MAX] {
-        assert!(PreviewSampleLimit::try_from(value).is_err());
-    }
-    for value in [json!(-1), json!(1.5), json!(true), json!("50")] {
-        assert!(serde_json::from_value::<PreviewSampleLimit>(value).is_err());
-    }
+fn preview_logical_dates_have_documented_bounds() {
+    assert_eq!(PREVIEW_MAX_SAMPLES, 50);
     let mut request: RulesPreviewRequest =
-        serde_json::from_value(fixture()["editor"].clone()).expect("request");
+        serde_json::from_value(fixture()["edit"].clone()).expect("request");
     for end in ["2026-11-17", "2026-11-23"] {
         request.end_date = end.parse().expect("end");
         request.validate_dates().expect("one through seven days");
@@ -95,8 +69,9 @@ fn preview_samples_and_logical_dates_have_documented_bounds() {
         assert!(request.validate_dates().is_err());
     }
 }
+
 #[test]
-fn preview_responses_accept_additive_fields() {
+fn preview_responses_accept_additive_fields_and_ui_only_role() {
     let mut response = fixture()["response"].clone();
     response["extra"] = json!(true);
     response["rules"][0]["extra"] = json!(true);
@@ -104,81 +79,16 @@ fn preview_responses_accept_additive_fields() {
     response["samples"][0]["extra"] = json!(true);
     response["samples"][0]["after"]["extra"] = json!(true);
     let _: RulesPreviewResponse = serde_json::from_value(response).expect("additive response");
-}
-#[test]
-fn preview_roles_match_the_contract() {
     assert!(Role::Ui.authorize(Op::RulesPreview).is_ok());
-    assert!(Role::Ui.authorize(Op::RulesTextPreview).is_ok());
-    assert!(Role::Cli.authorize(Op::RulesTextPreview).is_ok());
     assert!(Role::Cli.authorize(Op::RulesPreview).is_err());
-}
-#[test]
-fn preview_cursors_bind_mutation_operation_dates_versions_and_limits() {
-    let request: RulesPreviewRequest =
-        serde_json::from_value(fixture()["editor"].clone()).expect("request");
-    let parameters = request.cursor_parameters("mutation-digest".into());
-    let cursor = QueryCursor::new(QueryVersions("inputs".into()), parameters.clone(), 1);
-    cursor.validate_query(&parameters).expect("same parameters");
-    assert!(
-        cursor
-            .validate_query(&request.cursor_parameters("another-mutation".into()))
-            .is_err()
-    );
-    let text: RulesTextPreviewRequest =
-        serde_json::from_value(fixture()["text"].clone()).expect("request");
-    assert!(
-        cursor
-            .validate_query(&text.cursor_parameters("mutation-digest".into()))
-            .is_err()
-    );
-    let mut changed = request.clone();
-    changed.expected_versions = QueryVersions("other".into());
-    assert!(
-        cursor
-            .validate_query(&changed.cursor_parameters("mutation-digest".into()))
-            .is_err()
-    );
-    changed = request.clone();
-    changed.end_date = "2026-11-22".parse().expect("date");
-    assert!(
-        cursor
-            .validate_query(&changed.cursor_parameters("mutation-digest".into()))
-            .is_err()
-    );
-    changed = request;
-    changed.sample_limit = Some(PreviewSampleLimit::try_from(0).expect("no samples"));
-    assert!(
-        cursor
-            .validate_query(&changed.cursor_parameters("mutation-digest".into()))
-            .is_err()
-    );
-}
-#[test]
-fn preview_debug_output_omits_submitted_rule_text() {
-    let mut request = fixture()["editor"].clone();
-    request["mutation"]["body"]["text"] = json!("private-rule-text-marker");
-    let request: RulesPreviewRequest = serde_json::from_value(request).expect("request");
-    assert!(!format!("{request:?}").contains("private-rule-text-marker"));
-    let mut request = fixture()["text"].clone();
-    request["mutation"]["body"]["text"] = json!("private-rule-text-marker");
-    let request: RulesTextPreviewRequest = serde_json::from_value(request).expect("request");
-    assert!(!format!("{request:?}").contains("private-rule-text-marker"));
-}
-#[test]
-fn preview_errors_require_the_current_digest_and_preserve_stable_codes() {
-    for wire in [
-        json!({"code":"stale_inputs","current_versions":"current-range-inputs"}),
-        json!({"code":"stale_cursor"}),
-    ] {
-        round_trip::<crate::ProtocolError>(wire);
-    }
-    assert!(
-        serde_json::from_value::<crate::ProtocolError>(json!({"code":"stale_inputs"})).is_err()
-    );
 }
 
 #[test]
-fn privacy_preview_fixture_preserves_stored_retention_totals() {
-    let totals = fixture()["response"]["totals"].clone();
-    assert_eq!(totals["before"], totals["after"]);
+fn preview_debug_output_omits_submitted_rule_text() {
+    for key in ["edit", "import"] {
+        let mut request = fixture()[key].clone();
+        request["mutation"]["body"]["text"] = json!("private-rule-text-marker");
+        let request: RulesPreviewRequest = serde_json::from_value(request).expect("request");
+        assert!(!format!("{request:?}").contains("private-rule-text-marker"));
+    }
 }

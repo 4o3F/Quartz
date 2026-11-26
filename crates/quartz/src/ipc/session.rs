@@ -289,11 +289,8 @@ impl ConnectionSession {
                             Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
                         }
                     }
-                    Op::RulesPreview | Op::RulesTextPreview => {
-                        match crate::query::preview::PreviewRequest::decode(
-                            request.op,
-                            request.body,
-                        ) {
+                    Op::RulesPreview => {
+                        match crate::query::preview::PreviewRequest::decode(request.body) {
                             Ok(request) => Action::Preview { id, request },
                             Err(error) => Action::Reply(Action::error_response(Some(id), error)),
                         }
@@ -1204,52 +1201,53 @@ mod tests {
     fn rule_previews_check_roles_and_nested_bodies_before_worker_admission() {
         let status =
             crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("preview-roles".into()));
-        for role in [
-            ReadyRole::Ui {
-                state: UiState::Visible,
-            },
-            ReadyRole::Cli,
-        ] {
-            for op in [Op::RulesPreview, Op::RulesTextPreview] {
-                let mut session = ConnectionSession {
-                    state: State::Ready(role),
-                    allowed: AllowedRoles::Quartz,
-                };
-                let mutation_op = if op == Op::RulesPreview {
-                    "rule_sets.edit"
-                } else {
-                    "rules_text.import"
-                };
-                let body = serde_json::json!({"mutation":{"op":mutation_op,"body":{"key":"user.preview","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":"opaque"});
-                let allowed = role.role().authorize(op).is_ok();
-                let action = session.receive(
-                    request(2, op, body.clone()),
+        for mutation_op in ["rule_sets.edit", "rules_text.import"] {
+            let body = serde_json::json!({
+                "mutation": {"op": mutation_op, "body": {"key": "user.preview", "base_version": 0, "text": ""}},
+                "start_date": "2025-01-02",
+                "end_date": "2025-01-03",
+            });
+            let mut cli = ConnectionSession {
+                state: State::Ready(ReadyRole::Cli),
+                allowed: AllowedRoles::Quartz,
+            };
+            assert_eq!(
+                cli.receive(
+                    request(2, Op::RulesPreview, body.clone()),
                     &status.subscribe().borrow().status,
-                );
-                if allowed {
-                    assert!(matches!(action, Action::Preview { .. }));
-                } else {
-                    assert_eq!(
-                        action.reply().outcome,
-                        ResponseOutcome::Err {
-                            error: ProtocolError::new(ErrorKind::Forbidden)
-                        }
-                    );
+                )
+                .reply()
+                .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::Forbidden)
                 }
-                if allowed {
-                    let mut invalid = body;
-                    invalid["mutation"]["body"]["unknown_field"] = serde_json::json!("forbidden");
-                    assert_eq!(
-                        session
-                            .receive(request(3, op, invalid), &status.subscribe().borrow().status)
-                            .reply()
-                            .outcome,
-                        ResponseOutcome::Err {
-                            error: ProtocolError::new(ErrorKind::BadRequest)
-                        }
-                    );
+            );
+            let mut ui = ConnectionSession {
+                state: State::Ready(ReadyRole::Ui {
+                    state: UiState::Visible,
+                }),
+                allowed: AllowedRoles::Quartz,
+            };
+            assert!(matches!(
+                ui.receive(
+                    request(2, Op::RulesPreview, body.clone()),
+                    &status.subscribe().borrow().status,
+                ),
+                Action::Preview { .. }
+            ));
+            let mut invalid = body;
+            invalid["mutation"]["body"]["unknown_field"] = serde_json::json!("forbidden");
+            assert_eq!(
+                ui.receive(
+                    request(3, Op::RulesPreview, invalid),
+                    &status.subscribe().borrow().status,
+                )
+                .reply()
+                .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::BadRequest)
                 }
-            }
+            );
         }
     }
 }

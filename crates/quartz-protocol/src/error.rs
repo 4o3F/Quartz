@@ -36,10 +36,6 @@ pub enum ErrorKind {
     InvalidRange,
     /// Query inputs changed; pagination must restart.
     StaleCursor,
-    /// The first preview's expected inputs differ from the current range digest.
-    StaleInputs {
-        current_versions: crate::QueryVersions,
-    },
     /// Document reference inputs changed; refresh the originating query.
     StaleDocumentRef,
     /// The submitted base version differs from the current rule-set version.
@@ -90,7 +86,6 @@ impl ErrorKind {
             Self::Forbidden => "forbidden",
             Self::InvalidRange => "invalid_range",
             Self::StaleCursor => "stale_cursor",
-            Self::StaleInputs { .. } => "stale_inputs",
             Self::StaleDocumentRef => "stale_document_ref",
             Self::RuleSetStale { .. } => "rule_set_stale",
             Self::RuleSetNotFound { .. } => "rule_set_not_found",
@@ -143,7 +138,6 @@ mod tests {
             "forbidden",
             "invalid_range",
             "stale_cursor",
-            "stale_inputs",
             "stale_document_ref",
             "rule_set_stale",
             "rule_set_not_found",
@@ -155,7 +149,7 @@ mod tests {
             "version_exhausted",
             "busy",
         ] {
-            let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "current_versions":"range-inputs", "key": "user.local", "core_version": "test-core", "field":"parent", "diagnostics":[], "truncated":false});
+            let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "key": "user.local", "core_version": "test-core", "field":"parent", "diagnostics":[], "truncated":false});
             let kind: ErrorKind = serde_json::from_value(wire).expect("known error kind");
             assert_eq!(kind.code(), name);
             assert_eq!(
