@@ -1036,4 +1036,14 @@ today.annotations.error.busy:
   zh-CN: "核心暂时繁忙，已保留当前输入，可直接重试保存。"
 today.annotations.error.generic:
   zh-CN: "保存标注变更失败，请重试。"
+today.annotations.error.category_unavailable:
+  zh-CN: "所选分类已不可用或已归档，请刷新分类后重试。"
+timeline.mode.pan:
+  zh-CN: "平移"
+timeline.mode.select:
+  zh-CN: "选择"
+timeline.classify.title:
+  zh-CN: "归类为…"
+timeline.classify.other:
+  zh-CN: "其他…"
 

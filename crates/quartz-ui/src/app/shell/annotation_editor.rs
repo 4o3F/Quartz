@@ -269,13 +269,16 @@ impl AppShell {
         self.run_annotation_editor_effect(effect, cx);
     }
 
-    /// Handles `Esc` when the Annotations panel is active: cancels delete confirm, closes draft,
-    /// or closes the floating side panel.
+    /// Handles `Esc` when the Annotations panel is active: cancels transient timeline state,
+    /// delete confirm, closes draft, or closes the floating side panel.
     pub(super) fn handle_annotations_escape(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.dismiss_timeline_transient(cx) {
+            return;
+        }
         if let Some(draft) = self.annotation_editor.draft() {
             if matches!(
                 draft.mode,
@@ -293,6 +296,50 @@ impl AppShell {
             return;
         }
         self.close_details(window, cx);
+    }
+
+    /// Opens the annotation editor in create mode for a preselected UTC range and optional typed
+    /// category UUID (H14 drag-select and H15 context menu "Other…").
+    pub(super) fn open_create_annotation_range(
+        &mut self,
+        range: crate::link::UtcRange,
+        category: Option<wire::Uuid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.annotation_editor.day_context().is_none() {
+            let context = self.day.live_time_context();
+            let _ = self.annotation_editor.set_day_context(context);
+        }
+        self.annotation_editor.open_create(range, category);
+        self.annotation_inputs_sync = InputSyncState::NeedsSync;
+        self.ensure_categories_loaded_for_annotations(cx);
+        self.hover = None;
+        self.segment_menu = None;
+        window.focus(&self.panel_focus, cx);
+        cx.notify();
+    }
+
+    /// Directly creates a category-override annotation for `range` and active `category` (H15),
+    /// then refreshes the shown day on success or surfaces the H13 write notice on failure.
+    pub(super) fn quick_classify_range(
+        &mut self,
+        range: crate::link::UtcRange,
+        category: wire::Uuid,
+        cx: &mut Context<Self>,
+    ) {
+        if self.annotation_editor.day_context().is_none() {
+            let context = self.day.live_time_context();
+            let _ = self.annotation_editor.set_day_context(context);
+        }
+        let effect = self.annotation_editor.quick_classify(
+            range,
+            category,
+            self.rules.categories(),
+            generate_annotation_id,
+        );
+        self.run_annotation_editor_effect(effect, cx);
+        cx.notify();
     }
 
     fn open_create_annotation_default(&mut self, cx: &mut Context<Self>) {
@@ -377,8 +424,12 @@ impl AppShell {
                 cx.spawn(async move |this, cx| {
                     let result = link.create_annotations(request).await.map(|_| ());
                     let _ = this.update(cx, |this, cx| {
+                        let succeeded = result.is_ok();
                         let next = this.annotation_editor.apply_write_finished(date, result);
                         this.run_annotation_editor_effect(next, cx);
+                        if succeeded && this.day.date() == date {
+                            this.retry_day(cx);
+                        }
                         cx.notify();
                     });
                 })
@@ -395,8 +446,12 @@ impl AppShell {
                 cx.spawn(async move |this, cx| {
                     let result = link.update_annotations(request).await.map(|_| ());
                     let _ = this.update(cx, |this, cx| {
+                        let succeeded = result.is_ok();
                         let next = this.annotation_editor.apply_write_finished(date, result);
                         this.run_annotation_editor_effect(next, cx);
+                        if succeeded && this.day.date() == date {
+                            this.retry_day(cx);
+                        }
                         cx.notify();
                     });
                 })
@@ -413,8 +468,12 @@ impl AppShell {
                 cx.spawn(async move |this, cx| {
                     let result = link.delete_annotations(request).await.map(|_| ());
                     let _ = this.update(cx, |this, cx| {
+                        let succeeded = result.is_ok();
                         let next = this.annotation_editor.apply_write_finished(date, result);
                         this.run_annotation_editor_effect(next, cx);
+                        if succeeded && this.day.date() == date {
+                            this.retry_day(cx);
+                        }
                         cx.notify();
                     });
                 })
@@ -990,6 +1049,78 @@ impl AppShell {
             .child(close_button)
     }
 
+    /// Renders the H13 write-error notice banner when a direct quick-classify write (H15) fails
+    /// outside the annotation editor form.
+    pub(super) fn render_quick_annotation_notice(
+        &self,
+        ui: &Widgets<'_>,
+        cx: &Context<Self>,
+    ) -> Option<Div> {
+        let notice = self.annotation_editor.quick_notice()?;
+        Some(
+            self.render_annotation_write_notice(ui, notice).child(
+                ui.button(
+                    "quick-annotation-notice-dismiss",
+                    Density::Compact,
+                    ButtonContent::Icon(IconName::Close),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.annotation_editor.clear_quick_notice();
+                    cx.notify();
+                })),
+            ),
+        )
+    }
+
+    fn render_annotation_write_notice(
+        &self,
+        ui: &Widgets<'_>,
+        notice: &AnnotationWriteNotice,
+    ) -> Div {
+        let space = &ui.metrics.space;
+        let colors = ui.info_bar_colors(InfoBarStyle::Critical);
+        let msg = match notice {
+            AnnotationWriteNotice::BadRequest { .. } => Msg::TodayAnnotationsErrorBadRequest,
+            AnnotationWriteNotice::InvalidRange { .. } => Msg::TodayAnnotationsErrorInvalidRange,
+            AnnotationWriteNotice::Stale { .. } => Msg::TodayAnnotationsErrorStale,
+            AnnotationWriteNotice::Busy { .. } => Msg::TodayAnnotationsErrorBusy,
+            AnnotationWriteNotice::Generic { .. } => Msg::TodayAnnotationsErrorGeneric,
+            AnnotationWriteNotice::CategoryUnavailable { .. } => {
+                Msg::TodayAnnotationsErrorCategoryUnavailable
+            }
+        };
+        ui.card()
+            .p(space.m)
+            .bg(colors.background)
+            .border_color(colors.border)
+            .text_color(colors.foreground)
+            .flex()
+            .items_start()
+            .gap(space.s)
+            .child(ui.icon(IconName::CircleX, Density::Compact, colors.icon))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(space.xxs)
+                    .child(
+                        div()
+                            .whitespace_normal()
+                            .ramp(ui, Ramp::Caption)
+                            .child(self.formatter.text(msg)),
+                    )
+                    .child(
+                        div()
+                            .ramp(ui, Ramp::Caption)
+                            .font(ui.mono_font())
+                            .text_color(colors.secondary)
+                            .child(notice.code().to_string()),
+                    ),
+            )
+    }
+
     fn render_annotation_editor_body(
         &self,
         ui: &Widgets<'_>,
@@ -1001,48 +1132,10 @@ impl AppShell {
         let busy = self.annotation_editor.mutating() == MutationActivity::Busy;
         let is_dismissed = draft.mode.kind() == wire::AnnotationKind::DismissedAway;
 
-        let mutation_banner = draft.mutation_error.as_ref().map(|notice| {
-            let colors = ui.info_bar_colors(InfoBarStyle::Critical);
-            let msg = match notice {
-                AnnotationWriteNotice::BadRequest { .. } => Msg::TodayAnnotationsErrorBadRequest,
-                AnnotationWriteNotice::InvalidRange { .. } => {
-                    Msg::TodayAnnotationsErrorInvalidRange
-                }
-                AnnotationWriteNotice::Stale { .. } => Msg::TodayAnnotationsErrorStale,
-                AnnotationWriteNotice::Busy { .. } => Msg::TodayAnnotationsErrorBusy,
-                AnnotationWriteNotice::Generic { .. } => Msg::TodayAnnotationsErrorGeneric,
-            };
-            ui.card()
-                .p(space.m)
-                .bg(colors.background)
-                .border_color(colors.border)
-                .text_color(colors.foreground)
-                .flex()
-                .items_start()
-                .gap(space.s)
-                .child(ui.icon(IconName::CircleX, Density::Compact, colors.icon))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .gap(space.xxs)
-                        .child(
-                            div()
-                                .whitespace_normal()
-                                .ramp(ui, Ramp::Caption)
-                                .child(self.formatter.text(msg)),
-                        )
-                        .child(
-                            div()
-                                .ramp(ui, Ramp::Caption)
-                                .font(ui.mono_font())
-                                .text_color(colors.secondary)
-                                .child(notice.code().to_string()),
-                        ),
-                )
-        });
+        let mutation_banner = draft
+            .mutation_error
+            .as_ref()
+            .map(|notice| self.render_annotation_write_notice(ui, notice));
 
         let validation_banner = draft.validation_error.map(|error| {
             let text = self.format_validation_error(error);

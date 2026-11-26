@@ -147,6 +147,10 @@ messages! {
     PendingOther => "today.pending.other",
     TimelineTitle => "timeline.title",
     TimelineMainTrack => "timeline.main_track",
+    TimelineModePan => "timeline.mode.pan",
+    TimelineModeSelect => "timeline.mode.select",
+    TimelineClassifyMenuTitle => "timeline.classify.title",
+    TimelineClassifyMenuOther => "timeline.classify.other",
     TimelineLanesApps => "timeline.lanes.apps",
     TimelineLanesCategory => "timeline.lanes.category",
     TimelineFullDay => "timeline.full_day",
@@ -483,6 +487,7 @@ messages! {
     TodayAnnotationsErrorStale => "today.annotations.error.stale",
     TodayAnnotationsErrorBusy => "today.annotations.error.busy",
     TodayAnnotationsErrorGeneric => "today.annotations.error.generic",
+    TodayAnnotationsErrorCategoryUnavailable => "today.annotations.error.category_unavailable",
 }
 
 impl From<quartz_protocol::AnnotationLabelPreset> for Msg {

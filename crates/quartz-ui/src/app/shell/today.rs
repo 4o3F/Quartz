@@ -210,7 +210,8 @@ impl AppShell {
             .pb(space.xxl)
             .child(self.render_date_bar(ui, cx))
             .children(self.stop_bar(ui, cx))
-            .children(self.action_notice(ui));
+            .children(self.action_notice(ui))
+            .children(self.render_quick_annotation_notice(ui, cx));
         let content = match self.live_notice(ui, frame, cx) {
             Some(notice) => content.child(notice),
             None => content

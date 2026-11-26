@@ -331,6 +331,8 @@ impl AppShell {
                 self.calendar = None;
                 self.hover = None;
                 self.pan = None;
+                self.range_select = None;
+                self.segment_menu = None;
                 self.range = RangeChoice::FullDay;
                 self.day = Day::empty(live.snapshot.logical_date);
                 live.request = None;
@@ -440,7 +442,14 @@ impl AppShell {
             live.load_task = Some(task);
         }
     }
-    pub(super) fn observe_plot(&mut self, logical: f32, scale: f32, cx: &mut Context<Self>) {
+    pub(super) fn observe_plot(
+        &mut self,
+        origin_x: f32,
+        logical: f32,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.plot_origin_x = Some(origin_x);
         self.plot_width = Some(logical);
         let Some(live) = &self.live else {
             return;
@@ -475,10 +484,13 @@ impl AppShell {
         let entity = cx.entity();
         canvas(
             move |bounds, window, app| {
+                let origin_x = f32::from(bounds.origin.x);
                 let width = f32::from(bounds.size.width);
                 let scale = window.scale_factor();
                 window.defer(app, move |_, app| {
-                    entity.update(app, |shell, cx| shell.observe_plot(width, scale, cx))
+                    entity.update(app, |shell, cx| {
+                        shell.observe_plot(origin_x, width, scale, cx)
+                    })
                 });
             },
             |_, _, _, _| {},
@@ -500,6 +512,8 @@ impl AppShell {
         }
         self.calendar = None;
         self.pan = None;
+        self.range_select = None;
+        self.segment_menu = None;
         let previous = live.request;
         live.generation = live.generation.next();
         live.change_date();

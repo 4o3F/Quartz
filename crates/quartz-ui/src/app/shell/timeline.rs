@@ -6,12 +6,14 @@
 
 use gpui_kit::{
     AnyElement, ClickEvent, Context, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, MouseMoveEvent, ParentElement as _, Pixels, Point, Stateful,
-    StatefulInteractiveElement as _, Styled as _, anchored, assets::IconName, div, pattern_slash,
-    point, prelude::FluentBuilder as _, px,
+    KeyDownEvent, MouseButton, MouseMoveEvent, ParentElement as _, Pixels, Point, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Window, anchored, assets::IconName, div,
+    pattern_slash, point, prelude::FluentBuilder as _, px,
 };
 
-use super::{AppShell, Frame, HoverTarget, LaneMode, LayerCx, RangeChoice};
+use super::{
+    AppShell, Frame, HoverTarget, LaneMode, LayerCx, PanelContent, RangeChoice, rules::KeyHandled,
+};
 use crate::{
     app::{
         measure::TextMeasure,
@@ -20,13 +22,14 @@ use crate::{
     },
     format::{Arg, Msg, SourceText},
     layout::{ColumnRange, LABEL_COLUMN_MAX_WIDTH},
+    link::{DetailTarget, UtcRange},
     model::{
-        CategoryId, ClockAnomaly, DetailsSubject, Lane, MainBlock, Segment, StateBlock, StateKind,
-        TimeOfDay, TimeSpan,
+        CategoryId, ClockAnomaly, DetailsSubject, EndpointRole, Lane, LoadState, MainBlock,
+        MutationActivity, Segment, SegmentId, StateBlock, StateKind, TimeOfDay, TimeSpan,
     },
     timeline_scale::{
-        BuildPlotGridError, Interval, PixelPlacement, PlotGrid, RowTiles, ScaleFactor,
-        TICK_LABEL_GAP, Tick, TickBudget, View, ZoomStep,
+        BuildPlotGridError, Interval, PixelPlacement, PlotGrid, RangeSelectGesture, RowTiles,
+        ScaleFactor, TICK_LABEL_GAP, Tick, TickBudget, View, ZoomStep,
     },
 };
 
@@ -43,6 +46,61 @@ const TOOLTIP_MAX_WIDTH: f32 = 320.;
 const TOOLTIP_OFFSET: Point<Pixels> = point(px(12.), px(16.));
 /// Smallest height of a category chip; it grows with the text.
 const CHIP_HEIGHT: f32 = 20.;
+/// Border thickness of the active drag-selection band left and right rails (today-annotate.html).
+const SELECTION_BAND_BORDER_WIDTH: f32 = 2.;
+/// Horizontal padding inside the live drag-selection range badge.
+const SELECTION_BADGE_PADDING_X: f32 = 6.;
+/// Vertical padding inside the live drag-selection range badge.
+const SELECTION_BADGE_PADDING_Y: f32 = 2.;
+/// Narrowest the segment "Classify as…" context menu gets.
+const CONTEXT_MENU_MIN_WIDTH: f32 = 200.;
+/// Widest the segment "Classify as…" context menu gets.
+const CONTEXT_MENU_MAX_WIDTH: f32 = 280.;
+/// Maximum scrollable height for the active categories list inside the context menu.
+const CONTEXT_MENU_MAX_HEIGHT: f32 = 320.;
+/// Fallback horizontal anchor when opening the classify menu via keyboard before plot layout.
+const KEYBOARD_MENU_FALLBACK_X: f32 = 160.;
+/// Horizontal inset from the plot left edge when opening the classify menu via keyboard `C`.
+const KEYBOARD_MENU_OFFSET_X: f32 = 24.;
+/// Vertical anchor when opening the classify menu via keyboard `C`.
+const KEYBOARD_MENU_OFFSET_Y: f32 = 220.;
+
+/// Pointer drag behavior on the timeline plot: pan by default or range-select (today-annotate.html).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(super) enum TimelineDragMode {
+    #[default]
+    Pan,
+    Select,
+}
+
+/// One timeline drag-mode option with its element id and localized label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DragModeOption {
+    mode: TimelineDragMode,
+    id: &'static str,
+    label: Msg,
+}
+
+/// Drag-mode choices in display order (`Pan` default, `Select` for H14 range annotation).
+const DRAG_MODES: [DragModeOption; 2] = [
+    DragModeOption {
+        mode: TimelineDragMode::Pan,
+        id: "timeline-mode-pan",
+        label: Msg::TimelineModePan,
+    },
+    DragModeOption {
+        mode: TimelineDragMode::Select,
+        id: "timeline-mode-select",
+        label: Msg::TimelineModeSelect,
+    },
+];
+
+/// Anchored "Classify as…" context menu state for a timeline segment or active block (H15).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct SegmentContextMenu {
+    pub(super) range: UtcRange,
+    pub(super) position: Point<Pixels>,
+}
 
 /// One lane-mode option with its element id and localized label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,12 +245,16 @@ impl PanGesture {
 enum TimelineInput<'a> {
     Down(&'a gpui_kit::MouseDownEvent),
     Move(&'a MouseMoveEvent),
-    Up,
+    Up {
+        now_utc_ms: Option<i64>,
+    },
+    CancelDrag,
     Zoom(ZoomStep),
     ToggleFullDay,
     Activate {
         event: &'a ClickEvent,
         subject: DetailsSubject,
+        now_utc_ms: Option<i64>,
     },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +262,7 @@ enum TimelineEffect {
     None,
     Redraw,
     Select(DetailsSubject),
+    CreateRange(UtcRange),
 }
 
 impl<Focus> AppShell<Focus> {
@@ -237,14 +300,63 @@ impl<Focus> AppShell<Focus> {
         }
     }
 
+    fn resolve_drag_selection(
+        &self,
+        gesture: RangeSelectGesture,
+        now_utc_ms: Option<i64>,
+    ) -> Option<UtcRange> {
+        let width = self.plot_width?;
+        let origin_x = self.plot_origin_x.unwrap_or(0.);
+        let ctx = self.day.live_time_context()?;
+        gesture.resolve_range(origin_x, width, ctx.bounds, now_utc_ms)
+    }
+
+    fn selected_segment_utc_range(&self) -> Option<UtcRange> {
+        let details = self.details.as_ref()?;
+        match &details.content {
+            PanelContent::Live(panel) => match &panel.request.target {
+                DetailTarget::Segment { range, .. } => Some(*range),
+                DetailTarget::App(_) | DetailTarget::Document { .. } => None,
+            },
+            PanelContent::Fixture(_) => None,
+        }
+    }
+
     fn timeline_input(&mut self, input: TimelineInput<'_>) -> TimelineEffect {
         match input {
             TimelineInput::Down(event) => {
-                self.pan = Some(PanGesture::new(f32::from(event.position.x), self.view()));
+                self.segment_menu = None;
+                let use_select = matches!(self.day.source(), super::DaySource::Live(_))
+                    && (self.drag_mode == TimelineDragMode::Select || event.modifiers.shift);
+                if use_select {
+                    self.pan = None;
+                    self.range_select = Some(RangeSelectGesture::new(
+                        f32::from(event.position.x),
+                        self.view(),
+                    ));
+                } else {
+                    self.range_select = None;
+                    self.pan = Some(PanGesture::new(f32::from(event.position.x), self.view()));
+                }
             }
             TimelineInput::Move(event) => {
                 if event.pressed_button != Some(MouseButton::Left) {
+                    let was_dragging = self
+                        .range_select
+                        .take()
+                        .is_some_and(RangeSelectGesture::is_dragging);
                     self.pan = None;
+                    return if was_dragging {
+                        TimelineEffect::Redraw
+                    } else {
+                        TimelineEffect::None
+                    };
+                }
+                if let Some(select) = &mut self.range_select {
+                    if select.move_to(f32::from(event.position.x)) {
+                        self.hover = None;
+                        return TimelineEffect::Redraw;
+                    }
                     return TimelineEffect::None;
                 }
                 let Some(width) = self.plot_width else {
@@ -262,11 +374,27 @@ impl<Focus> AppShell<Focus> {
                     return TimelineEffect::Redraw;
                 }
             }
-            TimelineInput::Up => {
+            TimelineInput::Up { now_utc_ms } => {
                 self.pan = None;
+                if let Some(select) = self.range_select.take()
+                    && select.is_dragging()
+                {
+                    return self
+                        .resolve_drag_selection(select, now_utc_ms)
+                        .map_or(TimelineEffect::Redraw, TimelineEffect::CreateRange);
+                }
+            }
+            TimelineInput::CancelDrag => {
+                if let Some(select) = &mut self.range_select
+                    && select.cancel()
+                {
+                    return TimelineEffect::Redraw;
+                }
             }
             TimelineInput::Zoom(step) => {
                 self.pan = None;
+                self.range_select = None;
+                self.segment_menu = None;
                 self.range =
                     RangeChoice::Zoomed(self.view().zoomed_within(step, self.day.full_span()));
                 self.hover = None;
@@ -274,6 +402,8 @@ impl<Focus> AppShell<Focus> {
             }
             TimelineInput::ToggleFullDay => {
                 self.pan = None;
+                self.range_select = None;
+                self.segment_menu = None;
                 self.range = match self.range {
                     RangeChoice::FullDay => RangeChoice::Activity,
                     RangeChoice::Activity | RangeChoice::Zoomed(_) => RangeChoice::FullDay,
@@ -281,9 +411,28 @@ impl<Focus> AppShell<Focus> {
                 self.hover = None;
                 return TimelineEffect::Redraw;
             }
-            TimelineInput::Activate { event, subject } => {
+            TimelineInput::Activate {
+                event,
+                subject,
+                now_utc_ms,
+            } => {
                 let pan = self.pan.take();
-                if event.is_keyboard() || pan.is_none_or(PanGesture::selects) {
+                let select = self.range_select.take();
+                if event.is_keyboard() {
+                    return TimelineEffect::Select(subject);
+                }
+                if let Some(select) = select {
+                    if select.is_click() {
+                        return TimelineEffect::Select(subject);
+                    }
+                    if select.is_dragging() {
+                        return self
+                            .resolve_drag_selection(select, now_utc_ms)
+                            .map_or(TimelineEffect::Redraw, TimelineEffect::CreateRange);
+                    }
+                    return TimelineEffect::None;
+                }
+                if pan.is_none_or(PanGesture::selects) {
                     return TimelineEffect::Select(subject);
                 }
             }
@@ -293,27 +442,155 @@ impl<Focus> AppShell<Focus> {
 }
 
 impl AppShell {
-    fn start_pan(&mut self, event: &gpui_kit::MouseDownEvent) {
-        self.timeline_input(TimelineInput::Down(event));
+    fn today_clamp_now_utc_ms(&self) -> Option<i64> {
+        let is_today = self
+            .day_snapshot()
+            .is_some_and(|snapshot| self.day.date() == snapshot.logical_date);
+        is_today.then(|| jiff::Timestamp::now().as_millisecond())
     }
+
+    fn start_pointer_gesture(&mut self, event: &gpui_kit::MouseDownEvent, cx: &mut Context<Self>) {
+        let closed_menu = self.segment_menu.take().is_some();
+        self.timeline_input(TimelineInput::Down(event));
+        if closed_menu {
+            cx.notify();
+        }
+    }
+
+    fn finish_timeline_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now_utc_ms = self.today_clamp_now_utc_ms();
+        match self.timeline_input(TimelineInput::Up { now_utc_ms }) {
+            TimelineEffect::CreateRange(range) => {
+                self.open_create_annotation_range(range, None, window, cx);
+            }
+            TimelineEffect::Redraw => cx.notify(),
+            TimelineEffect::None | TimelineEffect::Select(_) => {}
+        }
+    }
+
     fn select_tile(
         &mut self,
         event: &ClickEvent,
         subject: DetailsSubject,
-        window: &mut gpui_kit::Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let TimelineEffect::Select(subject) =
-            self.timeline_input(TimelineInput::Activate { event, subject })
-        {
-            self.select(subject, window, cx);
+        let now_utc_ms = self.today_clamp_now_utc_ms();
+        match self.timeline_input(TimelineInput::Activate {
+            event,
+            subject,
+            now_utc_ms,
+        }) {
+            TimelineEffect::Select(subject) => self.select(subject, window, cx),
+            TimelineEffect::CreateRange(range) => {
+                self.open_create_annotation_range(range, None, window, cx);
+            }
+            TimelineEffect::Redraw => cx.notify(),
+            TimelineEffect::None => {}
         }
         cx.stop_propagation();
     }
-    fn move_pan(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+
+    fn move_pointer_gesture(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if self.timeline_input(TimelineInput::Move(event)) == TimelineEffect::Redraw {
             cx.notify();
         }
+    }
+
+    /// Cancels an open segment context menu or active timeline drag selection on `Esc`.
+    pub(super) fn dismiss_timeline_transient(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.segment_menu.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        if self.timeline_input(TimelineInput::CancelDrag) == TimelineEffect::Redraw {
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    /// Minimal keyboard parity (H15): pressing `C` while a live timeline segment is selected
+    /// opens the "Classify as…" menu for that segment's exact UTC range.
+    pub(super) fn handle_today_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> KeyHandled {
+        if self.calendar.is_some()
+            || self.annotation_editor.draft().is_some()
+            || !matches!(self.day.source(), super::DaySource::Live(_))
+        {
+            return KeyHandled::Ignored;
+        }
+        let mods = &event.keystroke.modifiers;
+        if mods.control || mods.alt || mods.platform || mods.function {
+            return KeyHandled::Ignored;
+        }
+        if !event.keystroke.key.eq_ignore_ascii_case("c") {
+            return KeyHandled::Ignored;
+        }
+        let Some(range) = self.selected_segment_utc_range() else {
+            return KeyHandled::Ignored;
+        };
+        let anchor_x =
+            self.plot_origin_x.unwrap_or(KEYBOARD_MENU_FALLBACK_X) + KEYBOARD_MENU_OFFSET_X;
+        self.open_classify_menu(range, point(px(anchor_x), px(KEYBOARD_MENU_OFFSET_Y)), cx);
+        KeyHandled::Handled
+    }
+
+    fn open_segment_classify_menu(
+        &mut self,
+        id: SegmentId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(segment) = self.day.segment(id) else {
+            return;
+        };
+        self.open_span_classify_menu(segment.span, position, cx);
+    }
+
+    fn open_span_classify_menu(
+        &mut self,
+        span: TimeSpan,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(range) = self.day.utc_range(span) else {
+            return;
+        };
+        self.open_classify_menu(range, position, cx);
+    }
+
+    fn open_classify_menu(
+        &mut self,
+        range: UtcRange,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.day.source(), super::DaySource::Live(_)) {
+            return;
+        }
+        if self.annotation_editor.day_context().is_none() {
+            let context = self.day.live_time_context();
+            let _ = self.annotation_editor.set_day_context(context);
+        }
+        self.ensure_categories_loaded_for_annotations(cx);
+        self.hover = None;
+        self.pan = None;
+        self.range_select = None;
+        self.calendar = None;
+        self.segment_menu = Some(SegmentContextMenu { range, position });
+        cx.notify();
+    }
+
+    fn set_drag_mode(&mut self, mode: TimelineDragMode, cx: &mut Context<Self>) {
+        self.drag_mode = mode;
+        self.pan = None;
+        self.range_select = None;
+        self.hover = None;
+        cx.notify();
     }
     fn zoom(&mut self, step: ZoomStep, cx: &mut Context<Self>) {
         self.timeline_input(TimelineInput::Zoom(step));
@@ -437,6 +714,24 @@ impl AppShell {
                         self.clock_label(self.view().span().end())
                     )),
             )
+            .children(
+                matches!(self.day.source(), super::DaySource::Live(_)).then(|| {
+                    ui.segmented(
+                        "timeline-drag-mode",
+                        DRAG_MODES.map(|option| SegmentedItem {
+                            id: option.id,
+                            label: self.formatter.text(option.label),
+                            value: option.mode,
+                        }),
+                        self.drag_mode,
+                        |mode| {
+                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.set_drag_mode(mode, cx);
+                            })
+                        },
+                    )
+                }),
+            )
             .child(ui.segmented(
                 "timeline-lanes",
                 LANE_MODES.map(|option| SegmentedItem {
@@ -532,17 +827,17 @@ impl AppShell {
             .overflow_hidden()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &gpui_kit::MouseDownEvent, _, _| {
-                    this.start_pan(event);
+                cx.listener(|this, event: &gpui_kit::MouseDownEvent, _, cx| {
+                    this.start_pointer_gesture(event, cx);
                 }),
             )
-            .on_mouse_move(
-                cx.listener(|this, event: &MouseMoveEvent, _, cx| this.move_pan(event, cx)),
-            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                this.move_pointer_gesture(event, cx);
+            }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| {
-                    this.timeline_input(TimelineInput::Up);
+                cx.listener(|this, _, window, cx| {
+                    this.finish_timeline_up(window, cx);
                 }),
             )
             .on_mouse_up_out(
@@ -550,9 +845,9 @@ impl AppShell {
                 cx.listener(|_, _, window, cx| {
                     // An occluded plot's out listener captures before the tile's click handler.
                     let entity = cx.entity();
-                    window.defer(cx, move |_, app| {
-                        entity.update(app, |this, _| {
-                            this.timeline_input(TimelineInput::Up);
+                    window.defer(cx, move |window, app| {
+                        entity.update(app, |this, cx| {
+                            this.finish_timeline_up(window, cx);
                         })
                     });
                 }),
@@ -608,6 +903,7 @@ impl AppShell {
                 .children(self.gridlines(ui, &geometry))
                 .child(rows)
                 .children(self.selection_overlay(ui, view, &geometry))
+                .children(self.drag_selection_overlay(ui, view, &geometry))
                 .into_any_element()
         })
     }
@@ -669,6 +965,283 @@ impl AppShell {
         )
     }
 
+    fn drag_selection_overlay(
+        &self,
+        ui: &Widgets<'_>,
+        view: View,
+        geometry: &PlotGeometry,
+    ) -> Option<Div> {
+        let gesture = self.range_select?;
+        if !gesture.is_dragging() {
+            return None;
+        }
+        let range = self.resolve_drag_selection(gesture, self.today_clamp_now_utc_ms())?;
+        let span = self.day.span_for_utc(range)?;
+        let pixels = geometry.grid.span(view.place(span)?);
+        let accent = ui.palette.accent_fill;
+        let label = self.format_utc_range_hm(range);
+        let mut band = div()
+            .absolute()
+            .top(px(0.))
+            .bottom(px(0.))
+            .left(px(pixels.left))
+            .w(px(pixels.width))
+            .bg(ui.state_color(accent, ui.metrics.opacity.selection))
+            .border_color(accent)
+            .child(
+                div()
+                    .absolute()
+                    .top(ui.metrics.space.xxs)
+                    .left(ui.metrics.space.xs)
+                    .px(px(SELECTION_BADGE_PADDING_X))
+                    .py(px(SELECTION_BADGE_PADDING_Y))
+                    .rounded(ui.metrics.radius.control)
+                    .bg(accent)
+                    .text_color(ui.palette.text_on_accent)
+                    .ramp(ui, Ramp::Caption)
+                    .font(ui.mono_font())
+                    .tabular_figures()
+                    .whitespace_nowrap()
+                    .child(label),
+            );
+        band.style().border_widths.left = Some(px(SELECTION_BAND_BORDER_WIDTH).into());
+        band.style().border_widths.right = Some(px(SELECTION_BAND_BORDER_WIDTH).into());
+        Some(band)
+    }
+
+    fn format_utc_range_hm(&self, range: UtcRange) -> String {
+        if let Some(ctx) = self.day.live_time_context() {
+            let start = ctx.format_endpoint_hm(range.start, EndpointRole::Start);
+            let end = ctx.format_endpoint_hm(range.end, EndpointRole::End);
+            return format!("{start} – {end}");
+        }
+        if let Some(span) = self.day.span_for_utc(range) {
+            return format!(
+                "{} – {}",
+                self.clock_label(span.start()),
+                self.clock_label(span.end())
+            );
+        }
+        String::new()
+    }
+
+    /// Renders the anchored "Classify as…" context menu for a right-clicked or `C`-activated
+    /// timeline segment (H15).
+    pub(super) fn render_segment_context_menu(
+        &self,
+        ui: &Widgets<'_>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.segment_menu?;
+        let palette = ui.palette;
+        let space = &ui.metrics.space;
+        let busy = self.annotation_editor.mutating() == MutationActivity::Busy;
+        let range = menu.range;
+        let range_label = self.format_utc_range_hm(range);
+
+        let category_rows = match self.rules.categories_state() {
+            LoadState::Loading => div()
+                .px(space.s)
+                .py(space.xs)
+                .ramp(ui, Ramp::Caption)
+                .text_color(palette.text_secondary)
+                .child(
+                    self.formatter
+                        .text(Msg::TodayAnnotationsEditorCategoryLoading),
+                )
+                .into_any_element(),
+            LoadState::Stale | LoadState::Failed(_) => div()
+                .px(space.s)
+                .py(space.xs)
+                .flex()
+                .flex_col()
+                .gap(space.xs)
+                .child(
+                    div()
+                        .ramp(ui, Ramp::Caption)
+                        .text_color(palette.text_secondary)
+                        .whitespace_normal()
+                        .child(self.formatter.text(Msg::RulesCategoriesLoadFailedTitle)),
+                )
+                .child(
+                    div().child(
+                        ui.button(
+                            "segment-classify-reload-cats",
+                            Density::Compact,
+                            ButtonContent::Label(self.formatter.text(Msg::RetryDay)),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let effect = this.rules.reload_categories();
+                            this.run_rules_effect(effect, cx);
+                            cx.notify();
+                        })),
+                    ),
+                )
+                .into_any_element(),
+            LoadState::Ready(catalog) => {
+                let active = catalog.active_items();
+                if active.is_empty() {
+                    div()
+                        .px(space.s)
+                        .py(space.xs)
+                        .ramp(ui, Ramp::Caption)
+                        .text_color(palette.text_secondary)
+                        .child(self.formatter.text(Msg::RulesCategoriesEmpty))
+                        .into_any_element()
+                } else {
+                    div()
+                        .id("segment-classify-categories")
+                        .flex()
+                        .flex_col()
+                        .gap(space.xxs)
+                        .max_h(px(CONTEXT_MENU_MAX_HEIGHT))
+                        .overflow_y_scroll()
+                        .children(active.into_iter().enumerate().map(|(index, item)| {
+                            let target_uuid = item.uuid.clone();
+                            div()
+                                .id(("segment-classify-cat", index))
+                                .flex()
+                                .items_center()
+                                .gap(space.s)
+                                .min_h(ui.metrics.density(Density::Compact).row_height)
+                                .px(space.s)
+                                .rounded(ui.metrics.radius.control)
+                                .ramp(ui, Ramp::Body)
+                                .text_color(if busy {
+                                    palette.text_disabled
+                                } else {
+                                    palette.text_primary
+                                })
+                                .when(!busy, |row| {
+                                    row.cursor_pointer().hover(ui.subtle_hover()).on_click(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.segment_menu = None;
+                                            this.quick_classify_range(
+                                                range,
+                                                target_uuid.clone(),
+                                                cx,
+                                            );
+                                        }),
+                                    )
+                                })
+                                .child(ui.category_mark(
+                                    ui.swatch(palette.category(item.color)),
+                                    item.color,
+                                ))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(self.formatter.category_name(&item.display_name)),
+                                )
+                        }))
+                        .into_any_element()
+                }
+            }
+        };
+
+        let other_row = div()
+            .id("segment-classify-other")
+            .flex()
+            .items_center()
+            .gap(space.s)
+            .min_h(ui.metrics.density(Density::Compact).row_height)
+            .px(space.s)
+            .rounded(ui.metrics.radius.control)
+            .ramp(ui, Ramp::Body)
+            .text_color(if busy {
+                palette.text_disabled
+            } else {
+                palette.text_primary
+            })
+            .when(!busy, |row| {
+                row.cursor_pointer()
+                    .hover(ui.subtle_hover())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.segment_menu = None;
+                        this.open_create_annotation_range(range, None, window, cx);
+                    }))
+            })
+            .child(ui.icon(
+                IconName::FileText,
+                Density::Compact,
+                if busy {
+                    palette.text_disabled
+                } else {
+                    palette.text_secondary
+                },
+            ))
+            .child(self.formatter.text(Msg::TimelineClassifyMenuOther));
+
+        Some(
+            anchored()
+                .position(menu.position)
+                .snap_to_window_with_margin(space.s)
+                .child(
+                    ui.flyout()
+                        .id("segment-classify-menu")
+                        .min_w(px(CONTEXT_MENU_MIN_WIDTH))
+                        .max_w(px(CONTEXT_MENU_MAX_WIDTH))
+                        .p(space.xs)
+                        .rounded(ui.metrics.radius.overlay)
+                        .shadow(ui.shadows(&ui.metrics.shadow.overlay))
+                        .flex()
+                        .flex_col()
+                        .gap(space.xxs)
+                        .text_color(palette.text_primary)
+                        .occlude()
+                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                        .on_mouse_down_out(cx.listener(
+                            |this, _: &gpui_kit::MouseDownEvent, _, cx| {
+                                this.segment_menu = None;
+                                cx.notify();
+                            },
+                        ))
+                        .child(
+                            div()
+                                .px(space.s)
+                                .py(space.xxs)
+                                .flex()
+                                .items_baseline()
+                                .justify_between()
+                                .gap(space.s)
+                                .child(
+                                    div()
+                                        .ramp(ui, Ramp::Caption)
+                                        .text_color(palette.text_secondary)
+                                        .child(self.formatter.text(Msg::TimelineClassifyMenuTitle)),
+                                )
+                                .child(
+                                    div()
+                                        .ramp(ui, Ramp::Caption)
+                                        .font(ui.mono_font())
+                                        .tabular_figures()
+                                        .text_color(palette.text_tertiary)
+                                        .child(range_label),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .h(ui.metrics.layout.divider)
+                                .my(space.xxs)
+                                .bg(palette.stroke_divider),
+                        )
+                        .child(category_rows)
+                        .child(
+                            div()
+                                .h(ui.metrics.layout.divider)
+                                .my(space.xxs)
+                                .bg(palette.stroke_divider),
+                        )
+                        .child(other_row),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn block_hover(&self, target: HoverTarget) -> BlockHover {
         if self.hover.is_some_and(|hover| hover.target == target) {
             BlockHover::Hovered
@@ -683,7 +1256,7 @@ impl AppShell {
     {
         element
             .on_mouse_move(layer.listen(move |this, event: &MouseMoveEvent, _, cx| {
-                this.move_pan(event, cx);
+                this.move_pointer_gesture(event, cx);
                 if event.pressed_button.is_none() {
                     this.set_hover(target, event.position, cx);
                 }
@@ -713,6 +1286,7 @@ impl AppShell {
             let pixels = geometry.grid.place(placement);
             let target = HoverTarget::MainBlock(span.start());
             let body = block_body(ui, self.block_hover(target), pixels);
+            let is_active_block = matches!(block, MainBlock::Active { .. });
             let body = match block {
                 MainBlock::Active { category, .. } => {
                     self.active_block(ui, measure, body, *category, span, pixels)
@@ -724,9 +1298,21 @@ impl AppShell {
                 .on_mouse_down(
                     MouseButton::Left,
                     layer.listen(|this, event: &gpui_kit::MouseDownEvent, _, cx| {
-                        this.start_pan(event);
+                        this.start_pointer_gesture(event, cx);
                         cx.stop_propagation();
                     }),
+                )
+                .when(
+                    matches!(self.day.source(), super::DaySource::Live(_)) && is_active_block,
+                    |tile| {
+                        tile.on_mouse_down(
+                            MouseButton::Right,
+                            layer.listen(move |this, event: &gpui_kit::MouseDownEvent, _, cx| {
+                                this.open_span_classify_menu(span, event.position, cx);
+                                cx.stop_propagation();
+                            }),
+                        )
+                    },
                 )
                 .on_click(layer.listen(move |this, event: &ClickEvent, window, cx| {
                     this.select_tile(event, DetailsSubject::MainBlock(span), window, cx)
@@ -879,9 +1465,21 @@ impl AppShell {
                 .on_mouse_down(
                     MouseButton::Left,
                     layer.listen(|this, event: &gpui_kit::MouseDownEvent, _, cx| {
-                        this.start_pan(event);
+                        this.start_pointer_gesture(event, cx);
                         cx.stop_propagation();
                     }),
+                )
+                .when(
+                    matches!(self.day.source(), super::DaySource::Live(_)),
+                    |tile| {
+                        tile.on_mouse_down(
+                            MouseButton::Right,
+                            layer.listen(move |this, event: &gpui_kit::MouseDownEvent, _, cx| {
+                                this.open_segment_classify_menu(id, event.position, cx);
+                                cx.stop_propagation();
+                            }),
+                        )
+                    },
                 )
                 .on_click(layer.listen(move |this, event: &ClickEvent, window, cx| {
                     this.select_tile(event, DetailsSubject::Segment(id), window, cx);
@@ -1194,8 +1792,12 @@ mod tests {
                 View::new(TimeSpan::new(TimeOfDay::hm(8, 0), TimeOfDay::hm(12, 0))).expect("view"),
             ),
             hover: None,
+            plot_origin_x: Some(0.),
             plot_width: Some(480.),
+            drag_mode: crate::app::shell::timeline::TimelineDragMode::Pan,
             pan: None,
+            range_select: None,
+            segment_menu: None,
         }
     }
     fn down(x: f32) -> gpui_kit::MouseDownEvent {
@@ -1214,6 +1816,44 @@ mod tests {
             modifiers: Default::default(),
         }
     }
+    fn live_day_for_test(day_start: i64, day_end: i64) -> crate::model::Day {
+        let data = crate::link::DayData {
+            date: "2026-11-21".parse().expect("date"),
+            bounds: UtcRange {
+                start: day_start,
+                end: day_end,
+            },
+            visible: UtcRange {
+                start: day_start,
+                end: day_end,
+            },
+            reference_range: Some(quartz_protocol::ReferenceRange {
+                start_utc_ms: day_start,
+                end_utc_ms: day_end,
+            }),
+            metrics: quartz_protocol::DayMetrics {
+                active_ms: 3_600_000,
+                focus_ratio: 1.0,
+                distract_ratio: 0.0,
+                unclassified_ms: 0,
+                longest_focus_ms: 3_600_000,
+                switches_per_hour: 0.0,
+            },
+            hours: vec![quartz_protocol::HourStack {
+                start_utc_ms: day_start,
+                end_utc_ms: day_end,
+                local_start: "2026-11-21T00:00:00+00:00[UTC]".into(),
+                categories: Vec::new(),
+            }],
+            applications: Vec::new(),
+            documents: Vec::new(),
+            truncated: false,
+            categories: Vec::new(),
+            raw: Vec::new(),
+            pending: Vec::new(),
+        };
+        crate::model::Day::from_protocol(data).expect("live day")
+    }
     #[test]
     fn shell_release_outside_tile_then_zoom_mouse_and_keyboard_activation() {
         let mut shell = shell();
@@ -1227,7 +1867,7 @@ mod tests {
             TimelineEffect::Redraw
         );
         assert_eq!(shell.view().span().start(), TimeOfDay::hm(9, 0));
-        shell.timeline_input(TimelineInput::Up);
+        shell.timeline_input(TimelineInput::Up { now_utc_ms: None });
         assert!(
             shell.pan.is_none(),
             "releasing outside the originating tile ends the drag"
@@ -1253,7 +1893,8 @@ mod tests {
         assert_eq!(
             shell.timeline_input(TimelineInput::Activate {
                 event: &click,
-                subject
+                subject,
+                now_utc_ms: None,
             }),
             TimelineEffect::Select(subject)
         );
@@ -1265,7 +1906,8 @@ mod tests {
         assert_eq!(
             shell.timeline_input(TimelineInput::Activate {
                 event: &click,
-                subject
+                subject,
+                now_utc_ms: None,
             }),
             TimelineEffect::None,
             "mouse release after a drag does not select"
@@ -1278,10 +1920,91 @@ mod tests {
         assert_eq!(
             shell.timeline_input(TimelineInput::Activate {
                 event: &ClickEvent::default(),
-                subject
+                subject,
+                now_utc_ms: None,
             }),
             TimelineEffect::Select(subject),
             "keyboard and accessibility activation must bypass mouse suppression"
+        );
+    }
+
+    #[test]
+    fn select_mode_below_threshold_clicks_and_drag_opens_snapped_range_or_cancels_on_escape() {
+        const DAY_START: i64 = 1_795_219_200_000;
+        const MINUTE_MS: i64 = 60_000;
+        const HOUR_MS: i64 = 60 * MINUTE_MS;
+
+        let mut shell = shell();
+        shell.day = live_day_for_test(DAY_START, DAY_START + 24 * HOUR_MS);
+        shell.drag_mode = TimelineDragMode::Select;
+        shell.plot_origin_x = Some(100.);
+        shell.plot_width = Some(480.);
+        let subject = DetailsSubject::Segment(crate::model::SegmentId::new(1));
+
+        // Sub-threshold horizontal jitter keeps existing click selection behavior.
+        shell.timeline_input(TimelineInput::Down(&down(220.)));
+        assert_eq!(
+            shell.timeline_input(TimelineInput::Move(&movement(
+                222.,
+                Some(MouseButton::Left)
+            ))),
+            TimelineEffect::None
+        );
+        let click = ClickEvent::Mouse(gpui_kit::MouseClickEvent {
+            down: down(220.),
+            up: gpui_kit::MouseUpEvent {
+                button: MouseButton::Left,
+                position: point(px(222.), px(10.)),
+                modifiers: Default::default(),
+                click_count: 1,
+            },
+        });
+        assert_eq!(
+            shell.timeline_input(TimelineInput::Activate {
+                event: &click,
+                subject,
+                now_utc_ms: None,
+            }),
+            TimelineEffect::Select(subject)
+        );
+
+        // Dragging past threshold in [08:00, 12:00) (2 px/min) from 09:00 to 11:00 with
+        // today clamped to 10:30:40 emits CreateRange([09:00, 10:30)).
+        shell.timeline_input(TimelineInput::Down(&down(220.)));
+        assert_eq!(
+            shell.timeline_input(TimelineInput::Move(&movement(
+                460.,
+                Some(MouseButton::Left)
+            ))),
+            TimelineEffect::Redraw
+        );
+        assert_eq!(
+            shell.timeline_input(TimelineInput::Up {
+                now_utc_ms: Some(DAY_START + 10 * HOUR_MS + 30 * MINUTE_MS + 40_000),
+            }),
+            TimelineEffect::CreateRange(UtcRange {
+                start: DAY_START + 9 * HOUR_MS,
+                end: DAY_START + 10 * HOUR_MS + 30 * MINUTE_MS,
+            })
+        );
+
+        // Escape cancels an active drag without creating an annotation or selecting the tile.
+        shell.timeline_input(TimelineInput::Down(&down(220.)));
+        shell.timeline_input(TimelineInput::Move(&movement(
+            340.,
+            Some(MouseButton::Left),
+        )));
+        assert_eq!(
+            shell.timeline_input(TimelineInput::CancelDrag),
+            TimelineEffect::Redraw
+        );
+        assert_eq!(
+            shell.timeline_input(TimelineInput::Activate {
+                event: &click,
+                subject,
+                now_utc_ms: None,
+            }),
+            TimelineEffect::None
         );
     }
     #[test]

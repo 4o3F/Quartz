@@ -3,14 +3,27 @@
 
 use std::time::Duration;
 
+use num_traits::ToPrimitive as _;
 use snafu::Snafu;
 
-use crate::model::{SECONDS_PER_MINUTE, TimeOfDay, TimeSpan};
+use crate::{
+    link::UtcRange,
+    model::{SECONDS_PER_MINUTE, TimeOfDay, TimeSpan},
+};
 
 /// Margin around the activity range of the default view (07 section 4.1).
 pub(crate) const ACTIVITY_MARGIN_MINUTES: u32 = 15;
 /// The narrowest span zooming in reaches.
 pub(crate) const MIN_ZOOM_MINUTES: u32 = 5;
+/// Horizontal drag distance in logical pixels required to distinguish a timeline drag-select
+/// from a click (matches one design-grid step).
+pub(crate) const SELECTION_DRAG_THRESHOLD_PX: f32 = 4.;
+/// Granularity in minutes to which timeline drag-selected endpoints snap.
+pub(crate) const SELECTION_SNAP_MINUTES: i64 = 1;
+/// Milliseconds in one minute for snapping drag-selected UTC endpoints.
+const SELECTION_MILLIS_PER_MINUTE: i64 = 60_000;
+/// Granularity in milliseconds to which timeline drag-selected endpoints snap.
+pub(crate) const SELECTION_SNAP_MILLIS: i64 = SELECTION_SNAP_MINUTES * SELECTION_MILLIS_PER_MINUTE;
 /// Most axis ticks a view shows; a view picks the finest step that stays within it.
 pub(crate) const MAX_TICKS: u8 = 14;
 /// Fewest tick intervals; large labels may omit ticks while retaining this grid density.
@@ -565,6 +578,194 @@ impl View {
     }
 }
 
+/// Parameters for mapping a horizontal drag across the timeline plot into a snapped, clamped
+/// half-open UTC range.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DragSelectionSpace {
+    pub(crate) view: View,
+    pub(crate) plot_width: f32,
+    pub(crate) day_bounds: UtcRange,
+    /// Exclusive upper UTC limit for "today" (clamps selection end to "now"); `None` for past days.
+    pub(crate) clamp_end_utc_ms: Option<i64>,
+}
+
+fn snap_nearest_granularity(elapsed_ms: i64) -> i64 {
+    let half = SELECTION_SNAP_MILLIS / 2;
+    let steps = if elapsed_ms >= 0 {
+        elapsed_ms.saturating_add(half) / SELECTION_SNAP_MILLIS
+    } else {
+        elapsed_ms.saturating_sub(half) / SELECTION_SNAP_MILLIS
+    };
+    steps.saturating_mul(SELECTION_SNAP_MILLIS)
+}
+
+fn floor_granularity(elapsed_ms: i64) -> i64 {
+    elapsed_ms
+        .div_euclid(SELECTION_SNAP_MILLIS)
+        .saturating_mul(SELECTION_SNAP_MILLIS)
+}
+
+/// Maps two plot-local horizontal coordinates (`anchor_local_x`, `current_local_x`) into a
+/// non-empty half-open [`UtcRange`] snapped to [`SELECTION_SNAP_MILLIS`] and clamped to
+/// `space.day_bounds` (and to `space.clamp_end_utc_ms` for today).
+///
+/// Returns `None` if the plot width is non-positive, inputs are non-finite, or the clamped
+/// selection lies completely past the allowed upper bound (for example, entirely in the future).
+#[must_use]
+pub(crate) fn snap_drag_selection(
+    space: DragSelectionSpace,
+    anchor_local_x: f32,
+    current_local_x: f32,
+) -> Option<UtcRange> {
+    if !space.plot_width.is_finite()
+        || space.plot_width <= 0.
+        || !anchor_local_x.is_finite()
+        || !current_local_x.is_finite()
+    {
+        return None;
+    }
+    let raw_max_utc = match space.clamp_end_utc_ms {
+        Some(now_ms) => space.day_bounds.end.min(now_ms),
+        None => space.day_bounds.end,
+    };
+    let max_elapsed = raw_max_utc.checked_sub(space.day_bounds.start)?;
+    if max_elapsed <= 0 {
+        return None;
+    }
+    let max_snapped_elapsed = floor_granularity(max_elapsed);
+    if max_snapped_elapsed <= 0 {
+        return None;
+    }
+
+    let view_start_ms = i64::from(space.view.span().start().millis());
+    let view_len_ms = space.view.span().end().millis() - space.view.span().start().millis();
+    let px_to_elapsed = |local_x: f32| -> Option<i64> {
+        let fraction = (f64::from(local_x) / f64::from(space.plot_width)).clamp(0.0, 1.0);
+        let offset = (fraction * f64::from(view_len_ms)).round().to_i64()?;
+        view_start_ms.checked_add(offset)
+    };
+
+    let elapsed_a = px_to_elapsed(anchor_local_x)?;
+    let elapsed_b = px_to_elapsed(current_local_x)?;
+    let (raw_start, raw_end) = if elapsed_a <= elapsed_b {
+        (elapsed_a, elapsed_b)
+    } else {
+        (elapsed_b, elapsed_a)
+    };
+    if raw_start >= max_elapsed {
+        return None;
+    }
+
+    let mut snapped_start = snap_nearest_granularity(raw_start).clamp(0, max_snapped_elapsed);
+    let mut snapped_end = snap_nearest_granularity(raw_end).clamp(0, max_snapped_elapsed);
+    if snapped_start >= snapped_end {
+        if snapped_start.saturating_add(SELECTION_SNAP_MILLIS) <= max_snapped_elapsed {
+            snapped_end = snapped_start.saturating_add(SELECTION_SNAP_MILLIS);
+        } else {
+            snapped_end = max_snapped_elapsed;
+            snapped_start = snapped_end.saturating_sub(SELECTION_SNAP_MILLIS).max(0);
+        }
+    }
+    if snapped_end <= snapped_start {
+        return None;
+    }
+    Some(UtcRange {
+        start: space.day_bounds.start.checked_add(snapped_start)?,
+        end: space.day_bounds.start.checked_add(snapped_end)?,
+    })
+}
+
+/// Motion phase of a timeline range-selection pointer gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeSelectMotion {
+    Pressed,
+    Dragging,
+    Cancelled,
+}
+
+/// Active horizontal drag-selection gesture on the timeline plot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RangeSelectGesture {
+    anchor_window_x: f32,
+    current_window_x: f32,
+    view: View,
+    motion: RangeSelectMotion,
+}
+
+impl RangeSelectGesture {
+    /// Starts a candidate selection gesture at `anchor_window_x`.
+    #[must_use]
+    pub(crate) const fn new(anchor_window_x: f32, view: View) -> Self {
+        Self {
+            anchor_window_x,
+            current_window_x: anchor_window_x,
+            view,
+            motion: RangeSelectMotion::Pressed,
+        }
+    }
+
+    /// Updates the pointer X coordinate; crosses into dragging once horizontal displacement
+    /// reaches [`SELECTION_DRAG_THRESHOLD_PX`]. Returns whether the selection band changed.
+    pub(crate) fn move_to(&mut self, window_x: f32) -> bool {
+        if self.motion == RangeSelectMotion::Cancelled {
+            return false;
+        }
+        if (window_x - self.anchor_window_x).abs() >= SELECTION_DRAG_THRESHOLD_PX {
+            self.motion = RangeSelectMotion::Dragging;
+        }
+        if self.motion == RangeSelectMotion::Dragging {
+            self.current_window_x = window_x;
+            return true;
+        }
+        false
+    }
+
+    /// Cancels the active drag selection (for example on `Escape`) while still suppressing a tile
+    /// click until pointer release.
+    pub(crate) fn cancel(&mut self) -> bool {
+        let was_active = self.motion != RangeSelectMotion::Cancelled;
+        self.motion = RangeSelectMotion::Cancelled;
+        was_active
+    }
+
+    /// Whether this gesture never exceeded [`SELECTION_DRAG_THRESHOLD_PX`] and was not cancelled,
+    /// so releasing it keeps normal click behavior.
+    #[must_use]
+    pub(crate) const fn is_click(self) -> bool {
+        matches!(self.motion, RangeSelectMotion::Pressed)
+    }
+
+    /// Whether a selection band is actively being dragged.
+    #[must_use]
+    pub(crate) const fn is_dragging(self) -> bool {
+        matches!(self.motion, RangeSelectMotion::Dragging)
+    }
+
+    /// Resolves the snapped and clamped UTC range of this drag gesture when actively dragging.
+    #[must_use]
+    pub(crate) fn resolve_range(
+        self,
+        plot_origin_x: f32,
+        plot_width: f32,
+        day_bounds: UtcRange,
+        clamp_end_utc_ms: Option<i64>,
+    ) -> Option<UtcRange> {
+        if !self.is_dragging() {
+            return None;
+        }
+        snap_drag_selection(
+            DragSelectionSpace {
+                view: self.view,
+                plot_width,
+                day_bounds,
+                clamp_end_utc_ms,
+            },
+            self.anchor_window_x - plot_origin_x,
+            self.current_window_x - plot_origin_x,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,5 +1207,108 @@ mod tests {
         assert_eq!(block(83.).fitting_label(6., full, short), Some("开发"));
         assert_eq!(block(36.).fitting_label(6., full, short), Some("开发"));
         assert_eq!(block(35.).fitting_label(6., full, short), None);
+    }
+
+    #[test]
+    fn drag_selection_snaps_to_one_minute_and_clamps_to_day_and_now() {
+        const DAY_START: i64 = 1_763_683_200_000; // 2025-11-21T00:00:00Z
+        const HOUR_MS: i64 = 60 * SELECTION_SNAP_MILLIS;
+        let day_bounds = UtcRange {
+            start: DAY_START,
+            end: DAY_START + 24 * HOUR_MS,
+        };
+        // 4-hour view [08:00, 12:00) across 480 px => 2 px per minute.
+        let view = View::new(span((8, 0), (12, 0))).expect("view");
+        let past_space = DragSelectionSpace {
+            view,
+            plot_width: 480.,
+            day_bounds,
+            clamp_end_utc_ms: None,
+        };
+
+        // 08:30:20 (60.67 px) to 09:44:50 (209.67 px) snaps to [08:30, 09:45).
+        let forward = snap_drag_selection(past_space, 60.67, 209.67).expect("snapped range");
+        assert_eq!(
+            forward,
+            UtcRange {
+                start: DAY_START + 8 * HOUR_MS + 30 * SELECTION_SNAP_MILLIS,
+                end: DAY_START + 9 * HOUR_MS + 45 * SELECTION_SNAP_MILLIS,
+            }
+        );
+
+        // Right-to-left drag orders endpoints and clamps coordinates outside [0, plot_width].
+        let reversed = snap_drag_selection(past_space, 520., -30.).expect("clamped view range");
+        assert_eq!(
+            reversed,
+            UtcRange {
+                start: DAY_START + 8 * HOUR_MS,
+                end: DAY_START + 12 * HOUR_MS,
+            }
+        );
+
+        // Today clamp: now = 10:15:45 clamps a drag crossing now to 10:15:00 (snapped <= now).
+        let now_utc_ms = DAY_START + 10 * HOUR_MS + 15 * SELECTION_SNAP_MILLIS + 45_000;
+        let today_space = DragSelectionSpace {
+            clamp_end_utc_ms: Some(now_utc_ms),
+            ..past_space
+        };
+        let clamped_to_now =
+            snap_drag_selection(today_space, 120., 480.).expect("clamped to today now");
+        assert_eq!(
+            clamped_to_now,
+            UtcRange {
+                start: DAY_START + 9 * HOUR_MS,
+                end: DAY_START + 10 * HOUR_MS + 15 * SELECTION_SNAP_MILLIS,
+            }
+        );
+        assert!(clamped_to_now.end <= now_utc_ms);
+
+        // Dragging wholly in the future past now produces no range.
+        assert_eq!(snap_drag_selection(today_space, 300., 420.), None);
+
+        // Full-day past drag reaches 24:00 without truncation.
+        let full_past = DragSelectionSpace {
+            view: View::full_day(),
+            plot_width: 1440.,
+            day_bounds,
+            clamp_end_utc_ms: None,
+        };
+        assert_eq!(
+            snap_drag_selection(full_past, 1410., 1500.),
+            Some(UtcRange {
+                start: DAY_START + 23 * HOUR_MS + 30 * SELECTION_SNAP_MILLIS,
+                end: day_bounds.end,
+            })
+        );
+    }
+
+    #[test]
+    fn range_select_gesture_treats_below_threshold_as_click_and_cancel_stops_selection() {
+        const DAY_START: i64 = 1_763_683_200_000;
+        const HOUR_MS: i64 = 60 * SELECTION_SNAP_MILLIS;
+        let day_bounds = UtcRange {
+            start: DAY_START,
+            end: DAY_START + 24 * HOUR_MS,
+        };
+        let view = View::new(span((8, 0), (12, 0))).expect("view");
+
+        let mut click = RangeSelectGesture::new(200., view);
+        assert!(!click.move_to(200. + SELECTION_DRAG_THRESHOLD_PX - 0.5));
+        assert!(click.is_click());
+        assert!(!click.is_dragging());
+        assert_eq!(click.resolve_range(100., 480., day_bounds, None), None);
+
+        let mut drag = RangeSelectGesture::new(200., view);
+        assert!(drag.move_to(200. + SELECTION_DRAG_THRESHOLD_PX));
+        assert!(!drag.is_click());
+        assert!(drag.is_dragging());
+        assert!(drag.resolve_range(100., 480., day_bounds, None).is_some());
+
+        // Escape cancellation clears active drag and prevents click fallback.
+        assert!(drag.cancel());
+        assert!(!drag.is_click());
+        assert!(!drag.is_dragging());
+        assert!(!drag.move_to(350.));
+        assert_eq!(drag.resolve_range(100., 480., day_bounds, None), None);
     }
 }

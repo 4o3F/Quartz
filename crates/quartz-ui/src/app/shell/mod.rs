@@ -314,8 +314,12 @@ pub(crate) struct AppShell<Focus = FocusHandle> {
     lanes: LaneMode,
     range: RangeChoice,
     hover: Option<Hover>,
+    plot_origin_x: Option<f32>,
     plot_width: Option<f32>,
+    drag_mode: timeline::TimelineDragMode,
     pan: Option<timeline::PanGesture>,
+    range_select: Option<crate::timeline_scale::RangeSelectGesture>,
+    segment_menu: Option<timeline::SegmentContextMenu>,
 }
 
 impl AppShell {
@@ -391,8 +395,12 @@ impl AppShell {
             lanes: LaneMode::Swimlanes,
             range: init.range,
             hover: None,
+            plot_origin_x: None,
             plot_width: None,
+            drag_mode: timeline::TimelineDragMode::default(),
             pan: None,
+            range_select: None,
+            segment_menu: None,
         }
     }
 
@@ -475,6 +483,7 @@ impl AppShell {
             .annotation_editor
             .select_tab(crate::model::TodayPanelTab::Details);
         self.hover = None;
+        self.segment_menu = None;
         if self.details.is_some() {
             window.focus(&self.panel_focus, cx);
         }
@@ -482,6 +491,7 @@ impl AppShell {
     }
 
     fn close_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.segment_menu = None;
         self.cancel_details(cx);
         self.annotation_editor.close_panel();
         window.focus(&self.root_focus, cx);
@@ -495,15 +505,22 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.key == "escape" && self.has_side_panel() {
-            if self.annotation_editor.is_panel_open()
-                && self.annotation_editor.active_tab() == crate::model::TodayPanelTab::Annotations
-            {
-                self.handle_annotations_escape(window, cx);
-            } else {
-                self.close_details(window, cx);
+        if event.keystroke.key == "escape" {
+            if self.dismiss_timeline_transient(cx) {
+                cx.stop_propagation();
+                return;
             }
-            cx.stop_propagation();
+            if self.has_side_panel() {
+                if self.annotation_editor.is_panel_open()
+                    && self.annotation_editor.active_tab()
+                        == crate::model::TodayPanelTab::Annotations
+                {
+                    self.handle_annotations_escape(window, cx);
+                } else {
+                    self.close_details(window, cx);
+                }
+                cx.stop_propagation();
+            }
         }
     }
 
@@ -543,6 +560,9 @@ impl AppShell {
             }
             self.page = page;
             self.hover = None;
+            self.pan = None;
+            self.range_select = None;
+            self.segment_menu = None;
             self.cancel_details(cx);
             self.annotation_editor.close_panel();
             if page == Page::Rules {
@@ -601,13 +621,19 @@ impl Render for AppShell {
                 self.render_placeholder(&ui, page).into_any_element()
             }
         };
-        let tooltip = match (self.page, layout.panel) {
-            (Page::Today, PanelPlacement::Closed | PanelPlacement::Beside) => {
+        let suppress_tooltip = self.segment_menu.is_some()
+            || self
+                .range_select
+                .is_some_and(crate::timeline_scale::RangeSelectGesture::is_dragging);
+        let tooltip = match (self.page, layout.panel, suppress_tooltip) {
+            (Page::Today, PanelPlacement::Closed | PanelPlacement::Beside, false) => {
                 self.render_tooltip(&ui)
             }
-            (Page::Today, PanelPlacement::Overlay)
-            | (Page::Week | Page::Rules | Page::Settings, _) => None,
+            (Page::Today, _, _) | (Page::Week | Page::Rules | Page::Settings, _, _) => None,
         };
+        let segment_menu = (self.page == Page::Today)
+            .then(|| self.render_segment_context_menu(&ui, cx))
+            .flatten();
         let panel = if self.annotation_editor.is_panel_open()
             && self.annotation_editor.active_tab() == crate::model::TodayPanelTab::Annotations
         {
@@ -634,8 +660,20 @@ impl Render for AppShell {
             .size_full()
             .track_focus(&self.root_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" && this.calendar.take().is_some() {
-                    cx.notify();
+                if event.keystroke.key == "escape" {
+                    if this.dismiss_timeline_transient(cx) {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if this.calendar.take().is_some() {
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+                if this.page == Page::Today
+                    && this.handle_today_key(event, cx) == rules::KeyHandled::Handled
+                {
                     cx.stop_propagation();
                     return;
                 }
@@ -676,6 +714,7 @@ impl Render for AppShell {
             )
             .children(overlay.map(|panel| deferred(self.overlay_layer(&ui, panel, cx))))
             .children(tooltip.map(deferred))
+            .children(segment_menu.map(deferred))
     }
 }
 

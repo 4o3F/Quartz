@@ -1036,4 +1036,14 @@ today.annotations.error.busy:
   en: "Quartz core is busy. Your inputs are preserved; retry saving."
 today.annotations.error.generic:
   en: "Couldn’t save annotation changes. Try again."
+today.annotations.error.category_unavailable:
+  en: "The selected category is no longer active. Refresh categories and try again."
+timeline.mode.pan:
+  en: "Pan"
+timeline.mode.select:
+  en: "Select"
+timeline.classify.title:
+  en: "Classify as…"
+timeline.classify.other:
+  en: "Other…"
 

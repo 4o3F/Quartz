@@ -378,7 +378,7 @@ impl DayTimeContext {
     }
 }
 
-/// Mapped write-error notice shown inline in the annotation editor.
+/// Mapped write-error notice shown inline in the annotation editor and for quick-classify writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AnnotationWriteNotice {
     BadRequest { code: LoadDataErrorCode },
@@ -386,6 +386,7 @@ pub(crate) enum AnnotationWriteNotice {
     Stale { code: LoadDataErrorCode },
     Busy { code: LoadDataErrorCode },
     Generic { code: LoadDataErrorCode },
+    CategoryUnavailable { code: LoadDataErrorCode },
 }
 
 impl AnnotationWriteNotice {
@@ -415,7 +416,8 @@ impl AnnotationWriteNotice {
             | Self::InvalidRange { code }
             | Self::Stale { code }
             | Self::Busy { code }
-            | Self::Generic { code } => code,
+            | Self::Generic { code }
+            | Self::CategoryUnavailable { code } => code,
         }
     }
 }
@@ -697,6 +699,15 @@ impl fmt::Debug for AnnotationEditorEffect {
     }
 }
 
+/// Retains the client-generated annotation UUID for one quick-classify attempt so retries for the
+/// same segment range and category remain idempotent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuickClassifySession {
+    range: UtcRange,
+    category: wire::Uuid,
+    id: wire::AnnotationId,
+}
+
 /// View model for the Today saved-annotations list and create/edit/delete editor.
 #[derive(Debug)]
 pub(crate) struct AnnotationEditor {
@@ -707,6 +718,8 @@ pub(crate) struct AnnotationEditor {
     list_state: Option<LoadState<AnnotationList>>,
     draft: Option<AnnotationDraft>,
     mutating: MutationActivity,
+    quick_notice: Option<AnnotationWriteNotice>,
+    quick_session: Option<QuickClassifySession>,
 }
 
 impl AnnotationEditor {
@@ -721,6 +734,8 @@ impl AnnotationEditor {
             list_state: None,
             draft: None,
             mutating: MutationActivity::Idle,
+            quick_notice: None,
+            quick_session: None,
         }
     }
 
@@ -769,6 +784,17 @@ impl AnnotationEditor {
         self.mutating
     }
 
+    /// Write failure notice from a direct quick-classify action (H15) when no editor draft is open.
+    #[must_use]
+    pub(crate) fn quick_notice(&self) -> Option<&AnnotationWriteNotice> {
+        self.quick_notice.as_ref()
+    }
+
+    /// Dismisses the current quick-classify write failure notice.
+    pub(crate) fn clear_quick_notice(&mut self) {
+        self.quick_notice = None;
+    }
+
     /// Updates the shown logical day context (on day load or date switch). Changing dates
     /// invalidates in-flight annotation queries and closes any open draft for the old day.
     #[must_use]
@@ -782,6 +808,8 @@ impl AnnotationEditor {
             self.list_state = None;
             self.draft = None;
             self.mutating = MutationActivity::Idle;
+            self.quick_notice = None;
+            self.quick_session = None;
             return AnnotationEditorEffect::None;
         };
         let date_changed = self
@@ -798,6 +826,8 @@ impl AnnotationEditor {
             self.draft = None;
             self.mutating = MutationActivity::Idle;
             self.list_state = None;
+            self.quick_notice = None;
+            self.quick_session = None;
         }
         if self.is_panel_open()
             && self.active_tab == TodayPanelTab::Annotations
@@ -910,18 +940,19 @@ impl AnnotationEditor {
         });
     }
 
-    /// Opens the annotation editor in create mode for `range` and optional preselected `category`.
+    /// Opens the annotation editor in create mode for `range` and an optional preselected typed
+    /// category UUID.
     ///
     /// Exposed at the model level so timeline selection (H14) and quick classification (H15) can
     /// seed the editor directly.
-    pub(crate) fn open_create(&mut self, range: UtcRange, category: Option<wire::CategoryUuid>) {
+    pub(crate) fn open_create(&mut self, range: UtcRange, category: Option<wire::Uuid>) {
         if self.mutating == MutationActivity::Busy {
             return;
         }
         self.visibility = PanelVisibility::Open;
         self.active_tab = TodayPanelTab::Annotations;
-        let category_uuid = category.and_then(|value| value.0.parse::<wire::Uuid>().ok());
-        let kind = if category_uuid.is_some() {
+        self.quick_notice = None;
+        let kind = if category.is_some() {
             wire::AnnotationKind::CategoryOverride
         } else {
             wire::AnnotationKind::Note
@@ -949,12 +980,92 @@ impl AnnotationEditor {
             end_input,
             start_fold,
             end_fold,
-            category: category_uuid,
+            category,
             label_input: String::new(),
             note_input: String::new(),
             validation_error: None,
             mutation_error: None,
         });
+    }
+
+    /// Directly creates a [`wire::AnnotationKind::CategoryOverride`] annotation for an exact UTC
+    /// `range` and active `category` from the loaded [`CategoryCatalog`] (H15).
+    ///
+    /// Reuses the same client-generated [`wire::AnnotationId`] if the exact `(range, category)`
+    /// attempt is retried after a failure. Never silently drops a missing or archived category.
+    #[must_use]
+    pub(crate) fn quick_classify(
+        &mut self,
+        range: UtcRange,
+        category: wire::Uuid,
+        catalog: Option<&CategoryCatalog>,
+        generate_id: impl FnOnce() -> Option<wire::AnnotationId>,
+    ) -> AnnotationEditorEffect {
+        if self.mutating == MutationActivity::Busy {
+            return AnnotationEditorEffect::None;
+        }
+        let Some(ctx) = self.day_context.clone() else {
+            self.quick_notice = Some(AnnotationWriteNotice::BadRequest {
+                code: LoadDataErrorCode::Local(LocalFailureCode::InvalidResponse),
+            });
+            return AnnotationEditorEffect::None;
+        };
+        if range.end <= range.start || range.start < ctx.bounds.start || range.end > ctx.bounds.end
+        {
+            self.quick_notice = Some(AnnotationWriteNotice::InvalidRange {
+                code: LoadDataErrorCode::Protocol(ErrorKind::InvalidRange),
+            });
+            return AnnotationEditorEffect::None;
+        }
+        let is_active = catalog
+            .and_then(|items| items.find(&category))
+            .is_some_and(|item| item.archive_state == CategoryArchiveState::Active);
+        if !is_active {
+            self.quick_notice = Some(AnnotationWriteNotice::CategoryUnavailable {
+                code: LoadDataErrorCode::Local(LocalFailureCode::InvalidResponse),
+            });
+            return AnnotationEditorEffect::None;
+        }
+        let uuid = match &self.quick_session {
+            Some(session) if session.range == range && session.category == category => {
+                session.id.clone()
+            }
+            _ => match generate_id() {
+                Some(generated) => {
+                    self.quick_session = Some(QuickClassifySession {
+                        range,
+                        category: category.clone(),
+                        id: generated.clone(),
+                    });
+                    generated
+                }
+                None => {
+                    self.quick_notice = Some(AnnotationWriteNotice::Generic {
+                        code: LoadDataErrorCode::Local(LocalFailureCode::InvalidResponse),
+                    });
+                    return AnnotationEditorEffect::None;
+                }
+            },
+        };
+        self.quick_notice = None;
+        self.mutating = MutationActivity::Busy;
+        AnnotationEditorEffect::Create {
+            request: wire::AnnotationsCreateRequest {
+                entities: vec![wire::CreateAnnotation {
+                    uuid,
+                    kind: wire::AnnotationKind::CategoryOverride,
+                    values: wire::AnnotationValues {
+                        start_utc_ms: range.start,
+                        end_utc_ms: range.end,
+                        category: Some(wire::AnnotationCategory::Uuid { uuid: category }),
+                        label_preset: None,
+                        label: None,
+                        note: None,
+                    },
+                }],
+            },
+            date: ctx.date,
+        }
     }
 
     /// Opens create mode with a default range inside the shown logical day (used by the list's
@@ -1345,22 +1456,34 @@ impl AnnotationEditor {
         match result {
             Ok(()) => {
                 self.draft = None;
+                self.quick_notice = None;
+                self.quick_session = None;
                 if self
                     .day_context
                     .as_ref()
                     .is_some_and(|ctx| ctx.date == date)
                 {
-                    self.query_current_day()
+                    if self.is_panel_open() && self.active_tab == TodayPanelTab::Annotations {
+                        self.query_current_day()
+                    } else {
+                        if self.list_state.is_some() {
+                            self.list_state = Some(LoadState::Stale);
+                        }
+                        AnnotationEditorEffect::None
+                    }
                 } else {
                     AnnotationEditorEffect::None
                 }
             }
             Err(error) => {
+                let notice = AnnotationWriteNotice::from_error(&error);
                 if let Some(draft) = &mut self.draft {
                     if let AnnotationEditorMode::Edit { delete_confirm, .. } = &mut draft.mode {
                         *delete_confirm = DeleteConfirmState::Idle;
                     }
-                    draft.mutation_error = Some(AnnotationWriteNotice::from_error(&error));
+                    draft.mutation_error = Some(notice);
+                } else {
+                    self.quick_notice = Some(notice);
                 }
                 AnnotationEditorEffect::None
             }
@@ -1638,7 +1761,7 @@ mod tests {
         let _ = editor.set_day_context(Some(ctx.clone()));
         editor.open_create(
             ctx.default_create_range(),
-            Some(wire::CategoryUuid(CAT_DEV_UUID.to_owned())),
+            Some(CAT_DEV_UUID.parse().expect("uuid")),
         );
         editor.set_label_input("Deep work".into());
 
@@ -1965,5 +2088,134 @@ mod tests {
                 .live_time_context()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn quick_classify_builds_category_override_for_exact_segment_range_with_idempotent_id() {
+        let ctx = utc_day_context("2026-11-21");
+        let catalog = sample_catalog();
+        let dev_uuid: wire::Uuid = CAT_DEV_UUID.parse().expect("uuid");
+        let segment_range = UtcRange {
+            start: ctx.bounds.start + 9 * 60 * MILLIS_PER_MINUTE + 12_345,
+            end: ctx.bounds.start + 9 * 60 * MILLIS_PER_MINUTE + 47_890,
+        };
+        let mut editor = AnnotationEditor::new();
+        let _ = editor.set_day_context(Some(ctx.clone()));
+
+        let mut ids = vec![sample_id(ANNO_ID_1), sample_id(ANNO_ID_2)].into_iter();
+        let effect = editor.quick_classify(segment_range, dev_uuid.clone(), Some(&catalog), || {
+            ids.next()
+        });
+        let AnnotationEditorEffect::Create { request, date } = effect else {
+            panic!("expected quick classify create effect");
+        };
+        assert_eq!(date, ctx.date);
+        assert_eq!(request.entities.len(), 1);
+        let entity = request.entities.first().expect("entity");
+        assert_eq!(entity.uuid, sample_id(ANNO_ID_1));
+        assert_eq!(entity.kind, wire::AnnotationKind::CategoryOverride);
+        assert_eq!(entity.values.start_utc_ms, segment_range.start);
+        assert_eq!(entity.values.end_utc_ms, segment_range.end);
+        assert_eq!(
+            entity.values.category,
+            Some(wire::AnnotationCategory::Uuid {
+                uuid: dev_uuid.clone()
+            })
+        );
+        assert_eq!(entity.values.label, None);
+        assert_eq!(entity.values.note, None);
+
+        // Failure surfaces the H13 notice and retrying the same (range, category) reuses ANNO_ID_1.
+        assert_eq!(
+            editor.apply_write_finished(ctx.date, Err(LoadDataError::from(RequestCoreError::Busy))),
+            AnnotationEditorEffect::None
+        );
+        assert!(matches!(
+            editor.quick_notice(),
+            Some(AnnotationWriteNotice::Busy { .. })
+        ));
+        let retry = editor.quick_classify(segment_range, dev_uuid.clone(), Some(&catalog), || {
+            ids.next()
+        });
+        let AnnotationEditorEffect::Create {
+            request: retry_req, ..
+        } = retry
+        else {
+            panic!("expected retry create effect");
+        };
+        assert_eq!(
+            retry_req.entities.first().expect("retry entity").uuid,
+            sample_id(ANNO_ID_1)
+        );
+        assert_eq!(editor.quick_notice(), None);
+
+        // Completing clears the notice and session; next quick-classify allocates ANNO_ID_2.
+        assert_eq!(
+            editor.apply_write_finished(ctx.date, Ok(())),
+            AnnotationEditorEffect::None
+        );
+        assert_eq!(editor.quick_notice(), None);
+        let next = editor.quick_classify(segment_range, dev_uuid, Some(&catalog), || ids.next());
+        let AnnotationEditorEffect::Create {
+            request: next_req, ..
+        } = next
+        else {
+            panic!("expected next create effect");
+        };
+        assert_eq!(
+            next_req.entities.first().expect("next entity").uuid,
+            sample_id(ANNO_ID_2)
+        );
+    }
+
+    #[test]
+    fn malformed_or_missing_category_is_rejected_and_not_silently_dropped() {
+        // Typed wire::Uuid rejects malformed strings rather than silently dropping them in open_create.
+        assert!("not-a-valid-uuid".parse::<wire::Uuid>().is_err());
+
+        let ctx = utc_day_context("2026-11-21");
+        let catalog = sample_catalog();
+        let dev_uuid: wire::Uuid = CAT_DEV_UUID.parse().expect("uuid");
+        let archived_uuid: wire::Uuid = CAT_LEARN_UUID.parse().expect("uuid");
+        let missing_uuid: wire::Uuid = "99999999-9999-4999-8999-999999999999"
+            .parse()
+            .expect("uuid");
+        let range = ctx.default_create_range();
+
+        let mut editor = AnnotationEditor::new();
+        let _ = editor.set_day_context(Some(ctx));
+
+        // open_create preserves a typed category UUID without fallback to Note.
+        editor.open_create(range, Some(dev_uuid.clone()));
+        let draft = editor.draft().expect("draft");
+        assert_eq!(draft.mode.kind(), wire::AnnotationKind::CategoryOverride);
+        assert_eq!(draft.category, Some(dev_uuid));
+        editor.close_draft();
+
+        // Missing category in catalog is rejected with a notice rather than silently dropped.
+        assert_eq!(
+            editor.quick_classify(range, missing_uuid, Some(&catalog), || {
+                panic!("must not allocate id for missing category")
+            }),
+            AnnotationEditorEffect::None
+        );
+        assert!(matches!(
+            editor.quick_notice(),
+            Some(AnnotationWriteNotice::CategoryUnavailable { .. })
+        ));
+        editor.clear_quick_notice();
+        assert_eq!(editor.quick_notice(), None);
+
+        // Archived category is also rejected explicitly.
+        assert_eq!(
+            editor.quick_classify(range, archived_uuid, Some(&catalog), || {
+                panic!("must not allocate id for archived category")
+            }),
+            AnnotationEditorEffect::None
+        );
+        assert!(matches!(
+            editor.quick_notice(),
+            Some(AnnotationWriteNotice::CategoryUnavailable { .. })
+        ));
     }
 }
