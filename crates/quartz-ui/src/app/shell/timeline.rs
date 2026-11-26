@@ -1166,6 +1166,7 @@ mod tests {
             root_focus: (),
             rules: crate::model::RulesPage::new(),
             rules_focus: (),
+            category_name_input: None,
             ranking: Default::default(),
             lanes: LaneMode::Swimlanes,
             range: RangeChoice::Zoomed(

@@ -8,7 +8,19 @@ use std::{
 
 use quartz_protocol::{self as wire, ErrorKind};
 
-use crate::link::{LoadDataError, LoadDataErrorCode};
+use crate::{
+    link::{LoadDataError, LoadDataErrorCode},
+    model::{BuiltinCategory, CategoryColor, CategoryName, PaletteSlot, Tendency},
+};
+
+/// Maximum category name length in Unicode scalar values (04 §6.3.5).
+const MAX_CATEGORY_NAME_SCALARS: usize = 256;
+/// Reserved prefix for canonical built-in category identifiers.
+const BUILTIN_IDENTIFIER_PREFIX: &str = "builtin:";
+/// Length of a canonical 8-4-4-4-12 UUID string.
+const UUID_TEXT_LEN: usize = 36;
+/// Byte positions of hyphens in a canonical UUID string.
+const UUID_HYPHENS: [usize; 4] = [8, 13, 18, 23];
 
 /// Monotonic generation counter for dropping late rule-set responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -414,6 +426,7 @@ pub(crate) struct RuleEntryDetail {
     pub(crate) entry_kind: wire::RuleEntryKind,
     pub(crate) state: wire::RuleEntryState,
     pub(crate) label: RuleEntryLabel,
+    pub(crate) category: Option<wire::Uuid>,
     pub(crate) target: Option<String>,
     pub(crate) priority: Option<u16>,
     pub(crate) summary: EntryConditionSummary,
@@ -492,6 +505,7 @@ impl RuleEntryDetail {
             entry_kind: entry.entry_kind,
             state: entry.state,
             label,
+            category: content.category,
             target: content.target,
             priority: content.priority,
             summary,
@@ -526,6 +540,394 @@ impl RuleSetDetail {
             truncated: response.truncated,
         }
     }
+}
+
+/// Active section inside the Rules page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RulesTab {
+    #[default]
+    RuleSets,
+    Categories,
+}
+
+/// Whether archived categories are visible in the categories list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ArchivedVisibility {
+    #[default]
+    Hidden,
+    Visible,
+}
+
+impl ArchivedVisibility {
+    /// Returns the opposite visibility state.
+    #[must_use]
+    pub(crate) const fn toggled(self) -> Self {
+        match self {
+            Self::Hidden => Self::Visible,
+            Self::Visible => Self::Hidden,
+        }
+    }
+}
+
+/// Archive status of a category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CategoryArchiveState {
+    Active,
+    Archived,
+}
+
+impl CategoryArchiveState {
+    /// Maps the wire boolean flag into a typed archive state.
+    #[must_use]
+    pub(crate) const fn from_wire(archived: bool) -> Self {
+        if archived {
+            Self::Archived
+        } else {
+            Self::Active
+        }
+    }
+}
+
+/// Origin of a category: built-in or user-created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CategoryOrigin {
+    Builtin(BuiltinCategory),
+    User,
+}
+
+/// Direction of sibling reordering inside the categories list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReorderDirection {
+    Up,
+    Down,
+}
+
+/// Failure when mapping `categories.list` into a [`CategoryCatalog`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, snafu::Snafu)]
+pub(crate) enum MapCategoriesError {
+    #[snafu(display("category list contained a duplicate UUID"))]
+    DuplicateUuid,
+    #[snafu(display("user category is missing a display name"))]
+    MissingName,
+    #[snafu(display("category color is outside the supported palette"))]
+    InvalidColor,
+    #[snafu(display("category list contained a parent cycle"))]
+    ParentCycle,
+}
+
+/// Client-side validation failure for a category name input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, snafu::Snafu)]
+pub(crate) enum ValidateCategoryNameError {
+    #[snafu(display("category name cannot be blank"))]
+    Blank,
+    #[snafu(display("category name exceeds the maximum length"))]
+    TooLong,
+    #[snafu(display("category name uses a reserved identifier"))]
+    Reserved,
+}
+
+/// Outcome of resolving a rule entry's category UUID against the loaded catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedCategory {
+    Active {
+        name: CategoryName,
+        color: CategoryColor,
+    },
+    Missing,
+}
+
+/// One category row mapped from `categories.list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CategoryItem {
+    pub(crate) uuid: wire::Uuid,
+    pub(crate) parent_uuid: Option<wire::Uuid>,
+    pub(crate) origin: CategoryOrigin,
+    pub(crate) custom_name: Option<String>,
+    pub(crate) display_name: CategoryName,
+    pub(crate) color: CategoryColor,
+    pub(crate) tendency: Tendency,
+    pub(crate) archive_state: CategoryArchiveState,
+    pub(crate) depth: usize,
+}
+
+/// Loaded category catalog in server hierarchy preorder.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct CategoryCatalog {
+    pub(crate) items: Vec<CategoryItem>,
+    pub(crate) truncated: bool,
+}
+
+impl CategoryCatalog {
+    /// Maps a `categories.list` response into a typed catalog.
+    ///
+    /// # Errors
+    /// Returns [`MapCategoriesError`] if UUIDs repeat, colors are invalid, a user category lacks
+    /// a name, or parent pointers form a cycle.
+    pub(crate) fn from_protocol(
+        response: wire::CategoriesListResponse,
+    ) -> Result<Self, MapCategoriesError> {
+        let mut parent_by_uuid: BTreeMap<wire::Uuid, Option<wire::Uuid>> = BTreeMap::new();
+        for entity in &response.entities {
+            if parent_by_uuid
+                .insert(entity.uuid.clone(), entity.parent_uuid.clone())
+                .is_some()
+            {
+                return Err(MapCategoriesError::DuplicateUuid);
+            }
+        }
+
+        let mut items = Vec::with_capacity(response.entities.len());
+        for entity in response.entities {
+            let depth = compute_category_depth(&entity.uuid, &parent_by_uuid)?;
+            let origin = match entity.builtin_key {
+                Some(builtin) => CategoryOrigin::Builtin(builtin_from_wire(builtin)),
+                None => CategoryOrigin::User,
+            };
+            let custom_name = entity
+                .name
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty());
+            let display_name = match (origin, &custom_name) {
+                (_, Some(name)) => CategoryName::Custom(name.clone()),
+                (CategoryOrigin::Builtin(builtin), None) => CategoryName::Builtin(builtin),
+                (CategoryOrigin::User, None) => return Err(MapCategoriesError::MissingName),
+            };
+            let color =
+                CategoryColor::parse_wire(&entity.color).ok_or(MapCategoriesError::InvalidColor)?;
+            items.push(CategoryItem {
+                uuid: entity.uuid,
+                parent_uuid: entity.parent_uuid,
+                origin,
+                custom_name,
+                display_name,
+                color,
+                tendency: tendency_from_wire(entity.tendency),
+                archive_state: CategoryArchiveState::from_wire(entity.archived),
+                depth,
+            });
+        }
+
+        Ok(Self {
+            items,
+            truncated: response.truncated,
+        })
+    }
+
+    /// Looks up a category by UUID.
+    #[must_use]
+    pub(crate) fn find(&self, uuid: &wire::Uuid) -> Option<&CategoryItem> {
+        self.items.iter().find(|item| &item.uuid == uuid)
+    }
+
+    /// Active (non-archived) categories in server preorder.
+    #[must_use]
+    pub(crate) fn active_items(&self) -> Vec<&CategoryItem> {
+        self.items
+            .iter()
+            .filter(|item| item.archive_state == CategoryArchiveState::Active)
+            .collect()
+    }
+
+    /// Archived categories in server preorder.
+    #[must_use]
+    pub(crate) fn archived_items(&self) -> Vec<&CategoryItem> {
+        self.items
+            .iter()
+            .filter(|item| item.archive_state == CategoryArchiveState::Archived)
+            .collect()
+    }
+
+    /// Resolves a rule entry's category UUID to its active name and color, or marks it missing
+    /// when unknown or archived.
+    #[must_use]
+    pub(crate) fn resolve(&self, uuid: &wire::Uuid) -> ResolvedCategory {
+        match self.find(uuid) {
+            Some(item) if item.archive_state == CategoryArchiveState::Active => {
+                ResolvedCategory::Active {
+                    name: item.display_name.clone(),
+                    color: item.color,
+                }
+            }
+            Some(_) | None => ResolvedCategory::Missing,
+        }
+    }
+
+    /// Whether an active category can move in `direction` among its active siblings.
+    #[must_use]
+    pub(crate) fn can_reorder(&self, uuid: &wire::Uuid, direction: ReorderDirection) -> bool {
+        self.reorder_request(uuid, direction).is_some()
+    }
+
+    /// Builds a `categories.reorder` request swapping `uuid` with its adjacent active sibling
+    /// while preserving every sibling (including archived ones) under the same parent.
+    #[must_use]
+    pub(crate) fn reorder_request(
+        &self,
+        uuid: &wire::Uuid,
+        direction: ReorderDirection,
+    ) -> Option<wire::CategoriesReorderRequest> {
+        let item = self.find(uuid)?;
+        if item.archive_state != CategoryArchiveState::Active {
+            return None;
+        }
+        let parent_uuid = item.parent_uuid.clone();
+        let mut all_siblings: Vec<wire::Uuid> = Vec::new();
+        let mut active_positions: Vec<usize> = Vec::new();
+        for candidate in &self.items {
+            if candidate.parent_uuid == parent_uuid {
+                let index = all_siblings.len();
+                all_siblings.push(candidate.uuid.clone());
+                if candidate.archive_state == CategoryArchiveState::Active {
+                    active_positions.push(index);
+                }
+            }
+        }
+        let active_index = active_positions
+            .iter()
+            .position(|&idx| all_siblings.get(idx).is_some_and(|sibling| sibling == uuid))?;
+        let target_active_index = match direction {
+            ReorderDirection::Up => active_index.checked_sub(1)?,
+            ReorderDirection::Down => {
+                let next = active_index.checked_add(1)?;
+                (next < active_positions.len()).then_some(next)?
+            }
+        };
+        let from_pos = *active_positions.get(active_index)?;
+        let to_pos = *active_positions.get(target_active_index)?;
+        all_siblings.swap(from_pos, to_pos);
+        Some(wire::CategoriesReorderRequest {
+            parent_uuid,
+            uuids: all_siblings,
+        })
+    }
+
+    /// Next recommended palette color for a newly created category.
+    #[must_use]
+    pub(crate) fn next_default_color(&self) -> CategoryColor {
+        let used: Vec<CategoryColor> = self
+            .active_items()
+            .into_iter()
+            .map(|item| item.color)
+            .collect();
+        CategoryColor::Palette(PaletteSlot::first_unused(&used).unwrap_or(PaletteSlot::numbered(1)))
+    }
+}
+
+fn compute_category_depth(
+    uuid: &wire::Uuid,
+    parent_by_uuid: &BTreeMap<wire::Uuid, Option<wire::Uuid>>,
+) -> Result<usize, MapCategoriesError> {
+    let mut visited = BTreeSet::new();
+    visited.insert(uuid);
+    let mut depth = 0_usize;
+    let mut current = uuid;
+    while let Some(Some(parent)) = parent_by_uuid.get(current) {
+        if !parent_by_uuid.contains_key(parent) {
+            break;
+        }
+        if !visited.insert(parent) {
+            return Err(MapCategoriesError::ParentCycle);
+        }
+        depth = depth.saturating_add(1);
+        current = parent;
+    }
+    Ok(depth)
+}
+
+const fn builtin_from_wire(builtin: wire::BuiltinCategory) -> BuiltinCategory {
+    match builtin {
+        wire::BuiltinCategory::Development => BuiltinCategory::Development,
+        wire::BuiltinCategory::Learning => BuiltinCategory::Learning,
+        wire::BuiltinCategory::Communication => BuiltinCategory::Communication,
+        wire::BuiltinCategory::Entertainment => BuiltinCategory::Entertainment,
+        wire::BuiltinCategory::System => BuiltinCategory::System,
+    }
+}
+
+const fn tendency_from_wire(tendency: wire::CategoryTendency) -> Tendency {
+    match tendency {
+        wire::CategoryTendency::Focus => Tendency::Focus,
+        wire::CategoryTendency::Neutral => Tendency::Neutral,
+        wire::CategoryTendency::Distraction => Tendency::Distraction,
+    }
+}
+
+const fn tendency_into_wire(tendency: Tendency) -> wire::CategoryTendency {
+    match tendency {
+        Tendency::Focus => wire::CategoryTendency::Focus,
+        Tendency::Neutral => wire::CategoryTendency::Neutral,
+        Tendency::Distraction => wire::CategoryTendency::Distraction,
+    }
+}
+
+fn is_reserved_category_name(value: &str) -> bool {
+    if value.starts_with(BUILTIN_IDENTIFIER_PREFIX) {
+        return true;
+    }
+    value.len() == UUID_TEXT_LEN
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if UUID_HYPHENS.contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+fn validate_category_name(raw: &str) -> Result<String, ValidateCategoryNameError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ValidateCategoryNameError::Blank);
+    }
+    if trimmed.chars().count() > MAX_CATEGORY_NAME_SCALARS {
+        return Err(ValidateCategoryNameError::TooLong);
+    }
+    if is_reserved_category_name(trimmed) {
+        return Err(ValidateCategoryNameError::Reserved);
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Whether the category editor is creating a new category or updating an existing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CategoryEditorMode {
+    Create {
+        uuid: wire::Uuid,
+    },
+    Edit {
+        uuid: wire::Uuid,
+        origin: CategoryOrigin,
+        parent_uuid: Option<wire::Uuid>,
+    },
+}
+
+/// Mutable form state of the category editor card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CategoryEditorDraft {
+    pub(crate) mode: CategoryEditorMode,
+    pub(crate) name_input: String,
+    pub(crate) color: CategoryColor,
+    pub(crate) tendency: Tendency,
+    pub(crate) validation_error: Option<ValidateCategoryNameError>,
+}
+
+/// Inline confirmation state for archiving a category.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum ArchiveConfirmation {
+    #[default]
+    Idle,
+    Pending {
+        uuid: wire::Uuid,
+    },
+}
+
+/// Typed category mutation emitted by [`RulesPage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CategoryMutation {
+    Create(wire::CategoriesCreateRequest),
+    Update(wire::CategoriesUpdateRequest),
+    Archive(wire::CategoriesArchiveRequest),
+    Reorder(wire::CategoriesReorderRequest),
 }
 
 /// Load lifecycle for the rule-set tree or selected rule-set detail.
@@ -572,6 +974,10 @@ pub(crate) struct MutationNotice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RulesEffect {
     None,
+    LoadPage {
+        tree_generation: RulesGeneration,
+        categories_generation: RulesGeneration,
+    },
     LoadTree {
         generation: RulesGeneration,
     },
@@ -581,6 +987,13 @@ pub(crate) enum RulesEffect {
     },
     Mutate {
         mutation: RulesMutation,
+        generation: RulesGeneration,
+    },
+    LoadCategories {
+        generation: RulesGeneration,
+    },
+    MutateCategory {
+        mutation: CategoryMutation,
         generation: RulesGeneration,
     },
 }
@@ -601,9 +1014,10 @@ pub(crate) enum RulesKeyAction {
     Cancel,
 }
 
-/// State machine for the Rules page: rule-set tree, selection, detail, and mutations.
+/// State machine for the Rules page: rule-set tree, selection, detail, categories, and mutations.
 #[derive(Debug)]
 pub(crate) struct RulesPage {
+    active_tab: RulesTab,
     tree_state: LoadState<RuleTree>,
     selected_key: Option<String>,
     detail_state: LoadState<RuleSetDetail>,
@@ -613,6 +1027,14 @@ pub(crate) struct RulesPage {
     delete_confirm: DeleteConfirmation,
     mutating: MutationActivity,
     mutation_notice: Option<MutationNotice>,
+    categories_state: LoadState<CategoryCatalog>,
+    categories_generation: RulesGeneration,
+    category_mutation_generation: RulesGeneration,
+    archived_visibility: ArchivedVisibility,
+    category_editor: Option<CategoryEditorDraft>,
+    archive_confirm: ArchiveConfirmation,
+    category_mutating: MutationActivity,
+    category_mutation_notice: Option<MutationNotice>,
 }
 
 impl Default for RulesPage {
@@ -626,6 +1048,7 @@ impl RulesPage {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self {
+            active_tab: RulesTab::default(),
             tree_state: LoadState::Loading,
             selected_key: None,
             detail_state: LoadState::Loading,
@@ -635,13 +1058,40 @@ impl RulesPage {
             delete_confirm: DeleteConfirmation::Idle,
             mutating: MutationActivity::Idle,
             mutation_notice: None,
+            categories_state: LoadState::Loading,
+            categories_generation: RulesGeneration::default(),
+            category_mutation_generation: RulesGeneration::default(),
+            archived_visibility: ArchivedVisibility::default(),
+            category_editor: None,
+            archive_confirm: ArchiveConfirmation::Idle,
+            category_mutating: MutationActivity::Idle,
+            category_mutation_notice: None,
         }
     }
 
-    /// Starts loading the rule-set tree when opening the Rules page.
+    /// Starts loading the rule-set tree and category catalog when opening the Rules page.
     #[must_use]
     pub(crate) fn open(&mut self) -> RulesEffect {
-        self.reload_tree()
+        self.tree_generation = self.tree_generation.next();
+        self.detail_generation = self.detail_generation.next();
+        self.categories_generation = self.categories_generation.next();
+        self.tree_state = LoadState::Loading;
+        self.detail_state = LoadState::Loading;
+        self.categories_state = LoadState::Loading;
+        self.delete_confirm = DeleteConfirmation::Idle;
+        self.mutation_notice = None;
+        self.archive_confirm = ArchiveConfirmation::Idle;
+        self.category_mutation_notice = None;
+        self.category_editor = None;
+        RulesEffect::LoadPage {
+            tree_generation: self.tree_generation,
+            categories_generation: self.categories_generation,
+        }
+    }
+
+    /// Switches between the Rule sets and Categories sections of the Rules page.
+    pub(crate) fn set_active_tab(&mut self, tab: RulesTab) {
+        self.active_tab = tab;
     }
 
     /// Forces a fresh load of the rule-set tree, invalidating older in-flight responses.
@@ -905,6 +1355,16 @@ impl RulesPage {
     /// Selection movement clamps at the first and last rows of the tree.
     #[must_use]
     pub(crate) fn handle_key(&mut self, action: RulesKeyAction) -> RulesEffect {
+        if self.active_tab == RulesTab::Categories {
+            if matches!(action, RulesKeyAction::Cancel) {
+                if matches!(self.archive_confirm, ArchiveConfirmation::Pending { .. }) {
+                    self.cancel_archive_category();
+                } else {
+                    self.close_category_editor();
+                }
+            }
+            return RulesEffect::None;
+        }
         match action {
             RulesKeyAction::Move(direction) => {
                 let target_key = {
@@ -942,6 +1402,379 @@ impl RulesPage {
                 RulesEffect::None
             }
         }
+    }
+
+    /// Forces a fresh load of the category list, invalidating older in-flight responses.
+    #[must_use]
+    pub(crate) fn reload_categories(&mut self) -> RulesEffect {
+        self.categories_generation = self.categories_generation.next();
+        self.categories_state = LoadState::Loading;
+        self.archive_confirm = ArchiveConfirmation::Idle;
+        self.category_mutation_notice = None;
+        RulesEffect::LoadCategories {
+            generation: self.categories_generation,
+        }
+    }
+
+    /// Applies the result of a `categories.list` load, ignoring stale generations.
+    pub(crate) fn apply_categories_loaded(
+        &mut self,
+        generation: RulesGeneration,
+        result: Result<wire::CategoriesListResponse, LoadDataError>,
+    ) {
+        if !self.categories_generation.accepts(generation) {
+            return;
+        }
+        match result {
+            Ok(response) => match CategoryCatalog::from_protocol(response) {
+                Ok(catalog) => {
+                    if let ArchiveConfirmation::Pending { uuid } = &self.archive_confirm
+                        && catalog
+                            .find(uuid)
+                            .is_none_or(|item| item.archive_state != CategoryArchiveState::Active)
+                    {
+                        self.archive_confirm = ArchiveConfirmation::Idle;
+                    }
+                    self.categories_state = LoadState::Ready(catalog);
+                }
+                Err(_) => {
+                    self.categories_state = LoadState::Failed(LoadDataError::InvalidData);
+                }
+            },
+            Err(LoadDataError::Stale) => {
+                self.categories_state = LoadState::Stale;
+            }
+            Err(error) => {
+                self.categories_state = LoadState::Failed(error);
+            }
+        }
+    }
+
+    /// Toggles whether archived categories are shown below the active category list.
+    pub(crate) fn toggle_archived_visibility(&mut self) {
+        self.archived_visibility = self.archived_visibility.toggled();
+    }
+
+    /// Opens the category editor in create mode with a client-generated UUID.
+    pub(crate) fn begin_create_category(&mut self, uuid: wire::Uuid) {
+        if self.category_mutating == MutationActivity::Busy {
+            return;
+        }
+        let color = self.categories().map_or(
+            CategoryColor::Palette(PaletteSlot::numbered(1)),
+            CategoryCatalog::next_default_color,
+        );
+        self.archive_confirm = ArchiveConfirmation::Idle;
+        self.category_mutation_notice = None;
+        self.category_editor = Some(CategoryEditorDraft {
+            mode: CategoryEditorMode::Create { uuid },
+            name_input: String::new(),
+            color,
+            tendency: Tendency::Neutral,
+            validation_error: None,
+        });
+    }
+
+    /// Opens the category editor for an existing category.
+    pub(crate) fn begin_edit_category(&mut self, uuid: &wire::Uuid) {
+        if self.category_mutating == MutationActivity::Busy {
+            return;
+        }
+        let Some(item) = self.categories().and_then(|catalog| catalog.find(uuid)) else {
+            return;
+        };
+        let draft = CategoryEditorDraft {
+            mode: CategoryEditorMode::Edit {
+                uuid: item.uuid.clone(),
+                origin: item.origin,
+                parent_uuid: item.parent_uuid.clone(),
+            },
+            name_input: item.custom_name.clone().unwrap_or_default(),
+            color: item.color,
+            tendency: item.tendency,
+            validation_error: None,
+        };
+        self.archive_confirm = ArchiveConfirmation::Idle;
+        self.category_mutation_notice = None;
+        self.category_editor = Some(draft);
+    }
+
+    /// Closes the category editor without saving.
+    pub(crate) fn close_category_editor(&mut self) {
+        if self.category_mutating == MutationActivity::Busy {
+            return;
+        }
+        self.category_editor = None;
+    }
+
+    /// Updates the draft name text and clears any prior validation notice.
+    pub(crate) fn set_category_editor_name(&mut self, name: String) {
+        if let Some(draft) = &mut self.category_editor {
+            draft.name_input = name;
+            draft.validation_error = None;
+        }
+    }
+
+    /// Clears a renamed built-in category's custom name so saving restores the localized default.
+    pub(crate) fn reset_builtin_editor_name(&mut self) {
+        if let Some(draft) = &mut self.category_editor
+            && matches!(
+                draft.mode,
+                CategoryEditorMode::Edit {
+                    origin: CategoryOrigin::Builtin(_),
+                    ..
+                }
+            )
+        {
+            draft.name_input.clear();
+            draft.validation_error = None;
+        }
+    }
+
+    /// Selects a palette color inside the category editor.
+    pub(crate) fn set_category_editor_color(&mut self, color: CategoryColor) {
+        if let Some(draft) = &mut self.category_editor {
+            draft.color = color;
+        }
+    }
+
+    /// Selects a focus tendency inside the category editor.
+    pub(crate) fn set_category_editor_tendency(&mut self, tendency: Tendency) {
+        if let Some(draft) = &mut self.category_editor {
+            draft.tendency = tendency;
+        }
+    }
+
+    /// Validates the category editor draft client-side and emits a create or update mutation.
+    #[must_use]
+    pub(crate) fn submit_category_editor(&mut self) -> RulesEffect {
+        if self.category_mutating == MutationActivity::Busy {
+            return RulesEffect::None;
+        }
+        let Some(draft) = &mut self.category_editor else {
+            return RulesEffect::None;
+        };
+        let mutation = match &draft.mode {
+            CategoryEditorMode::Create { uuid } => {
+                let name = match validate_category_name(&draft.name_input) {
+                    Ok(name) => name,
+                    Err(error) => {
+                        draft.validation_error = Some(error);
+                        return RulesEffect::None;
+                    }
+                };
+                CategoryMutation::Create(wire::CategoriesCreateRequest {
+                    entity: wire::NewCategory {
+                        uuid: uuid.clone(),
+                        parent_uuid: None,
+                        name: Some(name),
+                        color: draft.color.token_key().to_owned(),
+                        tendency: tendency_into_wire(draft.tendency),
+                    },
+                })
+            }
+            CategoryEditorMode::Edit {
+                uuid,
+                origin,
+                parent_uuid,
+            } => {
+                let name = match origin {
+                    CategoryOrigin::User => match validate_category_name(&draft.name_input) {
+                        Ok(name) => Some(name),
+                        Err(error) => {
+                            draft.validation_error = Some(error);
+                            return RulesEffect::None;
+                        }
+                    },
+                    CategoryOrigin::Builtin(_) => {
+                        if draft.name_input.trim().is_empty() {
+                            None
+                        } else {
+                            match validate_category_name(&draft.name_input) {
+                                Ok(name) => Some(name),
+                                Err(error) => {
+                                    draft.validation_error = Some(error);
+                                    return RulesEffect::None;
+                                }
+                            }
+                        }
+                    }
+                };
+                CategoryMutation::Update(wire::CategoriesUpdateRequest {
+                    entity: wire::CategoryEdit {
+                        uuid: uuid.clone(),
+                        parent_uuid: parent_uuid.clone(),
+                        name,
+                        color: draft.color.token_key().to_owned(),
+                        tendency: tendency_into_wire(draft.tendency),
+                    },
+                })
+            }
+        };
+        self.category_mutation_notice = None;
+        self.category_mutating = MutationActivity::Busy;
+        self.category_mutation_generation = self.category_mutation_generation.next();
+        RulesEffect::MutateCategory {
+            mutation,
+            generation: self.category_mutation_generation,
+        }
+    }
+
+    /// Opens the inline archive confirmation for an active category.
+    pub(crate) fn request_archive_category(&mut self, uuid: &wire::Uuid) {
+        if self.category_mutating == MutationActivity::Busy {
+            return;
+        }
+        let Some(item) = self.categories().and_then(|catalog| catalog.find(uuid)) else {
+            return;
+        };
+        if item.archive_state != CategoryArchiveState::Active {
+            return;
+        }
+        let uuid = item.uuid.clone();
+        self.category_mutation_notice = None;
+        self.archive_confirm = ArchiveConfirmation::Pending { uuid };
+    }
+
+    /// Dismisses any pending inline archive confirmation.
+    pub(crate) fn cancel_archive_category(&mut self) {
+        self.archive_confirm = ArchiveConfirmation::Idle;
+    }
+
+    /// Executes `categories.archive` only when inline confirmation is pending for `uuid`.
+    #[must_use]
+    pub(crate) fn confirm_archive_category(&mut self, uuid: &wire::Uuid) -> RulesEffect {
+        if self.category_mutating == MutationActivity::Busy {
+            return RulesEffect::None;
+        }
+        let ArchiveConfirmation::Pending { uuid: pending } = &self.archive_confirm else {
+            return RulesEffect::None;
+        };
+        if pending != uuid {
+            return RulesEffect::None;
+        }
+        let Some(item) = self.categories().and_then(|catalog| catalog.find(uuid)) else {
+            self.archive_confirm = ArchiveConfirmation::Idle;
+            return RulesEffect::None;
+        };
+        if item.archive_state != CategoryArchiveState::Active {
+            self.archive_confirm = ArchiveConfirmation::Idle;
+            return RulesEffect::None;
+        }
+        let uuid = item.uuid.clone();
+        self.archive_confirm = ArchiveConfirmation::Idle;
+        self.category_mutation_notice = None;
+        self.category_mutating = MutationActivity::Busy;
+        self.category_mutation_generation = self.category_mutation_generation.next();
+        RulesEffect::MutateCategory {
+            mutation: CategoryMutation::Archive(wire::CategoriesArchiveRequest {
+                uuid,
+                archived: true,
+            }),
+            generation: self.category_mutation_generation,
+        }
+    }
+
+    /// Restores an archived category back to active status.
+    #[must_use]
+    pub(crate) fn restore_category(&mut self, uuid: &wire::Uuid) -> RulesEffect {
+        if self.category_mutating == MutationActivity::Busy {
+            return RulesEffect::None;
+        }
+        let Some(item) = self.categories().and_then(|catalog| catalog.find(uuid)) else {
+            return RulesEffect::None;
+        };
+        if item.archive_state != CategoryArchiveState::Archived {
+            return RulesEffect::None;
+        }
+        let uuid = item.uuid.clone();
+        self.archive_confirm = ArchiveConfirmation::Idle;
+        self.category_mutation_notice = None;
+        self.category_mutating = MutationActivity::Busy;
+        self.category_mutation_generation = self.category_mutation_generation.next();
+        RulesEffect::MutateCategory {
+            mutation: CategoryMutation::Archive(wire::CategoriesArchiveRequest {
+                uuid,
+                archived: false,
+            }),
+            generation: self.category_mutation_generation,
+        }
+    }
+
+    /// Moves an active category up or down among its siblings; no-op at sibling bounds.
+    #[must_use]
+    pub(crate) fn reorder_category(
+        &mut self,
+        uuid: &wire::Uuid,
+        direction: ReorderDirection,
+    ) -> RulesEffect {
+        if self.category_mutating == MutationActivity::Busy {
+            return RulesEffect::None;
+        }
+        let Some(request) = self
+            .categories()
+            .and_then(|catalog| catalog.reorder_request(uuid, direction))
+        else {
+            return RulesEffect::None;
+        };
+        self.archive_confirm = ArchiveConfirmation::Idle;
+        self.category_mutation_notice = None;
+        self.category_mutating = MutationActivity::Busy;
+        self.category_mutation_generation = self.category_mutation_generation.next();
+        RulesEffect::MutateCategory {
+            mutation: CategoryMutation::Reorder(request),
+            generation: self.category_mutation_generation,
+        }
+    }
+
+    /// Applies the outcome of a category mutation; success closes the editor and reloads the list.
+    #[must_use]
+    pub(crate) fn apply_category_mutation_finished(
+        &mut self,
+        generation: RulesGeneration,
+        result: Result<(), LoadDataError>,
+    ) -> RulesEffect {
+        if !self.category_mutation_generation.accepts(generation) {
+            return RulesEffect::None;
+        }
+        self.category_mutating = MutationActivity::Idle;
+        match result {
+            Ok(()) => {
+                self.category_editor = None;
+                self.reload_categories()
+            }
+            Err(error) => {
+                if matches!(error, LoadDataError::Stale)
+                    || matches!(
+                        error.code(),
+                        LoadDataErrorCode::Protocol(
+                            ErrorKind::RuleSetStale { .. } | ErrorKind::StaleDocumentRef
+                        )
+                    )
+                {
+                    self.category_editor = None;
+                    self.categories_state = LoadState::Stale;
+                } else {
+                    self.category_mutation_notice = Some(MutationNotice { error });
+                }
+                RulesEffect::None
+            }
+        }
+    }
+
+    /// Resolves a rule entry's category UUID against the loaded category catalog.
+    #[must_use]
+    pub(crate) fn resolve_entry_category(&self, uuid: &wire::Uuid) -> ResolvedCategory {
+        match self.categories() {
+            Some(catalog) => catalog.resolve(uuid),
+            None => ResolvedCategory::Missing,
+        }
+    }
+
+    /// Active tab on the Rules page.
+    #[must_use]
+    pub(crate) const fn active_tab(&self) -> RulesTab {
+        self.active_tab
     }
 
     /// Current tree when loaded.
@@ -990,16 +1823,86 @@ impl RulesPage {
         &self.delete_confirm
     }
 
-    /// Whether a mutation is currently in flight.
+    /// Whether a rule-set mutation is currently in flight.
     #[must_use]
     pub(crate) const fn mutating(&self) -> MutationActivity {
         self.mutating
     }
 
-    /// Inline mutation failure notice, if any.
+    /// Inline rule-set mutation failure notice, if any.
     #[must_use]
     pub(crate) const fn mutation_notice(&self) -> Option<&MutationNotice> {
         self.mutation_notice.as_ref()
+    }
+
+    /// Loaded category catalog, if ready.
+    #[must_use]
+    pub(crate) fn categories(&self) -> Option<&CategoryCatalog> {
+        match &self.categories_state {
+            LoadState::Ready(catalog) => Some(catalog),
+            LoadState::Loading | LoadState::Failed(_) | LoadState::Stale => None,
+        }
+    }
+
+    /// Current category list load state.
+    #[must_use]
+    pub(crate) const fn categories_state(&self) -> &LoadState<CategoryCatalog> {
+        &self.categories_state
+    }
+
+    /// Active (non-archived) categories in server preorder.
+    #[must_use]
+    pub(crate) fn active_categories(&self) -> Vec<&CategoryItem> {
+        self.categories()
+            .map_or_else(Vec::new, CategoryCatalog::active_items)
+    }
+
+    /// Archived categories currently visible according to the archived visibility toggle.
+    #[must_use]
+    pub(crate) fn visible_archived_categories(&self) -> Vec<&CategoryItem> {
+        match self.archived_visibility {
+            ArchivedVisibility::Hidden => Vec::new(),
+            ArchivedVisibility::Visible => self
+                .categories()
+                .map_or_else(Vec::new, CategoryCatalog::archived_items),
+        }
+    }
+
+    /// Total number of archived categories in the loaded catalog.
+    #[must_use]
+    pub(crate) fn archived_category_count(&self) -> usize {
+        self.categories()
+            .map_or(0, |catalog| catalog.archived_items().len())
+    }
+
+    /// Whether archived categories are currently expanded.
+    #[must_use]
+    pub(crate) const fn archived_visibility(&self) -> ArchivedVisibility {
+        self.archived_visibility
+    }
+
+    /// Open category editor draft, if any.
+    #[must_use]
+    pub(crate) const fn category_editor(&self) -> Option<&CategoryEditorDraft> {
+        self.category_editor.as_ref()
+    }
+
+    /// Active inline archive confirmation state.
+    #[must_use]
+    pub(crate) const fn archive_confirmation(&self) -> &ArchiveConfirmation {
+        &self.archive_confirm
+    }
+
+    /// Whether a category mutation is currently in flight.
+    #[must_use]
+    pub(crate) const fn category_mutating(&self) -> MutationActivity {
+        self.category_mutating
+    }
+
+    /// Inline category mutation failure notice, if any.
+    #[must_use]
+    pub(crate) const fn category_mutation_notice(&self) -> Option<&MutationNotice> {
+        self.category_mutation_notice.as_ref()
     }
 }
 
@@ -1007,10 +1910,11 @@ impl RulesPage {
 mod tests {
     use super::*;
     use quartz_protocol::{
-        MutatedRuleSet, QueryVersions, RuleCondition, RuleEntryContent, RuleEntryKind,
-        RuleEntryState, RuleField, RuleKind, RuleMatch, RuleOperator, RuleProvenance,
-        RuleSetCounts, RuleSetEntry, RuleSetNode, RuleSetSource, RuleSetWarning,
-        RuleSetsGetResponse, RuleSetsTreeResponse, RuleSetsWriteResponse, RuleWarningCode,
+        BuiltinCategory as WireBuiltinCategory, CategoriesListResponse, CategoryTendency,
+        EditableCategory, MutatedRuleSet, QueryVersions, RuleCondition, RuleEntryContent,
+        RuleEntryKind, RuleEntryState, RuleField, RuleKind, RuleMatch, RuleOperator,
+        RuleProvenance, RuleSetCounts, RuleSetEntry, RuleSetNode, RuleSetSource, RuleSetWarning,
+        RuleSetsGetResponse, RuleSetsTreeResponse, RuleSetsWriteResponse, RuleWarningCode, Uuid,
     };
 
     fn node(
@@ -1087,8 +1991,12 @@ mod tests {
 
     fn loaded_page() -> RulesPage {
         let mut page = RulesPage::new();
-        let RulesEffect::LoadTree { generation } = page.open() else {
-            panic!("opening the page must load the tree");
+        let RulesEffect::LoadPage {
+            tree_generation: generation,
+            ..
+        } = page.open()
+        else {
+            panic!("opening the page must load both the tree and categories");
         };
         let mut parent = node(
             "builtin.classification",
@@ -1428,5 +2336,373 @@ mod tests {
             RulesEffect::None
         );
         assert!(matches!(page.tree_state(), LoadState::Failed(_)));
+    }
+
+    fn uuid(suffix: u16) -> Uuid {
+        format!("00000000-0000-4000-8000-{suffix:012}")
+            .parse()
+            .expect("valid test UUID")
+    }
+
+    fn editable_category(
+        suffix: u16,
+        parent: Option<u16>,
+        builtin_key: Option<WireBuiltinCategory>,
+        name: Option<&str>,
+        color: &str,
+        tendency: CategoryTendency,
+        archived: bool,
+    ) -> EditableCategory {
+        EditableCategory {
+            uuid: uuid(suffix),
+            builtin_key,
+            parent_uuid: parent.map(uuid),
+            name: name.map(str::to_owned),
+            color: color.to_owned(),
+            tendency,
+            sort_order: i64::from(suffix),
+            archived,
+        }
+    }
+
+    fn loaded_categories_page() -> RulesPage {
+        let mut page = RulesPage::new();
+        let RulesEffect::LoadPage {
+            categories_generation,
+            ..
+        } = page.open()
+        else {
+            panic!("opening the page must request categories");
+        };
+        page.set_active_tab(RulesTab::Categories);
+        let response = CategoriesListResponse {
+            entities: vec![
+                editable_category(
+                    1,
+                    None,
+                    Some(WireBuiltinCategory::Development),
+                    None,
+                    "cat.8",
+                    CategoryTendency::Focus,
+                    false,
+                ),
+                editable_category(
+                    2,
+                    Some(1),
+                    None,
+                    Some("Backend"),
+                    "cat.2",
+                    CategoryTendency::Focus,
+                    false,
+                ),
+                editable_category(
+                    3,
+                    None,
+                    None,
+                    Some("Old client"),
+                    "cat.9",
+                    CategoryTendency::Neutral,
+                    true,
+                ),
+                editable_category(
+                    4,
+                    None,
+                    Some(WireBuiltinCategory::Learning),
+                    Some("Deep study"),
+                    "cat.1",
+                    CategoryTendency::Focus,
+                    false,
+                ),
+            ],
+            versions: QueryVersions("categories.v1:4".to_owned()),
+            truncated: false,
+        };
+        page.apply_categories_loaded(categories_generation, Ok(response));
+        page
+    }
+
+    #[test]
+    fn category_list_mapping_and_archived_filtering() {
+        let mut page = loaded_categories_page();
+        assert_eq!(page.active_tab(), RulesTab::Categories);
+        assert_eq!(page.archived_visibility(), ArchivedVisibility::Hidden);
+        assert_eq!(page.archived_category_count(), 1);
+
+        let active = page.active_categories();
+        assert_eq!(active.len(), 3);
+        let dev = active.first().expect("development");
+        assert_eq!(
+            dev.origin,
+            CategoryOrigin::Builtin(BuiltinCategory::Development)
+        );
+        assert_eq!(
+            dev.display_name,
+            CategoryName::Builtin(BuiltinCategory::Development)
+        );
+        assert_eq!(dev.color, CategoryColor::Palette(PaletteSlot::numbered(8)));
+        assert_eq!(dev.tendency, Tendency::Focus);
+        assert_eq!(dev.depth, 0);
+
+        let backend = active.get(1).expect("backend child");
+        assert_eq!(backend.origin, CategoryOrigin::User);
+        assert_eq!(
+            backend.display_name,
+            CategoryName::Custom("Backend".to_owned())
+        );
+        assert_eq!(backend.depth, 1);
+
+        let learning = active.get(2).expect("renamed builtin");
+        assert_eq!(
+            learning.origin,
+            CategoryOrigin::Builtin(BuiltinCategory::Learning)
+        );
+        assert_eq!(
+            learning.display_name,
+            CategoryName::Custom("Deep study".to_owned())
+        );
+        assert_eq!(learning.custom_name.as_deref(), Some("Deep study"));
+        assert!(!page.categories().expect("catalog").truncated);
+
+        assert!(
+            page.visible_archived_categories().is_empty(),
+            "archived categories stay hidden until toggled visible"
+        );
+        page.toggle_archived_visibility();
+        assert_eq!(page.archived_visibility(), ArchivedVisibility::Visible);
+        let archived = page.visible_archived_categories();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(
+            archived.first().expect("archived").display_name,
+            CategoryName::Custom("Old client".to_owned())
+        );
+    }
+
+    #[test]
+    fn create_category_rejects_blank_and_reserved_names_without_request() {
+        let mut page = loaded_categories_page();
+        let new_id = uuid(99);
+        page.begin_create_category(new_id.clone());
+        assert_eq!(
+            page.category_editor().expect("editor").color,
+            CategoryColor::Palette(PaletteSlot::numbered(3)),
+            "default color picks the first unused palette slot"
+        );
+
+        page.set_category_editor_name("   \t ".to_owned());
+        assert_eq!(
+            page.submit_category_editor(),
+            RulesEffect::None,
+            "blank name must not emit a create request"
+        );
+        assert_eq!(
+            page.category_editor().expect("editor").validation_error,
+            Some(ValidateCategoryNameError::Blank)
+        );
+
+        page.set_category_editor_name("builtin:development".to_owned());
+        assert_eq!(page.submit_category_editor(), RulesEffect::None);
+        assert_eq!(
+            page.category_editor().expect("editor").validation_error,
+            Some(ValidateCategoryNameError::Reserved)
+        );
+
+        page.set_category_editor_name("x".repeat(MAX_CATEGORY_NAME_SCALARS + 1));
+        assert_eq!(page.submit_category_editor(), RulesEffect::None);
+        assert_eq!(
+            page.category_editor().expect("editor").validation_error,
+            Some(ValidateCategoryNameError::TooLong)
+        );
+
+        page.set_category_editor_name("  Research  ".to_owned());
+        page.set_category_editor_color(CategoryColor::Palette(PaletteSlot::numbered(5)));
+        page.set_category_editor_tendency(Tendency::Focus);
+        let effect = page.submit_category_editor();
+        assert!(matches!(
+            effect,
+            RulesEffect::MutateCategory {
+                mutation: CategoryMutation::Create(wire::CategoriesCreateRequest {
+                    entity: wire::NewCategory {
+                        ref uuid,
+                        parent_uuid: None,
+                        ref name,
+                        ref color,
+                        tendency: CategoryTendency::Focus,
+                    }
+                }),
+                ..
+            } if *uuid == new_id && name.as_deref() == Some("Research") && color == "cat.5"
+        ));
+    }
+
+    #[test]
+    fn archive_category_requires_inline_confirmation() {
+        let mut page = loaded_categories_page();
+        let target = uuid(2);
+
+        assert_eq!(
+            page.confirm_archive_category(&target),
+            RulesEffect::None,
+            "archive without prior confirmation request must do nothing"
+        );
+        assert_eq!(page.archive_confirmation(), &ArchiveConfirmation::Idle);
+
+        page.request_archive_category(&target);
+        assert_eq!(
+            page.archive_confirmation(),
+            &ArchiveConfirmation::Pending {
+                uuid: target.clone()
+            }
+        );
+        assert_eq!(
+            page.confirm_archive_category(&uuid(1)),
+            RulesEffect::None,
+            "confirming a different category must do nothing"
+        );
+
+        let effect = page.confirm_archive_category(&target);
+        assert!(matches!(
+            effect,
+            RulesEffect::MutateCategory {
+                mutation: CategoryMutation::Archive(wire::CategoriesArchiveRequest {
+                    ref uuid,
+                    archived: true,
+                }),
+                ..
+            } if *uuid == target
+        ));
+        assert_eq!(page.archive_confirmation(), &ArchiveConfirmation::Idle);
+    }
+
+    #[test]
+    fn reorder_up_at_top_is_a_noop_and_preserves_archived_siblings() {
+        let mut page = loaded_categories_page();
+        let top_root = uuid(1);
+        let second_active_root = uuid(4);
+        let archived_root = uuid(3);
+        let only_child = uuid(2);
+
+        let catalog = page.categories().expect("catalog");
+        assert!(!catalog.can_reorder(&top_root, ReorderDirection::Up));
+        assert!(catalog.can_reorder(&top_root, ReorderDirection::Down));
+        assert!(catalog.can_reorder(&second_active_root, ReorderDirection::Up));
+        assert!(!catalog.can_reorder(&second_active_root, ReorderDirection::Down));
+
+        assert_eq!(
+            page.reorder_category(&top_root, ReorderDirection::Up),
+            RulesEffect::None,
+            "moving up at the top of a sibling group is a no-op"
+        );
+        assert_eq!(
+            page.reorder_category(&second_active_root, ReorderDirection::Down),
+            RulesEffect::None,
+            "moving down at the bottom of a sibling group is a no-op"
+        );
+        assert_eq!(
+            page.reorder_category(&only_child, ReorderDirection::Up),
+            RulesEffect::None
+        );
+
+        let effect = page.reorder_category(&second_active_root, ReorderDirection::Up);
+        assert!(matches!(
+            effect,
+            RulesEffect::MutateCategory {
+                mutation: CategoryMutation::Reorder(wire::CategoriesReorderRequest {
+                    parent_uuid: None,
+                    ref uuids,
+                }),
+                ..
+            } if *uuids == vec![second_active_root.clone(), archived_root.clone(), top_root.clone()]
+        ));
+    }
+
+    #[test]
+    fn category_mutation_success_reloads_list_and_errors_preserve_state() {
+        let mut page = loaded_categories_page();
+        page.begin_edit_category(&uuid(4));
+        page.reset_builtin_editor_name();
+        let RulesEffect::MutateCategory {
+            mutation,
+            generation,
+        } = page.submit_category_editor()
+        else {
+            panic!("resetting builtin name and saving emits update mutation");
+        };
+        assert!(matches!(
+            mutation,
+            CategoryMutation::Update(wire::CategoriesUpdateRequest {
+                entity: wire::CategoryEdit { name: None, .. }
+            })
+        ));
+        assert_eq!(page.category_mutating(), MutationActivity::Busy);
+
+        let reload = page.apply_category_mutation_finished(generation, Ok(()));
+        assert_eq!(page.category_mutating(), MutationActivity::Idle);
+        assert!(page.category_editor().is_none());
+        assert!(
+            matches!(reload, RulesEffect::LoadCategories { .. }),
+            "successful category mutation must reload the category list"
+        );
+        assert!(matches!(page.categories_state(), LoadState::Loading));
+
+        // Failed mutation surfaces an inline notice without wiping loaded categories.
+        let mut failing_page = loaded_categories_page();
+        let RulesEffect::MutateCategory { generation, .. } =
+            failing_page.restore_category(&uuid(3))
+        else {
+            panic!("restoring archived category emits mutation");
+        };
+        assert_eq!(
+            failing_page
+                .apply_category_mutation_finished(generation, Err(LoadDataError::InvalidData)),
+            RulesEffect::None
+        );
+        assert!(failing_page.category_mutation_notice().is_some());
+        assert!(failing_page.categories().is_some());
+    }
+
+    #[test]
+    fn rule_entry_category_resolution_handles_active_archived_and_unknown() {
+        let mut page = loaded_categories_page();
+        let mut response = get_response("user.tweaks", "Dev rule");
+        if let Some(entry) = response.entries.first_mut() {
+            entry.content.category = Some(uuid(1));
+        }
+        let detail = RuleSetDetail::from_protocol(response);
+        let entry_category = detail
+            .entries
+            .first()
+            .expect("entry")
+            .category
+            .as_ref()
+            .expect("entry category UUID");
+        assert_eq!(
+            page.resolve_entry_category(entry_category),
+            ResolvedCategory::Active {
+                name: CategoryName::Builtin(BuiltinCategory::Development),
+                color: CategoryColor::Palette(PaletteSlot::numbered(8)),
+            }
+        );
+        assert_eq!(
+            page.resolve_entry_category(&uuid(2)),
+            ResolvedCategory::Active {
+                name: CategoryName::Custom("Backend".to_owned()),
+                color: CategoryColor::Palette(PaletteSlot::numbered(2)),
+            }
+        );
+        assert_eq!(
+            page.resolve_entry_category(&uuid(3)),
+            ResolvedCategory::Missing,
+            "archived categories resolve as missing on rule entries"
+        );
+        assert_eq!(
+            page.resolve_entry_category(&uuid(999)),
+            ResolvedCategory::Missing,
+            "unknown category UUIDs resolve as missing without raw UUID fallback"
+        );
+
+        page.begin_edit_category(&uuid(1));
+        assert!(page.category_editor().is_some());
+        assert_eq!(page.handle_key(RulesKeyAction::Cancel), RulesEffect::None);
+        assert!(page.category_editor().is_none());
     }
 }

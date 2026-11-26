@@ -1,7 +1,9 @@
-//! Rule-set tree, detail, and mutation requests over the existing UI pipe link.
+//! Rule-set and category reads and mutations over the existing UI pipe link.
 
 use super::{Link, LoadDataError};
 use quartz_protocol::{
+    AcceptedBody, CategoriesArchiveRequest, CategoriesCreateRequest, CategoriesListRequest,
+    CategoriesListResponse, CategoriesReorderRequest, CategoriesUpdateRequest, CategoryResponse,
     RuleKind, RuleSetsDeleteRequest, RuleSetsGetRequest, RuleSetsGetResponse,
     RuleSetsSetEnabledRequest, RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsWriteResponse,
     RuleView,
@@ -70,6 +72,62 @@ impl Link {
         &self,
         request: RuleSetsDeleteRequest,
     ) -> Result<RuleSetsWriteResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Loads all categories (active and archived) in server hierarchy preorder.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn list_categories(&self) -> Result<CategoriesListResponse, LoadDataError> {
+        self.request(CategoriesListRequest {
+            include_archived: true,
+        })
+        .await
+        .map_err(LoadDataError::from)
+    }
+
+    /// Creates a new user category with a client-supplied UUID.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn create_category(
+        &self,
+        request: CategoriesCreateRequest,
+    ) -> Result<CategoryResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Updates an existing category's editable metadata.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn update_category(
+        &self,
+        request: CategoriesUpdateRequest,
+    ) -> Result<CategoryResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Archives or restores a category without deleting historical records.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn archive_category(
+        &self,
+        request: CategoriesArchiveRequest,
+    ) -> Result<CategoryResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Reorders all siblings under one parent category.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn reorder_categories(
+        &self,
+        request: CategoriesReorderRequest,
+    ) -> Result<AcceptedBody, LoadDataError> {
         self.request(request).await.map_err(LoadDataError::from)
     }
 }

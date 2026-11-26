@@ -628,4 +628,98 @@ rules.entry.no_conditions:
   zh-CN: "无条件"
 rules.entry.target:
   zh-CN: "目标：%{value}"
+rules.entry.category_missing:
+  zh-CN: "分类已缺失"
+rules.tab.rule_sets:
+  zh-CN: "规则集"
+rules.tab.categories:
+  zh-CN: "分类"
+rules.categories.heading:
+  zh-CN: "分类"
+rules.categories.empty:
+  zh-CN: "没有启用中的分类。"
+rules.categories.truncated:
+  zh-CN: "仅显示前 %{count} 个分类，列表已截断。"
+rules.categories.col.name:
+  zh-CN: "分类"
+rules.categories.col.tendency:
+  zh-CN: "倾向"
+rules.categories.col.actions:
+  zh-CN: "操作"
+rules.categories.tendency.focus:
+  zh-CN: "专注"
+rules.categories.tendency.neutral:
+  zh-CN: "中性"
+rules.categories.tendency.distraction:
+  zh-CN: "分心"
+rules.categories.badge.renamed:
+  zh-CN: "已改名"
+rules.categories.badge.archived:
+  zh-CN: "已归档"
+rules.categories.action.new:
+  zh-CN: "新建分类"
+rules.categories.action.edit:
+  zh-CN: "编辑"
+rules.categories.action.archive:
+  zh-CN: "归档"
+rules.categories.action.restore:
+  zh-CN: "恢复"
+rules.categories.action.move_up:
+  zh-CN: "上移"
+rules.categories.action.move_down:
+  zh-CN: "下移"
+rules.categories.action.show_archived:
+  zh-CN: "显示已归档（%{count}）"
+rules.categories.action.hide_archived:
+  zh-CN: "隐藏已归档（%{count}）"
+rules.categories.archived.info:
+  zh-CN: "已归档分类保留历史记录与已有规则引用，但不会出现在新选择器中。"
+rules.categories.archived.empty:
+  zh-CN: "没有已归档分类。"
+rules.categories.archive_confirm.prompt:
+  zh-CN: "确定归档分类“%{name}”吗？"
+rules.categories.archive_confirm.confirm:
+  zh-CN: "确认归档"
+rules.categories.editor.create_title:
+  zh-CN: "新建分类"
+rules.categories.editor.edit_title:
+  zh-CN: "编辑分类"
+rules.categories.editor.name_label:
+  zh-CN: "名称"
+rules.categories.editor.name_placeholder:
+  zh-CN: "输入分类名称"
+rules.categories.editor.reset_default:
+  zh-CN: "恢复默认名称"
+rules.categories.editor.builtin_hint:
+  zh-CN: "留空以保留随界面语言切换的默认名称。"
+rules.categories.editor.color_label:
+  zh-CN: "颜色"
+rules.categories.editor.tendency_label:
+  zh-CN: "统计倾向"
+rules.categories.editor.create_submit:
+  zh-CN: "创建"
+rules.categories.editor.save_submit:
+  zh-CN: "保存"
+rules.categories.validation.blank:
+  zh-CN: "请输入分类名称。"
+rules.categories.validation.too_long:
+  zh-CN: "分类名称不能超过 256 个字符。"
+rules.categories.validation.reserved:
+  zh-CN: "该名称为系统保留标识，请换一个名称。"
+rules.categories.load_failed.title:
+  zh-CN: "暂时无法加载分类"
+rules.categories.load_failed.message:
+  zh-CN: "请重试以重新加载分类。"
+rules.categories.stale.title:
+  zh-CN: "分类已更新"
+rules.categories.stale.message:
+  zh-CN: "分类在加载或操作期间发生了变更，请重新加载以查看最新列表。"
+rules.categories.mutation_failed.invalid:
+  zh-CN: "分类修改被拒绝，请检查名称或重新加载列表后重试。"
+rules.categories.mutation_failed.readonly:
+  zh-CN: "不允许执行此分类操作。"
+rules.categories.mutation_failed.busy:
+  zh-CN: "核心正忙，请稍后重试。"
+rules.categories.mutation_failed.generic:
+  zh-CN: "无法更新分类，请重试。"
 

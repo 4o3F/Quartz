@@ -628,4 +628,98 @@ rules.entry.no_conditions:
   en: "No conditions"
 rules.entry.target:
   en: "Target: %{value}"
+rules.entry.category_missing:
+  en: "Missing category"
+rules.tab.rule_sets:
+  en: "Rule sets"
+rules.tab.categories:
+  en: "Categories"
+rules.categories.heading:
+  en: "Categories"
+rules.categories.empty:
+  en: "No active categories."
+rules.categories.truncated:
+  en: "Showing first %{count} categories; list was truncated."
+rules.categories.col.name:
+  en: "Category"
+rules.categories.col.tendency:
+  en: "Tendency"
+rules.categories.col.actions:
+  en: "Actions"
+rules.categories.tendency.focus:
+  en: "Focus"
+rules.categories.tendency.neutral:
+  en: "Neutral"
+rules.categories.tendency.distraction:
+  en: "Distraction"
+rules.categories.badge.renamed:
+  en: "Renamed"
+rules.categories.badge.archived:
+  en: "Archived"
+rules.categories.action.new:
+  en: "New category"
+rules.categories.action.edit:
+  en: "Edit"
+rules.categories.action.archive:
+  en: "Archive"
+rules.categories.action.restore:
+  en: "Restore"
+rules.categories.action.move_up:
+  en: "Move up"
+rules.categories.action.move_down:
+  en: "Move down"
+rules.categories.action.show_archived:
+  en: "Show archived (%{count})"
+rules.categories.action.hide_archived:
+  en: "Hide archived (%{count})"
+rules.categories.archived.info:
+  en: "Archived categories keep history and existing rule references, but are hidden from new pickers."
+rules.categories.archived.empty:
+  en: "No archived categories."
+rules.categories.archive_confirm.prompt:
+  en: "Archive category %{name}?"
+rules.categories.archive_confirm.confirm:
+  en: "Confirm archive"
+rules.categories.editor.create_title:
+  en: "New category"
+rules.categories.editor.edit_title:
+  en: "Edit category"
+rules.categories.editor.name_label:
+  en: "Name"
+rules.categories.editor.name_placeholder:
+  en: "Category name"
+rules.categories.editor.reset_default:
+  en: "Reset to default"
+rules.categories.editor.builtin_hint:
+  en: "Leave blank to keep the localized built-in name."
+rules.categories.editor.color_label:
+  en: "Color"
+rules.categories.editor.tendency_label:
+  en: "Tendency"
+rules.categories.editor.create_submit:
+  en: "Create"
+rules.categories.editor.save_submit:
+  en: "Save"
+rules.categories.validation.blank:
+  en: "Enter a category name."
+rules.categories.validation.too_long:
+  en: "Category name must be 256 characters or fewer."
+rules.categories.validation.reserved:
+  en: "This name is reserved by the system. Choose another name."
+rules.categories.load_failed.title:
+  en: "Couldn’t load categories"
+rules.categories.load_failed.message:
+  en: "Retry to load categories again."
+rules.categories.stale.title:
+  en: "Categories changed"
+rules.categories.stale.message:
+  en: "Categories changed while loading or updating. Reload to see the latest list."
+rules.categories.mutation_failed.invalid:
+  en: "Category change was rejected. Check the name or reload to refresh the list."
+rules.categories.mutation_failed.readonly:
+  en: "This category operation is not permitted."
+rules.categories.mutation_failed.busy:
+  en: "Core is busy. Try again in a moment."
+rules.categories.mutation_failed.generic:
+  en: "Could not update categories. Try again."
 

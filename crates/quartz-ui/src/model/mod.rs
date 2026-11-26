@@ -37,14 +37,17 @@ pub(crate) use rule::Explanation;
 pub(crate) use rule::RuleCondition;
 #[cfg(any(test, feature = "preview"))]
 pub(crate) use rule::{Rule, RuleField, RuleId, RuleOperator};
-pub(crate) use rules::{
-    ConditionItem, ConditionPolarity, EntryConditionSummary, PrivacyEffectSummary, RuleEntryLabel,
-};
 #[cfg(windows)]
 pub(crate) use rules::{
-    DeleteConfirmation, FlatTreeRow, LoadState, MutationActivity, NodeEnablement, RuleEntryDetail,
-    RuleSetDetail, RuleSetEnablement, RuleTree, RuleTreeNode, RulesEffect, RulesKeyAction,
-    RulesMutation, RulesPage, TreeDirection,
+    ArchiveConfirmation, ArchivedVisibility, CategoryEditorDraft, CategoryEditorMode, CategoryItem,
+    CategoryMutation, CategoryOrigin, DeleteConfirmation, FlatTreeRow, LoadState, MutationActivity,
+    NodeEnablement, ReorderDirection, RuleEntryDetail, RuleSetDetail, RuleSetEnablement, RuleTree,
+    RuleTreeNode, RulesEffect, RulesKeyAction, RulesMutation, RulesPage, RulesTab, TreeDirection,
+    ValidateCategoryNameError,
+};
+pub(crate) use rules::{
+    CategoryCatalog, ConditionItem, ConditionPolarity, EntryConditionSummary, PrivacyEffectSummary,
+    ResolvedCategory, RuleEntryLabel,
 };
 pub(crate) use segment::{ClassificationSource, Segment, SegmentId};
 pub(crate) use state::{AwayLabel, ClockAnomaly, StateBlock, StateKind};

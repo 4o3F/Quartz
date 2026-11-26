@@ -58,10 +58,6 @@ impl PaletteSlot {
     /// The first slot no color in `used` takes, in palette order (11 section 3.3); `None` when
     /// all 14 are taken.
     #[must_use]
-    #[cfg_attr(
-        all(not(test), not(feature = "preview")),
-        expect(dead_code, reason = "used by preview fixtures and their model tests")
-    )]
     pub(crate) fn first_unused(used: &[CategoryColor]) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -127,6 +123,48 @@ pub(crate) enum CategoryColor {
     Neutral,
 }
 
+impl CategoryColor {
+    /// All selectable category colors: the 14 palette slots followed by neutral.
+    pub(crate) const ALL: [Self; PALETTE_LEN + 1] = [
+        Self::Palette(PaletteSlot::numbered(1)),
+        Self::Palette(PaletteSlot::numbered(2)),
+        Self::Palette(PaletteSlot::numbered(3)),
+        Self::Palette(PaletteSlot::numbered(4)),
+        Self::Palette(PaletteSlot::numbered(5)),
+        Self::Palette(PaletteSlot::numbered(6)),
+        Self::Palette(PaletteSlot::numbered(7)),
+        Self::Palette(PaletteSlot::numbered(8)),
+        Self::Palette(PaletteSlot::numbered(9)),
+        Self::Palette(PaletteSlot::numbered(10)),
+        Self::Palette(PaletteSlot::numbered(11)),
+        Self::Palette(PaletteSlot::numbered(12)),
+        Self::Palette(PaletteSlot::numbered(13)),
+        Self::Palette(PaletteSlot::numbered(14)),
+        Self::Neutral,
+    ];
+
+    /// The persisted wire token key (`cat.1` through `cat.14`, or `neutral`).
+    #[must_use]
+    pub(crate) fn token_key(self) -> &'static str {
+        match self {
+            Self::Palette(slot) => slot.token_key(),
+            Self::Neutral => "neutral",
+        }
+    }
+
+    /// Parses a canonical wire color token (`cat.1` through `cat.14`, or `neutral`).
+    #[must_use]
+    pub(crate) fn parse_wire(value: &str) -> Option<Self> {
+        if value == "neutral" {
+            return Some(Self::Neutral);
+        }
+        PaletteSlot::ALL
+            .into_iter()
+            .find(|slot| slot.token_key() == value)
+            .map(Self::Palette)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +207,16 @@ mod tests {
             PaletteSlotMap::try_from_fn(|slot| Ok::<_, std::convert::Infallible>(slot.token_key()))
                 .expect("infallible");
         assert_eq!(*map.get(PaletteSlot::numbered(8)), "cat.8");
+    }
+
+    #[test]
+    fn category_color_round_trips_canonical_wire_tokens() {
+        assert_eq!(CategoryColor::ALL.len(), PALETTE_LEN + 1);
+        for color in CategoryColor::ALL {
+            assert_eq!(CategoryColor::parse_wire(color.token_key()), Some(color));
+        }
+        assert_eq!(CategoryColor::parse_wire("cat.0"), None);
+        assert_eq!(CategoryColor::parse_wire("cat.15"), None);
+        assert_eq!(CategoryColor::parse_wire(""), None);
     }
 }

@@ -9,9 +9,10 @@ use super::message::{Arg, ArgValue, Msg};
 #[cfg(windows)]
 use crate::model::RankingKind;
 use crate::model::{
-    BuiltinCategory, CategoryName, ClassificationSource, ConditionItem, ConditionPolarity, Day,
-    EntryConditionSummary, MINUTES_PER_HOUR, PrivacyEffectSummary, RuleCondition, RuleEntryLabel,
-    SECONDS_PER_MINUTE, Share, StateKind,
+    BuiltinCategory, CategoryCatalog, CategoryName, ClassificationSource, ConditionItem,
+    ConditionPolarity, Day, EntryConditionSummary, MINUTES_PER_HOUR, PrivacyEffectSummary,
+    ResolvedCategory, RuleCondition, RuleEntryLabel, SECONDS_PER_MINUTE, Share, StateKind,
+    Tendency,
 };
 
 /// Looks up translations and formats values for one interface language.
@@ -343,15 +344,44 @@ impl Formatter {
         }
     }
 
-    /// Formats one protocol condition with optional negation.
+    /// Localized label for a category's focus tendency.
     #[must_use]
-    pub(crate) fn protocol_condition(self, item: &ConditionItem) -> String {
+    pub(crate) fn tendency(self, tendency: Tendency) -> String {
+        self.text(match tendency {
+            Tendency::Focus => Msg::RulesCategoriesTendencyFocus,
+            Tendency::Neutral => Msg::RulesCategoriesTendencyNeutral,
+            Tendency::Distraction => Msg::RulesCategoriesTendencyDistraction,
+        })
+    }
+
+    /// Formats one protocol condition with optional negation, resolving category UUID values
+    /// against `categories` when the condition targets `category`.
+    #[must_use]
+    fn protocol_condition(
+        self,
+        item: &ConditionItem,
+        categories: Option<&CategoryCatalog>,
+    ) -> String {
+        let formatted_value = if item.field == quartz_protocol::RuleField::Category {
+            let resolved = item
+                .value
+                .parse::<quartz_protocol::Uuid>()
+                .ok()
+                .and_then(|uuid| categories.map(|catalog| catalog.resolve(&uuid)))
+                .unwrap_or(ResolvedCategory::Missing);
+            match resolved {
+                ResolvedCategory::Active { name, .. } => format!("{:?}", self.category_name(&name)),
+                ResolvedCategory::Missing => self.text(Msg::RulesEntryCategoryMissing),
+            }
+        } else {
+            format!("{:?}", item.value)
+        };
         let base = self.text_with(
             Msg::DetailsCondition,
             &[
                 Arg::Field.with(rule_field_str(item.field)),
                 Arg::Operator.with(rule_operator_str(item.op)),
-                Arg::Value.with(&format!("{:?}", item.value)),
+                Arg::Value.with(&formatted_value),
             ],
         );
         match item.polarity {
@@ -364,7 +394,11 @@ impl Formatter {
 
     /// Summarizes a rule entry's matching conditions and effect for display in the detail list.
     #[must_use]
-    pub(crate) fn entry_condition_summary(self, summary: &EntryConditionSummary) -> String {
+    pub(crate) fn entry_condition_summary(
+        self,
+        summary: &EntryConditionSummary,
+        categories: Option<&CategoryCatalog>,
+    ) -> String {
         match summary {
             EntryConditionSummary::DisableTarget { target, reason } => {
                 let base = self.text_with(Msg::RulesEntryDisables, &[Arg::Value.with(target)]);
@@ -382,7 +416,7 @@ impl Formatter {
                 if !items.is_empty() {
                     let joined = items
                         .iter()
-                        .map(|item| self.protocol_condition(item))
+                        .map(|item| self.protocol_condition(item, categories))
                         .collect::<Vec<_>>()
                         .join("; ");
                     let msg = match combinator {
@@ -408,7 +442,7 @@ impl Formatter {
                 if !app_conditions.is_empty() {
                     let joined = app_conditions
                         .iter()
-                        .map(|item| self.protocol_condition(item))
+                        .map(|item| self.protocol_condition(item, categories))
                         .collect::<Vec<_>>()
                         .join("; ");
                     parts.push(
@@ -755,7 +789,7 @@ mod tests {
                 web: Some(quartz_protocol::RuleWebAction::DomainOnly),
             }),
         };
-        let rendered = EN.entry_condition_summary(&cond);
+        let rendered = EN.entry_condition_summary(&cond, None);
         assert!(rendered.contains("NOT app.exe_name equals \"code.exe\""));
         assert!(rendered.contains("title=drop"));
         assert!(rendered.contains("web=domain_only"));
@@ -765,8 +799,55 @@ mod tests {
             reason: Some("Handled elsewhere".into()),
         };
         assert_eq!(
-            EN.entry_condition_summary(&disable),
+            EN.entry_condition_summary(&disable, None),
             "Disables builtin.classification/wechat · Handled elsewhere"
         );
+        assert_eq!(EN.tendency(Tendency::Focus), "Focus");
+        assert_eq!(ZH.tendency(Tendency::Distraction), "分心");
+
+        let unknown_cat_cond = EntryConditionSummary::Conditions {
+            combinator: quartz_protocol::RuleMatch::All,
+            items: vec![ConditionItem {
+                field: quartz_protocol::RuleField::Category,
+                op: quartz_protocol::RuleOperator::Equals,
+                value: "00000000-0000-4000-8000-000000000999".into(),
+                polarity: ConditionPolarity::Positive,
+            }],
+            privacy: None,
+        };
+        let rendered_missing = EN.entry_condition_summary(&unknown_cat_cond, None);
+        assert!(rendered_missing.contains("Missing category"));
+        assert!(!rendered_missing.contains("00000000-0000-4000-8000-000000000999"));
+
+        let catalog = CategoryCatalog::from_protocol(quartz_protocol::CategoriesListResponse {
+            entities: vec![quartz_protocol::EditableCategory {
+                uuid: "00000000-0000-4000-8000-000000000001"
+                    .parse()
+                    .expect("UUID"),
+                builtin_key: Some(quartz_protocol::BuiltinCategory::Development),
+                parent_uuid: None,
+                name: None,
+                color: "cat.8".into(),
+                tendency: quartz_protocol::CategoryTendency::Focus,
+                sort_order: 0,
+                archived: false,
+            }],
+            versions: quartz_protocol::QueryVersions("categories.v1:1".into()),
+            truncated: false,
+        })
+        .expect("catalog");
+        let active_cat_cond = EntryConditionSummary::Conditions {
+            combinator: quartz_protocol::RuleMatch::All,
+            items: vec![ConditionItem {
+                field: quartz_protocol::RuleField::Category,
+                op: quartz_protocol::RuleOperator::Equals,
+                value: "00000000-0000-4000-8000-000000000001".into(),
+                polarity: ConditionPolarity::Positive,
+            }],
+            privacy: None,
+        };
+        let rendered_active = ZH.entry_condition_summary(&active_cat_cond, Some(&catalog));
+        assert!(rendered_active.contains("开发"));
+        assert!(!rendered_active.contains("00000000-0000-4000-8000-000000000001"));
     }
 }

@@ -662,6 +662,10 @@ impl Worker {
                             | Op::TrackingResume
                             | Op::RuleSetsSetEnabled
                             | Op::RuleSetsDelete
+                            | Op::CategoriesCreate
+                            | Op::CategoriesUpdate
+                            | Op::CategoriesArchive
+                            | Op::CategoriesReorder
                     )
                     && let Some(loader) = &self.day
                 {
