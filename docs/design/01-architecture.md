@@ -1,5 +1,7 @@
 # 01 总体架构
 
+本文记录 Quartz 的进程与线程模型、职责边界、单实例与界面生命周期、crate 依赖规则和核心工程决策；具体常量、CLI 参数细节与内部装配以代码（`crates/quartz/src/`）为准，资源指标目标见 [08-resources.md](08-resources.md)。
+
 ## 1. 进程模型
 
 ```text
@@ -12,13 +14,11 @@ quartz.exe（windows 子系统，核心与界面共用）
 └─ 界面模式（`ui` 子命令，默认常驻，可配置）
    └─ GPUI：连接核心 → 无窗口等待或查询与渲染；关窗销毁窗口，按常驻设置保留或退出进程
 
-quartz-host.exe（console 子系统，由浏览器启动，不链接 GPUI）
+quartz-host.exe（console 子系统，M5，由浏览器启动，不链接 GPUI）
 └─ 浏览器 stdio ⇄ 长度与格式校验 ⇄ 命名管道
 ```
 
-进程数上限为：1 个核心，加最多 1 个界面进程，再加每个已连接的浏览器 profile 一个 host。
-
-各模式的职责边界：
+进程数上限：1 个核心 + 最多 1 个界面进程 + 每个已连接浏览器 profile 1 个 host。
 
 | 模式 | 负责 | 不做 |
 |---|---|---|
@@ -26,319 +26,176 @@ quartz-host.exe（console 子系统，由浏览器启动，不链接 GPUI）
 | 界面 | 展示、交互、规则编辑、标注；所有数据经管道请求核心 | 不打开数据库，不做分类匹配 |
 | host | 字节转发、帧长度与 JSON 结构校验、浏览器身份登记 | 不落盘，不缓冲，不拉起核心 |
 
-分类、提取、统计只在核心实现一份。这是为了避开 ActivityWatch 的问题：它的服务端和 WebUI 各实现一套分类匹配，结果不一致。
+**单一事实与计算源**：文档提取、分类匹配与聚合只在核心实现一份，避免服务端与前端各算一套导致口径分歧。
 
 ## 2. 入口识别
 
-`quartz.exe` 用 `Args::try_parse()` 解析自身命令，确定模式后再初始化日志、线程、数据库和平台设施。浏览器通过 Native Messaging manifest 启动独立的 `quartz-host.exe`。
+`quartz.exe` 在初始化日志、线程和数据库之前用 `clap` 解析参数（权威定义：`crates/quartz/src/main.rs`）：
 
-`quartz.exe` 的命令行定义如下：
+| 调用形式 | 模式 | 说明 |
+|---|---|---|
+| 无子命令（可选 `--autostart`） | 核心 | 启动采集核心；重复启动按单实例规则转发或退出 |
+| `ui [--prewarm \| --core-error <code> [--backup-path <路径>...]]` | 界面 | 隐藏子命令，由核心拉起；`--core-error` 展示核心启动致命错误 |
+| `dump --date <日> [--format text\|json] [--offline]` | 命令行 | 默认经管道走 `query.facts` 先写临时文件再输出；核心停止时可用 `--offline` 只读直出 |
+| `status` | 命令行 | 经管道查询 `core.status` |
+| `settings get \| set ...` | 命令行 | 经管道读写语言、区域、常驻与预热设置 |
+| `gen-data` / `bench-query` | 命令行 | 在独立模拟库生成数据与运行查询基准（不触碰生产库） |
+| `restore-backup <文件> [--yes]` | 命令行 | 核心停止后用迁移备份原子替换生产库（无 `--yes` 仅提示并失败退出） |
+| `rules check <文件>...` | 命令行 | 离线校验规则文件及与已安装规则集组成的树（预览与导入在 UI 完成） |
+| 参数解析失败 | 报错退出 | 退出码 2，不进入核心，防止异常参数误拉起第二个核心 |
 
-```rust
-#[derive(Parser)]
-#[command(name = "quartz", version)]
-struct Args {
-    /// 由自启项传入，只影响启动提示与延迟初始化
-    #[arg(long)]
-    autostart: bool,
-    #[command(subcommand)]
-    command: Option<Command>,
-}
+**为什么界面必须使用显式 `ui` 子命令**：核心重启或崩溃恢复期间数据目录锁会短暂空出，不能靠“锁是否被占”推断应启动核心还是界面；显式子命令让进程角色仅由调用意图决定，并自然区分普通打开、预热与错误窗口。
 
-#[derive(Subcommand)]
-enum Command {
-    /// 界面进程，只由核心拉起
-    #[command(hide = true)]
-    Ui {
-        #[arg(long, conflicts_with = "core_error")]
-        prewarm: bool,
-        #[arg(long)]
-        core_error: Option<CoreErrorCode>,
-        #[arg(long, requires = "core_error", required_if_eq("core_error", "migration_failed"))]
-        backup_path: Vec<PathBuf>,
-    },
-    /// 打印日历日事实：默认经管道以 cli 角色查询核心；--offline 直接只读打开数据库
-    Dump { #[arg(long)] date: String, #[arg(long)] offline: bool },
-    /// 核心状态
-    Status,
-    /// 向独立模拟库写入一年模拟数据，不触碰生产数据库
-    GenData { #[arg(long)] db: PathBuf },
-    /// 只读模拟库的查询基准
-    BenchQuery { #[arg(long)] db: PathBuf },
-    /// 用迁移前备份替换数据库；核心必须已退出
-    RestoreBackup { file: PathBuf, #[arg(long)] yes: bool },
-    /// 规则文本的校验与预览（quartz-rules/1，见 docs/rules/rule-format.md）
-    #[command(subcommand)]
-    Rules(RulesCommand),
-}
-
-#[derive(Subcommand)]
-enum RulesCommand {
-    /// 校验规则文件及其与已安装规则集组成的树，按固定格式输出错误（离线，不需要核心）
-    Check { files: Vec<PathBuf> },
-    /// 以下经管道以 cli 角色请求核心（只读）
-    Preview { file: PathBuf, #[arg(long, default_value_t = 7)] days: u32 },
-    Diff { file: PathBuf, #[arg(long, default_value_t = 7)] days: u32 },
-    Explain { #[arg(long)] at: String },
-    Tree { #[arg(long)] kind: Option<String> },
-}
-```
-
-| 解析结果 | 模式 |
-|---|---|
-| 无子命令 | 核心 |
-| `ui [--prewarm]` | 界面 |
-| `dump`、`status`、`gen-data`、`bench-query`、`restore-backup`、`rules check/preview/diff/explain/tree` | 命令行 |
-| 解析失败 | 报错退出，不进入核心 |
-
-`dump` 默认通过管道请求 `query.facts`，先将全部分页写入自动清理的临时文件，全部成功后才输出到标准输出；分页过期或查询失败时返回类型化错误并丢弃本次导出。核心未运行时以非零状态退出并提示 `--offline`，核心停止或挂起时可显式使用 `dump --offline` 直接只读导出。
-
-解析失败时退出码为 2，不启动核心。这样，浏览器或其他调用方传入未预料的参数时，不会误启动第二个核心。`ui` 在帮助中隐藏，它是核心拉起界面时使用的进程间约定。
-
-**为什么界面需要显式子命令。** 界面和核心是同一个 exe，但启动后的行为完全不同。核心拉起界面时必须明确告诉子进程“你是界面”：
-
-1. 不能靠“核心是否已在运行”推断。核心重启、更新或崩溃恢复期间，数据目录锁会短暂空出；按推断启动的界面子进程会拿到锁，变成第二个核心，开始采集。显式子命令让模式只取决于调用方意图，与时序无关。
-2. 预热进程（`ui --prewarm`）不开窗口，它的行为本来就需要用参数区分。
-3. 用户双击 exe 或从开始菜单启动时不带参数，走核心路径：核心已在运行时，把“打开界面”转发给核心后退出（第 3 节），由核心按第 4 节拉起界面。用户直接运行 `quartz ui` 时，界面通过握手登记到核心，由核心接管其进程退出观察和显示路由。
-
-**控制台输出。** `quartz.exe` 使用 `windows` 子系统，启动时没有控制台。`Args::try_parse()` 返回帮助、版本或解析错误时，先调用 `AttachConsole(ATTACH_PARENT_PROCESS)`，再由 clap 输出并选择退出码。解析成功后，仅用户命令行子命令附加父控制台，核心和界面均不附加。解析错误、日志初始化前的核心启动失败，以及此时拉起错误界面失败，都通过独立的启动诊断写入标准错误流及 `logs/bootstrap.log`，包含完整错误来源链；单个输出失败仍尝试另一个，输出失败不会触发 panic。该日志达到 64 KiB 后清空，再写入新诊断。GUI 子系统进程附加控制台后，cmd 不会等它退出，输出可能和下一个提示符交错。
-
-`quartz-host.exe` 使用独立的 console 子系统入口接收浏览器提供的标准句柄，不链接 GPUI。浏览器参数不用于入口路由；Native Messaging manifest 的 `allowed_origins`、`allowed_extensions` 限制可调用的扩展。用户命令行入口仍留在 `quartz.exe`。
+**控制台与早期诊断**：`quartz.exe` 为 `windows` 子系统，默认无控制台；仅在帮助/版本/参数错误及用户命令行子命令时调用 `AttachConsole(ATTACH_PARENT_PROCESS)`，核心和界面均不附加。日志初始化前的启动失败同时写入 stderr 与带 64 KiB 上限的 `logs/bootstrap.log`。`quartz-host.exe` 为独立 `console` 子系统入口，不链接 GPUI。
 
 ## 3. 单实例
 
-- 同一用户只允许一个采集会话。核心在初始化数据库与管道前，用 `LockFileEx` 独占数据目录的 `quartz.lock`，并在整个生命周期持有；锁文件跨 Windows 会话生效。
-- `Local\Quartz.<SID>.core` 互斥量只用于会话内快速转发。同会话的普通重复启动通过管道发送 `ui.open` 后退出；`--autostart` 重复启动直接退出。另一会话启动时，核心以 `other_session` 错误码启动 UI 错误窗口并返回失败退出码。
-- 首个管道实例使用 `FILE_FLAG_FIRST_PIPE_INSTANCE`，防止其他进程抢先创建同名管道。
-- 普通界面进程在启动时持有互斥量 `Local\Quartz.<SID>.ui`。重复启动通过管道向核心发送 `ui.open`，由核心显示或激活已登记的界面，然后以 0 退出；核心不可达时记录警告并以 0 退出。`--core-error` 错误窗口不取得此互斥量，以便已有界面运行时仍能展示核心启动错误。
+- **跨会话数据目录锁**：核心启动后在打开数据库与管道前，通过 `LockFileEx` 独占数据目录的 `quartz.lock` 并持有至退出，保证同一用户跨 Windows 会话最多只有一个采集核心。
+- **同会话快速转发**：核心另持有 `Local\Quartz.<SID>.core` 互斥量；同会话普通重复启动经管道发 `ui.open` 后退出，`--autostart` 重复启动直接退出。另一会话抢占锁失败时，核心以 `other_session` 启动错误窗口并以非零退出。
+- **管道防抢注**：首个管道实例带 `FILE_FLAG_FIRST_PIPE_INSTANCE`。
+- **界面单实例**：普通界面持有 `Local\Quartz.<SID>.ui` 互斥量，重复启动转发 `ui.open` 后退出；`--core-error` 错误窗口不占用该互斥量，确保已有界面运行时仍可弹出核心启动错误。
 
 ## 4. 界面生命周期
 
-界面进程默认常驻，由 `ui.resident.enabled` 控制；核心管道就绪后启动无窗口界面，保留 GPUI 和 D3D 设备。关闭常驻后，界面按需启动，并可由托盘悬停预热。
+界面默认无窗口常驻（`ui.resident.enabled = true`），保留 GPUI 与 D3D 设备以缩短点击托盘到首帧的延迟；关闭常驻后按需启动，并支持托盘悬停预热。资源与首帧延迟目标（含常驻/预热/冷启动三组 P50 测量）见 [08-resources.md](08-resources.md)。
 
 ### 4.1 打开
 
-1. 用户左键点击托盘、选择“打开 Quartz”或“设置…”，以及管道收到 `ui.open`，均进入同一打开路径。
-2. 核心维护 `None`、`Starting { process, intent: Show | Prewarm | Resident }`、`Registered { process, connection, phase }`、`Closing { process }` 和 `show_requested: DisplayRequest`；登记后的阶段为 `Starting | Prewarming | Hidden | Visible`，显示请求为 `Idle | Pending`。打开请求置 `show_requested = Pending`：`None` 时启动界面，`Starting` 时等待握手，已登记且阶段为 `Starting`、`Prewarming` 或 `Hidden` 时向该连接发送 `ui.show`，`Visible` 时发送 `ui.activate`。核心在发送前以登记的进程标识调用 `AllowSetForegroundWindow`；界面通过 GPUI 还原最小化窗口并请求前台激活。
-3. 显式打开时，核心用 `CreateProcessW` 以 `current_exe()` 的绝对路径和 `ui` 子命令启动界面，不经过 shell，设置 `STARTF_FORCEONFEEDBACK`。保存进程句柄后进入 `Starting`，防止连续点击重复启动。托盘提示从启动起保持“正在打开…”，直到首帧或界面退出。
-4. UI 完成 `hello` 后，注册表非阻塞地将连接标识、经管道身份校验的进程标识和 `ui.state` 交给主线程。核心保留同一子进程的句柄；其他进程通过 `OpenProcess` 取得同步和有限查询权限，接管退出观察与退出码日志。已登记界面存在时保留首个连接，对后续登记记录警告。
-5. 握手时若仍有显示请求，`Prewarming` 或 `Hidden` 重放 `ui.show`，`Visible` 重放 `ui.activate`；`Starting` 会自行创建窗口，无需重放。预热进程使用同一个 UI 互斥量，重复运行 `quartz ui` 会通过核心显示它。
-6. 仅登记连接的 `ui.first_frame` 将阶段改为 `Visible`、清除 `show_requested` 并恢复普通托盘提示。该连接注销后进入 `Closing` 并保留进程句柄，关闭期间的新打开请求记为 `Pending`，等旧进程退出后启动一次。注销或进程退出会清除未完成的旧显示请求并记录警告；仅所跟踪的进程退出才回到 `None`。
+- 左键点击托盘、托盘菜单“打开/设置”与管道 `ui.open` 共用同一打开路径。
+- 核心主线程维护界面状态机：`None` → `Starting { intent: Show | Prewarm | Resident }` → `Registered { process, connection, phase: Starting | Prewarming | Hidden | Visible }` → `Closing { process }`，配独立显示意图 `show_requested`。
+- 打开请求在 `None` 时用 `CreateProcessW`（直接执行 `current_exe() ui`，不经 shell）启动界面；在已登记且未可见时发 `ui.show`，已可见时发 `ui.activate`（发送前调用 `AllowSetForegroundWindow`）。
+- 仅首个已登记连接受核心路由控制；其 `ui.first_frame` 确认后状态转为 `Visible` 并清除显示请求；连接注销转 `Closing` 并等待进程句柄退出后才回到 `None`（期间的新打开请求在旧进程退出后执行一次）。
 
 ### 4.2 无窗口常驻与悬停预热
 
-`ui.resident.enabled` 默认 `true`，可通过 `quartz settings set --resident-enabled false` 或 `settings.set` 的 `{"resident":{"enabled":false}}` 修改。核心在管道就绪后、或设置从关闭变为开启且状态为 `None` 时，用 `ui --prewarm` 启动无窗口进程，意图为 `Resident`；hello 的 `prewarming` 在常驻开启时登记为 `Hidden`。常驻不受电池、预热设置、预热 TTL 或悬停冷却限制。
-
-运行中关闭常驻时，已隐藏且没有待显示请求的界面收到定向 `ui.shutdown`，可见界面继续运行并在最后一个窗口关闭时退出；启动中的常驻界面在握手后执行同一判断。开启常驻时，已有预热进程转为 `Hidden` 并取消 TTL。
-
-常驻进程意外退出后，核心按 `RESIDENT_RELAUNCH_COOLDOWN = 60 s` 调度无窗口重启，从上次启动起算；若已超过六十秒，立即重启。启动失败也等待六十秒后重试。截止时间加入主线程的消息等待，不轮询；核心关闭时取消重启。显式打开请求可以立即启动界面，退出码日志对启动和接管的进程均保留。
-
-鼠标悬停通知 `NIN_POPUPOPEN` 或首个 `WM_MOUSEMOVE` 触发预热判断，同时请求刷新托盘摘要与提示。只有常驻关闭、状态为 `None`、设置与电源允许且冷却期已过时，核心才通过 `CreateProcessW` 启动 `ui --prewarm`，进入 `Starting { intent: Prewarm }`；预热不设置 `STARTF_FORCEONFEEDBACK`，也不显示“正在打开…”提示。
-
-- `ui.prewarm.enabled` 默认 `true`，`ui.prewarm.on_battery` 默认 `false`，通过 `quartz settings set --prewarm-enabled true --prewarm-on-battery false` 或 `settings.set` 修改。
-- 核心在允许启动的悬停事件上调用 `GetSystemPowerStatus`：接通电源可预热，电池供电按 `ui.prewarm.on_battery` 判断；读取失败或电源状态未知时跳过预热，仅在状态或错误码改变时记录一次警告；恢复为已知状态后再次出现相同失败也会记录。现有睡眠与恢复通知不提供电源接入状态。
-- UI 持有单实例互斥量，进入 GPUI 的 `Application::run` 完成初始化及 D3D 设备创建，不创建窗口；随后发送 `hello`，登记 `ui.state = prewarming`，进入 `Registered { phase: Prewarming }`。收到 `ui.show` 才复用正常打开路径创建主窗口并确认首帧；断线、初次连接失败或 `ui.shutdown` 均退出隐藏进程。
-- `PREWARM_TTL` 为 8 秒，由核心主线程管理，从 I/O 线程完成 hello 时记录的单调时间起算，与逻辑日截止时间共同决定 `MsgWaitForMultipleObjects` 的等待期限。到期且没有显示请求时，仅向对应预热连接发送 `ui.shutdown`，进入 `Closing` 并保留句柄直到退出。
-- 主线程先处理已收到的打开请求，再检查 TTL；打开请求保留为 `Pending` 并取消预热期限，握手前请求在登记后重放 `ui.show`，握手后请求立即定向发送，直到首帧确认才清除。退出控制已经发出后收到的打开请求，沿用 `Closing` 的规则等待旧进程退出后启动一次。
-- `PREWARM_COOLDOWN` 为 60 秒，从上次成功启动预热进程起算，进程退出后仍保留；重复移动鼠标不会在启动中、已登记或关闭中启动第二个进程。
-
-核心在有效首帧确认时记录 `click_to_first_frame_ms`，从接收显式打开请求计至收到 `ui.first_frame`。使用相同构建、电源和等待间隔，分别测量常驻隐藏、关闭常驻但有预热、关闭常驻与预热三组，每组至少二十次；预热组在握手后八秒内点击且满足六十秒冷却，隐藏常驻组每次关闭窗口后确认进程标识未变。各组排序后取第 `ceil(样本数 × 0.5)` 个值作为 P50（08 第 1.3 节）。
+- **常驻模式**：管道就绪（或运行中开启 `ui.resident.enabled`）时，核心拉起 `ui --prewarm` 并登记为无 TTL 的 `Hidden`；关闭常驻时向已隐藏界面发定向 `ui.shutdown`，可见界面在关窗后自行退出。常驻进程意外退出后按冷却期（60 s）在主线程等待队列中重启，不轮询。
+- **悬停预热**：仅当常驻关闭、`ui.prewarm.enabled` 为真、电源满足 `ui.prewarm.on_battery`（经 `GetSystemPowerStatus` 判断）且冷却期已过时，托盘悬停触发 `ui --prewarm`；预热进程握手后受短 TTL（8 s）约束，显式打开优先于 TTL，到期无显示请求即发 `ui.shutdown`。
 
 ### 4.3 关闭
 
-- 最后一个窗口关闭时销毁窗口。有效常驻设置开启且管道仍连接时，UI 发送 `ui.hidden`，核心保留登记并转为无 TTL 的 `Hidden`；下一次打开通过 `ui.show` 重建主窗口并确认首帧。常驻关闭时调用 `cx.quit()`，退出进程并释放 GPU 设备。
-- 已成功连接的界面在管道断开后关闭所有窗口并退出，释放界面互斥量。核心在连接注销后以 `Closing` 保留进程句柄，收到退出信号后才回到 `None`，并执行关闭期间新收到的打开请求。
-- 用户在托盘选择"退出 Quartz"时，核心先通知界面关闭，再结算当前区间、关闭数据库，最后退出。
+- 最后窗口关闭时销毁窗口：有效常驻开启且连接正常时发送 `ui.hidden` 保留无窗口进程；常驻关闭时调用 `cx.quit()` 释放 GPU 设备并退出。
+- 已连接的界面在管道断开后直接关闭窗口并退出。用户从托盘“退出 Quartz”时，核心先广播 `ui.shutdown`，再限时排空并关闭管道、结算采集、关闭数据库。
 
 ### 4.4 核心不在时的界面
 
-界面首次连接失败后停止尝试，按 07 第 2.5 节显示统一错误界面；核心未运行时提供“启动核心”和“重试”，点击“重试”只进行一次新连接。点击“启动核心”以 `current_exe()` 的绝对路径、无参数、不经过 shell 启动核心，先等待管道就绪通知，再连接一次；`CORE_START_TIMEOUT` 为 8 秒，沿用 04 第 6.1 节的管道线程启动预算。
-
-启动等待在创建子进程前登记 `Local\Quartz.<SID>.v1.ready` 内核事件；管道服务创建监听实例后置位，停止时清除。界面通过可取消的本机等待接收通知，等待期间不轮询管道；超时显示可重试的连接超时错误。界面不自行读取数据库。
+- 界面首次连接失败即展示统一错误界面（07 第 2.5 节），不做后台自动重连。
+- 用户点击“启动核心”前，界面先监听内核事件 `Local\Quartz.<SID>.v1.ready`（由核心管道创建监听实例后置位），再直接拉起无参数 `current_exe()`，可取消阻塞等待就绪后连接一次（超时显示可重试错误），全程不轮询管道、不直接读库。
 
 ## 5. crate 划分
 
 ```text
 crates/
 ├─ quartz          exe 入口；核心装配、平台层、存储、查询、托盘
-├─ quartz-host     独立 Native Messaging 主机；浏览器 stdio 与核心管道转发，不链接 GPUI
-├─ quartz-domain   纯逻辑：计时状态机、区间运算、可用状态裁剪、规则匹配、提取、隐私策略求值
+├─ quartz-host     独立 Native Messaging 主机（M5），不链接 GPUI
+├─ quartz-domain   纯逻辑：计时状态机、区间运算、可用状态裁剪、规则匹配、提取、隐私求值
 ├─ quartz-protocol 消息类型、分帧编解码、版本与错误码
-├─ quartz-pipe     共享命名管道客户端、进程身份校验、分帧与请求关联
+├─ quartz-pipe     共享命名管道客户端、对端进程身份校验、分帧与请求关联
 ├─ quartz-i18n     翻译资源、语言协商、复数、时长与日期格式化（10）
-└─ quartz-ui       GPUI 界面，在工作区内只依赖 quartz-protocol、quartz-pipe 与 quartz-i18n
-
-以后：quartz-protocols  自控协议的纯逻辑（12 第 4 节），依赖规则同 quartz-domain
+└─ quartz-ui       GPUI 界面，工作区内仅依赖 quartz-protocol、quartz-pipe、quartz-i18n
 ```
 
-依赖规则：
+未来 M7 的自控纯逻辑将放在同级 `quartz-protocols`（见 12 第 4 节）。
 
-- `quartz-domain` 不依赖 Windows API、SQLite 和 GPUI，可以在任意平台跑单元测试。时间值由外壳读取后作为纯核心的输入传入。
-- `quartz-pipe` 依赖 `quartz-protocol`、tokio、tokio-util、windows、snafu 与 tracing；Windows 项目受 `cfg(windows)` 保护，不依赖领域逻辑、Windows 界面、SQLite 或 GPUI。核心的服务端复用这里的进程身份校验，DACL、连接注册表与会话仍在 `quartz`。
-- `quartz-ui` 在工作区内仅依赖 `quartz-protocol`、`quartz-pipe` 与 `quartz-i18n`，展示所需的一切都来自协议消息；文字翻译与格式化来自 `quartz-i18n`。
-- `quartz-i18n` 不依赖 GPUI、Windows API 与 SQLite，核心和界面共用。界面里要显示"命中规则"或"预览命中"，都向核心请求。
-- `quartz` 不呈现窗口、对话框或错误文字，只保留 Shell 托盘；启动错误以 `quartz-protocol::CoreErrorCode` 和结构化参数交给 `quartz-ui` 本地化并展示，`quartz-i18n` 的文字查找仅用于托盘菜单和提示。托盘通过 `TrayState` 输入、`TrayCommand` 输出隔离，原生窗口、菜单和 Shell 调用集中在 `platform/windows/tray/`；以后可像 `quartz-host` 一样将该模块移到独立可执行文件。
-- `quartz` 对 `quartz-ui` 的依赖只出现在入口里一个函数调用：`quartz_ui::run(args)`。日后要拆成独立的 `quartz-ui.exe`，只需把这一行移到新的 bin crate。
-- 平台代码放在 `quartz/src/platform/windows/`，对外只暴露领域事件，不暴露 HWND、HANDLE 或 COM 类型。macOS 实现以后放在同级目录。
-- **函数式核心 + 命令式外壳（sans-IO）。** 有状态的业务组件（规则注册表、采集状态机、截止时间调度器）是不做 I/O 的纯核心：输入当前状态与一条命令或事件，输出决定（要执行的写入描述、回复、待发布的结果），不调用数据库、文件、系统 API 或线程原语。外壳（各线程的循环，组合根 `core::app` 负责装配）持有 `store`、平台句柄与通道，执行核心给出的写入，成功后再把结果交回核心。数据库只是外壳的依赖，业务核心不定义也不依赖仓储接口。核心放在 `quartz-domain`，用值做单元测试。
-- **适用边界。** 状态能放进内存、规模有限的组件采用上述模式。需要按需读取大量数据的部分（查询管线，03 第 5 节）属于外壳，直接在数据库线程上用只读连接执行。`store` 是唯一包含 diesel 与 SQL 的模块，只做持久化与行、领域类型转换，不含业务判断。
+**架构边界与依赖规则：**
 
-`quartz` crate 内部模块：
+- **纯领域层**：`quartz-domain` 不依赖 Windows API、SQLite 与 GPUI，时间由外壳传入，可在任意平台值测试。
+- **函数式核心 + 命令式外壳（sans-IO）**：状态有界且可常驻内存的组件（采集状态机、规则注册表、截止时间调度器）在 `quartz-domain` 中纯函数式决策，输出领域写入描述与回复；外壳（`core::app` 及各线程循环）执行数据库与平台 I/O，提交成功后再把结果交回核心。需要按需扫描大量数据的查询管线属于外壳，直接在数据库线程只读执行。
+- **平台与存储隔离**：Win32 / COM / HWND / HANDLE 封闭在 `quartz/src/platform/windows/`，对外只暴露领域事件与端口 trait；diesel 与 SQL 封闭在 `quartz/src/store/`，只做持久化与类型转换。
+- **界面隔离**：`quartz` 不直接渲染窗口或错误文案（托盘菜单/提示经 `TrayState`/`TrayCommand` 隔离）；对 `quartz-ui` 的依赖仅入口单点调用，便于日后独立拆分 `quartz-ui.exe`。
+
+`quartz` crate 内部模块职责：
 
 | 模块 | 职责 |
 |---|---|
-| `main` | clap 参数解析与模式分发 |
-| `core::app` | 核心装配、线程启动、关闭顺序；`Autostart` 控制重复启动时是否转发打开界面的请求 |
-| `core::foreground` | 前台事件过滤、元数据选择与解析接口 |
-| `core::sources` | 系统采样的时间转换、会话重试与空闲状态处理 |
-| `platform::windows::{foreground, sources, tray, process}` | Win32 前台解析、系统观测源、托盘与进程信息；`sources` 读取空闲、会话与电源状态 |
-| `platform::windows::ipc` | 命名管道创建、调用共享对端身份验证与连接生命周期；传递 `ipc::Services` |
-| `persistence` | 数据库线程的写入队列、批量事务、失败缓冲与采集反馈 |
-| `store` | schema 迁移、写入、读取、保留清理；`Store::write` 统一写事务，提交后合并版本变更，`store::versions` 管理版本行、UTC 日期范围和配置键 |
-| `rules::registry` | 规则注册表：规则状态的唯一写者，发布不可变规则快照（第 6.2 节） |
-| `query` | 查询调度、纯切片与聚合、版本摘要与分页；`query::runner` 持有分批查询任务并归还只读连接 |
-| `ipc` | 会话动作、角色权限、订阅与 CLI 输出；`ipc::Services` 汇集应用服务，`ipc::connection` 在异步读写流上执行会话动作 |
-
-`query` 依赖 `store` 读取事实和版本值，`store` 通过 `quartz-domain` 的事实类型返回数据。`ipc` 依赖 `query` 的查询调度与版本发布接口。`core::app` 将查询端口、版本端口、状态接收端和界面命令端口组装为 `ipc::Services`。`platform::windows::ipc` 创建和验证命名管道，只通过 `ipc` 接口传递服务集合、启动订阅注册表并调用 `ipc::connection`。`core::app::CoreRuntime` 打开存储、取得安装标识、构造运行元数据与状态发布器，并启动采集线程、数据库线程和管道服务。`PlatformPorts` 提供时钟、主线程唤醒与界面命令通知、会话标识、安装标识候选值、核心实例标识、前台解析器工厂和管道工厂，以及语言与区域设置。前台解析器工厂在采集线程调用；Windows 实现持有该线程的 COM apartment，并在解析器释放后结束 COM。平台主线程持有托盘、系统观测源和消息循环，通过运行时取得观测入口、关闭端口和命令接收端。日志初始化由运行时提供，数据目录定位和实例锁仍使用 Windows 环境与系统接口。
-
-用户退出时，`CoreRuntime` 依次发送 `ui.shutdown`、限时发送待处理的管道消息并停止管道、请求采集结算、等待采集与数据库线程退出。启动失败和运行时释放也使用同一条关闭路径。`WM_ENDSESSION` 先通过 `ShutdownPort` 在回调内等待最终持久化，消息循环结束后由运行时停止管道并回收已完成的线程。关闭时读取时钟失败会保留错误，并使用采集线程最后一次观测时间结算。
+| `main` | CLI 解析与模式分发 |
+| `core::app` | 核心装配、线程启停与统一关闭路径（含 `WM_ENDSESSION` 最终持久化） |
+| `core::{foreground, sources}` | 前台事件过滤与系统采样时间转换、会话/空闲处理 |
+| `platform::windows::{foreground, sources, tray, process, ipc}` | Win32 前台解析（采集线程 COM）、观测源、托盘、进程信息与命名管道承载 |
+| `persistence` | 数据库线程写入队列、合批事务、失败缓冲与采集过载反馈 |
+| `store` | schema 迁移、事务写入、只读查询、版本与备份恢复 |
+| `rules::registry` | 规则注册表外壳：单写者事务执行与不可变快照发布（第 6.2 节） |
+| `query` | 分批只读查询调度、切片聚合、版本摘要与单帧截断 |
+| `ipc` | 会话状态机、角色授权、订阅注册表、连接 outbox 与 CLI 客户端 |
 
 ## 6. 线程模型
 
-| 线程 | 内容 | 阻塞规则 |
+核心常驻 4 个工作线程（具体通道容量与批处理常量以 `crates/quartz/src/` 为准，线程总数预算见 [08-resources.md](08-resources.md)）：
+
+| 线程 | 职责 | 阻塞与隔离规则 |
 |---|---|---|
-| 主线程 | 消息循环；WinEvent 回调；托盘；消息窗口接收会话和电源通知，隐藏顶层窗口接收时间变化和结束会话广播；空闲检查定时器（`SetTimer`） | 所有 hook 注册、重绑、解绑均在主线程；触发与低频复核共用当前桌面、`GetForegroundWindow()` 和标题的读取比较路径，仅将变化观测按读取顺序入队（02 第 1 节），不做磁盘 I/O |
-| 采集线程 | 进程身份查询、处理标题快照、隐私策略、状态机；发送目标 HWND/PID 的 hook 重绑命令，生成写入命令 | 可以调用 `OpenProcess` 等慢 API；不访问数据库；主线程执行重绑前核对目标仍为当前前台 |
-| 数据库线程 | 持有写连接和只读连接；写连接批量写入，只读连接持有查询的 WAL 快照 | 查询分批计算，批间让出给写连接处理写入；同一响应使用同一读事务 |
-| I/O 线程 | tokio current-thread；管道 accept、读写、订阅推送 | 不执行 SQLite；查询请求转给数据库线程，用 oneshot 取回结果 |
-
-查询任务持有只读事务，按 `QUERY_BATCH_ROWS`（256）分批读取事实、扫描边界和聚合片段；每批之间先处理待写命令，并在写入截止时间前预留 `COMMIT_HEADROOM`（100 毫秒）执行提交。I/O 线程以非阻塞方式投递到容量为 8 的查询通道，异步等待 oneshot 回复；查询结束或取消后，`query::runner` 归还只读连接。`DatabaseLoop` 直接持有 `Store`，规则外壳按调用借用存储，规则事务的时间由数据库线程的时钟提供。
-
-I/O 与托盘写入通过独立的有界 `WritePort`（`WRITE_CHANNEL_CAPACITY`，8）投递，队列满时返回 `busy`，数据库线程先提交全部待落盘的采集批次，再处理一条写命令，成功提交后发布版本变化。采集提交截止时间和关闭请求优先于写命令，写命令的 SQLite 锁等待限制在 `COMMIT_HEADROOM` 内，执行后返回循环重新检查采集队列。
-
-I/O 线程内用普通 tokio task 和有界 `mpsc` 实现一个连接注册表 actor，以及每个连接独立的 outbox actor。数据库线程的 `VersionPublisher` 保存 UTC 日期版本并计算已订阅逻辑日期的摘要，通过 watch 发布 `{date, versions}`；注册表只保留已订阅日期的摘要。注册表持有连接角色、订阅和发送句柄，扇出只调用非阻塞投递；outbox 负责发送预算、可靠消息顺序和最新状态槽。主线程通过 watch 发布已清洗状态，通过有界邮箱非阻塞投递控制消息；客户端写入只由 outbox 等待，详细规则见 04 第 7 节。连接级错误关闭时，管道服务最多增加一个临时原生刷新线程，等待客户端读取末帧；等待容量和刷新共用 500 毫秒期限，完成后结束该线程。
-
-线程之间用有界通道连接：
+| 主线程 | Win32 消息循环、WinEvent hook、托盘、会话/电源/时钟通知、空闲定时器 | 全部 hook 生命周期在主线程；变化观测才入队，不做磁盘 I/O |
+| 采集线程 | 进程身份解析、隐私求值、计时状态机、生成写入命令 | 可调 `OpenProcess` 等慢 API，不访问数据库 |
+| 数据库线程 | 持有写连接与只读连接：批量落盘采集与写请求，分批执行只读查询 | 查询按批让出给采集提交；写提交期限与关闭优先于查询 |
+| I/O 线程 | tokio current-thread：管道 accept、读写、连接注册表与每连接 outbox | 不访问 SQLite；查询与写请求通过有界通道转数据库线程，满即返回 `busy` |
 
 ```text
-主线程 ──ObservedEvent──▶ 采集线程 ──WriteCommand──▶ 数据库线程 ◀──Query── I/O 线程
+主线程 ──ObservedEvent──▶ 采集线程 ──WriteCommand──▶ 数据库线程 ◀──Query/Write── I/O 线程
    ▲                          │                              │
    └──── 托盘与 UI 控制命令 ◀──┴─────── StateChanged ─────────┴──▶ I/O 线程（推送）
 ```
 
-采集线程按出队顺序应用来自主线程、控制入口和数据库反馈的工作。若观测的单调时间早于已接受的边界，则使用该边界的 UTC 与单调时间作为生效时间，保留事件载荷中的原始截止时间和输入证据。关闭时先处理队列，再对关闭采样应用相同规则；关闭采样早于队列尾部时，在最后接受的边界结算。
+**有界通道与过载不变量：**
 
-工作线程到主线程的通知队列最多保留 1,024 项，最新采集快照、持久化状态、定时器和 hook 目标等可替换通知按种类合并；容量耗尽时发送立即返回错误。致命故障使用独立保留位置并优先取出，同时停止接受观测。唤醒使用内核事件和发给隐藏窗口的无指针消息；模态托盘菜单收到致命通知时结束菜单，再由主循环执行运行时关闭。会话结算开始后停止观测，结算完成优先于其余事件和采集效果；关闭期间的托盘状态通知不影响数据库向采集线程发出完成确认。
-
-主线程到采集线程的队列容量为 1,024。满时主线程不阻塞，置过载标志并丢弃新事件。采集线程发现标志后，把当前区间结束于最后可信时间，写 `capture_gaps`，清空不再可信的排队事件；恢复后重读前台，缺口到重读成功时结束。
-
-采集线程到数据库线程共用一个按写入命令数计量的 4,096 容量预算；排队批次、失败缓冲和正在提交的事务前缀都计入这个预算。数据库线程提交前固定事务前缀，执行 SQLite 时释放队列锁；采集线程继续合并或丢弃尚未提交的后缀，控制通道仅发送合并后的唤醒。满时先合并可替换的确认点命令；仍无法入队则按同一过载流程记录未知范围。数据库写入失败时托盘显示异常；写入队列作为失败缓冲，最多保留 4,096 条命令或 10 分钟，以先到者为准，超限范围转为 `capture_gaps`。数据库恢复后优先落盘缺口，再恢复采集。缺口不包含标题或应用身份。
-
-会话与电源通知通过显式注册交给 message-only 窗口；`WM_TIMECHANGE`、`WM_QUERYENDSESSION` 和 `WM_ENDSESSION` 由托盘已有的隐藏顶层窗口接收。两个窗口均不设置 `WS_VISIBLE`。跨线程通知使用类型化 `AppMessage` 唤醒主线程。
+- 线程间全部使用有界队列，生产端绝不因下游阻塞而卡死主线程或采集。
+- 主线程→采集线程队列满时丢弃新事件并置过载标志；采集线程发现后将当前区间结束于最后可信时间，写入不含应用/标题的 `capture_gaps`，恢复后重读前台。
+- 采集线程→数据库线程共用有界命令预算（排队、失败缓冲与提交中前缀合计），满时优先合并可替换的确认点，仍满则记录 `capture_gaps`；数据库写入失败期间托盘示警，恢复后优先落盘缺口。
+- 采集线程若收到单调时间倒退的观测，以已接受边界作为生效时间，保留原始证据字段。
+- 通知主线程队列对状态/托盘/hook 目标按类合并，致命故障占独立优先槽位并停止新观测。
 
 ### 6.1 截止时间调度器
 
-暂停、隐私模式、保持计时、空闲例外等限时状态，以及以后的协议计时（12 第 7 节），都注册到核心的一个截止时间调度器：
+暂停、隐私模式、保持计时、空闲例外及未来 M7 协议计时统一注册到主线程截止时间调度器：
 
-- 调度器在主线程，只为最近的一个截止时间设置一次性 `SetTimer`；没有截止时间时不设定时器，不产生周期唤醒。
-- 暂停、隐私模式、保持计时、应用豁免和声音例外的状态与 UTC 截止时间保存在 `timed_policies`，注册、取消或到期与对应采集边界在同一事务完成；这些策略不在 `settings` 重复保存截止时间。其他需要持久化的调度截止时间保存在 `settings`。
-- 核心启动时读取全部截止时间：已过期的立即按到期处理，其余重新调度。
-- 到期回调投递给拥有该状态的模块（采集线程或以后的 selfreg 模块），由它产生 `policy_changed` 等边界。
-- 系统时间跳变（02 第 5 节）后重新计算最近截止时间。
+- 只为最近的一个截止时间设置一次性 `SetTimer`，无截止时间时不设定时器、零周期唤醒。
+- 限时策略持久存于 `timed_policies`（其余定时截止存 `settings`）；启动时立刻结算已过期项、重排未过期项；系统时钟跳变后重算最近期限；到期事件交由拥有模块产生 `policy_changed` 等边界。
 
 ### 6.2 规则注册表的并发模型
 
-规则会被采集线程（隐私求值）和数据库线程（分类、提取、查询）同时读取，又会被界面、命令行导入和内置升级修改。并发由三个明确的模式分工处理：
+规则被采集线程与数据库线程高频并发读取，又会被 UI 修改或内置升级更新，由三种模式协作：
 
 | 模式 | 解决的问题 | 做法 |
 |---|---|---|
-| Actor（单写者） | 修改之间的竞争 | 规则注册表由数据库线程上的 Actor 循环驱动，是规则状态的唯一写者。所有修改都是 `RegistryCommand`（`Apply`、`Toggle`、`Reorder`、`Delete`、`Revert`、`Import`、`InstallBuiltin`），附回复通道，逐条串行处理，修改可线性化。注册表本身是 sans-IO 纯核心（第 5 节），见下文“处理一条命令” |
-| RCU（读-复制-更新） | 读写之间的竞争 | 当前生效规则是不可变的 `RuleSnapshot { epoch, privacy, classification, extraction, hashes }`，以 `Arc` 共享，放在基于 `arc-swap` 的 `SnapshotCell` 中。读者用一次原子加载取得快照，不加锁、不阻塞；写者构造并编译完整的新快照后原子替换，旧快照在最后一个读者释放后回收 |
-| 乐观并发控制（OCC） | 基于旧版本的修改覆盖新版本 | 每个修改命令携带它所基于的 `base_version`。注册表与当前版本比较，不一致时返回错误码 `rule_set_stale`，客户端重新加载并显示三方对比；单写者保证“比较并写入”是原子的 |
+| Actor（单写者） | 写竞争 | 规则注册表在数据库线程串行处理全部 `RegistryCommand`（`Apply`、`Import`、`Toggle`、`Delete`、`InstallBuiltin`） |
+| RCU（读-复制-更新） | 读写竞争 | 生效规则编译为不可变 `Arc<RuleSnapshot>` 存入 `arc-swap`；读者无锁原子加载，单工作单元全程使用同一快照 |
+| OCC（乐观并发） | 覆盖丢失 | 修改携带 `base_version`，单写者原子比较，过期返回 `rule_set_stale` |
 
-**读者的快照隔离。** 一个工作单元只使用一个快照：采集线程处理一个事件、数据库线程计算一次查询响应（含全部分页）时，开始时取一次快照，全程使用它，不会混用新旧规则。查询游标绑定的规则输入版本即快照中的哈希，与第 4 节的 `stale_cursor` 机制一致。
-
-**变更通知。** 替换快照后，注册表向采集线程的事件队列推送 `RulesChanged { epoch }`。采集线程记录当前区间求值时所用快照的 epoch；收到通知或在处理事件时发现更大的 epoch，就产生 06 第 4.1 节的 `policy_changed` 边界。通知只用于及时唤醒，正确性由 epoch 比较保证，通知延迟或合并都不会漏掉变更。
-
-**固定顺序与不变量：**
-
-**处理一条命令（sans-IO）。** 注册表核心 `RuleRegistry` 在 `quartz-domain` 中，内存里保存各规则集的当前版本与内容（数百条规则，启动时由外壳从数据库载入）。外壳的循环对每条命令执行：
+**sans-IO 执行顺序与不变量：**
 
 ```text
-RegistryCommand ─▶ RuleRegistry::decide(&self, cmd) ─▶ Decision { writes: Vec<RuleSetWrite>, reply }
-                         （纯计算：OCC 检查、校验与编译）        │
-                                                              ▼
-              外壳在一个事务中用 store 执行 writes；失败则只回复错误，不进入下一步
-                                                              │ 提交成功
-                                                              ▼
-              RuleRegistry::committed(outcome) ─▶ 新快照、epoch+1、原子替换、发通知
+RegistryCommand ─▶ RuleRegistry::decide（纯校验、OCC、编译）─▶ Vec<RuleSetWrite>
+   ─▶ 外壳单事务落盘（失败直接返回，不改内存）
+   ─▶ RuleRegistry::committed ─▶ 新快照、epoch + 1、原子替换、通知采集线程
 ```
 
-`RuleSetWrite` 是领域层的写入描述枚举（提交新版本、启停、排序、标记删除、安装内置修订），只携带领域类型。核心从不调用数据库；外壳不做业务判断。
+1. **先编译校验、后落盘、再发布**：写库失败绝不污染内存快照；提交后发布前崩溃时，重启以数据库重建快照（数据库为唯一事实来源）。
+2. **epoch 与内容哈希分离**：进程内 `epoch` 单调递增，用于采集线程触发 `policy_changed` 边界（`RulesChanged` 通知只作及时唤醒，正确性由 `epoch` 比较保证）；跨查询与版本摘要使用生效规则内容 SHA-256 哈希。
+3. **启动容错**：若某个已保存规则集启动编译失败，仅停用该集并在规则集树告警，不阻断其余规则。
 
-1. `decide` 校验并编译新版本（正则限制见 03 第 5.5 节），并按 `base_version` 做 OCC 检查。编译失败或版本过期时不产生写入，只返回错误回复。
-2. 外壳在一个事务中执行全部写入（`rule_set_versions` 与 `rule_sets`），提交。
-3. 提交成功后外壳调用 `committed`，核心更新内存状态，构建新快照，epoch 加一，原子替换，再发通知。提交失败时不调用 `committed`，内存状态与数据库不会分歧。
-4. 提交成功但替换前崩溃时，核心启动时从数据库重建快照；数据库是唯一事实来源，快照只是它的编译视图。
-5. epoch 只在进程内单调递增，用于判断发布先后；跨进程与缓存使用内容哈希（03 第 2.7 节），两者职责不同。
-6. 启动时若某个已存版本编译失败（例如限制调整后），只停用该规则集并在规则集树上告警，其余规则照常生效。
+## 7. 依赖选型与工程约定
 
-## 7. 依赖选型
+基础 crate：`windows`、`snafu`、`tokio`、`clap`、`tracing`。其余关键选型：
 
-用户指定的基础 crate：`windows`、`snafu`、`tokio`、`clap`、`tracing`。其余按下表选择。
-
-| 用途 | 选择 | 说明 |
+| 领域 | 选型 | 理由与边界 |
 |---|---|---|
-| Win32 | `windows 0.62`，只开需要的 feature | 不混用 `windows-sys`；平台层集中在 `platform::windows` |
-| 命令行 | `clap 4`（`derive`，关闭 `color`、`suggestions` 等非必要 feature） | 用法见第 2 节；浏览器启动参数在 clap 之前预检 |
-| 错误 | `snafu` | 见下文“错误处理” |
-| 异步 I/O | `tokio`，只开 `rt`、`net`、`io-util`、`io-std`、`sync`、`time`、`macros` | 只用 current-thread runtime，见下文“tokio 使用范围” |
-| 日志 | `tracing` + 精简 `tracing-subscriber`（`fmt`、`env-filter`），自写按大小滚动的文件 writer | 日志里不写标题、域名等内容，见 06 |
-| 界面 | `gpui-kit 0.10.0`（固定版本，及其依赖的 `gpui-pre`） | 只在 `quartz-ui` 中 |
-| 托盘 | `tray-icon 0.26` | 复用核心的消息循环。如果无法拿到悬停事件或需要自绘 HMENU，就改为直接调用 `Shell_NotifyIconW` |
-| 数据库 | `diesel 2.4.0`（`sqlite`、`returning_clauses_for_sqlite_3_35`）+ `diesel_migrations 2.4.0`；`libsqlite3-sys` 开 `bundled` | 只在 `store` 模块中，见 03 第 4.5、8 节。启动时检查 SQLite 版本不低于 3.51.3（WAL-reset 缺陷修复版本） |
-| 序列化 | `serde` + `serde_json` | 协议与浏览器共用 JSON |
-| 规则快照发布 | `arc-swap 1.9.5` | 只在 `rules::registry` 中，实现第 6.2 节的 RCU 快照单元 |
-| 日期 | `jiff` | [Windows 系统时区识别与内嵌 IANA 历史时区数据](https://docs.rs/jiff/1.0.0/jiff/_documentation/platform/index.html#windows) |
-| 正则 | `regex`，规则编译时设置 `size_limit` 和 `dfa_size_limit` | 防止用户正则耗尽内存 |
-| 界面文字 | `rust-i18n`（与 gpui-component 相同） | 只在 `quartz-i18n` 中声明翻译资源，见 10 第 2 节 |
-| 文本比较 | ICU4X `icu_normalizer`、`icu_casemap`（编译期数据） | `quartz-domain` 的规则匹配使用；M1 测量体积（09 H10） |
-| 区域格式 | ICU4X `icu_plurals`、`icu_decimal`；界面另用 `icu_collator` | 复数、数字格式、按语言排序 |
-| 域名 | `idna` | 用户输入的 Unicode 域名转 punycode |
+| Win32 / 托盘 | `windows`、`tray-icon` | 集中在 `platform::windows`，不混用 `windows-sys` |
+| 存储与迁移 | `diesel` + `diesel_migrations` + `libsqlite3-sys(bundled)` | 仅限 `store` 模块；启动校验 SQLite ≥ 3.51.3 |
+| 界面 | `gpui-kit`（固定版本） | 仅限 `quartz-ui` |
+| 规则并发与匹配 | `arc-swap`、`regex`（设 `size_limit`/`dfa_size_limit`）、`idna`、ICU4X | 规则快照 RCU、正则内存护栏、跨语言文本与域名规范化 |
+| 日期与本地化 | `jiff`、`rust-i18n` | Windows 系统时区 + 内嵌 IANA 历史数据；翻译资源集中在 `quartz-i18n` |
 
-文件日志使用独立写线程，主线程、采集线程和 I/O 线程只以非阻塞方式投递已格式化的诊断记录。每个目标（`core.log`、`ui.log`）的单文件上限为 2 MiB，保留当前文件及两份归档，共三个文件；启动时沿用已有文件的大小。每条记录最多 4 KiB，队列最多 64 条；过长记录替换为固定诊断，队列满时累计丢弃数并由写线程记录。日志线程空闲时阻塞等待记录或独立控制消息，不使用周期唤醒。正常关闭通过控制消息唤醒，排空已接受的记录，最多等待两秒刷新日志。panic hook 发送不含 panic 载荷的固定记录，通过独立控制消息同步等待文件写入及刷新确认，最多两秒，失败时输出诊断；写线程自身 panic 时直接追加并刷新该记录。磁盘或滚动失败输出诊断并结束写线程。
+- **文件日志**：独立低开销写线程非阻塞接收记录，无周期唤醒；`core.log` / `ui.log` 按大小滚动（单文件 2 MiB、保留 3 份），panic hook 仅落固定诊断记录（不写 panic 载荷，不写标题/域名/URL，见 06 第 5 节）。
+- **发布配置**：`lto = "fat"`、`codegen-units = 1`、`panic = "abort"`（不生成含敏感内存的转储）、`strip = true`。
 
 ### 7.1 错误处理
 
-错误类型定义在执行该失败操作的模块中，上层只通过 `source` 包装下层错误，不重复定义下层的失败原因。
-
-有明确接收者的操作应实现为拥有或借用该接收者的类型的方法，自由函数仅用于没有接收者的纯计算，关联函数用于构造对象。
-
-- `anyhow` 仅在 `quartz-ui` 的 GPUI 错误边界作为上游错误的 `source` 类型出现，所有内部错误均使用 `snafu`。
-- 按失败情形定义 snafu 错误类型，名称采用“动词 + 对象 + Error”；一个操作有多种失败原因时，用该操作命名的一个枚举为每种原因定义变体，并用 context selector 附加上下文（路径、调用名、规则 ID 等）。不定义整个 crate 共用的兜底错误枚举；跨平台端口与前台解析器工厂使用 `Box<dyn Error + Send + Sync>` 保留平台错误，操作错误仍由具体的 snafu 错误类型包装。裸名 `Error` 仅用于模块私有类型。
-- Win32 调用的 `windows::core::Error` 作为 `source` 保留，上下文写调用名，例如 `OpenProcessSnafu { pid }`。
-- 跨进程只传结构化错误码。`quartz-protocol` 定义错误码枚举，核心把内部 snafu 错误映射为错误码，界面和 host 只按错误码分支，不解析错误消息文本。
-- 错误的 `Display` 与上下文字段同样遵守 06 的日志约束：不携带标题、域名、URL。需要定位时只带区间 ID、规则 ID 等标识。
-- 入口 `main` 用一个顶层 snafu 错误汇总各模式的启动失败，写日志后按模式返回退出码。命令行模式额外打印到附加的控制台。
+内部统一使用按失败操作命名的 `snafu` 错误枚举并保留下层 `source`（`anyhow` 仅在 `quartz-ui` 的 GPUI 边界出现）；跨进程只传 `quartz-protocol` 稳定错误码，不解析错误文本；错误 `Display` 同样遵守日志隐私约束（不携带标题、域名、URL）。
 
 ### 7.2 tokio 使用范围
 
-tokio 只承担管道与 stdio 的异步 I/O，不接管 Win32 消息循环、SQLite 或 GPUI 的执行器。UI 的管道线程通过容量为 64 的命令与事件通道连接 GPUI，最多保留 64 个待响应请求；GPUI 前台任务异步等待事件接收器，由下一帧回调发送 `ui.first_frame`。所有 runtime 都是 `Builder::new_current_thread()`，不使用 multi-thread runtime：它默认按 CPU 核数创建工作线程（测试机是 28 个逻辑核），会突破 08 的线程预算。
+tokio 仅用于命名管道与 host stdio 异步 I/O，绝不接管 Win32 消息循环、SQLite 或 GPUI。所有 runtime 必须使用 `Builder::new_current_thread()` 并限制小容量 `max_blocking_threads`（核心 2、host 1、界面 1），避免多线程 runtime 突破 08 的线程预算。
 
-| 模式 | runtime 所在线程 | 负责 |
-|---|---|---|
-| 核心 | 独立的 I/O 线程 | 命名管道 accept、读写、订阅推送；与其他线程用 tokio `mpsc`、`oneshot` 通道通信。主线程与采集线程是同步代码，用 `blocking_send` 或 `try_send` 向 I/O 线程投递 |
-| host | 主线程 | 浏览器 stdin/stdout 与命名管道之间的双向转发 |
-| 界面 | 一个后台线程 | 管道客户端、显式连接操作和启动就绪等待；通过有界通道把消息交给 GPUI 的前台执行器；前台任务异步等待不需要 tokio runtime 的通道接收器，管道、请求超时与启动等待在后台 runtime 内执行 |
+## 8. 自启、数据目录与更新
 
-`max_blocking_threads` 设为小值（核心 2、host 1、界面 1）。核心同时执行的对端认证最多一个，至少保留一个阻塞线程给已认证连接的规则读取；认证等待和执行均受握手期限约束。界面启动核心时的可取消内核事件等待使用这个单线程阻塞池，管道读写仍在 I/O 线程。`tokio::io::stdin` 等会使用 blocking 线程池，这些线程计入 08 的线程预算。数据库访问不用 `spawn_blocking`，仍由数据库线程处理（第 6 节）。
-
-release profile：`lto = "fat"`，`codegen-units = 1`，`panic = "abort"`，`strip = true`。`opt-level` 在 `"s"` 和 `3` 之间按实测决定。
-
-## 8. 自启与更新
-
-- 自启写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Quartz`，值为 `"<exe 绝对路径>" --autostart`。设置里可以开关。
-- 首版手动更新：利用 Windows 允许重命名运行中 exe 的行为，把 `quartz.exe` 重命名为 `quartz.old.exe`，放入新 `quartz.exe`，然后退出并重启 Quartz；下次启动删除 `.old`。
-- 程序目录和数据目录分开。数据目录是 `%LOCALAPPDATA%\Quartz\`，里面有 `quartz.db`、`logs\`、`icons\`、`backups\`。
-- 数据库升级、备份、降级处理见 03 第 7–8 节：迁移前用 `VACUUM INTO` 备份，只保留最近 2 份迁移备份；数据库来自更新版本时，核心拒绝启动，不尝试写入。按隐私规则清理历史时提示并可一并删除备份（03 第 6 节）。
-- 换回旧版本 exe 前，用 `quartz restore-backup <文件>` 恢复迁移前备份；备份之后记录的数据会丢失；不带 `--yes` 时仅打印替换范围并返回非零退出码，确认后加 `--yes` 执行。
+- **开机自启**：写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Quartz`（值 `"<exe 绝对路径>" --autostart`），可在设置开关。
+- **目录分离**：程序目录与数据目录分离；数据目录位于 `%LOCALAPPDATA%\Quartz\`，包含 `quartz.db`、`logs\`、`icons\`、`backups\` 与单实例锁 `quartz.lock`。
+- **更新与备份恢复**：手动替换 exe 时利用 Windows 允许重命名运行中 exe 的特性（`quartz.exe` → `quartz.old.exe`，重启后清理 `.old`）。数据库升级、自动迁移前备份与 `quartz restore-backup` 降级恢复见 03 第 7–8 节。

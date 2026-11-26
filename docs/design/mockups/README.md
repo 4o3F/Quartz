@@ -1,5 +1,7 @@
 # Quartz UI mockups
 
+> 2026-11-26：M4 收缩后，explain / 版本历史 / 三方对比 / 历史隐私清理相关 mockup 暂不实现，保留作参考。
+
 Static HTML mockups (1280x800, zh-CN, no JS apart from a theme switch). Open any page with `?theme=light` or `?theme=dark`. `tokens.css` encodes 11-design-system tokens (header comment maps each variable to its token name); `mockup.css` holds shared component styles using only those variables. Screenshots are in `screenshots/{page}-{light,dark}.png`.
 
 - `today.html`: Today page per 07 §3/§4/§10 with the 11 §5.4 layout (32 px custom title bar, 240 px navigation, date bar, status line with 100% category bar, timeline with category main track + per-app swimlanes, idle hatching, locked/excluded states, a hover tooltip, hourly stacked bars, application ranking, pending-away row).

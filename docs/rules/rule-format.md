@@ -243,11 +243,11 @@ preset = "title_hidden"            # 与下面三项二选一
 |---|---|---|
 | `quartz rules check <文件>...` | 校验一个或多个规则文件，包括它们与已安装规则集组成的树 | 否（树检查使用本地已安装规则集的只读副本） |
 
-界面中有相同功能：通过 `rules.preview` 在 1–7 个逻辑日内预览草稿或导入文本的影响，以及规则集树视图。
+预览与导入在界面中完成：通过 `rules.preview` 在 1–7 个逻辑日内预览草稿或导入文本的影响，确认后由界面导入并查看规则集树。
 
 导出通过 `rules_text.export` 协议操作取得；`rules_text.validate` 对指定 key 与基础版本作上下文校验。
 
-规范导出使用 LF 换行，末尾保留一个换行，先写 `format` 和 `[set]`，随后按保存的跨节顺序写 `[[rule]]`、`[[override]]`、`[[disable]]`。表内键按字典序排列，条件使用内联表并保留条件数组顺序；字符串使用双引号及 TOML 转义。默认 priority、match、case_sensitive、negate 写出，隐私 preset 展开为 app/window_title/web，分类名称和内置键均写为保存的 UUID。可选空值省略；内置条目保留 detector、verified、label_key 和非空的 languages；languages 为空时省略，与未提供该字段等价。用户条目不增加这些字段。相同保存内容重复导出得到相同字节，导出后解析再导出也得到相同字节。内置 key 的只读验证权限与诊断返回方式见 [04 第 6.3.3 节](../design/04-ipc.md#633-文本)。
+规范导出使用 LF 换行，末尾保留一个换行，先写 `format` 和 `[set]`，随后按保存的跨节顺序写 `[[rule]]`、`[[override]]`、`[[disable]]`。表内键按字典序排列，条件使用内联表并保留条件数组顺序；字符串使用双引号及 TOML 转义。默认 priority、match、case_sensitive、negate 写出，隐私 preset 展开为 app/window_title/web，分类名称和内置键均写为保存的 UUID。可选空值省略；内置条目保留 detector、verified、label_key 和非空的 languages；languages 为空时省略，与未提供该字段等价。用户条目不增加这些字段。相同保存内容重复导出得到相同字节，导出后解析再导出也得到相同字节。内置 key 的只读验证权限与诊断返回方式见 [04 第 6.3 节](../design/04-ipc.md#63-规则标注与设置)。
 
 ### 4.2 错误
 
@@ -274,7 +274,7 @@ error[E-RULE-TARGET]: user.my-tweaks: override[0].target: "builtin.classificatio
 | `E-RULE-REF` | 引用的分类、链或国策不存在，或分类显示名称有歧义 |
 | `E-RULE-DUP` | 规则集内 `id` 重复 |
 
-界面保存隐私规则前通过 `rules.preview` 显示预览并要求确认；核心不强制回执。
+界面保存隐私规则前通过 `rules.preview` 显示影响预览并要求确认。
 
 ### 4.3 内置规则更新
 
