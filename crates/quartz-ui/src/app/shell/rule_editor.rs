@@ -14,7 +14,7 @@ use gpui_kit::{
     px,
 };
 use quartz_protocol::{
-    ErrorKind, PREVIEW_MAX_SAMPLES, RuleDiagnostic, RuleKind, RulePreviewSample,
+    ErrorKind, LocalDate, PREVIEW_MAX_SAMPLES, RuleDiagnostic, RuleKind, RulePreviewSample,
     RulePreviewStatistics, RuleSetIdentityField, RuleSetSource, RuleView, RulesPreviewResponse,
 };
 
@@ -29,15 +29,15 @@ use crate::{
     layout::ChartArrangement,
     link::{LoadDataError, LoadDataErrorCode, RequestCoreError},
     model::{
-        DirtyState, EditorLoadState, LeaveConfirmation, LeaveDecision, LeaveTarget,
-        MutationActivity, PreviewState, RuleEditorEffect, RuleEditorMode, RuleEditorSession,
-        SaveOutcome, StaleNotice, VALIDATE_DEBOUNCE_DELAY, ValidateRuleSetKeyError,
-        ValidationState, valid_parents_for_kind,
+        ClassificationRulePrefill, DirtyState, EditorLoadState, LeaveConfirmation, LeaveDecision,
+        LeaveTarget, MutationActivity, PreviewState, RuleEditorEffect, RuleEditorMode,
+        RuleEditorSession, RulesTab, SaveOutcome, StaleNotice, VALIDATE_DEBOUNCE_DELAY,
+        ValidateRuleSetKeyError, ValidationState, valid_parents_for_kind,
     },
 };
 
 /// Height of the multi-line monospace TOML editor box in logical pixels.
-const EDITOR_TEXTAREA_HEIGHT: f32 = 300.;
+pub(super) const EDITOR_TEXTAREA_HEIGHT: f32 = 300.;
 /// Maximum height of the scrollable preview samples list in logical pixels.
 const PREVIEW_SAMPLES_MAX_HEIGHT: f32 = 320.;
 /// Compact pill badge horizontal padding.
@@ -50,7 +50,7 @@ const PARENT_PICKER_INDENT_STEP: f32 = 12.;
 const MAX_PARENT_INDENT_DEPTH: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditorBadgeTone {
+pub(super) enum EditorBadgeTone {
     Neutral,
     Accent,
     Caution,
@@ -164,6 +164,7 @@ impl AppShell {
         base_version: u32,
         cx: &mut Context<Self>,
     ) {
+        self.close_rule_import_silently();
         self.rule_editor_validate_task = None;
         self.pending_leave_page = None;
         let effect = self.rule_editor.open_edit(key, kind, base_version);
@@ -174,6 +175,7 @@ impl AppShell {
 
     /// Opens the text editor in create mode for a brand-new `user.<slug>` rule set.
     pub(super) fn open_new_rule_set(&mut self, cx: &mut Context<Self>) {
+        self.close_rule_import_silently();
         self.rule_editor_validate_task = None;
         self.pending_leave_page = None;
         let default_kind = self
@@ -195,11 +197,32 @@ impl AppShell {
         target: String,
         cx: &mut Context<Self>,
     ) {
+        self.close_rule_import_silently();
         self.rule_editor_validate_task = None;
         self.pending_leave_page = None;
         let effect =
             self.rule_editor
                 .open_override_child(parent, kind, &rule_id, target, self.rules.tree());
+        self.rule_editor_key_sync = InputSyncState::NeedsSync;
+        self.rule_editor_text_sync = InputSyncState::NeedsSync;
+        self.run_rule_editor_effect(effect, cx);
+        cx.notify();
+    }
+
+    /// Opens the text editor in create mode with a classification template prefilled for an
+    /// unclassified entity and switches to the Rule sets tab so the editor is visible.
+    pub(super) fn open_prefilled_classification_rule_set(
+        &mut self,
+        prefill: ClassificationRulePrefill,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_rule_import_silently();
+        self.rule_editor_validate_task = None;
+        self.pending_leave_page = None;
+        self.rules.set_active_tab(RulesTab::RuleSets);
+        let effect = self
+            .rule_editor
+            .open_prefilled_classification(prefill, self.rules.tree());
         self.rule_editor_key_sync = InputSyncState::NeedsSync;
         self.rule_editor_text_sync = InputSyncState::NeedsSync;
         self.run_rule_editor_effect(effect, cx);
@@ -247,6 +270,10 @@ impl AppShell {
                 self.pending_leave_page = None;
                 cx.notify();
             }
+            LeaveTarget::OpenImport => {
+                self.pending_leave_page = None;
+                self.open_rule_import_now(cx);
+            }
             LeaveTarget::SelectRuleSet(key) => {
                 self.pending_leave_page = None;
                 let effect = self.rules.select(key);
@@ -256,6 +283,9 @@ impl AppShell {
             LeaveTarget::SwitchTab(tab) => {
                 self.pending_leave_page = None;
                 self.rules.set_active_tab(tab);
+                if tab == RulesTab::Unclassified {
+                    self.open_unclassified_tab(cx);
+                }
                 cx.notify();
             }
             LeaveTarget::LeavePage => {
@@ -489,6 +519,7 @@ impl AppShell {
                                 this.pending_leave_page = None;
                                 let next = this.rules.reload_tree_selecting(key);
                                 this.run_rules_effect(next, cx);
+                                this.on_rules_mutated(cx);
                             }
                             SaveOutcome::Ignored | SaveOutcome::Failed => {}
                         }
@@ -929,9 +960,10 @@ impl AppShell {
                 .into_any_element(),
         };
 
-        let validation_section = self.render_validation_section(ui, session);
+        let validation_section = self.render_validation_state(ui, &session.validation);
         let action_bar = self.render_editor_action_bar(ui, session, cx);
-        let preview_section = self.render_preview_section(ui, session);
+        let preview_section =
+            self.render_preview_state(ui, &session.preview, session.preview_range);
 
         div()
             .flex()
@@ -1161,12 +1193,16 @@ impl AppShell {
             )
     }
 
-    fn render_validation_section(&self, ui: &Widgets<'_>, session: &RuleEditorSession) -> Div {
+    pub(super) fn render_validation_state(
+        &self,
+        ui: &Widgets<'_>,
+        validation: &ValidationState,
+    ) -> Div {
         let space = &ui.metrics.space;
         let palette = ui.palette;
 
         let mut section = div().flex().flex_col().gap(space.xs);
-        match &session.validation {
+        match validation {
             ValidationState::Idle => {}
             ValidationState::Debouncing => {
                 section = section.child(
@@ -1427,11 +1463,16 @@ impl AppShell {
             .children(preview_hint)
     }
 
-    fn render_preview_section(&self, ui: &Widgets<'_>, session: &RuleEditorSession) -> Option<Div> {
+    pub(super) fn render_preview_state(
+        &self,
+        ui: &Widgets<'_>,
+        preview: &PreviewState,
+        preview_range: Option<(LocalDate, LocalDate)>,
+    ) -> Option<Div> {
         let space = &ui.metrics.space;
         let palette = ui.palette;
 
-        match &session.preview {
+        match preview {
             PreviewState::Idle => None,
             PreviewState::Loading => Some(
                 div()
@@ -1480,7 +1521,7 @@ impl AppShell {
                 )
             }
             PreviewState::Ready(response) => {
-                Some(self.render_preview_results(ui, session, response))
+                Some(self.render_preview_results(ui, preview_range, response))
             }
         }
     }
@@ -1488,12 +1529,12 @@ impl AppShell {
     fn render_preview_results(
         &self,
         ui: &Widgets<'_>,
-        session: &RuleEditorSession,
+        preview_range: Option<(LocalDate, LocalDate)>,
         response: &RulesPreviewResponse,
     ) -> Div {
         let space = &ui.metrics.space;
         let palette = ui.palette;
-        let range_label = match session.preview_range {
+        let range_label = match preview_range {
             Some((start, end)) => {
                 let last_day = end.yesterday().unwrap_or(end);
                 format!("{start} – {last_day}")
@@ -1833,7 +1874,7 @@ impl AppShell {
             )
     }
 
-    fn editor_badge(ui: &Widgets<'_>, text: String, tone: EditorBadgeTone) -> Div {
+    pub(super) fn editor_badge(ui: &Widgets<'_>, text: String, tone: EditorBadgeTone) -> Div {
         let palette = ui.palette;
         let high_contrast = palette.contrast == ContrastMode::High;
         let (bg, fg) = match tone {
@@ -1875,7 +1916,7 @@ impl AppShell {
     }
 }
 
-fn ms_to_duration(millis: i64) -> Duration {
+pub(super) fn ms_to_duration(millis: i64) -> Duration {
     Duration::from_millis(u64::try_from(millis.max(0)).unwrap_or(0))
 }
 

@@ -568,6 +568,7 @@ pub(crate) enum RulesTab {
     #[default]
     RuleSets,
     Categories,
+    Unclassified,
 }
 
 /// Whether archived categories are visible in the categories list.
@@ -1383,6 +1384,9 @@ impl RulesPage {
     /// Selection movement clamps at the first and last rows of the tree.
     #[must_use]
     pub(crate) fn handle_key(&mut self, action: RulesKeyAction) -> RulesEffect {
+        if self.active_tab == RulesTab::Unclassified {
+            return RulesEffect::None;
+        }
         if self.active_tab == RulesTab::Categories {
             if matches!(action, RulesKeyAction::Cancel) {
                 if matches!(self.archive_confirm, ArchiveConfirmation::Pending { .. }) {

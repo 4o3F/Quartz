@@ -50,6 +50,7 @@ requests! {
     crate::RulesPreviewRequest => RulesPreview => crate::RulesPreviewResponse,
     crate::RulesTextValidateRequest => RulesTextValidate => crate::RulesTextValidateResponse,
     crate::RulesTextExportRequest => RulesTextExport => crate::RulesTextExportResponse,
+    crate::RulesTextImportRequest => RulesTextImport => crate::RuleSetsWriteResponse,
     crate::RuleSetsTreeRequest => RuleSetsTree => crate::RuleSetsTreeResponse,
     crate::RuleSetsGetRequest => RuleSetsGet => crate::RuleSetsGetResponse,
     crate::RuleSetsEditRequest => RuleSetsEdit => crate::RuleSetsWriteResponse,

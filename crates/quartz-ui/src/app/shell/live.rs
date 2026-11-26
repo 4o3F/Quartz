@@ -341,6 +341,9 @@ impl AppShell {
                 live.indicator = Indicator::Hidden;
             }
         }
+        if follow {
+            self.on_rules_mutated(cx);
+        }
         if recovered && !follow {
             self.retry_day(cx);
         }

@@ -55,8 +55,8 @@ pub use rules::{
     RuleSetsEditRequest, RuleSetsGetRequest, RuleSetsGetResponse, RuleSetsSetEnabledRequest,
     RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsWriteResponse, RuleView, RuleWarningCode,
     RuleWebAction, RulesPreviewRequest, RulesPreviewResponse, RulesTextExportRequest,
-    RulesTextExportResponse, RulesTextValidateRequest, RulesTextValidateResponse,
-    ValidatePreviewDatesError,
+    RulesTextExportResponse, RulesTextImportRequest, RulesTextValidateRequest,
+    RulesTextValidateResponse, ValidatePreviewDatesError,
 };
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};
 pub use topic::{LocalDate, ParseTopicError, Subscribe, SubscribeResponse, Topic, Unsubscribe};

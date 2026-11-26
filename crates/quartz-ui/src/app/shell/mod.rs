@@ -11,10 +11,12 @@ mod pending;
 mod preview;
 mod ranking;
 mod rule_editor;
+mod rule_import;
 mod rules;
 mod stat_grid;
 mod timeline;
 mod today;
+mod unclassified;
 
 use std::{fmt, rc::Rc};
 
@@ -290,6 +292,14 @@ pub(crate) struct AppShell<Focus = FocusHandle> {
     rule_editor_key_sync: InputSyncState,
     rule_editor_text_sync: InputSyncState,
     rule_editor_validate_task: Option<gpui_kit::Task<()>>,
+    rule_import: crate::model::RuleImport,
+    rule_import_text_input: Option<Entity<gpui_kit::component::input::EditorState>>,
+    rule_import_text_sync: InputSyncState,
+    rule_import_validate_task: Option<gpui_kit::Task<()>>,
+    unclassified: crate::model::UnclassifiedQueue,
+    unclassified_search_input: Option<Entity<gpui_kit::component::input::InputState>>,
+    unclassified_search_sync: InputSyncState,
+    unclassified_query_task: Option<gpui_kit::Task<()>>,
     pending_leave_page: Option<Page>,
     ranking: RankingKind,
     lanes: LaneMode,
@@ -353,6 +363,14 @@ impl AppShell {
             rule_editor_key_sync: InputSyncState::Synced,
             rule_editor_text_sync: InputSyncState::Synced,
             rule_editor_validate_task: None,
+            rule_import: crate::model::RuleImport::new(),
+            rule_import_text_input: None,
+            rule_import_text_sync: InputSyncState::Synced,
+            rule_import_validate_task: None,
+            unclassified: crate::model::UnclassifiedQueue::new(),
+            unclassified_search_input: None,
+            unclassified_search_sync: InputSyncState::Synced,
+            unclassified_query_task: None,
             pending_leave_page: None,
             ranking: RankingKind::default(),
             lanes: LaneMode::Swimlanes,
@@ -488,6 +506,14 @@ impl AppShell {
                     }
                 }
             }
+            if self.page == Page::Rules && self.rule_import.is_open() {
+                if self.rule_import.session().is_some_and(|session| {
+                    session.importing == crate::model::MutationActivity::Busy
+                }) {
+                    return;
+                }
+                self.close_rule_import_silently();
+            }
             self.page = page;
             self.hover = None;
             self.cancel_details(cx);
@@ -524,6 +550,8 @@ fn open_details(day: &Day, subject: DetailsSubject) -> Option<OpenDetails> {
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_rule_editor_inputs_if_needed(window, cx);
+        self.sync_rule_import_input_if_needed(window, cx);
+        self.sync_unclassified_search_input_if_needed(window, cx);
         let (font_family, mode) = {
             let theme = cx.theme();
             (theme.font_family.clone(), theme.mode)

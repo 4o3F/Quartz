@@ -292,7 +292,11 @@ impl LaunchWindow {
                     shell.update(cx, |shell, cx| shell.detail_loaded(generation, result, cx));
                 }
             }
-            LinkEvent::Day(_) => {} // The link worker coalesces day invalidations.
+            LinkEvent::Day(changed) => {
+                if let Some(shell) = &self.shell {
+                    shell.update(cx, |shell, cx| shell.day_changed(changed.date, cx));
+                }
+            }
             LinkEvent::DayLoading { generation } => {
                 if let Some(shell) = &self.shell {
                     shell.update(cx, |shell, cx| shell.day_loading(generation, cx));

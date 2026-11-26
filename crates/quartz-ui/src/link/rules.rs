@@ -4,10 +4,11 @@ use super::{Link, LoadDataError};
 use quartz_protocol::{
     AcceptedBody, CategoriesArchiveRequest, CategoriesCreateRequest, CategoriesListRequest,
     CategoriesListResponse, CategoriesReorderRequest, CategoriesUpdateRequest, CategoryResponse,
-    RuleKind, RuleSetsDeleteRequest, RuleSetsEditRequest, RuleSetsGetRequest, RuleSetsGetResponse,
-    RuleSetsSetEnabledRequest, RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsWriteResponse,
-    RuleView, RulesPreviewRequest, RulesPreviewResponse, RulesTextExportRequest,
-    RulesTextExportResponse, RulesTextValidateRequest, RulesTextValidateResponse,
+    QueryUnclassifiedRequest, QueryUnclassifiedResponse, RuleKind, RuleSetsDeleteRequest,
+    RuleSetsEditRequest, RuleSetsGetRequest, RuleSetsGetResponse, RuleSetsSetEnabledRequest,
+    RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsWriteResponse, RuleView,
+    RulesPreviewRequest, RulesPreviewResponse, RulesTextExportRequest, RulesTextExportResponse,
+    RulesTextImportRequest, RulesTextValidateRequest, RulesTextValidateResponse,
 };
 
 /// All rule families queried when building the Rules page tree, in display order.
@@ -176,6 +177,30 @@ impl Link {
         &self,
         request: RuleSetsEditRequest,
     ) -> Result<RuleSetsWriteResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Imports complete `quartz-rules/1` rule-set text, creating a new set (`base_version == 0`)
+    /// or replacing an existing user set at its current version.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure (such as `rule_set_stale` or
+    /// `rule_validation_failed`).
+    pub(crate) async fn import_rule_set_text(
+        &self,
+        request: RulesTextImportRequest,
+    ) -> Result<RuleSetsWriteResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Queries grouped unclassified active work over a half-open logical-date range.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn query_unclassified(
+        &self,
+        request: QueryUnclassifiedRequest,
+    ) -> Result<QueryUnclassifiedResponse, LoadDataError> {
         self.request(request).await.map_err(LoadDataError::from)
     }
 }

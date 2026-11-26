@@ -862,4 +862,60 @@ rules.preview.sample.change:
   en: "Change: %{value}"
 rules.preview.hint.validate_first:
   en: "Fix validation errors to preview the last 7 days."
+rules.action.paste_import:
+  en: "Paste import"
+rules.import.title:
+  en: "Paste import rule set"
+rules.import.text.label:
+  en: "Paste complete rule set text (quartz-rules/1)"
+rules.import.text.placeholder:
+  en: "Paste TOML rule set text with format and [set]…"
+rules.import.action.import:
+  en: "Import"
+rules.import.action.importing:
+  en: "Importing…"
+rules.import.plan.create:
+  en: "Will create new rule set %{name}"
+rules.import.plan.replace:
+  en: "Will replace existing rule set %{name} (currently v%{value})"
+rules.import.key_error.missing:
+  en: "Missing [set].key. Declare a rule set key in the [set] header."
+rules.import.key_error.invalid:
+  en: "Invalid [set].key. Keys may only contain lowercase letters, digits, '.', '-', and '_'."
+rules.import.key_error.builtin:
+  en: "The builtin. prefix is reserved for built-in rule sets and cannot be imported. Use a user. key instead."
+rules.import.stale.message:
+  en: "The target rule set was updated to v%{value}. Reload rule sets before importing."
+rules.import.failed.generic:
+  en: "Could not import rule set. Try again."
+rules.tab.unclassified:
+  en: "Unclassified"
+rules.unclassified.heading:
+  en: "Unclassified queue"
+rules.unclassified.range:
+  en: "Last 7 days (%{range})"
+rules.unclassified.group.app:
+  en: "Applications"
+rules.unclassified.group.document:
+  en: "Documents"
+rules.unclassified.search.placeholder:
+  en: "Search unclassified apps or documents…"
+rules.unclassified.search.too_long:
+  en: "Search query must be 256 characters or fewer."
+rules.unclassified.empty:
+  en: "No unclassified activity in the last 7 days."
+rules.unclassified.search_empty:
+  en: "No unclassified items match your search."
+rules.unclassified.truncated:
+  en: "Showing first %{count} unclassified items; list was truncated."
+rules.unclassified.hidden_app:
+  en: "Hidden application"
+rules.unclassified.hidden_document:
+  en: "Hidden document"
+rules.unclassified.action.create_rule:
+  en: "Create rule…"
+rules.unclassified.load_failed.title:
+  en: "Couldn’t load unclassified queue"
+rules.unclassified.load_failed.message:
+  en: "Retry to load unclassified items from the last 7 days."
 

@@ -39,6 +39,11 @@ fn mutation_bodies_and_results_match_wire_snapshots() {
         serde_json::from_str(include_str!("../../tests/fixtures/rule-mutations.json"))
             .expect("fixture");
     WireSnapshot::round_trip::<RuleSetsEditRequest>(fixture["edit"].clone());
+    WireSnapshot::round_trip::<RulesTextImportRequest>(fixture["edit"].clone());
+    assert_eq!(
+        <RulesTextImportRequest as crate::CoreRequest>::OP,
+        crate::Op::RulesTextImport
+    );
     WireSnapshot::round_trip::<RuleSetsSetEnabledRequest>(fixture["set_enabled"].clone());
     WireSnapshot::round_trip::<RuleSetsDeleteRequest>(fixture["delete"].clone());
     WireSnapshot::round_trip::<RuleSetsWriteResponse>(fixture["response"].clone());
@@ -81,6 +86,14 @@ fn rule_write_debug_redacts_source_text() {
                 base_version: 0,
                 text: "private-text-marker".into()
             }
+        ),
+        format!(
+            "{:?}",
+            RulesTextImportRequest(RuleSetsEditRequest {
+                key: "user.debug".into(),
+                base_version: 0,
+                text: "private-text-marker".into()
+            })
         ),
     ];
     for debug in values {

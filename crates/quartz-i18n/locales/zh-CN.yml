@@ -862,4 +862,60 @@ rules.preview.sample.change:
   zh-CN: "变化：%{value}"
 rules.preview.hint.validate_first:
   zh-CN: "通过校验后即可预览最近 7 天的影响。"
+rules.action.paste_import:
+  zh-CN: "粘贴导入"
+rules.import.title:
+  zh-CN: "粘贴导入规则集"
+rules.import.text.label:
+  zh-CN: "粘贴完整的规则集文本（quartz-rules/1）"
+rules.import.text.placeholder:
+  zh-CN: "在此粘贴包含 format 与 [set] 的 TOML 规则集文本…"
+rules.import.action.import:
+  zh-CN: "导入"
+rules.import.action.importing:
+  zh-CN: "正在导入…"
+rules.import.plan.create:
+  zh-CN: "将新建规则集 %{name}"
+rules.import.plan.replace:
+  zh-CN: "将替换已有规则集 %{name}（当前 v%{value}）"
+rules.import.key_error.missing:
+  zh-CN: "未找到 [set].key，请在 [set] 段中声明规则集键名。"
+rules.import.key_error.invalid:
+  zh-CN: "[set].key 无效，只能包含小写字母、数字、.、- 和 _。"
+rules.import.key_error.builtin:
+  zh-CN: "builtin. 前缀为内置规则集保留，无法直接导入。请改用 user. 前缀键名。"
+rules.import.stale.message:
+  zh-CN: "目标规则集已更新至 v%{value}，请重新加载规则集树后再导入。"
+rules.import.failed.generic:
+  zh-CN: "导入规则集失败，请重试。"
+rules.tab.unclassified:
+  zh-CN: "未分类"
+rules.unclassified.heading:
+  zh-CN: "未分类队列"
+rules.unclassified.range:
+  zh-CN: "最近 7 天（%{range}）"
+rules.unclassified.group.app:
+  zh-CN: "按应用"
+rules.unclassified.group.document:
+  zh-CN: "按文档"
+rules.unclassified.search.placeholder:
+  zh-CN: "搜索未分类应用或文档…"
+rules.unclassified.search.too_long:
+  zh-CN: "搜索关键词不能超过 256 个字符。"
+rules.unclassified.empty:
+  zh-CN: "最近 7 天没有未分类活动。"
+rules.unclassified.search_empty:
+  zh-CN: "没有匹配当前搜索条件的未分类项。"
+rules.unclassified.truncated:
+  zh-CN: "仅显示前 %{count} 条未分类项，列表已截断。"
+rules.unclassified.hidden_app:
+  zh-CN: "已隐藏应用"
+rules.unclassified.hidden_document:
+  zh-CN: "已隐藏文档"
+rules.unclassified.action.create_rule:
+  zh-CN: "创建规则…"
+rules.unclassified.load_failed.title:
+  zh-CN: "暂时无法加载未分类队列"
+rules.unclassified.load_failed.message:
+  zh-CN: "请重试以重新读取最近 7 天的未分类项。"
 

@@ -23,8 +23,12 @@ const RULE_FORMAT_VERSION: &str = "quartz-rules/1";
 const DEFAULT_NEW_SET_KEY: &str = "user.";
 /// Prefix used when proposing a child rule-set key to override or disable a built-in rule.
 const DEFAULT_OVERRIDE_KEY_PREFIX: &str = "user.override-";
-/// Fallback slug if a built-in rule identifier has no lowercase ASCII characters.
+/// Prefix used when proposing a classification rule-set key from an unclassified entity.
+const DEFAULT_CLASSIFY_KEY_PREFIX: &str = "user.classify-";
+/// Fallback slug if a rule or entity identifier has no lowercase ASCII characters.
 const FALLBACK_OVERRIDE_SLUG: &str = "rule";
+/// Fallback slug if an unclassified entity has no lowercase ASCII characters.
+const FALLBACK_CLASSIFY_SLUG: &str = "item";
 /// Fallback display name in generated `[set]` headers when no slug is available yet.
 const DEFAULT_RULE_SET_NAME: &str = "Custom rules";
 /// Upper bound on numeric suffix attempts when deduplicating a suggested child key.
@@ -128,12 +132,61 @@ fn default_parent_for_kind(tree: Option<&RuleTree>, kind: wire::RuleKind) -> Opt
         .map(|option| option.key.clone())
 }
 
+/// One `when` condition prefilled into a classification rule template from an unclassified entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrefilledCondition {
+    pub(crate) field: &'static str,
+    pub(crate) op: &'static str,
+    pub(crate) value: String,
+}
+
+/// Entity-derived fields used to prefill a new classification rule set from the unclassified queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClassificationRulePrefill {
+    pub(crate) slug_hint: String,
+    pub(crate) rule_label: String,
+    pub(crate) conditions: Vec<PrefilledCondition>,
+}
+
+/// Source used to regenerate the template in create mode while [`TemplateSync::Auto`] is active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreateTemplateSource {
+    Default,
+    OverrideTarget(String),
+    PrefilledClassification(ClassificationRulePrefill),
+}
+
 /// Suggests a unique `user.*` key for a child set overriding or disabling `rule_id`.
 #[must_use]
 pub(crate) fn suggested_child_key(rule_id: &str, tree: Option<&RuleTree>) -> String {
+    suggested_user_key(
+        DEFAULT_OVERRIDE_KEY_PREFIX,
+        rule_id,
+        FALLBACK_OVERRIDE_SLUG,
+        tree,
+    )
+}
+
+/// Suggests a unique `user.*` key for a new classification set created from an unclassified entity.
+#[must_use]
+pub(crate) fn suggested_classification_key(slug_hint: &str, tree: Option<&RuleTree>) -> String {
+    suggested_user_key(
+        DEFAULT_CLASSIFY_KEY_PREFIX,
+        slug_hint,
+        FALLBACK_CLASSIFY_SLUG,
+        tree,
+    )
+}
+
+fn suggested_user_key(
+    prefix: &str,
+    hint: &str,
+    fallback_slug: &str,
+    tree: Option<&RuleTree>,
+) -> String {
     let mut slug = String::new();
     let mut last_was_dash = false;
-    for ch in rule_id.chars() {
+    for ch in hint.chars() {
         let lower = ch.to_ascii_lowercase();
         if lower.is_ascii_lowercase() || lower.is_ascii_digit() || lower == '_' || lower == '-' {
             slug.push(lower);
@@ -145,11 +198,11 @@ pub(crate) fn suggested_child_key(rule_id: &str, tree: Option<&RuleTree>) -> Str
     }
     let trimmed_slug = slug.trim_matches('-');
     let base_slug = if trimmed_slug.is_empty() {
-        FALLBACK_OVERRIDE_SLUG
+        fallback_slug
     } else {
         trimmed_slug
     };
-    let candidate = format!("{DEFAULT_OVERRIDE_KEY_PREFIX}{base_slug}");
+    let candidate = format!("{prefix}{base_slug}");
     if tree.is_none_or(|loaded| loaded.find(&candidate).is_none()) {
         return candidate;
     }
@@ -160,6 +213,39 @@ pub(crate) fn suggested_child_key(rule_id: &str, tree: Option<&RuleTree>) -> Str
         }
     }
     candidate
+}
+
+/// Builds a `quartz-rules/1` classification template matching an unclassified entity with
+/// `category` left empty for the user to pick.
+#[must_use]
+pub(crate) fn prefilled_classification_template(
+    key: &str,
+    parent: Option<&str>,
+    prefill: &ClassificationRulePrefill,
+) -> String {
+    let display_name = display_name_for_key(key);
+    let mut text = format_set_header(key, wire::RuleKind::Classification, &display_name, parent);
+    let escaped_label = toml_basic_string(&prefill.rule_label);
+    text.push_str(&format!(
+        "\n[[rule]]\n\
+         id = \"match-entity\"\n\
+         label = {escaped_label}\n\
+         # Pick a category (e.g. builtin:development, builtin:learning, builtin:communication, builtin:entertainment, builtin:system, or a custom category name)\n\
+         category = \"\"\n\
+         priority = 50\n\
+         match = \"all\"\n\
+         when = [\n"
+    ));
+    for condition in &prefill.conditions {
+        let escaped_field = toml_basic_string(condition.field);
+        let escaped_op = toml_basic_string(condition.op);
+        let escaped_value = toml_basic_string(&condition.value);
+        text.push_str(&format!(
+            "  {{ field = {escaped_field}, op = {escaped_op}, value = {escaped_value} }},\n"
+        ));
+    }
+    text.push_str("]\n");
+    text
 }
 
 /// Builds a minimal valid `quartz-rules/1` template for a new user rule set of `kind`.
@@ -344,7 +430,7 @@ pub(crate) enum RuleEditorMode {
         parent: Option<String>,
         key_error: Option<ValidateRuleSetKeyError>,
         template_sync: TemplateSync,
-        override_target: Option<String>,
+        template_source: CreateTemplateSource,
     },
 }
 
@@ -389,6 +475,7 @@ pub(crate) struct StaleNotice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LeaveTarget {
     CloseEditor,
+    OpenImport,
     SelectRuleSet(String),
     SwitchTab(RulesTab),
     LeavePage,
@@ -613,7 +700,7 @@ impl RuleEditor {
                 parent,
                 key_error: None,
                 template_sync: TemplateSync::Auto,
-                override_target: None,
+                template_source: CreateTemplateSource::Default,
             },
             load_state: EditorLoadState::Ready,
             text: template.clone(),
@@ -664,7 +751,64 @@ impl RuleEditor {
                 parent: Some(parent),
                 key_error,
                 template_sync: TemplateSync::Auto,
-                override_target: Some(target),
+                template_source: CreateTemplateSource::OverrideTarget(target),
+            },
+            load_state: EditorLoadState::Ready,
+            text: template.clone(),
+            saved_text: template,
+            dirty: DirtyState::Clean,
+            validation,
+            preview: PreviewState::Idle,
+            preview_range: None,
+            saving: MutationActivity::Idle,
+            stale_notice: None,
+            save_error: None,
+            leave_confirm: LeaveConfirmation::Idle,
+        });
+        match request {
+            Some(request) => RuleEditorEffect::Validate {
+                request,
+                generation: self.buffer_generation,
+            },
+            None => RuleEditorEffect::None,
+        }
+    }
+
+    /// Opens the editor in create mode for a classification rule set prefilled with conditions
+    /// matching an unclassified entity, leaving `category` empty for the user to choose.
+    #[must_use]
+    pub(crate) fn open_prefilled_classification(
+        &mut self,
+        prefill: ClassificationRulePrefill,
+        tree: Option<&RuleTree>,
+    ) -> RuleEditorEffect {
+        self.load_generation = self.load_generation.next();
+        self.buffer_generation = self.buffer_generation.next();
+        self.preview_generation = self.preview_generation.next();
+        self.save_generation = self.save_generation.next();
+        let kind = wire::RuleKind::Classification;
+        let parent = default_parent_for_kind(tree, kind);
+        let key = suggested_classification_key(&prefill.slug_hint, tree);
+        let key_error = validate_new_set_key(&key, tree).err();
+        let template = prefilled_classification_template(&key, parent.as_deref(), &prefill);
+        let request = key_error.is_none().then(|| wire::RulesTextValidateRequest {
+            key: key.clone(),
+            base_version: 0,
+            text: template.clone(),
+        });
+        let validation = if request.is_some() {
+            ValidationState::Validating
+        } else {
+            ValidationState::Idle
+        };
+        self.session = Some(RuleEditorSession {
+            mode: RuleEditorMode::CreateNew {
+                key,
+                kind,
+                parent,
+                key_error,
+                template_sync: TemplateSync::Auto,
+                template_source: CreateTemplateSource::PrefilledClassification(prefill),
             },
             load_state: EditorLoadState::Ready,
             text: template.clone(),
@@ -766,7 +910,7 @@ impl RuleEditor {
             parent,
             key_error,
             template_sync,
-            override_target,
+            template_source,
         } = &mut session.mode
         else {
             return RuleEditorEffect::None;
@@ -777,8 +921,7 @@ impl RuleEditor {
         *key = raw_key;
         *key_error = validate_new_set_key(key, tree).err();
         if *template_sync == TemplateSync::Auto {
-            session.text =
-                rebuild_create_template(key, *kind, parent.as_deref(), override_target.as_deref());
+            session.text = rebuild_create_template(key, *kind, parent.as_deref(), template_source);
         }
         session.dirty = DirtyState::Dirty;
         session.stale_notice = None;
@@ -819,7 +962,7 @@ impl RuleEditor {
             parent,
             key_error,
             template_sync,
-            override_target,
+            template_source,
         } = &mut session.mode
         else {
             return RuleEditorEffect::None;
@@ -828,7 +971,7 @@ impl RuleEditor {
             return RuleEditorEffect::None;
         }
         *kind = new_kind;
-        *override_target = None;
+        *template_source = CreateTemplateSource::Default;
         let parent_still_valid = parent.as_deref().is_some_and(|parent_key| {
             tree.is_some_and(|loaded| {
                 loaded
@@ -881,7 +1024,7 @@ impl RuleEditor {
             parent,
             key_error,
             template_sync,
-            override_target,
+            template_source,
         } = &mut session.mode
         else {
             return RuleEditorEffect::None;
@@ -900,8 +1043,7 @@ impl RuleEditor {
         }
         *parent = new_parent;
         if *template_sync == TemplateSync::Auto {
-            session.text =
-                rebuild_create_template(key, *kind, parent.as_deref(), override_target.as_deref());
+            session.text = rebuild_create_template(key, *kind, parent.as_deref(), template_source);
         }
         session.dirty = DirtyState::Dirty;
         session.stale_notice = None;
@@ -1354,11 +1496,24 @@ fn rebuild_create_template(
     key: &str,
     kind: wire::RuleKind,
     parent: Option<&str>,
-    override_target: Option<&str>,
+    source: &CreateTemplateSource,
 ) -> String {
-    match (parent, override_target) {
-        (Some(parent_key), Some(target)) => override_child_template(key, kind, parent_key, target),
-        _ => template_for_kind(key, kind, parent),
+    match source {
+        CreateTemplateSource::OverrideTarget(target) => {
+            if let Some(parent_key) = parent {
+                override_child_template(key, kind, parent_key, target)
+            } else {
+                template_for_kind(key, kind, parent)
+            }
+        }
+        CreateTemplateSource::PrefilledClassification(prefill)
+            if kind == wire::RuleKind::Classification =>
+        {
+            prefilled_classification_template(key, parent, prefill)
+        }
+        CreateTemplateSource::Default | CreateTemplateSource::PrefilledClassification(_) => {
+            template_for_kind(key, kind, parent)
+        }
     }
 }
 

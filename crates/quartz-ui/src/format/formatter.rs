@@ -12,7 +12,7 @@ use crate::model::{
     BuiltinCategory, CategoryCatalog, CategoryName, ClassificationSource, ConditionItem,
     ConditionPolarity, Day, DiagnosticCodeKind, EntryConditionSummary, MINUTES_PER_HOUR,
     PrivacyEffectSummary, ResolvedCategory, RuleCondition, RuleEntryLabel, SECONDS_PER_MINUTE,
-    Share, StateKind, Tendency,
+    Share, StateKind, Tendency, UnclassifiedEntityLabel,
 };
 
 /// Looks up translations and formats values for one interface language.
@@ -341,6 +341,18 @@ impl Formatter {
                 .into_owned(),
             RuleEntryLabel::Identifier(id) => id.clone(),
             RuleEntryLabel::Unnamed => self.text(Msg::RulesEntryUnnamed),
+        }
+    }
+
+    /// Display label of an unclassified queue entity, using localized text for hidden entities.
+    #[must_use]
+    pub(crate) fn unclassified_entity_label(self, label: &UnclassifiedEntityLabel) -> String {
+        match label {
+            UnclassifiedEntityLabel::Visible(text) => text.clone(),
+            UnclassifiedEntityLabel::HiddenApp => self.text(Msg::RulesUnclassifiedHiddenApp),
+            UnclassifiedEntityLabel::HiddenDocument => {
+                self.text(Msg::RulesUnclassifiedHiddenDocument)
+            }
         }
     }
 
@@ -1022,6 +1034,22 @@ mod tests {
         assert_eq!(
             EN.preview_output(&privacy),
             "app=keep, title=drop, web=domain_only"
+        );
+    }
+
+    #[test]
+    fn unclassified_entity_labels_localize_hidden_entities() {
+        assert_eq!(
+            EN.unclassified_entity_label(&UnclassifiedEntityLabel::Visible("Editor".to_owned())),
+            "Editor"
+        );
+        assert_eq!(
+            ZH.unclassified_entity_label(&UnclassifiedEntityLabel::HiddenApp),
+            ZH.text(Msg::RulesUnclassifiedHiddenApp)
+        );
+        assert_eq!(
+            EN.unclassified_entity_label(&UnclassifiedEntityLabel::HiddenDocument),
+            EN.text(Msg::RulesUnclassifiedHiddenDocument)
         );
     }
 }

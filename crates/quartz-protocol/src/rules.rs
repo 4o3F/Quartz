@@ -62,6 +62,20 @@ impl std::fmt::Debug for RuleSetsEditRequest {
     }
 }
 
+/// Imports complete quartz-rules/1 text with the same wire body as [`RuleSetsEditRequest`].
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RulesTextImportRequest(pub RuleSetsEditRequest);
+impl std::fmt::Debug for RulesTextImportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RulesTextImportRequest")
+            .field("key", &self.0.key)
+            .field("base_version", &self.0.base_version)
+            .field("text", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Validates text against an observed installed revision without saving it.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

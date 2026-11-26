@@ -10,12 +10,14 @@ mod palette;
 mod ranking;
 mod rule;
 pub(crate) mod rule_editor;
+pub(crate) mod rule_import;
 pub(crate) mod rules;
 mod segment;
 mod state;
 mod summary;
 mod time;
 mod track;
+pub(crate) mod unclassified;
 
 pub(crate) use application::{AppId, AppInfo, Glyph};
 pub(crate) use category::{BuiltinCategory, Category, CategoryId, CategoryName, Tendency};
@@ -41,9 +43,15 @@ pub(crate) use rule::{Rule, RuleField, RuleId, RuleOperator};
 pub(crate) use rule_editor::DiagnosticCodeKind;
 #[cfg(windows)]
 pub(crate) use rule_editor::{
-    DirtyState, EditorLoadState, LeaveConfirmation, LeaveDecision, LeaveTarget, PreviewState,
-    RuleEditor, RuleEditorEffect, RuleEditorMode, RuleEditorSession, SaveOutcome, StaleNotice,
-    VALIDATE_DEBOUNCE_DELAY, ValidateRuleSetKeyError, ValidationState, valid_parents_for_kind,
+    ClassificationRulePrefill, DirtyState, EditorLoadState, LeaveConfirmation, LeaveDecision,
+    LeaveTarget, PreviewState, RuleEditor, RuleEditorEffect, RuleEditorMode, RuleEditorSession,
+    SaveOutcome, StaleNotice, VALIDATE_DEBOUNCE_DELAY, ValidateRuleSetKeyError, ValidationState,
+    valid_parents_for_kind,
+};
+#[cfg(windows)]
+pub(crate) use rule_import::{
+    ExtractImportKeyError, ImportAction, ImportOutcome, ImportTarget, RuleImport, RuleImportEffect,
+    RuleImportSession,
 };
 #[cfg(windows)]
 pub(crate) use rules::{
@@ -66,6 +74,13 @@ pub(crate) use time::{
 #[cfg(windows)]
 pub(crate) use track::Lane;
 pub(crate) use track::MainBlock;
+pub(crate) use unclassified::UnclassifiedEntityLabel;
+#[cfg(windows)]
+pub(crate) use unclassified::{
+    UNCLASSIFIED_DEBOUNCE_DELAY, UnclassifiedEffect, UnclassifiedEntityKind, UnclassifiedList,
+    UnclassifiedQueue, UnclassifiedRow, ValidateUnclassifiedSearchError,
+    unclassified_last_seven_days,
+};
 
 #[cfg(test)]
 pub(crate) mod fixture;

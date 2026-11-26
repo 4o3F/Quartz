@@ -100,6 +100,9 @@ impl AppShell {
     pub(super) fn open_rules_page(&mut self, cx: &mut Context<Self>) {
         let effect = self.rules.open();
         self.run_rules_effect(effect, cx);
+        if self.rules.active_tab() == RulesTab::Unclassified {
+            self.open_unclassified_tab(cx);
+        }
     }
 
     /// Reloads the rule-set tree on explicit user request.
@@ -120,6 +123,16 @@ impl AppShell {
         if self.rule_editor.is_open() {
             self.leave_rule_editor_or(LeaveTarget::SelectRuleSet(key), cx);
             return;
+        }
+        if self.rule_import.is_open() {
+            if self
+                .rule_import
+                .session()
+                .is_some_and(|session| session.importing == MutationActivity::Busy)
+            {
+                return;
+            }
+            self.close_rule_import_silently();
         }
         let effect = self.rules.select(key);
         self.run_rules_effect(effect, cx);
@@ -153,7 +166,20 @@ impl AppShell {
             self.leave_rule_editor_or(LeaveTarget::SwitchTab(tab), cx);
             return;
         }
+        if self.rule_import.is_open() {
+            if self
+                .rule_import
+                .session()
+                .is_some_and(|session| session.importing == MutationActivity::Busy)
+            {
+                return;
+            }
+            self.close_rule_import_silently();
+        }
         self.rules.set_active_tab(tab);
+        if tab == RulesTab::Unclassified {
+            self.open_unclassified_tab(cx);
+        }
         cx.notify();
     }
 
@@ -324,6 +350,16 @@ impl AppShell {
             }
             return KeyHandled::Ignored;
         }
+        if self.rule_import.is_open() {
+            if event.keystroke.key == "escape" {
+                self.close_rule_import(cx);
+                return KeyHandled::Handled;
+            }
+            return KeyHandled::Ignored;
+        }
+        if self.rules.active_tab() == RulesTab::Unclassified {
+            return KeyHandled::Ignored;
+        }
         if self.rules.active_tab() == RulesTab::Categories {
             if event.keystroke.key == "escape"
                 && (matches!(
@@ -381,6 +417,7 @@ impl AppShell {
             let _ = this.update(cx, |this, cx| {
                 let next = this.rules.apply_tree_loaded(generation, result);
                 this.run_rules_effect(next, cx);
+                this.sync_rule_import_with_tree(cx);
                 cx.notify();
             });
         })
@@ -458,8 +495,12 @@ impl AppShell {
                         RulesMutation::Delete(request) => link.delete_rule_set(request).await,
                     };
                     let _ = this.update(cx, |this, cx| {
+                        let succeeded = result.is_ok();
                         let next = this.rules.apply_mutation_finished(generation, result);
                         this.run_rules_effect(next, cx);
+                        if succeeded {
+                            this.on_rules_mutated(cx);
+                        }
                         cx.notify();
                     });
                 })
@@ -521,9 +562,11 @@ impl AppShell {
             || self.rules.mutating() == MutationActivity::Busy;
         let categories_busy = matches!(self.rules.categories_state(), LoadState::Loading)
             || self.rules.category_mutating() == MutationActivity::Busy;
+        let unclassified_busy = matches!(self.unclassified.state(), LoadState::Loading);
         let reload_busy = match active_tab {
             RulesTab::RuleSets => tree_busy,
             RulesTab::Categories => categories_busy,
+            RulesTab::Unclassified => unclassified_busy,
         };
 
         let tab_switch = ui.segmented(
@@ -538,6 +581,11 @@ impl AppShell {
                     id: "rules-tab-categories",
                     label: self.formatter.text(Msg::RulesTabCategories),
                     value: RulesTab::Categories,
+                },
+                Segment {
+                    id: "rules-tab-unclassified",
+                    label: self.formatter.text(Msg::RulesTabUnclassified),
+                    value: RulesTab::Unclassified,
                 },
             ],
             active_tab,
@@ -589,6 +637,7 @@ impl AppShell {
             .on_click(cx.listener(move |this, _, _, cx| match active_tab {
                 RulesTab::RuleSets => this.reload_rules_tree(cx),
                 RulesTab::Categories => this.reload_categories(cx),
+                RulesTab::Unclassified => this.reload_unclassified(cx),
             }))
         };
 
@@ -631,6 +680,8 @@ impl AppShell {
                 let tree_pane = self.render_rules_tree_pane(ui, arrangement, cx);
                 let right_pane = if self.rule_editor.is_open() {
                     self.render_rule_editor_pane(ui, arrangement, cx)
+                } else if self.rule_import.is_open() {
+                    self.render_rule_import_pane(ui, arrangement, cx)
                 } else {
                     self.render_rules_detail_pane(ui, arrangement, cx)
                 };
@@ -652,6 +703,7 @@ impl AppShell {
                 .into_any_element()
             }
             RulesTab::Categories => self.render_categories_section(ui, arrangement, cx),
+            RulesTab::Unclassified => self.render_unclassified_section(ui, cx),
         };
 
         let content = div()
@@ -722,6 +774,21 @@ impl AppShell {
             LoadState::Ready(tree) => self.render_rules_tree_list(ui, tree, cx).into_any_element(),
         };
 
+        let tree_busy = matches!(self.rules.tree_state(), LoadState::Loading)
+            || self.rules.mutating() == MutationActivity::Busy;
+        let import_content = ButtonContent::IconLabel(
+            IconName::FileText,
+            self.formatter.text(Msg::RulesActionPasteImport),
+        );
+        let paste_import_button = if tree_busy || self.rule_import.is_open() {
+            ui.disabled_button("rules-paste-import", Density::Compact, import_content)
+        } else {
+            ui.button("rules-paste-import", Density::Compact, import_content)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.open_rule_import(cx);
+                }))
+        };
+
         ui.card()
             .id("rules-tree-pane")
             .flex()
@@ -740,10 +807,20 @@ impl AppShell {
             }))
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(space.xs)
                     .px(space.xs)
-                    .ramp(ui, Ramp::BodyStrong)
-                    .text_color(ui.palette.text_primary)
-                    .child(self.formatter.text(Msg::RulesTreeTitle)),
+                    .child(
+                        div()
+                            .ramp(ui, Ramp::BodyStrong)
+                            .text_color(ui.palette.text_primary)
+                            .child(self.formatter.text(Msg::RulesTreeTitle)),
+                    )
+                    .child(paste_import_button),
             )
             .child(body)
             .into_any_element()
@@ -1619,7 +1696,7 @@ impl AppShell {
             .children(override_child_btn.map(|btn| div().pt(space.xxs).child(btn)))
     }
 
-    fn render_truncated_notice(&self, ui: &Widgets<'_>, msg: Msg, count: usize) -> Div {
+    pub(super) fn render_truncated_notice(&self, ui: &Widgets<'_>, msg: Msg, count: usize) -> Div {
         let space = &ui.metrics.space;
         div()
             .flex()
@@ -1643,7 +1720,7 @@ impl AppShell {
             )
     }
 
-    fn render_rules_error_block<L>(
+    pub(super) fn render_rules_error_block<L>(
         &self,
         ui: &Widgets<'_>,
         title: Msg,
