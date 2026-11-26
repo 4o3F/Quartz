@@ -17,38 +17,29 @@ impl WireSnapshot {
 #[test]
 fn read_request_json_snapshots() {
     WireSnapshot::round_trip::<RuleSetsTreeRequest>(json!({"kind":"privacy"}));
-    WireSnapshot::round_trip::<RuleSetsGetRequest>(
-        json!({"key":"user.local","version":4,"view":"effective"}),
-    );
+    WireSnapshot::round_trip::<RuleSetsGetRequest>(json!({"key":"user.local","view":"effective"}));
     WireSnapshot::round_trip::<RuleSetsGetRequest>(json!({"key":"user.local","view":"own"}));
-    WireSnapshot::round_trip::<RuleSetsVersionsRequest>(json!({"key":"user.local"}));
     WireSnapshot::round_trip::<RuleSetsTreeRequest>(
         json!({"kind":"classification","cursor":{"versions":"registry-inputs","query":{"kind":"rule_sets_tree","rule_kind":"classification"},"position":5}}),
     );
     WireSnapshot::round_trip::<RuleSetsGetRequest>(
-        json!({"key":"user.local","view":"own","version":1,"cursor":{"versions":"registry-inputs","query":{"kind":"rule_sets_get","key":"user.local","version":1,"view":"own"},"position":2}}),
-    );
-    WireSnapshot::round_trip::<RuleSetsVersionsRequest>(
-        json!({"key":"user.local","cursor":{"versions":"registry-inputs","query":{"kind":"rule_sets_versions","key":"user.local"},"position":3}}),
+        json!({"key":"user.local","view":"own","cursor":{"versions":"registry-inputs","query":{"kind":"rule_sets_get","key":"user.local","view":"own"},"position":2}}),
     );
 }
 #[test]
 fn read_response_json_snapshots() {
     WireSnapshot::round_trip::<RuleSetsTreeResponse>(
-        json!({"kind":"classification","effective_version":"a".repeat(64),"nodes":[{"key":"user.local","parent":"builtin.classification","version":3,"enabled":true,"sibling_order":2,"source":"user","counts":{"added":1,"overridden":2,"disabled":3},"warnings":[{"code":"target_deleted","target":"builtin.classification/old"},{"code":"upstream_changed","target":"builtin.classification/code"},{"code":"conflict","target":"builtin.classification/terminal"}]}],"versions":"registry-inputs","next_cursor":null}),
+        json!({"kind":"classification","effective_version":"a".repeat(64),"nodes":[{"key":"user.local","parent":"builtin.classification","version":3,"enabled":true,"sibling_order":2,"source":"user","counts":{"added":1,"overridden":2,"disabled":3},"warnings":[{"code":"target_deleted","target":"builtin.classification/old"},{"code":"conflict","target":"builtin.classification/terminal"}]}],"versions":"registry-inputs","next_cursor":null}),
     );
     WireSnapshot::round_trip::<RuleSetsGetResponse>(
         json!({"key":"user.local","version":1,"parent_version":2,"entries":[WireSnapshot::rule(),{"entry_kind":"override","content":{"target":"builtin.classification/code","label":"Replacement","priority":50,"category":"11111111-1111-4111-8111-111111111111","match":"all","when":[]},"provenance":[{"key":"builtin.classification","version":2,"id":"code"},{"key":"user.local","version":1,"id":"code"}],"state":"overridden"},{"entry_kind":"disable","content":{"target":"builtin.classification/terminal","reason":"Unused"},"provenance":[{"key":"builtin.classification","version":2,"id":"terminal"},{"key":"user.local","version":1,"id":"terminal"}],"state":"disabled"}],"versions":"registry-inputs","next_cursor":null}),
     );
-    WireSnapshot::round_trip::<RuleSetsVersionsResponse>(
-        json!({"revisions":[{"version":3,"parent_version":2,"created_utc_ms":123456,"note":"rule-set state changed"},{"version":1,"parent_version":1,"created_utc_ms":0,"note":null}],"versions":"registry-inputs","next_cursor":null}),
-    );
     WireSnapshot::round_trip::<crate::ProtocolError>(
-        json!({"code":"rule_set_not_found","key":"user.local","version":null}),
+        json!({"code":"rule_set_not_found","key":"user.local"}),
     );
 }
 #[test]
-fn requests_reject_unknown_fields_invalid_enums_and_invalid_revision_numbers() {
+fn requests_reject_unknown_fields_and_invalid_enums() {
     for body in [
         json!({}),
         json!({"kind":"precedent"}),
@@ -60,27 +51,16 @@ fn requests_reject_unknown_fields_invalid_enums_and_invalid_revision_numbers() {
     for body in [
         json!({"key":"user.local"}),
         json!({"key":"user.local","view":"merged"}),
-        json!({"key":"user.local","view":"own","version":0}),
-        json!({"key":"user.local","view":"own","version":-1}),
-        json!({"key":"user.local","view":"own","version":4_294_967_296_u64}),
-        json!({"key":"user.local","view":"own","version":1.5}),
-        json!({"key":"user.local","view":"own","version":true}),
+        json!({"key":"user.local","view":"own","version":1}),
         json!({"key":"user.local","view":"own","extra":true}),
     ] {
         assert!(serde_json::from_value::<RuleSetsGetRequest>(body).is_err());
     }
     assert!(
-        serde_json::from_value::<RuleSetsVersionsRequest>(json!({"key":"user.local","extra":true}))
-            .is_err()
-    );
-    assert!(
         serde_json::from_str::<RuleSetsGetRequest>(
             r#"{"key":"user.local","view":"own","view":"effective"}"#
         )
         .is_err()
-    );
-    WireSnapshot::round_trip::<RuleSetsGetRequest>(
-        json!({"key":"user.local","view":"own","version":u32::MAX}),
     );
 }
 #[test]
@@ -106,9 +86,7 @@ fn mutation_bodies_and_results_match_wire_snapshots() {
             .expect("fixture");
     WireSnapshot::round_trip::<RuleSetsEditRequest>(fixture["edit"].clone());
     WireSnapshot::round_trip::<RuleSetsSetEnabledRequest>(fixture["set_enabled"].clone());
-    WireSnapshot::round_trip::<RuleSetsReorderRequest>(fixture["reorder"].clone());
     WireSnapshot::round_trip::<RuleSetsDeleteRequest>(fixture["delete"].clone());
-    WireSnapshot::round_trip::<RuleSetsRevertRequest>(fixture["revert"].clone());
     WireSnapshot::round_trip::<RuleSetsWriteResponse>(fixture["response"].clone());
     let mut future = fixture["response"].clone();
     future["extra"] = json!(true);
@@ -157,32 +135,12 @@ fn mutations_reject_unknown_fields_and_invalid_revision_numbers() {
         false,
     );
     WireSnapshot::strict_mutation::<RuleSetsDeleteRequest>(fixture["delete"].clone(), false);
-    WireSnapshot::strict_mutation::<RuleSetsRevertRequest>(fixture["revert"].clone(), false);
-    for body in [
-        json!({"siblings":[{"key":"user.a","base_version":1,"extra":true}]}),
-        json!({"siblings":[{"key":"user.a","base_version":0}]}),
-        json!({"siblings":[{"key":"user.a","base_version":4_294_967_296_u64}]}),
-        json!({"siblings":[],"extra":true}),
-    ] {
-        assert!(serde_json::from_value::<RuleSetsReorderRequest>(body).is_err());
-    }
     assert!(
         serde_json::from_str::<RuleSetsEditRequest>(
             r#"{"key":"user.a","base_version":1,"base_version":2,"text":""}"#
         )
         .is_err()
     );
-    for invalid in [
-        json!(0),
-        json!(-1),
-        json!(4_294_967_296_u64),
-        json!(1.5),
-        json!(true),
-    ] {
-        let mut body = fixture["revert"].clone();
-        body["version"] = invalid;
-        assert!(serde_json::from_value::<RuleSetsRevertRequest>(body).is_err());
-    }
 }
 
 #[test]
@@ -198,17 +156,9 @@ fn rule_text_contracts_preserve_fixtures_and_accept_additive_responses() {
     let mut export = fixture["export"].clone();
     export["extra"] = json!(true);
     assert!(serde_json::from_value::<RulesTextExportRequest>(export).is_err());
-    for invalid in [
-        json!(0),
-        json!(-1),
-        json!(1.5),
-        json!(true),
-        json!(u64::from(u32::MAX) + 1),
-    ] {
-        let mut export = fixture["export"].clone();
-        export["version"] = invalid;
-        assert!(serde_json::from_value::<RulesTextExportRequest>(export).is_err());
-    }
+    let mut versioned = fixture["export"].clone();
+    versioned["version"] = json!(1);
+    assert!(serde_json::from_value::<RulesTextExportRequest>(versioned).is_err());
     assert!(
         serde_json::from_str::<RulesTextValidateRequest>(
             r#"{"key":"user.text","base_version":0,"text":"","text":""}"#
@@ -216,10 +166,8 @@ fn rule_text_contracts_preserve_fixtures_and_accept_additive_responses() {
         .is_err()
     );
     assert!(
-        serde_json::from_str::<RulesTextExportRequest>(
-            r#"{"key":"user.text","version":1,"version":2}"#
-        )
-        .is_err()
+        serde_json::from_str::<RulesTextExportRequest>(r#"{"key":"user.text","key":"user.other"}"#)
+            .is_err()
     );
     let mut valid = fixture["valid"].clone();
     valid["future"] = json!(true);

@@ -8,12 +8,11 @@ mod preview;
 pub use preview::{
     FurtherHidden, PREVIEW_DEFAULT_DEADLINE_MS, PREVIEW_MAX_DAYS, PREVIEW_MAX_DEADLINE_MS,
     PREVIEW_MAX_SAMPLES, ParsePreviewDeadlineError, ParsePreviewSampleLimitError,
-    PreviewCategoryRank, PreviewDeadlineMs, PreviewDelete, PreviewReorder, PreviewRevert,
-    PreviewSampleLimit, PreviewSetEnabled, RuleConditionMatch, RuleEffectiveContribution,
-    RulePreviewMutation, RulePreviewOutput, RulePreviewRequest, RulePreviewSample,
-    RulePreviewSideTotals, RulePreviewStatistics, RulePreviewTotals, RulesPreviewRequest,
-    RulesPreviewResponse, RulesTextPreviewMutation, RulesTextPreviewRequest,
-    RulesTextPreviewResponse, ValidatePreviewDatesError,
+    PreviewCategoryRank, PreviewDeadlineMs, PreviewDelete, PreviewSampleLimit, PreviewSetEnabled,
+    RuleConditionMatch, RuleEffectiveContribution, RulePreviewMutation, RulePreviewOutput,
+    RulePreviewRequest, RulePreviewSample, RulePreviewSideTotals, RulePreviewStatistics,
+    RulePreviewTotals, RulesPreviewRequest, RulesPreviewResponse, RulesTextPreviewMutation,
+    RulesTextPreviewRequest, RulesTextPreviewResponse, ValidatePreviewDatesError,
 };
 
 /// Rule families available to the M4 editor.
@@ -39,22 +38,12 @@ pub struct RuleSetsTreeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<QueryCursor>,
 }
-/// Reads a current set or one retained revision, including deleted history.
+/// Reads a current active rule set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsGetRequest {
     pub key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<NonZeroU32>,
     pub view: RuleView,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<QueryCursor>,
-}
-/// Lists retained revisions, including revisions preceding deletion.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuleSetsVersionsRequest {
-    pub key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<QueryCursor>,
 }
@@ -101,13 +90,11 @@ pub struct RulesTextValidateResponse {
     pub diagnostics: Vec<RuleDiagnostic>,
     pub truncated: bool,
 }
-/// Exports current or retained contents, including deleted history.
+/// Exports current active rule-set contents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RulesTextExportRequest {
     pub key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<NonZeroU32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<QueryCursor>,
 }
@@ -127,35 +114,12 @@ pub struct RuleSetsSetEnabledRequest {
     pub enabled: bool,
 }
 
-/// One observed revision in a complete sibling ordering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuleSetSibling {
-    pub key: String,
-    pub base_version: NonZeroU32,
-}
-/// Replaces the entire same-parent, same-kind sibling order atomically.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuleSetsReorderRequest {
-    pub siblings: Vec<RuleSetSibling>,
-}
-
 /// Deletes a childless user set while retaining its history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsDeleteRequest {
     pub key: String,
     pub base_version: NonZeroU32,
-}
-
-/// Copies historical contents into a new current revision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuleSetsRevertRequest {
-    pub key: String,
-    pub base_version: NonZeroU32,
-    pub version: NonZeroU32,
 }
 
 /// A committed revision, including the revision recording a deletion.
@@ -216,7 +180,6 @@ pub struct RuleSetCounts {
 #[serde(rename_all = "snake_case")]
 pub enum RuleWarningCode {
     TargetDeleted,
-    UpstreamChanged,
     Conflict,
 }
 /// An overlay warning and its qualified ancestor target.
@@ -404,21 +367,6 @@ pub struct RuleSetsGetResponse {
     pub version: u32,
     pub parent_version: Option<u32>,
     pub entries: Vec<RuleSetEntry>,
-    pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
-}
-/// Immutable saved revision metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuleSetRevision {
-    pub version: u32,
-    pub parent_version: Option<u32>,
-    pub created_utc_ms: i64,
-    pub note: Option<String>,
-}
-/// Revision page in descending version order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuleSetsVersionsResponse {
-    pub revisions: Vec<RuleSetRevision>,
     pub versions: QueryVersions,
     pub next_cursor: Option<QueryCursor>,
 }

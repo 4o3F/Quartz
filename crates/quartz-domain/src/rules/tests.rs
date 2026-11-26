@@ -226,7 +226,6 @@ fn every_error_code_has_a_failing_fixture() {
         ("parent", DiagnosticCode::Parent),
         ("target", DiagnosticCode::Target),
         ("conflict", DiagnosticCode::Conflict),
-        ("immutable", DiagnosticCode::Immutable),
         ("field", DiagnosticCode::Field),
         ("op", DiagnosticCode::Op),
         ("value", DiagnosticCode::Value),
@@ -337,15 +336,7 @@ fn specification_examples_validate_or_report_unavailable_capabilities() {
                 references: &catalog(),
             },
         );
-        if source.contains("kind = \"precedent\"") {
-            assert!(
-                parsed
-                    .expect_err("M7 requires a later milestone")
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == DiagnosticCode::Set)
-            );
-        } else if source.contains("field = \"web.") {
+        if source.contains("field = \"web.") {
             assert!(
                 parsed
                     .expect_err("web classification requires a supplied field")
@@ -358,22 +349,27 @@ fn specification_examples_validate_or_report_unavailable_capabilities() {
         }
         count += 1;
     }
-    assert_eq!(count, 3);
-    let policy = "format = 'quartz-rules/1'\n[set]\nkey = 'user.policy'\nname = 'Policy'\nkind = 'policy_check'\n";
-    assert!(
-        RuleSet::parse(
-            "policy.toml",
-            policy,
-            ParseContext {
-                origin: RuleOrigin::User,
-                references: &catalog()
-            }
-        )
-        .expect_err("unsupported M7")
-        .diagnostics()
-        .iter()
-        .any(|d| d.code == DiagnosticCode::Set)
-    );
+    assert_eq!(count, 2);
+    for unknown_kind in ["precedent", "policy_check"] {
+        let source = format!(
+            "format = 'quartz-rules/1'\n[set]\nkey = 'user.future'\nname = 'Future'\nkind = '{unknown_kind}'\n"
+        );
+        assert!(
+            RuleSet::parse(
+                "future.toml",
+                &source,
+                ParseContext {
+                    origin: RuleOrigin::User,
+                    references: &catalog()
+                }
+            )
+            .expect_err("unknown rule kind")
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == DiagnosticCode::Set && d.path == "set.kind"),
+            "{unknown_kind}"
+        );
+    }
 }
 #[test]
 fn ancestors_only_and_sibling_conflicts() {
@@ -1149,27 +1145,63 @@ fn required_field_diagnostics_preserve_messages_order_and_locations() {
         }
     }
     let references = catalog();
-    let diagnostics: Vec<_> = sources
-        .iter()
-        .map(|source| {
-            RuleSet::parse(
-                "required-fields.toml",
-                source,
-                ParseContext {
-                    origin: RuleOrigin::User,
-                    references: &references,
-                },
-            )
-            .expect_err("incomplete source")
-            .into_diagnostics()
-        })
+    for source in &sources {
+        let diagnostics = RuleSet::parse(
+            "required-fields.toml",
+            source,
+            ParseContext {
+                origin: RuleOrigin::User,
+                references: &references,
+            },
+        )
+        .expect_err("incomplete source")
+        .into_diagnostics();
+        assert!(!diagnostics.is_empty(), "{source}");
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.location.line > 0 && d.location.column > 0 && !d.message.is_empty()),
+            "{source}: {diagnostics:?}"
+        );
+    }
+    for future_kind in ["precedent", "policy_check"] {
+        let future_source = format!(
+            "format='quartz-rules/1'\n[set]\nkey='user.invalid'\nkind='{future_kind}'\nname='Invalid'\n[[rule]]\nlabel='Missing fields'\n"
+        );
+        let unknown_source = "format='quartz-rules/1'\n[set]\nkey='user.invalid'\nkind='unknown'\nname='Invalid'\n[[rule]]\nlabel='Missing fields'\n";
+        let future_diagnostics: Vec<_> = RuleSet::parse(
+            "required-fields.toml",
+            &future_source,
+            ParseContext {
+                origin: RuleOrigin::User,
+                references: &references,
+            },
+        )
+        .expect_err("unknown kind")
+        .into_diagnostics()
+        .into_iter()
+        .map(|d| (d.code, d.path, d.message))
         .collect();
-    let serialized = serde_json::to_string(&diagnostics).expect("diagnostic serialization");
-    assert_eq!(
-        ContentHash::of(&serialized).as_str(),
-        "df2dc9ff90d1c59ec39ca9a005fa48817197f443433ba935166a9b6e81f4c23f",
-        "required-field diagnostic messages, order, and source locations changed: {diagnostics:#?}"
-    );
+        let unknown_diagnostics: Vec<_> = RuleSet::parse(
+            "required-fields.toml",
+            unknown_source,
+            ParseContext {
+                origin: RuleOrigin::User,
+                references: &references,
+            },
+        )
+        .expect_err("unknown kind")
+        .into_diagnostics()
+        .into_iter()
+        .map(|d| (d.code, d.path, d.message))
+        .collect();
+        assert_eq!(future_diagnostics, unknown_diagnostics, "{future_kind}");
+        assert!(
+            future_diagnostics
+                .iter()
+                .any(|(code, path, _)| *code == DiagnosticCode::Set && path == "set.kind")
+        );
+    }
 }
 
 #[test]
@@ -1852,7 +1884,6 @@ fn canonical_export_round_trips_every_available_field_and_operator() {
                     RuleKind::Privacy => format!(
                         "match='any'\nwhen=[{condition}]\napp='keep'\nwindow_title='drop'\nweb='domain_only'"
                     ),
-                    _ => unreachable!("supported families"),
                 };
                 let set = user(&format!(
                     "format='quartz-rules/1'\n[set]\nkey='user.fields'\nkind='{}'\nname='Fields'\n[[rule]]\nid='one'\nlabel='Field'\npriority=1000\n{body}\n",

@@ -18,7 +18,7 @@ macro_rules! text_enum {
     };
 }
 text_enum! {
-    /// Rule family; M7 families are recognized and rejected by the M1 parser.
+    /// Supported rule family.
     pub enum RuleKind {
         /// Selects the category of the first matching rule.
         Classification => "classification",
@@ -26,10 +26,6 @@ text_enum! {
         Extraction => "extraction",
         /// Combines all matching rules using the strictest retention for each field.
         Privacy => "privacy",
-        /// Append-only allowances for a task chain, recognized but unsupported until M7.
-        Precedent => "precedent",
-        /// Automatic policy checks, recognized but unsupported until M7.
-        PolicyCheck => "policy_check",
     }
 }
 text_enum! {
@@ -97,7 +93,6 @@ impl Field {
                             | Self::BrowserProfile
                     )
             }
-            RuleKind::Precedent | RuleKind::PolicyCheck => true,
         }
     }
 }
@@ -407,8 +402,6 @@ pub struct SetHeader {
     pub parent: Option<String>,
     /// Optional description of the set as a whole.
     pub description: Option<String>,
-    /// Precedent chain name, recognized for M7 rule sets that M1 rejects.
-    pub chain: Option<String>,
 }
 /// A validated source file with locations retained for tree diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]

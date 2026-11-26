@@ -1,7 +1,7 @@
 use super::*;
 use crate::rules::{
     Action, CaseSensitivity, Condition, Field, FieldSnapshot, MatchMode, Operator, PrivacyAction,
-    ReferenceCatalog, RuleBody, WebAction,
+    ReferenceCatalog, RuleBody, RuleKind, WebAction,
 };
 use crate::text::NfcText;
 use std::sync::Arc;
@@ -172,7 +172,7 @@ fn valid_decision_describes_writes_and_publication_waits_for_commit() {
 }
 
 #[test]
-fn toggle_reorder_revert_and_delete_have_explicit_atomic_write_descriptions() {
+fn toggle_and_delete_have_explicit_atomic_write_descriptions() {
     let mut fixture = Fixture::new();
     fixture.commit(apply("user.a", "A", 0)).expect("A");
     fixture.commit(apply("user.b", "B", 0)).expect("B");
@@ -191,56 +191,15 @@ fn toggle_reorder_revert_and_delete_have_explicit_atomic_write_descriptions() {
             enabled: Enablement::Disabled,
         })
         .expect("toggle");
-    let siblings = vec![
-        SiblingRevision {
-            key: "user.b".parse().expect("key"),
-            base_version: 1,
-        },
-        SiblingRevision {
-            key: "user.a".parse().expect("key"),
-            base_version: 2,
-        },
-    ];
-    let decision = fixture.core.decide(RegistryCommand::Reorder {
-        siblings: siblings.clone(),
-    });
-    assert!(
-        matches!(decision.writes(), [RuleSetWrite::Reorder(b), RuleSetWrite::Reorder(a)] if b.sibling_order == 1 && a.sibling_order == 2)
-    );
-    fixture
-        .commit(RegistryCommand::Reorder { siblings })
-        .expect("reorder");
-    fixture.commit(apply("user.b", "Edited", 2)).expect("edit");
-    let original_hash = fixture
-        .core
-        .state()
-        .version(&"user.b".parse().expect("key"), 1)
-        .expect("history")
-        .content_hash();
-    fixture
-        .commit(RegistryCommand::Revert {
-            key: "user.b".parse().expect("key"),
-            base_version: 3,
-            version: 1,
-        })
-        .expect("revert");
-    assert_eq!(
-        fixture
-            .core
-            .state()
-            .version(&"user.b".parse().expect("key"), 4)
-            .expect("new revision")
-            .content_hash(),
-        original_hash
-    );
+    fixture.commit(apply("user.b", "Edited", 1)).expect("edit");
     let key = "user.b".parse().expect("key");
     assert!(
-        matches!(fixture.core.decide(RegistryCommand::Delete { key, base_version: 4 }).writes(), [RuleSetWrite::MarkDeleted(update)] if update.deletion == RuleSetDeletion::Deleted && update.revision.version == 5)
+        matches!(fixture.core.decide(RegistryCommand::Delete { key, base_version: 2 }).writes(), [RuleSetWrite::MarkDeleted(update)] if update.deletion == RuleSetDeletion::Deleted && update.revision.version == 3)
     );
     fixture
         .commit(RegistryCommand::Delete {
             key: "user.b".parse().expect("key"),
-            base_version: 4,
+            base_version: 2,
         })
         .expect("delete");
     assert!(
@@ -267,87 +226,15 @@ fn toggle_reorder_revert_and_delete_have_explicit_atomic_write_descriptions() {
             .decide(apply("user.b", "Old client", 1))
             .reply(),
         Err(DecideRegistryCommandError::Stale {
-            current_version: Some(6),
+            current_version: Some(4),
             ..
         })
     ));
-    assert_eq!(fixture.core.snapshots().load().epoch().get(), 8);
+    assert_eq!(fixture.core.snapshots().load().epoch().get(), 6);
 }
 
 #[test]
-fn upstream_changes_follow_saved_parents_after_overlay_metadata_edits() {
-    let mut fixture = Fixture::new();
-    fixture
-        .commit(RegistryCommand::InstallBuiltin {
-            set: builtin("Original"),
-            revision: 1,
-        })
-        .expect("builtin");
-    fixture
-        .commit(overlay("user.parent", "builtin.test"))
-        .expect("parent overlay");
-    fixture
-        .commit(overlay("user.leaf", "user.parent"))
-        .expect("leaf overlay");
-    fixture
-        .commit(RegistryCommand::Toggle {
-            key: "user.parent".parse().expect("key"),
-            base_version: 1,
-            enabled: Enablement::Disabled,
-        })
-        .expect("metadata");
-    let reply = fixture
-        .commit(RegistryCommand::InstallBuiltin {
-            set: builtin("Changed"),
-            revision: 2,
-        })
-        .expect("new upstream revision");
-    assert_eq!(reply.versions[&"builtin.test".parse().expect("key")], 2);
-    let parent = reply
-        .upstream_changes
-        .iter()
-        .find(|change| change.set_key().as_str() == "user.parent")
-        .expect("root changed under parent");
-    assert_eq!(parent.base_parent_version(), Some(1));
-    assert_eq!(parent.current_parent_version(), 2);
-    assert_eq!(parent.state(), UpstreamState::UpstreamChanged);
-    let mut removed = builtin("Removed");
-    removed.content.rule.clear();
-    removed.content.order.clear();
-    fixture
-        .commit(RegistryCommand::InstallBuiltin {
-            set: removed,
-            revision: 3,
-        })
-        .expect("removed definition");
-    assert!(
-        fixture
-            .core
-            .snapshots()
-            .load()
-            .upstream_changes()
-            .iter()
-            .any(|change| change.set_key().as_str() == "user.parent"
-                && change.state() == UpstreamState::TargetDeleted)
-    );
-    assert!(
-        fixture
-            .core
-            .snapshots()
-            .load()
-            .upstream_changes()
-            .iter()
-            .all(|change| change.state() == UpstreamState::TargetDeleted)
-    );
-    let rebuilt = RuleRegistry::from_state(fixture.core.state().clone()).expect("recompute alerts");
-    assert_eq!(
-        fixture.core.snapshots().load().upstream_changes(),
-        rebuilt.snapshots().load().upstream_changes()
-    );
-}
-
-#[test]
-fn old_parent_revisions_survive_rejected_reparenting_and_parent_override_edits() {
+fn reparenting_is_rejected_without_writes() {
     let mut fixture = Fixture::new();
     fixture
         .commit(RegistryCommand::InstallBuiltin {
@@ -361,26 +248,6 @@ fn old_parent_revisions_survive_rejected_reparenting_and_parent_override_edits()
     fixture
         .commit(overlay("user.leaf", "user.parent"))
         .expect("leaf");
-    let RegistryCommand::Apply { mut text, .. } = overlay("user.parent", "builtin.test") else {
-        panic!("source")
-    };
-    text = text.replace("User replacement", "Parent edited");
-    fixture
-        .commit(RegistryCommand::Apply {
-            key: "user.parent".parse().expect("key"),
-            file: "edit.toml".into(),
-            text,
-            base_version: 1,
-        })
-        .expect("parent edit");
-    let snapshot = fixture.core.snapshots().load();
-    let leaf = snapshot
-        .upstream_changes()
-        .iter()
-        .find(|change| change.set_key().as_str() == "user.leaf")
-        .expect("changed parent override");
-    assert_eq!(leaf.base_parent_version(), Some(1));
-    assert_eq!(leaf.current_parent_version(), 2);
     let mut text = source("user.leaf", "Reparent", Some("builtin.test"));
     text = text.replace("id='one'", "id='new-rule'");
     let rejected = fixture.core.decide(RegistryCommand::Apply {
@@ -503,55 +370,6 @@ fn delayed_commit_acknowledgements_cannot_replace_a_newer_snapshot() {
         }) if expected.get() == 0 && current.get() == 1
     ));
     assert!(Arc::ptr_eq(&before, &fixture.core.snapshots().load()));
-}
-
-#[test]
-fn nested_overlay_uses_its_saved_parent_revision_after_the_parent_is_edited() {
-    let mut fixture = Fixture::new();
-    fixture
-        .commit(RegistryCommand::InstallBuiltin {
-            set: builtin("Original"),
-            revision: 1,
-        })
-        .expect("builtin");
-    let text = "format='quartz-rules/1'\n[set]\nkey='user.parent'\nkind='privacy'\nname='Parent'\nparent='builtin.test'\n";
-    fixture
-        .commit(RegistryCommand::Apply {
-            key: "user.parent".parse().expect("key"),
-            file: "parent.toml".into(),
-            text: text.into(),
-            base_version: 0,
-        })
-        .expect("empty intermediate overlay");
-    fixture
-        .commit(overlay("user.leaf", "user.parent"))
-        .expect("leaf");
-    fixture
-        .commit(RegistryCommand::InstallBuiltin {
-            set: builtin("Changed"),
-            revision: 2,
-        })
-        .expect("upstream edit");
-    fixture
-        .commit(RegistryCommand::Apply {
-            key: "user.parent".parse().expect("key"),
-            file: "parent.toml".into(),
-            text: text.replace("name='Parent'", "name='Renamed'"),
-            base_version: 1,
-        })
-        .expect("parent now based on the new upstream");
-    let snapshot = fixture.core.snapshots().load();
-    let leaf = snapshot
-        .upstream_changes()
-        .iter()
-        .find(|change| change.set_key().as_str() == "user.leaf")
-        .expect("original leaf baseline remains changed");
-    assert_eq!(leaf.base_parent_version(), Some(1));
-    assert_eq!(leaf.current_parent_version(), 2);
-    assert_eq!(leaf.base_target_version(), Some(1));
-    assert_eq!(leaf.current_target_version(), 2);
-    assert_eq!(leaf.target().set_key().as_str(), "builtin.test");
-    assert_eq!(leaf.target().rule_id().as_str(), "one");
 }
 
 #[test]
@@ -712,67 +530,6 @@ fn retained_keys_reject_family_changes_on_apply_and_import() {
 }
 
 #[test]
-fn revert_uses_historical_database_location() {
-    let mut fixture = Fixture::new();
-    fixture
-        .commit(RegistryCommand::InstallBuiltin {
-            set: builtin("Original"),
-            revision: 1,
-        })
-        .expect("builtin");
-    fixture
-        .commit(overlay("user.overlay", "builtin.test"))
-        .expect("overlay");
-    let RegistryCommand::Apply {
-        key, file, text, ..
-    } = overlay("user.overlay", "builtin.test")
-    else {
-        panic!("overlay")
-    };
-    let header = text
-        .split("[[override]]")
-        .next()
-        .expect("header")
-        .to_owned();
-    fixture
-        .commit(RegistryCommand::Apply {
-            key,
-            file,
-            text: header,
-            base_version: 1,
-        })
-        .expect("remove overlay");
-    let mut removed = builtin("Removed");
-    removed.content = rules::Content::default();
-    fixture
-        .commit(RegistryCommand::InstallBuiltin {
-            set: removed,
-            revision: 2,
-        })
-        .expect("remove target");
-    let decision = fixture.core.decide(RegistryCommand::Revert {
-        key: "user.overlay".parse().expect("key"),
-        base_version: 2,
-        version: 1,
-    });
-    let Err(DecideRegistryCommandError::Snapshot {
-        source: BuildRuleSnapshotError::Tree { diagnostics },
-    }) = decision.reply()
-    else {
-        panic!("invalid historical target")
-    };
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].path, "override[0].target");
-    assert_eq!(
-        diagnostics[0].location.file,
-        PathBuf::from("database:user.overlay@1")
-    );
-    assert_eq!(diagnostics[0].location.bytes, 0..0);
-    assert_eq!(diagnostics[0].location.line, 1);
-    assert_eq!(diagnostics[0].location.column, 1);
-}
-
-#[test]
 fn startup_reports_each_tree_diagnostic_once() {
     let mut fixture = Fixture::new();
     fixture
@@ -800,42 +557,6 @@ fn startup_reports_each_tree_diagnostic_once() {
     assert_eq!(diagnostic.set_key, "user.overlay");
     assert_eq!(diagnostic.path, "override[0].target");
     assert_eq!(diagnostic.location.file, PathBuf::from("overlay.toml"));
-}
-
-#[test]
-fn revert_rejects_historical_body_from_another_family() {
-    let mut fixture = Fixture::new();
-    fixture
-        .commit(apply("user.history", "First", 0))
-        .expect("first");
-    fixture
-        .commit(apply("user.history", "Second", 1))
-        .expect("second");
-    let mut state = fixture.core.state().clone();
-    let entry = state
-        .sets
-        .get_mut(&"user.history".parse().expect("key"))
-        .expect("set");
-    entry.versions.get_mut(&1).expect("revision").content.rule[0].body = RuleBody::Extraction {
-        app: vec![],
-        pattern: "(?P<document>.+)".into(),
-    };
-    let core = RuleRegistry::from_state(state).expect("current revision remains valid");
-    let decision = core.decide(RegistryCommand::Revert {
-        key: "user.history".parse().expect("key"),
-        base_version: 2,
-        version: 1,
-    });
-    assert!(matches!(
-        decision.reply(),
-        Err(DecideRegistryCommandError::Snapshot {
-            source: BuildRuleSnapshotError::Compile {
-                source: rules::CompileRulesError::KindMismatch,
-                ..
-            },
-        })
-    ));
-    assert!(decision.writes().is_empty());
 }
 
 #[test]
@@ -870,26 +591,16 @@ fn builtin_metadata_mutations_are_rejected_without_writes_or_publication() {
         })
         .expect("builtin");
     let snapshot = fixture.core.snapshots().load();
-    for command in [
-        RegistryCommand::Toggle {
-            key: "builtin.test".parse().expect("key"),
-            base_version: 1,
-            enabled: Enablement::Disabled,
-        },
-        RegistryCommand::Reorder {
-            siblings: vec![SiblingRevision {
-                key: "builtin.test".parse().expect("key"),
-                base_version: 1,
-            }],
-        },
-    ] {
-        let decision = fixture.core.decide(command);
-        assert!(
-            matches!(decision.reply(),Err(DecideRegistryCommandError::ReservedSet {key}) if key.as_str() == "builtin.test")
-        );
-        assert!(decision.writes().is_empty());
-        assert!(Arc::ptr_eq(&snapshot, &fixture.core.snapshots().load()));
-    }
+    let decision = fixture.core.decide(RegistryCommand::Toggle {
+        key: "builtin.test".parse().expect("key"),
+        base_version: 1,
+        enabled: Enablement::Disabled,
+    });
+    assert!(
+        matches!(decision.reply(),Err(DecideRegistryCommandError::ReservedSet {key}) if key.as_str() == "builtin.test")
+    );
+    assert!(decision.writes().is_empty());
+    assert!(Arc::ptr_eq(&snapshot, &fixture.core.snapshots().load()));
 }
 
 #[test]

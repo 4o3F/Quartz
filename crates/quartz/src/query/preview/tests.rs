@@ -856,45 +856,6 @@ fn deleting_a_rule_set_previews_unclassified_time_without_saving() {
     assert!(Arc::ptr_eq(&before, &fixture.registry.snapshots().load()));
 }
 #[test]
-fn reordering_rule_sets_changes_the_preview_winner_without_saving() {
-    let mut fixture = Fixture::new(4);
-    fixture.install(&Fixture::text("classification", Fixture::classification()));
-    fixture.install_at(
-        "user.second",
-        &Fixture::text("classification", Fixture::classification())
-            .replace("user.preview", "user.second")
-            .replace("builtin:learning", "builtin:development"),
-    );
-    let before = fixture.registry.snapshots().load();
-    let mut body = fixture.body("");
-    body["mutation"] = json!({"op":"rule_sets.reorder","body":{"siblings":[{"key":"user.second","base_version":1},{"key":"user.preview","base_version":1}]}});
-    let response = fixture.run(body).expect("reorder preview");
-    let winner = response
-        .rules
-        .iter()
-        .find(|rule| rule.rule == "user.second/first@2")
-        .expect("draft winner");
-    assert_eq!(winner.effective_contribution.active_ms, 4000);
-    assert!(Arc::ptr_eq(&before, &fixture.registry.snapshots().load()));
-}
-#[test]
-fn reverting_a_rule_set_previews_the_historical_category_without_saving() {
-    let mut fixture = Fixture::new(4);
-    let text = Fixture::text("classification", Fixture::classification());
-    fixture.install(&text);
-    fixture.install(&text.replace("builtin:learning", "builtin:development"));
-    let before = fixture.registry.snapshots().load();
-    let mut body = fixture.body("");
-    body["mutation"] =
-        json!({"op":"rule_sets.revert","body":{"key":"user.preview","base_version":2,"version":1}});
-    let response = fixture.run(body).expect("revert preview");
-    let category = &response.totals.expect("totals").after.categories[0].category;
-    assert!(
-        matches!(category,wire::CategoryRef::Classified {category} if category.builtin_key==Some(wire::BuiltinCategory::Learning))
-    );
-    assert!(Arc::ptr_eq(&before, &fixture.registry.snapshots().load()));
-}
-#[test]
 fn zero_sample_limit_preserves_statistics_and_totals() {
     let mut fixture = Fixture::new(4);
     let mut body = fixture.body(&Fixture::text("classification", Fixture::classification()));

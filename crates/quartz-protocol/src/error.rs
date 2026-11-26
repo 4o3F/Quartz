@@ -55,8 +55,8 @@ pub enum ErrorKind {
         /// Current version to read before resubmitting a change.
         current_version: RuleSetVersion,
     },
-    /// The selected set or historical revision does not exist.
-    RuleSetNotFound { key: String, version: Option<u32> },
+    /// The selected rule set does not exist.
+    RuleSetNotFound { key: String },
     /// Builtin rule sets can only be changed by embedded upgrades.
     RuleSetReadOnly { key: String },
     /// A set with active children cannot be deleted.
@@ -171,7 +171,7 @@ mod tests {
             "version_exhausted",
             "busy",
         ] {
-            let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "current_versions":"range-inputs", "key": "user.local", "version": null, "core_version": "test-core", "field":"parent", "diagnostics":[], "truncated":false});
+            let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "current_versions":"range-inputs", "key": "user.local", "core_version": "test-core", "field":"parent", "diagnostics":[], "truncated":false});
             let kind: ErrorKind = serde_json::from_value(wire).expect("known error kind");
             assert_eq!(kind.code(), name);
             assert_eq!(

@@ -1,4 +1,4 @@
-use super::{ComputeUpstreamChangesError, RegistryState, SnapshotEpoch, UpstreamChange};
+use super::{RegistryState, SnapshotEpoch};
 use crate::rules::{
     self, CompileRulesError, CompiledRules, ContentHash, Diagnostic, DiagnosticCode, Enablement,
     Resolution, RuleKind, RuleSetKey, resolve::RuleTree,
@@ -43,7 +43,6 @@ pub struct RuleSnapshot {
     extraction: CompiledRules,
     hashes: SnapshotHashes,
     warnings: Vec<RuleWarning>,
-    upstream_changes: Vec<UpstreamChange>,
     state: RegistryState,
     resolutions: Vec<Resolution>,
 }
@@ -71,11 +70,6 @@ impl RuleSnapshot {
     /// Borrows structured startup compilation and tree warnings.
     pub fn warnings(&self) -> &[RuleWarning] {
         &self.warnings
-    }
-
-    /// Borrows derived alerts for the snapshot or command result.
-    pub fn upstream_changes(&self) -> &[UpstreamChange] {
-        &self.upstream_changes
     }
 
     /// Borrows the exact registry history published with these compiled rules.
@@ -184,9 +178,6 @@ impl RuleSnapshot {
                 extraction: extraction_hash,
             },
             warnings,
-            upstream_changes: installed
-                .upstream_changes()
-                .context(snapshot_error::UpstreamSnafu)?,
         })
     }
 }
@@ -227,12 +218,6 @@ pub enum BuildRuleSnapshotError {
         /// Original failure retained as the standard error source.
         source: rules::ParseRuleSetKeyError,
     },
-    /// Could not compute upstream comparisons.
-    #[snafu(display("could not compute upstream comparisons"))]
-    Upstream {
-        /// Original failure retained as the standard error source.
-        source: ComputeUpstreamChangesError,
-    },
 }
 
 /// Startup retained a snapshot or a read handle before publication began.
@@ -268,13 +253,4 @@ impl SnapshotCell {
 pub struct RulesChanged {
     /// Process-local snapshot publication sequence.
     pub epoch: SnapshotEpoch,
-}
-
-/// A checked sibling revision participating in a complete sibling ordering.
-#[derive(Debug, Clone)]
-pub struct SiblingRevision {
-    /// Stable key of the rule set affected by this value.
-    pub key: RuleSetKey,
-    /// Current revision observed by the client; zero denotes a new or deleted key.
-    pub base_version: u32,
 }

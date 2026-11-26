@@ -251,19 +251,13 @@ pub enum CursorQuery {
     },
     /// Rule family tree inputs.
     RuleSetsTree { rule_kind: crate::rules::RuleKind },
-    /// Exact set revision and projection inputs.
+    /// Current rule-set and projection inputs.
     RuleSetsGet {
         key: String,
-        version: Option<std::num::NonZeroU32>,
         view: crate::rules::RuleView,
     },
     /// Canonical text export selection; position is a UTF-8 byte offset.
-    RulesTextExport {
-        key: String,
-        version: Option<std::num::NonZeroU32>,
-    },
-    /// Retained revision listing inputs.
-    RuleSetsVersions { key: String },
+    RulesTextExport { key: String },
     /// Saved annotation entities intersecting a bounded UTC range.
     Annotations { start_utc_ms: i64, end_utc_ms: i64 },
     /// Category hierarchy with the archive filter bound to the continuation.
@@ -1562,7 +1556,6 @@ mod tests {
             QueryVersions("v".into()),
             CursorQuery::RuleSetsGet {
                 key: String::new(),
-                version: None,
                 view: crate::RuleView::Own,
             },
             usize::MAX,
@@ -1572,7 +1565,6 @@ mod tests {
             QueryVersions("v".into()),
             CursorQuery::RuleSetsGet {
                 key: "x".repeat(MAX_CURSOR_BYTES - overhead),
-                version: None,
                 view: crate::RuleView::Own,
             },
             usize::MAX,
@@ -1585,7 +1577,6 @@ mod tests {
             QueryVersions("v".into()),
             CursorQuery::RuleSetsGet {
                 key: "x".repeat(MAX_CURSOR_BYTES),
-                version: None,
                 view: crate::RuleView::Own,
             },
             usize::MAX,

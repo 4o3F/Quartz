@@ -23,7 +23,6 @@ pub(crate) enum RuleFailure {
     SnapshotEffective,
     SnapshotTree,
     SnapshotIdentity,
-    SnapshotUpstream,
 }
 #[derive(Debug)]
 pub(crate) enum DatabaseFailure {
@@ -83,7 +82,6 @@ impl WriteFailure {
             BuildRuleSnapshotError::Effective { .. } => RuleFailure::SnapshotEffective,
             BuildRuleSnapshotError::Tree { .. } => RuleFailure::SnapshotTree,
             BuildRuleSnapshotError::Identity { .. } => RuleFailure::SnapshotIdentity,
-            BuildRuleSnapshotError::Upstream { .. } => RuleFailure::SnapshotUpstream,
         })
     }
 

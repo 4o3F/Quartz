@@ -4756,7 +4756,6 @@ fn committed_rule_mutations_stale_issued_rule_and_day_page_cursors() {
     };
     let mut get = RuleSetsGetRequest {
         key: root.into(),
-        version: None,
         view: RuleView::Effective,
         cursor: None,
     };

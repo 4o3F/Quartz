@@ -16,8 +16,6 @@ pub enum DiagnosticCode {
     Target,
     /// `E-RULE-CONFLICT` (rule-format.md §4.2): unrelated rule sets override or disable the same target.
     Conflict,
-    /// `E-RULE-IMMUTABLE` (rule-format.md §4.2): a precedent was changed or deleted, or uses override or disable.
-    Immutable,
     /// `E-RULE-FIELD` (rule-format.md §4.2): unknown field or a field unavailable to the rule kind.
     Field,
     /// `E-RULE-OP` (rule-format.md §4.2): unknown operator or an operator unavailable to the field.
@@ -41,7 +39,6 @@ impl DiagnosticCode {
             Self::Parent => "E-RULE-PARENT",
             Self::Target => "E-RULE-TARGET",
             Self::Conflict => "E-RULE-CONFLICT",
-            Self::Immutable => "E-RULE-IMMUTABLE",
             Self::Field => "E-RULE-FIELD",
             Self::Op => "E-RULE-OP",
             Self::Value => "E-RULE-VALUE",

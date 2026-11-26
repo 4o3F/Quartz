@@ -305,10 +305,7 @@ impl ConnectionSession {
                         };
                         Action::Unsubscribe { id, subscription }
                     }
-                    Op::RuleSetsTree
-                    | Op::RuleSetsGet
-                    | Op::RuleSetsVersions
-                    | Op::RulesTextExport => {
+                    Op::RuleSetsTree | Op::RuleSetsGet | Op::RulesTextExport => {
                         match crate::rules::read::ReadRequest::decode(request.op, request.body) {
                             Ok(request) => Action::Rules { id, request },
                             Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
@@ -343,9 +340,7 @@ impl ConnectionSession {
                     | Op::RulesTextImport
                     | Op::RuleSetsEdit
                     | Op::RuleSetsSetEnabled
-                    | Op::RuleSetsReorder
                     | Op::RuleSetsDelete
-                    | Op::RuleSetsRevert
                     | Op::SettingsGet
                     | Op::SettingsSet
                     | Op::AnnotationsCreate
@@ -418,21 +413,16 @@ mod tests {
                 state: State::Ready(role),
                 allowed: AllowedRoles::Quartz,
             };
-            for op in [
-                Op::RuleSetsTree,
-                Op::RuleSetsGet,
-                Op::RuleSetsVersions,
-                Op::RulesTextExport,
-            ] {
+            for op in [Op::RuleSetsTree, Op::RuleSetsGet, Op::RulesTextExport] {
                 let body = match op {
                     Op::RuleSetsTree => serde_json::json!({"kind":"privacy"}),
                     Op::RuleSetsGet => {
                         serde_json::json!({"key":"builtin.privacy","view":"effective"})
                     }
-                    Op::RuleSetsVersions | Op::RulesTextExport => {
+                    Op::RulesTextExport => {
                         serde_json::json!({"key":"builtin.privacy"})
                     }
-                    _ => unreachable!("three read operations"),
+                    _ => unreachable!("rule read operations"),
                 };
                 assert!(matches!(
                     session.receive(
@@ -479,16 +469,8 @@ mod tests {
                 body: fixture["set_enabled"].clone(),
             },
             Case {
-                op: Op::RuleSetsReorder,
-                body: fixture["reorder"].clone(),
-            },
-            Case {
                 op: Op::RuleSetsDelete,
                 body: fixture["delete"].clone(),
-            },
-            Case {
-                op: Op::RuleSetsRevert,
-                body: fixture["revert"].clone(),
             },
         ] {
             let mut cli = ConnectionSession {
@@ -1180,12 +1162,7 @@ mod tests {
                 Self {
                     op: Op::RuleSetsGet,
                     body: serde_json::json!({"key":"builtin.privacy","view":"own"}),
-                    query: serde_json::json!({"kind":"rule_sets_get","key":"builtin.privacy","version":null,"view":"own"}),
-                },
-                Self {
-                    op: Op::RuleSetsVersions,
-                    body: serde_json::json!({"key":"builtin.privacy"}),
-                    query: serde_json::json!({"kind":"rule_sets_versions","key":"builtin.privacy"}),
+                    query: serde_json::json!({"kind":"rule_sets_get","key":"builtin.privacy","view":"own"}),
                 },
                 Self {
                     op: Op::CategoriesList,

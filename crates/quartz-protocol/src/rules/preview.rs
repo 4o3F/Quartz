@@ -2,8 +2,7 @@
 
 use crate::{
     ApplicationRank, CategoryRef, ClockSegmentId, DocumentRank, LocalDate, QueryCursor,
-    QueryVersions, RuleAction, RuleSetSibling, RuleWebAction, RulesTextValidateRequest,
-    TitleExtraction,
+    QueryVersions, RuleAction, RuleWebAction, RulesTextValidateRequest, TitleExtraction,
 };
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
@@ -91,26 +90,12 @@ pub struct PreviewSetEnabled {
     pub base_version: NonZeroU32,
     pub enabled: bool,
 }
-/// Complete sibling order preview body.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreviewReorder {
-    pub siblings: Vec<RuleSetSibling>,
-}
 /// Childless user-set deletion preview body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewDelete {
     pub key: String,
     pub base_version: NonZeroU32,
-}
-/// Historical revision copied into a disposable draft.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreviewRevert {
-    pub key: String,
-    pub base_version: NonZeroU32,
-    pub version: NonZeroU32,
 }
 /// Exact rule_sets write operation for preview.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,21 +105,15 @@ pub enum RulePreviewMutation {
     Edit(RulesTextValidateRequest),
     #[serde(rename = "rule_sets.set_enabled")]
     SetEnabled(PreviewSetEnabled),
-    #[serde(rename = "rule_sets.reorder")]
-    Reorder(PreviewReorder),
     #[serde(rename = "rule_sets.delete")]
     Delete(PreviewDelete),
-    #[serde(rename = "rule_sets.revert")]
-    Revert(PreviewRevert),
 }
 impl std::fmt::Debug for RulePreviewMutation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let operation = match self {
             Self::Edit(_) => "rule_sets.edit",
             Self::SetEnabled(_) => "rule_sets.set_enabled",
-            Self::Reorder(_) => "rule_sets.reorder",
             Self::Delete(_) => "rule_sets.delete",
-            Self::Revert(_) => "rule_sets.revert",
         };
         formatter
             .debug_tuple("RulePreviewMutation")

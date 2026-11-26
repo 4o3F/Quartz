@@ -1029,19 +1029,9 @@ mod tests {
                 deleted: false,
             },
             Case {
-                op: Op::RuleSetsReorder,
-                body: serde_json::json!({"siblings":[{"key":"user.test","base_version":1}]}),
-                deleted: false,
-            },
-            Case {
                 op: Op::RuleSetsDelete,
                 body: serde_json::json!({"key":"user.test","base_version":1}),
                 deleted: true,
-            },
-            Case {
-                op: Op::RuleSetsRevert,
-                body: serde_json::json!({"key":"user.test","base_version":1,"version":1}),
-                deleted: false,
             },
         ];
         for case in cases {
@@ -1120,16 +1110,8 @@ mod tests {
                 body: serde_json::json!({"key":"builtin.privacy","base_version":1,"enabled":false}),
             },
             Case {
-                op: Op::RuleSetsReorder,
-                body: serde_json::json!({"siblings":[{"key":"builtin.privacy","base_version":1}]}),
-            },
-            Case {
                 op: Op::RuleSetsDelete,
                 body: serde_json::json!({"key":"builtin.privacy","base_version":1}),
-            },
-            Case {
-                op: Op::RuleSetsRevert,
-                body: serde_json::json!({"key":"builtin.privacy","base_version":1,"version":1}),
             },
         ] {
             Fixture::new().assert_rule_failure(
@@ -1164,54 +1146,7 @@ mod tests {
         );
     }
     #[test]
-    fn reorder_requires_complete_unique_siblings_and_reports_conflicts_by_key() {
-        use quartz_protocol::{ErrorKind, Op, RuleSetVersion};
-        let mut fixture = Fixture::new();
-        fixture.save_rule("user.a", "classification", "builtin.classification");
-        fixture.save_rule("user.b", "classification", "builtin.classification");
-        fixture.save_rule("user.foreign", "extraction", "builtin.extraction");
-        fixture.save_rule("user.child", "classification", "user.a");
-        for siblings in [
-            serde_json::json!([]),
-            serde_json::json!([{"key":"user.a","base_version":1}]),
-            serde_json::json!([{"key":"user.a","base_version":1},{"key":"user.a","base_version":1}]),
-            serde_json::json!([{"key":"user.a","base_version":1},{"key":"user.foreign","base_version":1}]),
-            serde_json::json!([{"key":"user.a","base_version":1},{"key":"user.child","base_version":1}]),
-        ] {
-            fixture.assert_rule_failure(
-                Op::RuleSetsReorder,
-                serde_json::json!({"siblings":siblings}),
-                ErrorKind::BadRequest,
-            );
-        }
-        let order = serde_json::json!({"siblings":[{"key":"user.b","base_version":1},{"key":"user.a","base_version":1}]});
-        let result = fixture
-            .ipc(Op::RuleSetsReorder, order)
-            .expect("complete final order");
-        assert_eq!(
-            result["sets"],
-            serde_json::json!([{"key":"user.a","version":2,"deleted":false},{"key":"user.b","version":2,"deleted":false}])
-        );
-        fixture.take_rule_publication();
-        fixture._versions.updates.borrow_and_update();
-        let snapshot = fixture.database.registry.snapshots().load();
-        assert_eq!(
-            snapshot.state().sets[&"user.b".parse().expect("key")]
-                .current
-                .sibling_order,
-            0
-        );
-        assert_eq!(
-            snapshot.state().sets[&"user.a".parse().expect("key")]
-                .current
-                .sibling_order,
-            1
-        );
-        fixture.assert_rule_failure(Op::RuleSetsReorder,serde_json::json!({"siblings":[{"key":"user.b","base_version":1},{"key":"user.a","base_version":1}]}),ErrorKind::RuleSetStale {key:"user.a".into(),current_version:RuleSetVersion(2)});
-        fixture.assert_rule_failure(Op::RuleSetsReorder,serde_json::json!({"siblings":[{"key":"user.b","base_version":1},{"key":"user.a","base_version":2}]}),ErrorKind::RuleSetStale {key:"user.b".into(),current_version:RuleSetVersion(2)});
-    }
-    #[test]
-    fn extraction_edits_and_reverts_restore_historical_contents_as_new_revisions() {
+    fn extraction_edits_update_snapshot_hashes() {
         use quartz_protocol::Op;
         let mut fixture = Fixture::new();
         fixture.save_rule("user.extract", "extraction", "builtin.extraction");
@@ -1235,43 +1170,37 @@ mod tests {
                 .hashes()
                 .extraction
         );
-        fixture
-            .ipc(
-                Op::RuleSetsRevert,
-                serde_json::json!({"key":"user.extract","base_version":2,"version":1}),
-            )
-            .expect("historical revert");
-        fixture.take_rule_publication();
         let snapshot = fixture.database.registry.snapshots().load();
         let entry = &snapshot.state().sets[&"user.extract".parse().expect("key")];
-        assert_eq!(entry.current.version, 3);
-        assert_eq!(
-            entry.current.set.content,
-            original.state().sets[&"user.extract".parse().expect("key")]
-                .current
-                .set
-                .content
-        );
-        assert_eq!(entry.versions.len(), 3);
+        assert_eq!(entry.current.version, 2);
+        assert_eq!(entry.versions.len(), 2);
     }
     #[test]
-    fn failed_rule_transactions_roll_back_all_siblings_and_publish_nothing() {
+    fn failed_rule_transactions_roll_back_and_publish_nothing() {
         use diesel::{Connection, connection::SimpleConnection};
         use quartz_protocol::{ErrorKind, Op};
         let mut fixture = Fixture::new();
         fixture.save_rule("user.a", "classification", "builtin.classification");
-        fixture.save_rule("user.b", "classification", "builtin.classification");
         fixture.subscribe_category_day();
         let path = fixture._directory.path().join("quartz.db");
         let mut connection =
             diesel::sqlite::SqliteConnection::establish(path.to_str().expect("database path"))
                 .expect("isolated connection");
-        connection.batch_execute("CREATE TRIGGER reject_rule_revision BEFORE INSERT ON rule_set_versions WHEN NEW.set_id=(SELECT id FROM rule_sets WHERE key='user.b') BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").expect("fail second sibling");
-        fixture.assert_rule_failure(Op::RuleSetsReorder,serde_json::json!({"siblings":[{"key":"user.a","base_version":1},{"key":"user.b","base_version":1}]}),ErrorKind::Internal);
+        connection.batch_execute("CREATE TRIGGER reject_rule_revision BEFORE INSERT ON rule_set_versions WHEN NEW.set_id=(SELECT id FROM rule_sets WHERE key='user.a') BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").expect("fail revision insert");
+        fixture.assert_rule_failure(
+            Op::RuleSetsSetEnabled,
+            serde_json::json!({"key":"user.a","base_version":1,"enabled":false}),
+            ErrorKind::Internal,
+        );
         connection
             .batch_execute("DROP TRIGGER reject_rule_revision")
             .expect("restore writes");
-        fixture.ipc(Op::RuleSetsReorder,serde_json::json!({"siblings":[{"key":"user.b","base_version":1},{"key":"user.a","base_version":1}]})).expect("retry uncommitted request");
+        fixture
+            .ipc(
+                Op::RuleSetsSetEnabled,
+                serde_json::json!({"key":"user.a","base_version":1,"enabled":false}),
+            )
+            .expect("retry uncommitted request");
         fixture.take_rule_publication();
     }
     #[test]
@@ -1379,8 +1308,8 @@ mod tests {
         fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.limit","base_version":1,"text":" ".repeat(MAX_RULE_TEXT_BYTES+1)}),ErrorKind::BadRequest);
         let long_key = "a".repeat(QUERY_PAGE_BYTES);
         fixture.assert_rule_failure(
-            Op::RuleSetsReorder,
-            serde_json::json!({"siblings":[{"key":long_key,"base_version":1}]}),
+            Op::RuleSetsSetEnabled,
+            serde_json::json!({"key":long_key,"base_version":1,"enabled":false}),
             ErrorKind::BadRequest,
         );
     }
@@ -1447,16 +1376,8 @@ mod tests {
                 body: serde_json::json!({"key":"user.missing","base_version":1,"enabled":true}),
             },
             Case {
-                op: Op::RuleSetsReorder,
-                body: serde_json::json!({"siblings":[{"key":"user.missing","base_version":1}]}),
-            },
-            Case {
                 op: Op::RuleSetsDelete,
                 body: serde_json::json!({"key":"user.missing","base_version":1}),
-            },
-            Case {
-                op: Op::RuleSetsRevert,
-                body: serde_json::json!({"key":"user.missing","base_version":1,"version":1}),
             },
         ] {
             fixture.assert_rule_failure(
@@ -1470,40 +1391,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reorder_errors_are_independent_of_input_key_order() {
-        use quartz_protocol::{ErrorKind, Op};
-        for keys in [
-            ["builtin.privacy", "builtin.classification"],
-            ["builtin.classification", "builtin.privacy"],
-        ] {
-            let siblings: Vec<_> = keys
-                .into_iter()
-                .map(|key| serde_json::json!({"key":key,"base_version":1}))
-                .collect();
-            Fixture::new().assert_rule_failure(
-                Op::RuleSetsReorder,
-                serde_json::json!({"siblings":siblings}),
-                ErrorKind::RuleSetReadOnly {
-                    key: "builtin.classification".into(),
-                },
-            );
-        }
-        for keys in [
-            ["builtin.privacy", "INVALID!"],
-            ["INVALID!", "builtin.privacy"],
-        ] {
-            let siblings: Vec<_> = keys
-                .into_iter()
-                .map(|key| serde_json::json!({"key":key,"base_version":1}))
-                .collect();
-            Fixture::new().assert_rule_failure(
-                Op::RuleSetsReorder,
-                serde_json::json!({"siblings":siblings}),
-                ErrorKind::BadRequest,
-            );
-        }
-    }
     #[test]
     fn parent_errors_in_new_sets_are_located_content_diagnostics() {
         use quartz_protocol::{ErrorKind, Op};
@@ -1582,19 +1469,11 @@ mod tests {
         );
     }
     #[test]
-    fn committed_creates_reject_zero_version_retries_and_missing_revert_sources() {
+    fn committed_creates_reject_zero_version_retries() {
         use quartz_protocol::{ErrorKind, Op, RuleSetVersion};
         let mut fixture = Fixture::new();
         fixture.save_rule("user.test", "classification", "builtin.classification");
         fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":0,"text":Fixture::rule_text("user.test","classification","builtin.classification")}),ErrorKind::RuleSetStale {key:"user.test".into(),current_version:RuleSetVersion(1)});
-        fixture.assert_rule_failure(
-            Op::RuleSetsRevert,
-            serde_json::json!({"key":"user.test","base_version":1,"version":2}),
-            ErrorKind::RuleSetNotFound {
-                key: "user.test".into(),
-                version: Some(2),
-            },
-        );
     }
 
     #[test]

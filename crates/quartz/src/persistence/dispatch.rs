@@ -47,14 +47,8 @@ impl WriteRequest {
             quartz_protocol::Op::RuleSetsSetEnabled => serde_json::from_value(body)
                 .map(RuleMutation::SetEnabled)
                 .map(Self::Rules),
-            quartz_protocol::Op::RuleSetsReorder => serde_json::from_value(body)
-                .map(RuleMutation::Reorder)
-                .map(Self::Rules),
             quartz_protocol::Op::RuleSetsDelete => serde_json::from_value(body)
                 .map(RuleMutation::Delete)
-                .map(Self::Rules),
-            quartz_protocol::Op::RuleSetsRevert => serde_json::from_value(body)
-                .map(RuleMutation::Revert)
                 .map(Self::Rules),
             quartz_protocol::Op::CategoriesList => serde_json::from_value(body)
                 .map(CategoryRequest::List)

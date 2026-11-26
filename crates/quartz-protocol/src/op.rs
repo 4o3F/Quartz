@@ -110,21 +110,12 @@ pub enum Op {
     /// The `rule_sets.get` request.
     #[serde(rename = "rule_sets.get")]
     RuleSetsGet,
-    /// The `rule_sets.versions` request.
-    #[serde(rename = "rule_sets.versions")]
-    RuleSetsVersions,
     /// The `rule_sets.set_enabled` request.
     #[serde(rename = "rule_sets.set_enabled")]
     RuleSetsSetEnabled,
-    /// The `rule_sets.reorder` request.
-    #[serde(rename = "rule_sets.reorder")]
-    RuleSetsReorder,
     /// The `rule_sets.delete` request.
     #[serde(rename = "rule_sets.delete")]
     RuleSetsDelete,
-    /// The `rule_sets.revert` request.
-    #[serde(rename = "rule_sets.revert")]
-    RuleSetsRevert,
     /// The `rule_sets.edit` request.
     #[serde(rename = "rule_sets.edit")]
     RuleSetsEdit,
@@ -247,11 +238,8 @@ impl Op {
             | Self::QueryAnnotations => OpFamily::Query,
             Self::RuleSetsTree
             | Self::RuleSetsGet
-            | Self::RuleSetsVersions
             | Self::RuleSetsSetEnabled
-            | Self::RuleSetsReorder
             | Self::RuleSetsDelete
-            | Self::RuleSetsRevert
             | Self::RuleSetsEdit => OpFamily::RuleSets,
             Self::RulesPreview => OpFamily::Rules,
             Self::RulesTextValidate

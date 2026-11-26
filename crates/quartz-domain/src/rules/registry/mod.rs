@@ -7,15 +7,15 @@ mod state;
 pub use epoch::SnapshotEpoch;
 pub use snapshot::{
     BuildRuleSnapshotError, ResetSnapshotEpochError, RuleSnapshot, RuleWarning, RulesChanged,
-    SiblingRevision, SnapshotCell, SnapshotHashes,
+    SnapshotCell, SnapshotHashes,
 };
 pub use state::{
     ExpectedRuleVersion, RegistryState, RuleSetDeletion, RuleSetState, RuleSetUpdate,
-    RuleSetVersion, RuleSetWrite, UpstreamChange, UpstreamState,
+    RuleSetVersion, RuleSetWrite,
 };
 
 use crate::rules::{
-    self, Enablement, InstalledSet, ParseContext, ParseRuleSetError, RuleKind, RuleOrigin, RuleSet,
+    self, Enablement, InstalledSet, ParseContext, ParseRuleSetError, RuleOrigin, RuleSet,
     RuleSetKey, RuleWriteCode,
 };
 use snafu::{ResultExt, Snafu};
@@ -85,26 +85,12 @@ pub enum RegistryCommand {
         /// Requested subtree enablement.
         enabled: Enablement,
     },
-    /// Appends revisions for a complete sibling ordering.
-    Reorder {
-        /// Complete sibling ordering with each client-observed revision.
-        siblings: Vec<SiblingRevision>,
-    },
     /// Marks a childless user set deleted while preserving history.
     Delete {
         /// Stable key of the rule set affected by this value.
         key: RuleSetKey,
         /// Current revision observed by the client; zero denotes a new or deleted key.
         base_version: u32,
-    },
-    /// Appends the selected historical contents as a new revision.
-    Revert {
-        /// Stable key of the rule set affected by this value.
-        key: RuleSetKey,
-        /// Current revision observed by the client; zero denotes a new or deleted key.
-        base_version: u32,
-        /// Rule-set revision identified by this value.
-        version: u32,
     },
     /// Installs a newer embedded upstream revision without editing overlays.
     InstallBuiltin {
@@ -121,62 +107,22 @@ impl RegistryCommand {
             Self::Apply { key, .. }
             | Self::Import { key, .. }
             | Self::Toggle { key, .. }
-            | Self::Delete { key, .. }
-            | Self::Revert { key, .. } => state.check_user_target(key),
-            Self::Reorder { siblings } => {
-                for key in siblings
-                    .iter()
-                    .map(|sibling| &sibling.key)
-                    .collect::<BTreeSet<_>>()
-                {
-                    state.check_user_target(key)?;
-                }
-                Ok(())
-            }
+            | Self::Delete { key, .. } => state.check_user_target(key),
             Self::InstallBuiltin { .. } => Ok(()),
         }
     }
 }
 
-/// Successful command reply, including its publication epoch and derived alerts.
+/// Successful command reply, including its publication epoch.
 #[derive(Debug)]
 pub struct RegistrySuccess {
     /// Process-local snapshot publication sequence.
     pub epoch: SnapshotEpoch,
     /// New current revisions by key; deleted keys are omitted.
     pub versions: BTreeMap<RuleSetKey, u32>,
-    /// Computed alerts comparing saved parent revisions with current ancestors.
-    pub upstream_changes: Vec<UpstreamChange>,
 }
 /// Command success or a structured, source-preserving rejection.
 pub type RegistryReply = Result<RegistrySuccess, DecideRegistryCommandError>;
-
-/// A saved parent chain cannot be interpreted from the supplied domain state.
-#[derive(Debug, Snafu)]
-#[snafu(module(upstream_error))]
-pub enum ComputeUpstreamChangesError {
-    /// Upstream rule-set key is invalid.
-    #[snafu(display("upstream rule-set key is invalid"))]
-    SetKey {
-        /// Original failure retained as the standard error source.
-        source: rules::ParseRuleSetKeyError,
-    },
-    /// Upstream rule target is invalid.
-    #[snafu(display("upstream rule target is invalid"))]
-    Target {
-        /// Original failure retained as the standard error source.
-        source: rules::ParseRuleTargetError,
-    },
-    /// Saved parent rule set is missing.
-    #[snafu(display("saved parent rule set is missing"))]
-    MissingAncestor,
-    /// Saved parent revision is missing.
-    #[snafu(display("saved parent revision is missing"))]
-    MissingRevision,
-    /// Saved parent chain is cyclic.
-    #[snafu(display("saved parent chain is cyclic"))]
-    CyclicAncestry,
-}
 
 /// A command could not produce a valid write plan.
 #[derive(Debug, Snafu)]
@@ -225,9 +171,6 @@ pub enum DecideRegistryCommandError {
         /// Builtin or reserved rule-set identity rejected by the command.
         key: RuleSetKey,
     },
-    /// Ordering must include every sibling exactly once.
-    #[snafu(display("ordering must include every sibling exactly once"))]
-    InvalidOrdering,
     /// Rule revision exceeds the supported range.
     #[snafu(display("rule revision exceeds the supported range"))]
     RevisionOverflow,
@@ -600,25 +543,6 @@ impl RuleRegistry {
                 let write = state.save_text(set, RuleOrigin::User)?;
                 writes.push(write);
             }
-            RegistryCommand::Revert {
-                key,
-                base_version,
-                version,
-            } => {
-                state.check_base(&key, base_version)?;
-                let mut set = state.active(&key)?.current.set.clone();
-                let revision = state
-                    .version(&key, version)
-                    .ok_or(DecideRegistryCommandError::MissingRevision)?;
-                set.content = revision.content.clone();
-                set.header = revision.header_or_legacy(&set.header);
-                set.locations.clear();
-                set.locations.insert(
-                    String::new(),
-                    rules::SourceLocation::database(&key, version),
-                );
-                writes.push(state.save_text(set, RuleOrigin::User)?);
-            }
             RegistryCommand::Toggle {
                 key,
                 base_version,
@@ -626,59 +550,8 @@ impl RuleRegistry {
             } => {
                 state.check_base(&key, base_version)?;
                 state.active(&key)?;
-                let update = state.metadata(&key, Some(enabled), None, RuleSetDeletion::Active)?;
+                let update = state.metadata(&key, Some(enabled), RuleSetDeletion::Active)?;
                 writes.push(RuleSetWrite::Toggle(update));
-            }
-            RegistryCommand::Reorder { siblings } => {
-                let mut seen = BTreeSet::new();
-                for sibling in &siblings {
-                    if !seen.insert(sibling.key.clone()) {
-                        return Err(DecideRegistryCommandError::InvalidOrdering);
-                    }
-                }
-                let mut ordered: Vec<_> = siblings.iter().collect();
-                ordered.sort_by(|left, right| left.key.cmp(&right.key));
-                for sibling in ordered {
-                    state.check_base(&sibling.key, sibling.base_version)?;
-                }
-                let first = siblings
-                    .first()
-                    .ok_or(DecideRegistryCommandError::InvalidOrdering)?;
-                let first = state.active(&first.key)?;
-                let expected: BTreeSet<_> = state
-                    .sets
-                    .iter()
-                    .filter(|(_, entry)| {
-                        entry.deletion == RuleSetDeletion::Active
-                            && entry.origin == RuleOrigin::User
-                            && entry.current.set.header.parent == first.current.set.header.parent
-                            && entry.current.set.header.kind == first.current.set.header.kind
-                    })
-                    .map(|(key, _)| key.clone())
-                    .collect();
-                if seen != expected {
-                    return Err(DecideRegistryCommandError::InvalidOrdering);
-                }
-                let first_order = if first.current.set.header.parent.is_none() {
-                    FIRST_USER_ROOT_ORDER
-                } else {
-                    0
-                };
-                for (order, sibling) in siblings.into_iter().enumerate() {
-                    let order = order
-                        .checked_add(first_order)
-                        .ok_or(DecideRegistryCommandError::RevisionOverflow)?;
-                    let update = state.metadata(
-                        &sibling.key,
-                        None,
-                        Some(
-                            i64::try_from(order)
-                                .context(command_error::SiblingOrderOverflowSnafu)?,
-                        ),
-                        RuleSetDeletion::Active,
-                    )?;
-                    writes.push(RuleSetWrite::Reorder(update));
-                }
             }
             RegistryCommand::Delete { key, base_version } => {
                 state.check_base(&key, base_version)?;
@@ -691,12 +564,8 @@ impl RuleRegistry {
                 }) {
                     return Err(DecideRegistryCommandError::HasChildren);
                 }
-                let update = state.metadata(
-                    &key,
-                    Some(Enablement::Disabled),
-                    None,
-                    RuleSetDeletion::Deleted,
-                )?;
+                let update =
+                    state.metadata(&key, Some(Enablement::Disabled), RuleSetDeletion::Deleted)?;
                 writes.push(RuleSetWrite::MarkDeleted(update));
             }
             RegistryCommand::InstallBuiltin { set, revision } => {
@@ -708,7 +577,6 @@ impl RuleRegistry {
                 if !key.as_str().starts_with("builtin.")
                     || set.header.parent.is_some()
                     || revision == 0
-                    || matches!(set.header.kind, RuleKind::Precedent | RuleKind::PolicyCheck)
                 {
                     return Err(DecideRegistryCommandError::InvalidBuiltin);
                 }
@@ -734,7 +602,6 @@ impl RuleRegistry {
                             reply: Ok(RegistrySuccess {
                                 epoch: current.epoch(),
                                 versions: BTreeMap::new(),
-                                upstream_changes: current.upstream_changes().to_vec(),
                             }),
                             outcome: None,
                             draft: Some(current.clone()),
@@ -773,11 +640,7 @@ impl RuleRegistry {
             .collect();
         Ok(Decision {
             writes,
-            reply: Ok(RegistrySuccess {
-                epoch,
-                versions,
-                upstream_changes: candidate.upstream_changes().to_vec(),
-            }),
+            reply: Ok(RegistrySuccess { epoch, versions }),
             outcome: Some(CommitOutcome {
                 state,
                 base_epoch: current.epoch(),
@@ -937,7 +800,6 @@ impl RegistryState {
         &mut self,
         key: &RuleSetKey,
         enabled: Option<Enablement>,
-        order: Option<i64>,
         deletion: RuleSetDeletion,
     ) -> Result<RuleSetUpdate, DecideRegistryCommandError> {
         let old = self.active(key)?;
@@ -963,7 +825,7 @@ impl RegistryState {
             expected: ExpectedRuleVersion::Version(old.current.version),
             // Absent metadata edits retain the persisted values.
             enabled: enabled.unwrap_or(old.current.enabled),
-            sibling_order: order.unwrap_or(old.current.sibling_order),
+            sibling_order: old.current.sibling_order,
             builtin_revision: old.builtin_revision,
             deletion,
         };

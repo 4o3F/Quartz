@@ -797,13 +797,6 @@ pub(crate) mod tests {
             client
                 .request(
                     4,
-                    quartz_protocol::Op::RuleSetsVersions,
-                    serde_json::json!({"key":"builtin.privacy"}),
-                )
-                .await;
-            client
-                .request(
-                    5,
                     quartz_protocol::Op::RulesTextExport,
                     serde_json::json!({"key":"builtin.privacy"}),
                 )

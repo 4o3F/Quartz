@@ -604,7 +604,6 @@ impl PreviewJob {
             domain::RuleKind::Classification => row.is_retained_window(),
             domain::RuleKind::Extraction => Classifier::accepts_extraction(row),
             domain::RuleKind::Privacy => row.is_retained_window(),
-            _ => return Err(RunQueryError::InvalidRuleEntry),
         };
         if !accepts_input {
             return Ok(());
@@ -632,7 +631,6 @@ impl PreviewJob {
                     ))
             }
             domain::RuleKind::Privacy => self.evaluate_privacy(row, self.after.privacy()),
-            _ => return Err(RunQueryError::InvalidRuleEntry),
         };
         let after_action = (self.kind == domain::RuleKind::Privacy).then_some(evaluation.privacy);
         let hidden = match after_action {
@@ -662,7 +660,6 @@ impl PreviewJob {
                         && after_facts.app(after).is_some()
                 }
                 domain::RuleKind::Privacy => !participating.fields.is_empty(),
-                _ => false,
             };
             let statistics = self
                 .statistics
@@ -817,9 +814,6 @@ impl PreviewJob {
                     domain::WebAction::None => wire::RuleWebAction::None,
                 },
             },
-            domain::RuleKind::Precedent | domain::RuleKind::PolicyCheck => {
-                return Err(RunQueryError::InvalidRuleEntry);
-            }
         })
     }
     fn prepare_page(&mut self) -> Result<PreviewPage, RunQueryError> {

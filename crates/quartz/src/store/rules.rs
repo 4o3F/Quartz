@@ -38,6 +38,8 @@ pub(crate) enum LoadRulesError {
     MissingRevision,
     #[snafu(display("stored rule enablement is unsupported"))]
     InvalidEnablement { value: i64 },
+    #[snafu(display("stored rule kind is unsupported"))]
+    UnsupportedKind,
     #[snafu(display("stored rule revision exceeds the supported range"))]
     InvalidVersion { source: std::num::TryFromIntError },
     #[snafu(display("stored contents do not match their SHA-256"))]
@@ -216,11 +218,10 @@ impl<'connection> RuleSets<'connection> {
                 .clone();
             let legacy_header = SetHeader {
                 key: row.key,
-                kind: row.kind.domain_kind(),
+                kind: row.kind.domain_kind()?,
                 name: row.name,
                 parent,
                 description: None,
-                chain: None,
             };
             // Legacy rows have no header snapshot; only the row header remains available.
             let header = history[&version].header.clone().unwrap_or(legacy_header);
@@ -381,13 +382,12 @@ impl<'connection> RuleSetTransaction<'connection> {
     }
 }
 impl RuleSetKind {
-    fn domain_kind(self) -> RuleKind {
+    fn domain_kind(self) -> Result<RuleKind, LoadRulesError> {
         match self {
-            Self::Classification => RuleKind::Classification,
-            Self::Extraction => RuleKind::Extraction,
-            Self::Privacy => RuleKind::Privacy,
-            Self::Precedent => RuleKind::Precedent,
-            Self::PolicyCheck => RuleKind::PolicyCheck,
+            Self::Classification => Ok(RuleKind::Classification),
+            Self::Extraction => Ok(RuleKind::Extraction),
+            Self::Privacy => Ok(RuleKind::Privacy),
+            Self::Precedent | Self::PolicyCheck => Err(LoadRulesError::UnsupportedKind),
         }
     }
     fn from_domain(kind: RuleKind) -> Self {
@@ -395,8 +395,6 @@ impl RuleSetKind {
             RuleKind::Classification => Self::Classification,
             RuleKind::Extraction => Self::Extraction,
             RuleKind::Privacy => Self::Privacy,
-            RuleKind::Precedent => Self::Precedent,
-            RuleKind::PolicyCheck => Self::PolicyCheck,
         }
     }
 }

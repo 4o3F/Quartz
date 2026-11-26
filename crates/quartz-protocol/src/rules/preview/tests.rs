@@ -53,23 +53,19 @@ fn preview_accepts_all_rule_set_write_shapes() {
     for mutation in [
         json!({"op":"rule_sets.edit","body":{"key":"user.x","base_version":0,"text":"text"}}),
         json!({"op":"rule_sets.set_enabled","body":{"key":"user.x","base_version":1,"enabled":false}}),
-        json!({"op":"rule_sets.reorder","body":{"siblings":[{"key":"user.x","base_version":1}]}}),
         json!({"op":"rule_sets.delete","body":{"key":"user.x","base_version":1}}),
-        json!({"op":"rule_sets.revert","body":{"key":"user.x","base_version":1,"version":1}}),
     ] {
         round_trip::<RulePreviewMutation>(mutation.clone());
         let mut unknown = mutation;
         unknown["body"]["extra"] = json!(true);
         assert!(serde_json::from_value::<RulePreviewMutation>(unknown).is_err());
     }
-    let mut reorder = json!({"op":"rule_sets.reorder","body":{"siblings":[{"key":"user.x","base_version":1,"extra":true}]}});
-    assert!(serde_json::from_value::<RulePreviewMutation>(reorder.clone()).is_err());
-    reorder["body"]["siblings"][0]
-        .as_object_mut()
-        .expect("sibling")
-        .remove("extra");
-    reorder["body"]["siblings"][0]["base_version"] = json!(0);
-    assert!(serde_json::from_value::<RulePreviewMutation>(reorder).is_err());
+    for removed in [
+        json!({"op":"rule_sets.reorder","body":{"siblings":[{"key":"user.x","base_version":1}]}}),
+        json!({"op":"rule_sets.revert","body":{"key":"user.x","base_version":1,"version":1}}),
+    ] {
+        assert!(serde_json::from_value::<RulePreviewMutation>(removed).is_err());
+    }
 }
 #[test]
 fn preview_deadlines_samples_and_logical_dates_have_documented_bounds() {

@@ -6,8 +6,7 @@ use crate::{
 };
 use diesel::connection::SimpleConnection;
 use quartz_domain::rules::registry::{
-    DecideRegistryCommandError, RegistryCommand, RuleRegistry, RuleWarning, SiblingRevision,
-    UpstreamState,
+    DecideRegistryCommandError, RegistryCommand, RuleRegistry, RuleWarning,
 };
 use quartz_domain::rules::{ParseContext, RuleBody};
 use std::{fs, sync::Arc};
@@ -79,44 +78,39 @@ impl Fixture {
 #[test]
 fn batch_failure_rolls_back_all_writes_and_never_acknowledges_the_core() {
     let mut fixture = Fixture::new();
-    for key in ["user.a", "user.b"] {
-        let text = source(key, "Sibling").replace(
-            "name='Test'",
-            "name='Test'\nparent='builtin.classification'",
-        );
-        fixture
-            .shell
-            .run(
-                &mut fixture.store,
-                test_now(),
-                RegistryCommand::Apply {
-                    key: key.parse().expect("key"),
-                    file: "sibling.toml".into(),
-                    text,
-                    base_version: 0,
-                },
-            )
-            .expect("sibling fixture");
-    }
+    let text = source("user.a", "Original").replace(
+        "name='Test'",
+        "name='Test'\nparent='builtin.classification'",
+    );
+    fixture
+        .shell
+        .run(
+            &mut fixture.store,
+            test_now(),
+            RegistryCommand::Apply {
+                key: "user.a".parse().expect("key"),
+                file: "a.toml".into(),
+                text,
+                base_version: 0,
+            },
+        )
+        .expect("seed fixture");
     let before = fixture.shell.snapshots().load();
     let count = fixture.version_count();
     let saved = fixture.persisted();
-    fixture.connection().batch_execute("CREATE TRIGGER fail_second_revision BEFORE INSERT ON rule_set_versions WHEN NEW.set_id=(SELECT id FROM rule_sets WHERE key='user.b') BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END;").expect("failure injection");
-    let siblings = ["user.a", "user.b"]
-        .into_iter()
-        .map(|key| SiblingRevision {
-            key: key.parse().expect("key"),
-            base_version: 1,
-        })
-        .collect();
+    fixture.connection().batch_execute("CREATE TRIGGER fail_revision BEFORE INSERT ON rule_set_versions WHEN NEW.set_id=(SELECT id FROM rule_sets WHERE key='user.a') BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END;").expect("failure injection");
     let error = fixture
         .shell
         .run(
             &mut fixture.store,
             test_now(),
-            RegistryCommand::Reorder { siblings },
+            RegistryCommand::Toggle {
+                key: "user.a".parse().expect("key"),
+                base_version: 1,
+                enabled: Enablement::Disabled,
+            },
         )
-        .expect_err("last write fails");
+        .expect_err("revision insert fails");
     assert!(matches!(error, RunRegistryCommandError::Persist { .. }));
     assert_eq!(fixture.version_count(), count);
     let persisted = fixture.persisted();
@@ -130,7 +124,7 @@ fn batch_failure_rolls_back_all_writes_and_never_acknowledges_the_core() {
         );
     }
     assert!(Arc::ptr_eq(&before, &fixture.shell.snapshots().load()));
-    assert_eq!(fixture.shell.snapshots().load().epoch().get(), 2);
+    assert_eq!(fixture.shell.snapshots().load().epoch().get(), 1);
 }
 
 #[test]
@@ -352,15 +346,6 @@ fn builtin_upgrade_uses_the_same_shell_and_keeps_user_overlays() {
     assert_eq!(
         result.reply.versions[&"builtin.test".parse().expect("key")],
         2
-    );
-    assert_eq!(result.reply.upstream_changes.len(), 1);
-    assert_eq!(
-        result.reply.upstream_changes[0].state(),
-        UpstreamState::UpstreamChanged
-    );
-    assert_eq!(
-        fixture.shell.snapshots().load().upstream_changes(),
-        result.reply.upstream_changes
     );
     let state = fixture.persisted();
     assert_eq!(

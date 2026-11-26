@@ -303,12 +303,6 @@ fn unknown_operation_preserves_connection_and_permission_errors_are_typed() {
         let contents: quartz_protocol::RuleSetsGetResponse =
             serde_json::from_value(body).expect("typed contents");
         assert!(!contents.entries.is_empty());
-        let body = client
-            .request(Op::RuleSetsVersions, &json!({"key":"builtin.privacy"}))
-            .expect("revisions over named pipe");
-        let revisions: quartz_protocol::RuleSetsVersionsResponse =
-            serde_json::from_value(body).expect("typed revisions");
-        assert_eq!(revisions.revisions[0].version, contents.version);
     }
 }
 #[test]

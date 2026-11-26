@@ -11,7 +11,6 @@ use quartz_domain::{
         self as domain,
         registry::{
             BuildRuleSnapshotError, DecideRegistryCommandError, RegistryCommand, RuleSetDeletion,
-            SiblingRevision,
         },
     },
 };
@@ -26,12 +25,8 @@ pub(crate) enum RuleMutation {
     Import(wire::RuleSetsEditRequest),
     #[serde(rename = "rule_sets.set_enabled")]
     SetEnabled(wire::RuleSetsSetEnabledRequest),
-    #[serde(rename = "rule_sets.reorder")]
-    Reorder(wire::RuleSetsReorderRequest),
     #[serde(rename = "rule_sets.delete")]
     Delete(wire::RuleSetsDeleteRequest),
-    #[serde(rename = "rule_sets.revert")]
-    Revert(wire::RuleSetsRevertRequest),
 }
 impl std::fmt::Debug for RuleMutation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -39,9 +34,7 @@ impl std::fmt::Debug for RuleMutation {
             Self::Edit(_) => "rule_sets.edit",
             Self::Import(_) => "rules_text.import",
             Self::SetEnabled(_) => "rule_sets.set_enabled",
-            Self::Reorder(_) => "rule_sets.reorder",
             Self::Delete(_) => "rule_sets.delete",
-            Self::Revert(_) => "rule_sets.revert",
         };
         f.debug_struct("RuleMutation")
             .field("operation", &operation)
@@ -58,7 +51,6 @@ struct PreparedMutation {
 }
 struct MutationTargets {
     keys: Vec<domain::RuleSetKey>,
-    historical_version: Option<u32>,
 }
 impl From<wire::RulePreviewMutation> for RuleMutation {
     fn from(mutation: wire::RulePreviewMutation) -> Self {
@@ -75,22 +67,10 @@ impl From<wire::RulePreviewMutation> for RuleMutation {
                     enabled: request.enabled,
                 })
             }
-            wire::RulePreviewMutation::Reorder(request) => {
-                Self::Reorder(wire::RuleSetsReorderRequest {
-                    siblings: request.siblings,
-                })
-            }
             wire::RulePreviewMutation::Delete(request) => {
                 Self::Delete(wire::RuleSetsDeleteRequest {
                     key: request.key,
                     base_version: request.base_version,
-                })
-            }
-            wire::RulePreviewMutation::Revert(request) => {
-                Self::Revert(wire::RuleSetsRevertRequest {
-                    key: request.key,
-                    base_version: request.base_version,
-                    version: request.version,
                 })
             }
         }
@@ -112,12 +92,6 @@ impl RuleMutation {
             Self::Edit(request) | Self::Import(request) => Ok(&request.key),
             Self::SetEnabled(request) => Ok(&request.key),
             Self::Delete(request) => Ok(&request.key),
-            Self::Revert(request) => Ok(&request.key),
-            Self::Reorder(request) => request
-                .siblings
-                .first()
-                .map(|sibling| sibling.key.as_str())
-                .ok_or_else(|| ProtocolError::new(ErrorKind::BadRequest)),
         }
     }
 
@@ -209,7 +183,6 @@ impl RuleMutation {
     }
     fn prepare(self, access: TargetAccess<'_>) -> Result<PreparedMutation, ProtocolError> {
         let mut keys = Vec::new();
-        let mut historical_version = None;
         let command = match self {
             Self::Edit(request) | Self::Import(request) => {
                 let key = Self::key(request.key)?;
@@ -234,34 +207,12 @@ impl RuleMutation {
                     },
                 }
             }
-            Self::Reorder(request) => {
-                let mut siblings = Vec::with_capacity(request.siblings.len());
-                for sibling in request.siblings {
-                    let key = Self::key(sibling.key)?;
-                    keys.push(key.clone());
-                    siblings.push(SiblingRevision {
-                        key,
-                        base_version: sibling.base_version.get(),
-                    });
-                }
-                RegistryCommand::Reorder { siblings }
-            }
             Self::Delete(request) => {
                 let key = Self::key(request.key)?;
                 keys.push(key.clone());
                 RegistryCommand::Delete {
                     key,
                     base_version: request.base_version.get(),
-                }
-            }
-            Self::Revert(request) => {
-                let key = Self::key(request.key)?;
-                keys.push(key.clone());
-                historical_version = Some(request.version.get());
-                RegistryCommand::Revert {
-                    key,
-                    base_version: request.base_version.get(),
-                    version: request.version.get(),
                 }
             }
         };
@@ -283,10 +234,7 @@ impl RuleMutation {
         }
         Ok(PreparedMutation {
             command,
-            targets: MutationTargets {
-                keys,
-                historical_version,
-            },
+            targets: MutationTargets { keys },
         })
     }
     fn key(key: String) -> Result<domain::RuleSetKey, ProtocolError> {
@@ -356,10 +304,7 @@ impl MutationTargets {
                     field: wire::RuleSetIdentityField::Parent,
                 },
                 DecideRegistryCommandError::MissingSet
-                | DecideRegistryCommandError::MissingRevision => ErrorKind::RuleSetNotFound {
-                    key,
-                    version: self.historical_version,
-                },
+                | DecideRegistryCommandError::MissingRevision => ErrorKind::RuleSetNotFound { key },
                 DecideRegistryCommandError::RevisionOverflow
                 | DecideRegistryCommandError::EpochOverflow
                 | DecideRegistryCommandError::SiblingOrderOverflow { .. } => {
@@ -396,7 +341,6 @@ impl MutationTargets {
                 }
                 DecideRegistryCommandError::Identity { .. }
                 | DecideRegistryCommandError::IdentityMismatch
-                | DecideRegistryCommandError::InvalidOrdering
                 | DecideRegistryCommandError::RevisionConflict
                 | DecideRegistryCommandError::InvalidBuiltin => ErrorKind::BadRequest,
             },
@@ -448,11 +392,11 @@ mod tests {
     #[test]
     fn internal_rule_failures_log_only_typed_causes() {
         use crate::store::rules::ExecuteRuleWritesError;
-        use domain::registry::{CommitRuleDecisionError, ComputeUpstreamChangesError};
+        use domain::registry::CommitRuleDecisionError;
         let targets = MutationTargets {
             keys: vec!["user.private-marker".parse().expect("key")],
-            historical_version: None,
         };
+        let invalid_key = || "INVALID!".parse::<domain::RuleSetKey>().expect_err("key");
         let failures = [
             RunRegistryCommandError::Persist {
                 source: ExecuteRuleWritesError::Database {
@@ -469,15 +413,15 @@ mod tests {
             },
             RunRegistryCommandError::Commit {
                 source: CommitRuleDecisionError::Snapshot {
-                    source: BuildRuleSnapshotError::Upstream {
-                        source: ComputeUpstreamChangesError::MissingAncestor,
+                    source: BuildRuleSnapshotError::Identity {
+                        source: invalid_key(),
                     },
                 },
             },
             RunRegistryCommandError::Decide {
                 source: DecideRegistryCommandError::Snapshot {
-                    source: BuildRuleSnapshotError::Upstream {
-                        source: ComputeUpstreamChangesError::MissingAncestor,
+                    source: BuildRuleSnapshotError::Identity {
+                        source: invalid_key(),
                     },
                 },
             },
@@ -629,13 +573,6 @@ mod tests {
                 path: "disable[1].target",
                 line: 17,
                 column: 8,
-            },
-            Case {
-                name: "immutable",
-                code: "E-RULE-IMMUTABLE",
-                path: "disable",
-                line: 13,
-                column: 1,
             },
             Case {
                 name: "field",
@@ -997,7 +934,7 @@ mod tests {
         }
     }
     #[test]
-    fn oversized_legacy_sets_can_be_disabled_but_not_edited_or_reverted() {
+    fn oversized_legacy_sets_can_be_disabled_but_not_edited() {
         let mut fixture = ValidationFixture::oversized_legacy();
         let key = "user.oversized";
         let text = ValidationFixture::oversized_legacy_text();
@@ -1010,14 +947,6 @@ mod tests {
         .execute(&mut fixture.registry, &mut fixture.store, now)
         .expect_err("edited canonical text exceeds budget");
         assert_eq!(error.kind, ErrorKind::BadRequest);
-        let error = RuleMutation::Revert(wire::RuleSetsRevertRequest {
-            key: key.into(),
-            base_version: std::num::NonZeroU32::new(1).expect("version"),
-            version: std::num::NonZeroU32::new(1).expect("version"),
-        })
-        .execute(&mut fixture.registry, &mut fixture.store, now)
-        .expect_err("reverted canonical text exceeds budget");
-        assert_eq!(error.kind, ErrorKind::BadRequest);
         let response = RuleMutation::SetEnabled(wire::RuleSetsSetEnabledRequest {
             key: key.into(),
             base_version: std::num::NonZeroU32::new(1).expect("version"),
@@ -1025,23 +954,6 @@ mod tests {
         })
         .execute(&mut fixture.registry, &mut fixture.store, now)
         .expect("disable oversized legacy set");
-        assert_eq!(response.sets[0].version, 2);
-    }
-    #[test]
-    fn oversized_legacy_sets_can_be_reordered() {
-        let mut fixture = ValidationFixture::oversized_legacy();
-        let response = RuleMutation::Reorder(wire::RuleSetsReorderRequest {
-            siblings: vec![wire::RuleSetSibling {
-                key: "user.oversized".into(),
-                base_version: std::num::NonZeroU32::new(1).expect("version"),
-            }],
-        })
-        .execute(
-            &mut fixture.registry,
-            &mut fixture.store,
-            UtcInstant::try_from(0).expect("UTC"),
-        )
-        .expect("reorder oversized legacy set");
         assert_eq!(response.sets[0].version, 2);
     }
     #[test]
@@ -1177,9 +1089,7 @@ mod tests {
         for op in [
             "rule_sets.edit",
             "rule_sets.set_enabled",
-            "rule_sets.reorder",
             "rule_sets.delete",
-            "rule_sets.revert",
         ] {
             let mut fixture = ValidationFixture::new();
             fixture.edit("user.draft", 0, text);
@@ -1190,13 +1100,7 @@ mod tests {
                 "rule_sets.set_enabled" => {
                     serde_json::json!({"key":"user.draft","base_version":1,"enabled":false})
                 }
-                "rule_sets.reorder" => {
-                    serde_json::json!({"siblings":[{"key":"user.draft","base_version":1}]})
-                }
                 "rule_sets.delete" => serde_json::json!({"key":"user.draft","base_version":1}),
-                "rule_sets.revert" => {
-                    serde_json::json!({"key":"user.draft","base_version":1,"version":1})
-                }
                 _ => unreachable!("fixture operations"),
             };
             let mutation = serde_json::json!({"op":op,"body":body});
@@ -1237,8 +1141,6 @@ mod tests {
             serde_json::json!({"op":"rule_sets.edit","body":{"key":"user.draft","base_version":1,"text":format!("{text}parent='builtin.classification'\n")}}),
             serde_json::json!({"op":"rule_sets.edit","body":{"key":"user.draft","base_version":1,"text":"invalid"}}),
             serde_json::json!({"op":"rule_sets.edit","body":{"key":"user.large","base_version":0,"text":"x".repeat(wire::MAX_RULE_TEXT_BYTES+1)}}),
-            serde_json::json!({"op":"rule_sets.reorder","body":{"siblings":[]}}),
-            serde_json::json!({"op":"rule_sets.revert","body":{"key":"user.draft","base_version":1,"version":2}}),
         ] {
             let actual = ValidationFixture::draft_mutation(body.clone())
                 .draft(&fixture.registry)

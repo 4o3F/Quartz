@@ -1,11 +1,8 @@
-use super::ComputeUpstreamChangesError;
 use crate::rules::{
-    Content, ContentHash, Enablement, InstalledSet, ReferenceCatalog, Rule, RuleOrigin, RuleSet,
-    RuleSetKey, RuleTarget,
+    Content, ContentHash, Enablement, InstalledSet, ReferenceCatalog, RuleOrigin, RuleSet,
+    RuleSetKey,
 };
-use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Whether a retained rule set participates in the current tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,19 +30,6 @@ pub struct RuleSetVersion {
     pub created_utc_ms: Option<i64>,
 }
 impl RuleSetVersion {
-    /// Returns the saved header, or the current row fields available for a legacy revision.
-    pub fn header_or_legacy(&self, current: &crate::rules::SetHeader) -> crate::rules::SetHeader {
-        self.header
-            .clone()
-            .unwrap_or_else(|| crate::rules::SetHeader {
-                key: current.key.clone(),
-                kind: current.kind,
-                name: current.name.clone(),
-                parent: current.parent.clone(),
-                description: None,
-                chain: None,
-            })
-    }
     /// Hashes canonical entries for rule-content comparisons, excluding the saved header.
     pub fn content_hash(&self) -> ContentHash {
         self.content.content_hash()
@@ -88,243 +72,6 @@ impl RegistryState {
     pub fn version(&self, key: &RuleSetKey, version: u32) -> Option<&RuleSetVersion> {
         self.sets.get(key)?.versions.get(&version)
     }
-    /// Compares saved parent revisions with current ancestor contents without side effects.
-    ///
-    /// # Errors
-    /// Returns invalid identity or incomplete historical ancestry errors.
-    pub fn upstream_changes(&self) -> Result<Vec<UpstreamChange>, ComputeUpstreamChangesError> {
-        let mut changes = Vec::new();
-        for (key, entry) in &self.sets {
-            if entry.deletion == RuleSetDeletion::Deleted {
-                continue;
-            }
-            let Some(parent) = &entry.current.set.header.parent else {
-                continue;
-            };
-            let parent: RuleSetKey = parent.parse().context(super::upstream_error::SetKeySnafu)?;
-            let parent = self
-                .sets
-                .get(&parent)
-                .ok_or(ComputeUpstreamChangesError::MissingAncestor)?;
-            let revision = entry
-                .versions
-                .get(&entry.current.version)
-                .ok_or(ComputeUpstreamChangesError::MissingRevision)?;
-            let Some(base_version) = revision.parent_version else {
-                continue;
-            };
-            for target in entry
-                .current
-                .set
-                .content
-                .r#override
-                .iter()
-                .map(|entry| &entry.target)
-                .chain(
-                    entry
-                        .current
-                        .set
-                        .content
-                        .disable
-                        .iter()
-                        .map(|entry| &entry.target),
-                )
-            {
-                let target: RuleTarget =
-                    target.parse().context(super::upstream_error::TargetSnafu)?;
-                if !self.sets.contains_key(target.set_key()) {
-                    continue;
-                }
-                let old =
-                    self.ancestor_rule(parent, base_version, &target, AncestryRevision::Saved)?;
-                let new = self.ancestor_rule(
-                    parent,
-                    parent.current.version,
-                    &target,
-                    AncestryRevision::Current,
-                )?;
-                let state = if new.rule().is_none() {
-                    Some(UpstreamState::TargetDeleted)
-                } else if old.rule() != new.rule()
-                    && entry
-                        .current
-                        .set
-                        .content
-                        .r#override
-                        .iter()
-                        .any(|entry| entry.target == target.to_string())
-                {
-                    Some(UpstreamState::UpstreamChanged)
-                } else {
-                    None
-                };
-                if let Some(state) = state {
-                    changes.push(UpstreamChange {
-                        set_key: key.clone(),
-                        target,
-                        base_parent_version: Some(i64::from(base_version)),
-                        current_parent_version: i64::from(parent.current.version),
-                        overlay_version: i64::from(entry.current.version),
-                        base_target_version: old.version().map(i64::from),
-                        // Missing targets are reported against the inspected parent's revision.
-                        current_target_version: i64::from(
-                            new.version().unwrap_or(parent.current.version),
-                        ),
-                        state,
-                    });
-                }
-            }
-        }
-        Ok(changes)
-    }
-    fn ancestor_rule<'state>(
-        &'state self,
-        mut entry: &'state RuleSetState,
-        mut version: u32,
-        target: &RuleTarget,
-        ancestry: AncestryRevision,
-    ) -> Result<AncestorRule, ComputeUpstreamChangesError> {
-        let mut visited = BTreeSet::new();
-        let target_name = target.to_string();
-        let mut replacement = None;
-        loop {
-            if !visited.insert(&entry.current.set.header.key) {
-                return Err(ComputeUpstreamChangesError::CyclicAncestry);
-            }
-            let revision = entry
-                .versions
-                .get(&version)
-                .ok_or(ComputeUpstreamChangesError::MissingRevision)?;
-            if replacement.is_none() {
-                replacement = revision
-                    .content
-                    .r#override
-                    .iter()
-                    .find(|entry| entry.target == target_name)
-                    .map(|entry| RuleRevision {
-                        rule: entry.rule.clone(),
-                        version,
-                    });
-            }
-            if entry.current.set.header.key == target.set_key().as_str() {
-                let definition = revision
-                    .content
-                    .rule
-                    .iter()
-                    .find(|rule| rule.id == target.rule_id().as_str())
-                    .cloned();
-                if definition.is_some()
-                    && let Some(replacement) = replacement
-                {
-                    return Ok(AncestorRule::Revision {
-                        rule: Some(replacement.rule),
-                        version: replacement.version,
-                    });
-                }
-                return Ok(AncestorRule::Revision {
-                    rule: definition,
-                    version,
-                });
-            }
-            let (Some(parent), Some(parent_version)) =
-                (&entry.current.set.header.parent, revision.parent_version)
-            else {
-                return Ok(AncestorRule::Missing);
-            };
-            let parent: RuleSetKey = parent.parse().context(super::upstream_error::SetKeySnafu)?;
-            entry = self
-                .sets
-                .get(&parent)
-                .ok_or(ComputeUpstreamChangesError::MissingAncestor)?;
-            version = match ancestry {
-                AncestryRevision::Saved => parent_version,
-                AncestryRevision::Current => entry.current.version,
-            };
-        }
-    }
-}
-struct RuleRevision {
-    rule: Rule,
-    version: u32,
-}
-enum AncestorRule {
-    Missing,
-    Revision { rule: Option<Rule>, version: u32 },
-}
-impl AncestorRule {
-    fn rule(&self) -> Option<&Rule> {
-        match self {
-            Self::Missing => None,
-            Self::Revision { rule, .. } => rule.as_ref(),
-        }
-    }
-    fn version(&self) -> Option<u32> {
-        match self {
-            Self::Missing => None,
-            Self::Revision { version, .. } => Some(*version),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum AncestryRevision {
-    Saved,
-    Current,
-}
-
-/// Computed comparison of the saved parent revision with the current ancestor contents.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpstreamChange {
-    set_key: RuleSetKey,
-    target: RuleTarget,
-    base_parent_version: Option<i64>,
-    current_parent_version: i64,
-    overlay_version: i64,
-    base_target_version: Option<i64>,
-    current_target_version: i64,
-    state: UpstreamState,
-}
-impl UpstreamChange {
-    /// Returns the user overlay key affected by the upstream change.
-    pub fn set_key(&self) -> &RuleSetKey {
-        &self.set_key
-    }
-    /// Returns the qualified ancestor target being compared.
-    pub fn target(&self) -> &RuleTarget {
-        &self.target
-    }
-    /// Returns the parent revision saved with this overlay version.
-    pub fn base_parent_version(&self) -> Option<i64> {
-        self.base_parent_version
-    }
-    /// Returns the direct parent current revision.
-    pub fn current_parent_version(&self) -> i64 {
-        self.current_parent_version
-    }
-    /// Returns the user overlay revision carrying this target.
-    pub fn overlay_version(&self) -> i64 {
-        self.overlay_version
-    }
-    /// Returns the ancestor revision supplying the saved target contents.
-    pub fn base_target_version(&self) -> Option<i64> {
-        self.base_target_version
-    }
-    /// Returns the ancestor revision supplying the current target contents.
-    pub fn current_target_version(&self) -> i64 {
-        self.current_target_version
-    }
-    /// Returns whether the target was removed or changed.
-    pub fn state(&self) -> UpstreamState {
-        self.state
-    }
-}
-/// Difference between a saved parent baseline and the current ancestor contents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UpstreamState {
-    /// The originally defined target is absent from the current ancestor contents.
-    TargetDeleted,
-    /// The inherited target contents differ from the saved parent baseline.
-    UpstreamChanged,
 }
 
 /// Exact after-image of one revision, with no database identifiers or timestamps.
@@ -360,12 +107,10 @@ pub enum ExpectedRuleVersion {
 /// Domain descriptions executed together by a persistence adapter.
 #[derive(Debug, Clone)]
 pub enum RuleSetWrite {
-    /// Appends imported, edited, or reverted user contents.
+    /// Appends imported or edited user contents.
     CommitVersion(RuleSetUpdate),
     /// Appends unchanged contents with a new enabled state.
     Toggle(RuleSetUpdate),
-    /// Appends unchanged contents with a new sibling position.
-    Reorder(RuleSetUpdate),
     /// Retains the row and history while marking it deleted.
     MarkDeleted(RuleSetUpdate),
     /// Appends a builtin version and records its upstream revision.
@@ -377,7 +122,6 @@ impl RuleSetWrite {
         match self {
             Self::CommitVersion(update)
             | Self::Toggle(update)
-            | Self::Reorder(update)
             | Self::MarkDeleted(update)
             | Self::InstallBuiltin(update) => update,
         }

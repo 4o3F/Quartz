@@ -518,11 +518,6 @@ pattern='\ANote: (?P<document>[^\r\n]+)\z'
         assert_eq!(builtin.builtin_revision, Some(revision));
         assert_eq!(builtin.current.version, 2);
         assert_eq!(builtin.versions.len(), 2);
-        assert_eq!(snapshot.upstream_changes().len(), 1);
-        assert_eq!(
-            snapshot.upstream_changes()[0].target().to_string(),
-            "builtin.extraction/vscode-project"
-        );
         for (exe, title, document, rule) in [
             (
                 "code.exe",
@@ -647,7 +642,6 @@ when=[{field='app.exe_name',op='equals',value='quartz-test.exe'}]
         let overlay = &state.sets[&overlay_key];
         assert_eq!(overlay.current.version, 1);
         assert_eq!(overlay.versions[&1].parent_version, Some(1));
-        assert_eq!(snapshot.upstream_changes().len(), 1);
         let fields = FieldSnapshot {
             text: BTreeMap::from([(Field::ExeName, NfcText::new("quartz-test.exe"))]),
             domain: None,

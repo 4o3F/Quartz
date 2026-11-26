@@ -218,7 +218,7 @@ impl RuleSet {
     /// Parses and validates every independent entry, returning all semantic diagnostics.
     ///
     /// # Errors
-    /// Returns [`ParseRuleSetError`] containing all located diagnostics for invalid syntax, keys, references, conditions, or unsupported M7 families.
+    /// Returns [`ParseRuleSetError`] containing all located diagnostics for invalid syntax, keys, references, or conditions.
     pub fn parse(
         file: &str,
         source: &str,
@@ -268,7 +268,7 @@ impl RuleSet {
         check.keys(
             header,
             "set",
-            &["key", "kind", "name", "parent", "description", "chain"],
+            &["key", "kind", "name", "parent", "description"],
         );
         let key = check.required_string(header, "key", "set");
         if key.as_deref().is_none_or(|key| {
@@ -293,33 +293,9 @@ impl RuleSet {
             check.error(DiagnosticCode::Set, "set.kind", "unknown rule kind");
             RuleKind::Classification
         });
-        if matches!(kind, RuleKind::Precedent | RuleKind::PolicyCheck) {
-            check.error(
-                DiagnosticCode::Set,
-                "set.kind",
-                "this rule kind requires milestone M7 and is not supported yet",
-            );
-        }
         let name = check.required_string(header, "name", "set");
         let parent = check.string(header, "parent", "set", Required::No);
         let description = check.string(header, "description", "set", Required::No);
-        let chain = check.string(
-            header,
-            "chain",
-            "set",
-            if kind == RuleKind::Precedent {
-                Required::Yes
-            } else {
-                Required::No
-            },
-        );
-        if chain.is_some() && kind != RuleKind::Precedent {
-            check.error(
-                DiagnosticCode::Set,
-                "set.chain",
-                "chain is only valid for precedent sets",
-            );
-        }
         let mut content = Content::default();
         let mut ids = BTreeSet::new();
         let mut targets = BTreeSet::new();
@@ -331,13 +307,6 @@ impl RuleSet {
                 check.error(DiagnosticCode::Key, section, "expected an array of tables");
                 continue;
             };
-            if kind == RuleKind::Precedent && section != "rule" && !entries.is_empty() {
-                check.error(
-                    DiagnosticCode::Immutable,
-                    section,
-                    "precedent sets only permit appended rules",
-                );
-            }
             for (index, entry) in entries.iter().enumerate() {
                 let path = format!("{section}[{index}]");
                 if section == "disable" {
@@ -467,7 +436,6 @@ impl RuleSet {
                         .expect("required set name exists when validation has no diagnostics"),
                     parent,
                     description,
-                    chain,
                 },
                 content,
                 locations: check.locations,
@@ -768,12 +736,6 @@ impl Check<'_> {
             RuleKind::Privacy => {
                 keys.extend(["match", "when", "preset", "app", "window_title", "web"])
             }
-            RuleKind::Precedent => {
-                keys.extend(["match", "when", "max_continuous", "max_total_per_session"])
-            }
-            RuleKind::PolicyCheck => keys.extend([
-                "policy", "kind", "window", "max", "within", "time", "match", "when",
-            ]),
         }
         if self.context.origin == RuleOrigin::Builtin {
             keys.extend(["detector", "languages", "verified", "label_key"]);
@@ -968,12 +930,6 @@ impl Check<'_> {
                     }
                 }
                 RuleBody::Privacy { action, mode, when }
-            }
-            RuleKind::Precedent | RuleKind::PolicyCheck => {
-                if entry.get("when").is_some() {
-                    self.conditions(entry, "when", path, kind);
-                }
-                return None;
             }
         };
         Some(Rule {

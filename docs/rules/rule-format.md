@@ -14,7 +14,6 @@ Quartz 本身不包含任何 AI 功能，也不会把数据发给任何服务。
 > 3. 每条规则都写 `label`，用一句话说明它的意图。
 > 4. 用户想修改内置或已有规则时，不要复制整套规则，而是新建一个以它为 `parent` 的规则集，用 `[[override]]` 或 `[[disable]]` 只写改动。
 > 5. 不确定用户想要多宽的范围时，选择**更窄**的写法，并在代码块之后用一两句话说明还可以放宽到什么程度。
-> 6. 写判例（`precedent`）时尤其要窄：判例一旦保存，在这条链的整个生命周期内永久有效，不能撤销。
 
 ## 1. 规则集
 
@@ -48,12 +47,10 @@ reason = "B 站改由本规则集细分"
 | `classification` | 分类规则 | 3.1 |
 | `extraction` | 文档提取规则 | 3.2 |
 | `privacy` | 隐私规则 | 3.3 |
-| `precedent` | 判例（M7 起） | 3.4 |
-| `policy_check` | 国策自动检查（M7 起） | 3.5 |
 
 - `key` 只能包含小写字母、数字、`.`、`-`、`_`。`builtin.` 前缀保留给 Quartz 内置规则集；用户规则集请用 `user.` 前缀。
 - 规则的 `id` 在规则集内唯一，只能包含字母、数字、`-`、`_`。规则的全名是 `<规则集 key>/<规则 id>`，例如 `user.study-sites/bili-tutorial`。
-- 规则集以 `key` 标识，规则的 `id` 只在该集内唯一。再次导入同一 key 生成新版本；旧版本保留，可以对比和回退。wire 写入携带当前 `base_version`，创建不存在或已删除的 key 使用 0；保存版本为 u32，从 1 开始，删除后恢复沿用历史版本递增。
+- 规则集以 `key` 标识，规则的 `id` 只在该集内唯一。再次导入同一 key 生成新版本。wire 写入携带当前 `base_version`，创建不存在或已删除的 key 使用 0；保存版本为 u32，从 1 开始，删除后恢复沿用历史版本递增。
 - 文件编码 UTF-8，注释用 `#`。未知的键会报错，不会被忽略。
 - 内置规则集另有几个只供内置使用的键（`detector`、`languages`、`verified`、`label_key`），出现在用户规则集中会报 `E-RULE-KEY`。
 
@@ -83,7 +80,6 @@ builtin.classification          （内置，随 Quartz 更新）
 - 父子规则集的 `kind` 必须相同。不允许成环。
 - 停用一个规则集时，它的整个子树一起停用，因为子规则集的差异依赖父级。
 - 两个互不为祖先的规则集，不能 `override` 或 `disable` 同一条规则。需要叠加修改时，让其中一个成为另一个的子规则集。
-- `precedent` 规则集只能使用 `[[rule]]`，不能覆盖或停用，因为判例永久有效。
 - 内置规则集不能直接编辑，只能通过子规则集修改。默认用户子集分别为 `user.local.classification`、`user.local.extraction`、`user.local.privacy`，以同类型 builtin 集为父；key 全局唯一。
 - 同一 key 创建后 kind 与 parent 固定，删除后恢复也沿用原身份；换类型或父级时新建 key。编译时检查每条新增和覆盖规则的内容类型与 kind 一致。
 
@@ -152,9 +148,8 @@ when = [
 |---|---|---|
 | `classification` | `app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`；M5 加入 `web.*`、`browser.profile_label` | 使用当前查询输入，不能依赖分类本身 |
 | `privacy` | `app.*`、`window.class`、`title.raw`、`web.domain`、`web.tab_title`、`browser.profile_label` | 隐私规则在入库前求值，只能用采集时就有的字段 |
-| `precedent`、`policy_check` | 全部字段 | 基于已入库并已分类的片段 |
 
-M4 先提取再分类，窗口类名取自已保留的窗口实例；标题隐藏时 `title.raw`、`title.normalized` 与 `doc.*` 缺失。分类的 `web.*` 与 `browser.profile_label` 待 M5，`precedent` / `policy_check` 待 M7；尚未交付的字段或规则类型在校验阶段返回 `E-RULE-FIELD` 或 `E-RULE-SET`。
+M4 先提取再分类，窗口类名取自已保留的窗口实例；标题隐藏时 `title.raw`、`title.normalized` 与 `doc.*` 缺失。分类的 `web.*` 与 `browser.profile_label` 待 M5；尚未交付的字段在校验阶段返回 `E-RULE-FIELD`。
 
 `web.*` 只在浏览器扩展已连接且关联到当前窗口时存在。字段不存在时，普通条件不成立，`negate = true` 的条件成立。
 
@@ -240,60 +235,6 @@ preset = "title_hidden"            # 与下面三项二选一
 
 多条隐私规则同时命中时，每一项取最严格的结果。停用内置隐私规则（例如无痕窗口识别）时，导入界面会单独警告。
 
-### 3.4 判例 `precedent`（M7 起）
-
-CTDP 专注任务中“判允许”的行为。命中判例的活动在这条链今后的所有任务中都不再被视为疑似违规。**判例保存后不能修改或删除。**
-
-每条链有自己的判例规则集，`[set]` 中多写一个 `chain`：
-
-```toml
-format = "quartz-rules/1"
-
-[set]
-key = "user.precedents-main"
-kind = "precedent"
-name = "主链判例"
-chain = "主链"                     # 链的名称
-
-[[rule]]
-id = "wechat-reply"
-label = "回复微信消息，每次不超过 3 分钟"
-match = "all"
-when = [{ field = "app.exe_name", op = "equals", value = "weixin.exe" }]
-max_continuous = "3m"              # 可选：连续超过这个时长仍算疑似违规
-max_total_per_session = "10m"      # 可选：一次任务内累计超过这个时长仍算疑似违规
-```
-
-- 时长写法：`90s`、`3m`、`1h30m`。
-- 判例规则集只能追加 `[[rule]]`。再次导入时，已有规则必须原样保留，否则报 `E-RULE-IMMUTABLE`。
-- 写判例时，从最窄的范围开始：具体的文档或标题 → 具体的应用或域名 → 整个分类。只有用户明确说“这一类都可以”时才用 `category`。
-- 离开电脑这类情况用 `activity`，例如 `{ field = "activity", op = "equals", value = "idle" }` 加 `max_continuous = "5m"` 表示“短暂离开 5 分钟以内允许”。
-
-### 3.5 国策自动检查 `policy_check`（M7 起）
-
-为 RSIP 国策提供基于电脑使用记录的自动检查。只能检查这台电脑上可观测的行为；手机、家务等国策请在 Quartz 中设为手动结算。
-
-```toml
-[[rule]]
-id = "curfew"
-label = "电子宵禁：23:30 后不用娱乐应用"
-policy = "电子宵禁"                # 国策名称
-kind = "window_max"
-window = "23:30-07:00"             # 本地时间，可以跨午夜
-max = "0m"
-match = "any"
-when = [{ field = "category", op = "equals", value = "builtin:entertainment" }]
-```
-
-| `kind` | 参数 | 满足条件 |
-|---|---|---|
-| `window_max` | `window`、`max`、`when` | 时间窗内命中条件的活跃时长不超过 `max` |
-| `after_first_active` | `within`、`when` | 当天第一次活跃之后的 `within` 时长内，没有命中条件的活动 |
-| `first_active_before` | `time` | 当天第一次活跃早于 `time` |
-| `last_active_before` | `time` | 当天最后一次活跃早于 `time`（按逻辑日计算，可跨午夜，如 `00:30`） |
-
-“当天”按 Quartz 设置的逻辑日起点计算。
-
 ## 4. 校验、预览与调试
 
 ### 4.1 命令
@@ -326,7 +267,6 @@ error[E-RULE-TARGET]: user.my-tweaks: override[0].target: "builtin.classificatio
 | `E-RULE-PARENT` | 父规则集 key 语法无效、父集不存在或已删除，或父链形成环 |
 | `E-RULE-TARGET` | `override`/`disable` 的目标不存在，或不在祖先链上 |
 | `E-RULE-CONFLICT` | 同一规则集重复修改一个 target，或与另一个非祖先规则集修改了同一条规则 |
-| `E-RULE-IMMUTABLE` | 修改或删除了判例，或在判例规则集中使用 `override`/`disable` |
 | `E-RULE-FIELD` | 未知字段，或该规则类型不允许使用此字段 |
 | `E-RULE-OP` | 未知操作符，或操作符不适用于该字段 |
 | `E-RULE-VALUE` | 值为空、超长、时长或时间格式错误、枚举值无效 |
@@ -338,10 +278,9 @@ error[E-RULE-TARGET]: user.my-tweaks: override[0].target: "builtin.classificatio
 
 ### 4.3 内置规则更新
 
-内置规则集随 Quartz 升级。你的子规则集不受影响，但可能出现两种情况，导入或升级后会在规则集树中标出：
+内置规则集随 Quartz 升级。你的子规则集不受影响；如果 `override` 或 `disable` 指向的内置规则在新版本中不存在，会在规则集树中标出：
 
 - **目标已删除**：`override` 或 `disable` 指向的内置规则在新版本中不存在。这条差异暂时不生效，请删除它或改为 `[[rule]]`。
-- **上游已变更**：被覆盖的内置规则在新版本中改了内容，由你决定保留覆盖还是删除它。
 
 ## 5. 示例
 
@@ -393,29 +332,6 @@ when = [{ field = "app.identity_key", op = "starts_with", value = "aumid:Microso
 target = "builtin.classification/wechat"
 reason = "微信不计入沟通"
 ```
-
-**需求**：“专注时查文档可以，比如 docs.rs 和 MDN。”
-
-```toml
-format = "quartz-rules/1"
-
-[set]
-key = "user.precedents-main"
-kind = "precedent"
-name = "主链判例"
-chain = "主链"
-
-[[rule]]
-id = "docs-sites"
-label = "查阅 docs.rs 与 MDN 文档"
-match = "any"
-when = [
-  { field = "web.domain", op = "domain_suffix", value = "docs.rs" },
-  { field = "web.domain", op = "domain_suffix", value = "developer.mozilla.org" },
-]
-```
-
-**反例**：把上一条写成 `{ field = "app.exe_name", op = "equals", value = "msedge.exe" }`。这会永久放行整个浏览器，范围远超“查文档”。
 
 ## 6. 版本
 

@@ -305,13 +305,13 @@ schema 版本由 diesel 的 `__diesel_schema_migrations` 表记录，不另建�
 
 所有规则（分类、提取、隐私，以及 M7 的判例与国策检查）都以**规则集**组织，规则集通过 `parent_id` 组成树，子规则集只保存相对父级的差异（新增 `rule`、覆盖 `override`、停用 `disable`）。规则集树的语义、生效规则的计算顺序、对外文本格式 `quartz-rules/1`、全部字段、操作符与校验错误码，以 [规则格式文档](../rules/rule-format.md) 为准；`rule_set_versions.content` 是该文本的规范化 JSON 形式，分类改用 uuid 引用，因此分类改名不影响规则。
 
-新修订的 `rule_set_versions.content` 在规范条目 JSON 中增加可选 `set` 对象，保存完整的 key、kind、name、parent、description、chain 头部，`content_hash` 仍校验整个存储 JSON 的 SHA-256。启停、排序、删除也保存头部；回退恢复来源修订的头部和条目。加载当前版本和导出历史版本使用对应修订的头部。这是现有 JSON 列的附加字段，不改变数据库 schema。旧修订没有保存头部时，导出与回退使用当前 rule_sets 行中的 key、kind、name、parent，description 与 chain 为空；旧名称和未曾持久化的 description 无法恢复。加载两种修订 JSON 时均拒绝未知顶层字段。规则生效内容哈希继续使用规范条目，规则读取 versions 摘要另包含历史头部。
+新修订的 `rule_set_versions.content` 在规范条目 JSON 中增加可选 `set` 对象，保存完整的 key、kind、name、parent、description 头部，`content_hash` 仍校验整个存储 JSON 的 SHA-256。启停、删除也保存头部。加载当前版本使用对应修订的头部。这是现有 JSON 列的附加字段，不改变数据库 schema。旧修订没有保存头部时，使用当前 rule_sets 行中的 key、kind、name、parent，description 为空；旧名称和未曾持久化的 description 无法恢复。加载两种修订 JSON 时均拒绝未知顶层字段。规则生效内容哈希继续使用规范条目。
 
 - 规则数量在数百条以内。核心启动或规则变化时，把每类规则的规则集树解析为生效规则列表并编译（正则、规范化后的条件值），组成不可变的规则快照常驻内存；查询与采集线程只读快照。规则的修改、快照发布与并发控制由规则注册表负责，见 01 第 6.2 节：注册表是规则表的唯一写者，修改先编译、后提交、再发布，并按 `base_version` 拒绝过期修改。
 - 每条生效规则带来源：定义它的规则集 key 与版本、规则 id，以及覆盖它的规则集。这份来源用于命中预览与隐私解释 ID。
 - 界面中“编辑内置规则”不修改内置规则集，而是写入用户选定的覆盖规则集（默认分别为 `user.local.classification`、`user.local.extraction`、`user.local.privacy`，以同 kind 的内置规则集为父）；编辑用户规则则生成该规则集的新版本。
-- 规则集创建后 kind 与父级身份固定，删除后重新导入同一 key 也沿用原身份；需要换类型或父级时新建规则集。存储更新将 kind、父级、来源与当前修订共同作为写入前置条件，不更新这三个身份列；条件不符时回滚事务。历史基线只由 `rule_set_versions.parent_version` 沿固定父级链追溯。
-- 历史版本全部保留（体积很小），用于回退。回退内容使用来源历史版本的 `database:<key>@<version>` 合成位置，不沿用当前文本跨度；编译检查规则正文与头部 kind 一致。整树身份、祖先和目标校验只执行一次，再分别计算各类型的生效规则；每项树诊断只发布一次。分类规则的条件字段有：`app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`、`web.domain`、`web.tab_title`、`browser.profile_label`。判例与国策检查另可使用 `category`、`category.tendency`、`activity`。隐私规则另用 06 第 4 节的字段白名单，保存时拒绝 `doc.*` 与 `title.normalized`。
+- 规则集创建后 kind 与父级身份固定，删除后重新导入同一 key 也沿用原身份；需要换类型或父级时新建规则集。存储更新将 kind、父级、来源与当前修订共同作为写入前置条件，不更新这三个身份列；条件不符时回滚事务。
+- 编译检查规则正文与头部 kind 一致。整树身份、祖先和目标校验只执行一次，再分别计算各类型的生效规则；每项树诊断只发布一次。分类规则的条件字段有：`app.identity_key`、`app.exe_name`、`app.display_name`、`window.class`、`title.raw`、`title.normalized`、`doc.document`、`doc.project`、`doc.profile`、`web.domain`、`web.tab_title`、`browser.profile_label`。判例与国策检查另可使用 `category`、`category.tendency`、`activity`。隐私规则另用 06 第 4 节的字段白名单，保存时拒绝 `doc.*` 与 `title.normalized`。
 
 操作符有：`equals`、`contains`、`starts_with`、`ends_with`、`regex`、`domain_suffix`。文本比较的规范化、大小写与全半角处理、IDN 域名转换见 10 第 4.1 节；匹配结果与界面语言无关。域名子串操作保留片段的首尾及连续分隔点，完整域名操作才移除根点，具体转换见规则格式第 2.2 节。求值语义改变时递增现有 `QUERY_SEMANTICS_VERSION`；新文本的规范化内容变化同时反映在规则内容哈希中。
 
@@ -326,7 +326,7 @@ CREATE TABLE data_day_versions (
 ) WITHOUT ROWID;
 ```
 
-`classification_version`、`extractor_version`、`privacy_version` 是对应类型**生效规则列表**的内容哈希（由各规则集当前版本的 `content_hash` 按解析顺序组合而成），不是手动递增的计数器：任何导入、编辑、启停、调整顺序都会自然改变哈希，回退到旧状态时哈希也恢复，可以复用缓存。`stats_policy_version` 仍保存在 `settings` 中，修改统计口径的事务里加一。
+`classification_version`、`extractor_version`、`privacy_version` 是对应类型**生效规则列表**的内容哈希（由各规则集当前版本的 `content_hash` 按解析顺序组合而成），不是手动递增的计数器：任何导入、编辑、启停都会自然改变哈希。`stats_policy_version` 仍保存在 `settings` 中，修改统计口径的事务里加一。
 
 `intervals` 来源也覆盖时钟段范围的建立、结束和确认点推进，使尚无前台事实的采集范围变化能使查询与日订阅失效。
 
