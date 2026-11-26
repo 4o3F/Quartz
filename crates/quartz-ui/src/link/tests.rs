@@ -21,7 +21,7 @@ fn show_and_activate_select_window_restore_activation_and_frame_acknowledgement(
         WindowAction::Quit
     );
     assert_eq!(
-        LinkEvent::Control(ControlOp::BrowserAck).window_action(),
+        LinkEvent::Connection(ConnectionState::Connecting).window_action(),
         WindowAction::Observe
     );
 }
@@ -167,7 +167,11 @@ mod pipe {
                     ui: quartz_protocol::UiHello { state }
                 }
             );
-            self.ok(request, serde_json::json!({"proto":1,"core_version":"1.0","instance_id":"test-start","capabilities":[]})).await;
+            self.ok(
+                request,
+                serde_json::json!({"proto":1,"core_version":"1.0","instance_id":"test-start"}),
+            )
+            .await;
             self.subscribe(vec![Topic::State]).await;
         }
         async fn subscribe(&mut self, topics: Vec<Topic>) {

@@ -306,16 +306,15 @@ fn unknown_operation_preserves_connection_and_permission_errors_are_typed() {
     }
 }
 #[test]
-fn host_role_is_rejected_and_connection_closed() {
+fn unknown_host_role_is_rejected_as_bad_request_and_connection_closed() {
     let fixture = Fixture::new();
     let mut client = fixture.raw();
     let mut request = hello();
     request["body"]["role"] = json!("host");
-    request["body"]["browser"] = json!({"profile_instance_id":"12345678-1234-1234-1234-123456789abc","browser_session_id":"12345678-1234-1234-1234-123456789abc","epoch":1,"proto":{"min":1,"max":1},"browser":"edge","extension_id":"test"});
     assert_error(
         exchange(&mut client, request),
         Some(RequestId(1)),
-        ErrorKind::Forbidden,
+        ErrorKind::BadRequest,
     );
     assert_closed(&mut client);
 }
@@ -909,7 +908,7 @@ fn subscriptions_add_idempotently_and_control_is_not_duplicated() {
 }
 
 #[test]
-fn cli_queries_temporary_database_over_pipe_and_host_cannot_query() {
+fn cli_queries_temporary_database_over_pipe() {
     let fixture = Fixture::new();
     let mut cli = fixture.cli();
     let day: quartz_protocol::QueryDayResponse = serde_json::from_value(
@@ -955,17 +954,6 @@ fn cli_queries_temporary_database_over_pipe_and_host_cannot_query() {
         .expect("typed pending away");
         assert!(pending.ranges.is_empty());
     }
-    assert!(
-        quartz_protocol::Role::Host
-            .authorize(Op::QueryPendingAway)
-            .is_err()
-    );
-    assert!(quartz_protocol::Role::Host.authorize(Op::QueryDay).is_err());
-    assert!(
-        quartz_protocol::Role::Host
-            .authorize(Op::QueryFacts)
-            .is_err()
-    );
     for mut client in [fixture.cli(), fixture.ui()] {
         let facts = client
             .facts(&quartz_protocol::QueryFactsRequest {
@@ -975,11 +963,6 @@ fn cli_queries_temporary_database_over_pipe_and_host_cannot_query() {
             .expect("facts query");
         assert_eq!(facts.facts.len(), 6, "run, clock and four foreground rows");
     }
-    assert!(
-        quartz_protocol::Role::Host
-            .authorize(Op::QueryTimeline)
-            .is_err()
-    );
 }
 #[test]
 fn overloaded_database_returns_busy_over_pipe() {

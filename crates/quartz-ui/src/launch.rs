@@ -543,14 +543,7 @@ impl UiSession {
             | LinkEvent::DayLoaded { .. }
             | LinkEvent::DetailLoading { .. }
             | LinkEvent::DetailLoaded { .. }
-            | LinkEvent::Control(
-                ControlOp::UiShow
-                | ControlOp::UiActivate
-                | ControlOp::BrowserAck
-                | ControlOp::BrowserPolicy
-                | ControlOp::BrowserPurge
-                | ControlOp::CoreOffline,
-            ) => {}
+            | LinkEvent::Control(ControlOp::UiShow | ControlOp::UiActivate) => {}
         }
         let action = event.window_action();
         if let Some(window) = &self.window {

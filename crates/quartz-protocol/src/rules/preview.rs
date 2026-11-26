@@ -11,43 +11,6 @@ use std::num::NonZeroU32;
 pub const PREVIEW_MAX_DAYS: i64 = 7;
 /// Default and maximum number of samples selected before pagination.
 pub const PREVIEW_MAX_SAMPLES: u32 = 50;
-/// Default deadline measured from admission of each page.
-pub const PREVIEW_DEFAULT_DEADLINE_MS: u32 = 30_000;
-/// Maximum deadline for one page, including queued work.
-pub const PREVIEW_MAX_DEADLINE_MS: u32 = 120_000;
-
-/// Validated relative deadline in milliseconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "u32", into = "u32")]
-pub struct PreviewDeadlineMs(u32);
-impl Default for PreviewDeadlineMs {
-    fn default() -> Self {
-        Self(PREVIEW_DEFAULT_DEADLINE_MS)
-    }
-}
-impl PreviewDeadlineMs {
-    pub fn get(self) -> u32 {
-        self.0
-    }
-}
-impl TryFrom<u32> for PreviewDeadlineMs {
-    type Error = ParsePreviewDeadlineError;
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        if (1..=PREVIEW_MAX_DEADLINE_MS).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(ParsePreviewDeadlineError)
-        }
-    }
-}
-impl From<PreviewDeadlineMs> for u32 {
-    fn from(value: PreviewDeadlineMs) -> Self {
-        value.0
-    }
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, snafu::Snafu)]
-#[snafu(display("preview deadline must be between 1 and 120000 milliseconds"))]
-pub struct ParsePreviewDeadlineError;
 
 /// First-N sample count; zero requests statistics without samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,8 +105,6 @@ pub struct RulePreviewRequest<Mutation> {
     pub end_date: LocalDate,
     pub expected_versions: QueryVersions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deadline_ms: Option<PreviewDeadlineMs>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_limit: Option<PreviewSampleLimit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<QueryCursor>,
@@ -197,7 +158,6 @@ impl RulesPreviewRequest {
             start_date: self.start_date,
             end_date: self.end_date,
             expected_versions: self.expected_versions.clone(),
-            deadline_ms: self.deadline_ms.unwrap_or_default(),
             sample_limit: self.sample_limit.unwrap_or_default(),
         }
     }
@@ -210,7 +170,6 @@ impl RulesTextPreviewRequest {
             start_date: self.start_date,
             end_date: self.end_date,
             expected_versions: self.expected_versions.clone(),
-            deadline_ms: self.deadline_ms.unwrap_or_default(),
             sample_limit: self.sample_limit.unwrap_or_default(),
         }
     }

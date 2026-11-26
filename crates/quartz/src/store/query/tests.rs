@@ -4828,7 +4828,7 @@ fn committed_rule_mutations_stale_issued_rule_and_day_page_cursors() {
 
 #[test]
 fn abandoned_queries_do_not_take_the_reader_or_read_rule_metadata() {
-    use crate::query::{control::QueryControl, dispatch::QueryCommand, runner::QueryRunner};
+    use crate::query::{dispatch::QueryCommand, runner::QueryRunner};
     use diesel::{Connection, connection::InstrumentationEvent};
     use std::sync::{
         Arc,
@@ -4872,20 +4872,6 @@ fn abandoned_queries_do_not_take_the_reader_or_read_rule_metadata() {
             &registry,
         )
         .expect("abandoned query");
-    let (reply, received) = tokio::sync::oneshot::channel();
-    drop(received);
-    let request = fixture.request_day();
-    runner
-        .start(
-            &mut fixture.store,
-            QueryCommand::Controlled {
-                request,
-                reply,
-                control: QueryControl::default(),
-            },
-            &registry,
-        )
-        .expect("abandoned controlled query");
     let request=crate::query::preview::PreviewRequest::decode(quartz_protocol::Op::RulesPreview,serde_json::json!({"mutation":{"op":"rule_sets.edit","body":{"key":"user.closed","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":"opaque"})).expect("preview request");
     let (reply, received) = tokio::sync::oneshot::channel();
     drop(received);

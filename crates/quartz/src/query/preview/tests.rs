@@ -360,32 +360,10 @@ fn preview_rejects_stale_expected_versions_before_scanning_facts() {
         .expect("reader restored");
 }
 #[test]
-fn cancelled_or_expired_previews_return_no_partial_result_and_restore_the_reader() {
-    let mut fixture = Fixture::new(4);
-    let body = fixture.body(&Fixture::text("classification", Fixture::classification()));
-    let request = PreviewRequest::decode(wire::Op::RulesPreview, body.clone()).expect("request");
-    request.control.cancel();
-    assert_eq!(
-        fixture.run_request(request).expect_err("cancel").kind(),
-        ErrorKind::Cancelled
-    );
-    let mut request = PreviewRequest::decode(wire::Op::RulesPreview, body).expect("request");
-    request.control = QueryControl::expired();
-    assert_eq!(
-        fixture.run_request(request).expect_err("deadline").kind(),
-        ErrorKind::DeadlineExceeded
-    );
-    fixture
-        .facts
-        .run(fixture.facts.request_day())
-        .expect("reader restored");
-}
-#[test]
 fn preview_keeps_one_fact_snapshot_while_capture_writes_are_serviced_between_turns() {
     let mut fixture = Fixture::new(4);
     let body = fixture.body(&Fixture::text("classification", Fixture::classification()));
     let request = PreviewRequest::decode(wire::Op::RulesPreview, body).expect("request");
-    let control = request.control.clone();
     let mut reader = fixture.facts.store.take_query_reader();
     let mut job = PreviewJob::start(&mut reader, request, &fixture.registry).expect("start");
     job.advance().expect("first bounded turn");
@@ -403,21 +381,6 @@ fn preview_keeps_one_fact_snapshot_while_capture_writes_are_serviced_between_tur
         .facts
         .store
         .return_query_reader(job.finish().expect("reader"));
-    let body = fixture.body(&Fixture::text("classification", Fixture::classification()));
-    let request = PreviewRequest::decode(wire::Op::RulesPreview, body).expect("request");
-    let control_after_start = request.control.clone();
-    let mut reader = fixture.facts.store.take_query_reader();
-    let mut job = PreviewJob::start(&mut reader, request, &fixture.registry).expect("start");
-    control_after_start.cancel();
-    assert_eq!(
-        job.advance().expect_err("running cancellation").kind(),
-        ErrorKind::Cancelled
-    );
-    fixture
-        .facts
-        .store
-        .return_query_reader(job.finish().expect("reader"));
-    control.check().expect("first job completed independently");
 }
 #[test]
 fn paging_bounds_encoded_responses_and_rejects_cursors_after_a_new_revision() {
@@ -505,40 +468,6 @@ fn shadowed_extraction_matches_do_not_contribute_to_selected_outputs() {
         .expect("shadowed");
     assert_eq!(second.condition_match.duration_ms, 4000);
     assert_eq!(second.effective_contribution.active_ms, 0);
-}
-#[test]
-fn cancellation_and_deadline_discard_statistics_already_computed() {
-    let mut fixture = Fixture::new(600);
-    for stop in [ErrorKind::Cancelled, ErrorKind::DeadlineExceeded] {
-        let body = fixture.body(&Fixture::text("classification", Fixture::classification()));
-        let request = PreviewRequest::decode(wire::Op::RulesPreview, body).expect("request");
-        let mut reader = fixture.facts.store.take_query_reader();
-        let mut job = PreviewJob::start(&mut reader, request, &fixture.registry).expect("start");
-        while !matches!(job.stage, Stage::Analyze(_)) {
-            assert!(job.advance().expect("bounded turn").is_none());
-        }
-        assert!(job.advance().expect("compute first batch").is_none());
-        assert!(
-            job.statistics
-                .values()
-                .any(|row| row.condition_match.segments > 0)
-        );
-        match stop {
-            ErrorKind::Cancelled => job.control.cancel(),
-            ErrorKind::DeadlineExceeded => job.control = QueryControl::expired(),
-            _ => unreachable!("stop reasons"),
-        }
-        assert_eq!(
-            job.advance()
-                .expect_err("stop without partial response")
-                .kind(),
-            stop
-        );
-        fixture
-            .facts
-            .store
-            .return_query_reader(job.finish().expect("reader restored"));
-    }
 }
 
 #[test]

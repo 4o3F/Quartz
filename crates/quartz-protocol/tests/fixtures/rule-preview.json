@@ -1,7 +1,7 @@
 {
   "editor": {
     "mutation": {"op":"rule_sets.edit","body":{"key":"user.preview","base_version":0,"text":"format='quartz-rules/1'\n[set]\nkey='user.preview'\nkind='classification'\nname='Preview'\n"}},
-    "start_date":"2026-11-16","end_date":"2026-11-23","expected_versions":"range-inputs","deadline_ms":30000,"sample_limit":50
+    "start_date":"2026-11-16","end_date":"2026-11-23","expected_versions":"range-inputs","sample_limit":50
   },
   "text": {
     "mutation": {"op":"rules_text.import","body":{"key":"user.preview","base_version":0,"text":"format='quartz-rules/1'\n[set]\nkey='user.preview'\nkind='privacy'\nname='Preview'\n"}},

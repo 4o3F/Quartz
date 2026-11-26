@@ -3,7 +3,6 @@
 use super::{SampleOrder, UnencodedTotals};
 use crate::query::{
     RunQueryError,
-    control::QueryControl,
     documents::DocumentDuration,
     input::QueryRange,
     paging::{PageBudget, PagePosition},
@@ -74,12 +73,8 @@ impl PreviewPage {
             admitted: 0,
         })
     }
-    pub(super) fn advance(
-        &mut self,
-        control: &QueryControl,
-    ) -> Result<PageProgress, RunQueryError> {
+    pub(super) fn advance(&mut self) -> Result<PageProgress, RunQueryError> {
         for _ in 0..QUERY_BATCH_ROWS {
-            control.check()?;
             let Some(item) = self.next_item() else {
                 if !self.position.is_first() && self.index <= self.position.index() {
                     return Err(RunQueryError::InvalidCursor);

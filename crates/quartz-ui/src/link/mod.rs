@@ -84,13 +84,7 @@ impl LinkEvent {
             | Self::DayLoaded { .. }
             | Self::State(_)
             | Self::Day(_)
-            | Self::Connection(_)
-            | Self::Control(
-                ControlOp::BrowserAck
-                | ControlOp::BrowserPolicy
-                | ControlOp::BrowserPurge
-                | ControlOp::CoreOffline,
-            ) => WindowAction::Observe,
+            | Self::Connection(_) => WindowAction::Observe,
         }
     }
     /// The application closes its windows for transport loss or an explicit core shutdown.

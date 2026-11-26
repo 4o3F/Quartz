@@ -36,13 +36,7 @@ impl PrewarmGate {
             | LinkEvent::DayLoading { .. }
             | LinkEvent::DayLoaded { .. }
             | LinkEvent::DetailLoading { .. }
-            | LinkEvent::DetailLoaded { .. }
-            | LinkEvent::Control(
-                ControlOp::BrowserAck
-                | ControlOp::BrowserPolicy
-                | ControlOp::BrowserPurge
-                | ControlOp::CoreOffline,
-            ) => PrewarmAction::Wait,
+            | LinkEvent::DetailLoaded { .. } => PrewarmAction::Wait,
         }
     }
 }

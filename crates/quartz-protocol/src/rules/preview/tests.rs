@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Capability, CoreRequest, Op, QueryCursor, Role};
+use crate::{CoreRequest, Op, QueryCursor, Role};
 use serde_json::{Value, json};
 
 fn fixture() -> Value {
@@ -68,20 +68,8 @@ fn preview_accepts_all_rule_set_write_shapes() {
     }
 }
 #[test]
-fn preview_deadlines_samples_and_logical_dates_have_documented_bounds() {
-    assert_eq!(PreviewDeadlineMs::default().get(), 30_000);
+fn preview_samples_and_logical_dates_have_documented_bounds() {
     assert_eq!(PreviewSampleLimit::default().get(), 50);
-    for value in [1, 120_000] {
-        assert_eq!(
-            PreviewDeadlineMs::try_from(value)
-                .expect("valid deadline")
-                .get(),
-            value
-        );
-    }
-    for value in [0, 120_001, u32::MAX] {
-        assert!(PreviewDeadlineMs::try_from(value).is_err());
-    }
     for value in [0, 50] {
         assert_eq!(
             PreviewSampleLimit::try_from(value)
@@ -94,7 +82,6 @@ fn preview_deadlines_samples_and_logical_dates_have_documented_bounds() {
         assert!(PreviewSampleLimit::try_from(value).is_err());
     }
     for value in [json!(-1), json!(1.5), json!(true), json!("50")] {
-        assert!(serde_json::from_value::<PreviewDeadlineMs>(value.clone()).is_err());
         assert!(serde_json::from_value::<PreviewSampleLimit>(value).is_err());
     }
     let mut request: RulesPreviewRequest =
@@ -119,17 +106,11 @@ fn preview_responses_accept_additive_fields() {
     let _: RulesPreviewResponse = serde_json::from_value(response).expect("additive response");
 }
 #[test]
-fn preview_roles_and_capability_match_the_contract() {
+fn preview_roles_match_the_contract() {
     assert!(Role::Ui.authorize(Op::RulesPreview).is_ok());
     assert!(Role::Ui.authorize(Op::RulesTextPreview).is_ok());
     assert!(Role::Cli.authorize(Op::RulesTextPreview).is_ok());
     assert!(Role::Cli.authorize(Op::RulesPreview).is_err());
-    assert!(Role::Host.authorize(Op::RulesPreview).is_err());
-    assert!(Role::Host.authorize(Op::RulesTextPreview).is_err());
-    assert_eq!(
-        serde_json::to_value(Capability::RulesPreviewV1).expect("capability"),
-        json!("rules.preview.v1")
-    );
 }
 #[test]
 fn preview_cursors_bind_mutation_operation_dates_versions_and_limits() {
@@ -164,15 +145,8 @@ fn preview_cursors_bind_mutation_operation_dates_versions_and_limits() {
             .validate_query(&changed.cursor_parameters("mutation-digest".into()))
             .is_err()
     );
-    changed = request.clone();
-    changed.sample_limit = Some(PreviewSampleLimit::try_from(0).expect("no samples"));
-    assert!(
-        cursor
-            .validate_query(&changed.cursor_parameters("mutation-digest".into()))
-            .is_err()
-    );
     changed = request;
-    changed.deadline_ms = Some(PreviewDeadlineMs::try_from(1).expect("short deadline"));
+    changed.sample_limit = Some(PreviewSampleLimit::try_from(0).expect("no samples"));
     assert!(
         cursor
             .validate_query(&changed.cursor_parameters("mutation-digest".into()))
@@ -195,30 +169,11 @@ fn preview_errors_require_the_current_digest_and_preserve_stable_codes() {
     for wire in [
         json!({"code":"stale_inputs","current_versions":"current-range-inputs"}),
         json!({"code":"stale_cursor"}),
-        json!({"code":"deadline_exceeded"}),
-        json!({"code":"cancelled"}),
     ] {
         round_trip::<crate::ProtocolError>(wire);
     }
     assert!(
         serde_json::from_value::<crate::ProtocolError>(json!({"code":"stale_inputs"})).is_err()
-    );
-}
-
-#[test]
-fn cancellation_requests_are_strict_and_exclude_host_roles() {
-    round_trip::<crate::CancelRequest>(json!({"request_id":17}));
-    assert!(
-        serde_json::from_value::<crate::CancelRequest>(json!({"request_id":17,"extra":true}))
-            .is_err()
-    );
-    assert!(serde_json::from_value::<crate::CancelRequest>(json!({"request_id":-1})).is_err());
-    assert!(Role::Ui.authorize(Op::RequestsCancel).is_ok());
-    assert!(Role::Cli.authorize(Op::RequestsCancel).is_ok());
-    assert!(Role::Host.authorize(Op::RequestsCancel).is_err());
-    assert_eq!(
-        serde_json::to_value(Capability::RequestsCancelV1).expect("capability"),
-        json!("requests.cancel.v1")
     );
 }
 

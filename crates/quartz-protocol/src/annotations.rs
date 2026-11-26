@@ -325,10 +325,6 @@ mod tests {
             serde_json::from_value(request_wire.clone()).expect("request");
         assert_eq!(request.body().expect("request body"), request_wire);
         assert_eq!(QueryAnnotationsRequest::OP, Op::QueryAnnotations);
-        assert_eq!(
-            serde_json::to_value(crate::Capability::QueryAnnotationsV1).expect("capability"),
-            "query.annotations.v1"
-        );
         for fixture in [
             include_str!("../tests/fixtures/annotations-normal.json"),
             include_str!("../tests/fixtures/annotations-chunked.json"),

@@ -57,7 +57,6 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 |---|---|---|
 | `bad_request` | 信封或操作参数不符合格式 | 无 |
 | `unknown_op` | 不认识请求操作名 | 无 |
-| `not_implemented` | 操作已定义，但当前核心尚未实现 | 无 |
 | `handshake_required` | 连接首帧不是 `hello` | 无 |
 | `frame_too_large` | 帧的 JSON 字节长度超过 256 KiB | 无 |
 | `proto_mismatch` | 客户端与核心支持的协议版本没有交集 | `supported: {min, max}`，核心支持的协议范围；`core_version` 必填，为核心发布版本 |
@@ -74,12 +73,9 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 | `rule_validation_failed` | 规则文本或编辑内容未通过校验 | `diagnostics`、`truncated`，第 6.3.3 节的有界诊断列表 |
 | `version_exhausted` | 版本计数无法继续递增 | 无；事务未写入 |
 | `page_too_large` | 所有分页读取中，单个结果项或固定字段超过 200 KiB 页预算；包括 query.*、规则预览与差异、规则集读取和文本导出 | 无 |
-| `deadline_exceeded` | 只读工作超过本次期限 | 无 |
-| `cancelled` | 只读工作被取消 | 无 |
 | `delete_scope_unsupported` | 当前里程碑不支持此删除范围 | `scope`，请求的 kind |
 | `delete_job_not_found` | 清理任务不存在 | `uuid` |
 | `delete_job_conflict` | 已有任务 UUID 对应另一份确认内容 | `uuid` |
-| `core_offline` | host 无法连接核心 | 无 |
 | `busy` | 核心暂时过载，客户端稍后重试 | 无 |
 | `internal` | 核心处理请求时发生内部错误 | 无 |
 
@@ -103,23 +99,21 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 // 客户端 → 核心
 { "t": "req", "id": 1, "op": "hello", "body": {
     "proto": { "min": 1, "max": 1 },
-    "role": "ui",                      // ui | host | cli
+    "role": "ui",                      // ui | cli
     "client_version": "0.1.0",
     "ui": { "state": "prewarming" }     // role = ui：starting | prewarming | visible
-    // role = host 时改为 browser 字段，内容来自 browser.hello，见 05 第 1.2 节
 } }
 // 核心 → 客户端
 { "t": "res", "id": 1, "ok": true, "body": {
     "proto": 1,
     "core_version": "0.1.0",
-    "instance_id": "8c1e...",          // 核心每次启动重新生成
-    "capabilities": ["browser.v1", "annotations.v1"]
+    "instance_id": "8c1e..."           // 核心每次启动重新生成
 } }
 ```
 
 协议只传键、编码、数字与原始数据，不传翻译后的句子（10 第 3 节）。UI 完成握手后订阅 `state`，从首个快照的 `logical_date` 取得核心当前逻辑日期，字段见第 7 节。
 
-提取字段、文档引用、文档排行与引用范围为增量字段，握手协议版本保持 1，旧客户端忽略未知字段；新客户端允许这些字段缺失。核心声明 `query.documents.v1`，覆盖文档排行、时间轴与原始详情的提取和引用字段，以及文档实体详情。
+提取字段、文档引用、文档排行与引用范围为增量字段，握手协议版本保持 1，旧客户端忽略未知字段；新客户端允许这些字段缺失。
 
 协议版本和数据库 schema 版本分开演进。协议版本范围没有交集时，核心返回 `proto_mismatch`，并在响应里附上自己的版本，让界面能提示"核心与界面版本不一致，请重启 Quartz"。
 
@@ -127,11 +121,10 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 | 角色 | 可用操作 |
 |---|---|
-| `ui` | 全部查询、订阅、设置、规则、标注、删除、图标、浏览器 host 管理、维护、隐私模式；发送 `ui.open`、`ui.first_frame`、`ui.hidden` |
-| `host` | `hello`、`browser.*`；只能为它自己在握手里登记的 `browser_stream` 上报 |
-| `cli` | `ui.open`、`settings.get`、`settings.set`；只读 `query.*`、`apps.icon`、`browser_hosts.status`、`core.status`、`rules_text.validate`、`rules_text.preview`、`rules_text.export`、`rule_sets.tree`、`rule_sets.get`、`requests.cancel`（用于诊断、测试脚本与规则编写） |
+| `ui` | 全部查询、订阅、设置、规则、标注、隐私模式；发送 `ui.open`、`ui.first_frame`、`ui.hidden` |
+| `cli` | `ui.open`、`settings.get`、`settings.set`；只读 `query.*`、`core.status`、`rules_text.validate`、`rules_text.preview`、`rules_text.export`、`rule_sets.tree`、`rule_sets.get`（用于诊断、测试脚本与规则编写） |
 
-新增功能模块使用独立的操作前缀与订阅主题（例如以后的自控协议使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节），权限表逐项授权；同一前缀下的读写操作可以有不同权限。`rules.preview`、`categories.*`、`data.delete` 和 `data.delete.*` 仅允许 `ui`；CLI 使用 `rules_text.preview`。`requests.cancel` 仅允许 UI、CLI 取消本连接的只读工作。
+新增功能模块使用独立的操作前缀与订阅主题（例如以后的自控协议使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节），权限表逐项授权；同一前缀下的读写操作可以有不同权限。`rules.preview`、`categories.*` 仅允许 `ui`；CLI 使用 `rules_text.preview`。
 
 角色在握手时声明。host 必须通过同用户、同会话及 `quartz-host.exe` 完整路径的检查，握手中的扩展 ID 还必须在已登记列表中；失败则断开。浏览器种类由扩展在 `browser.hello` 自报，host 不依赖父进程名推断。Edge 通过 `cmd.exe` 中转启动也是合法路径。
 
@@ -151,22 +144,7 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 `core.status` 从主线程发布的不可变快照读取，不访问 SQLite。`database` 为 `ok | persistence_failed`，`stop_reason` 在记录时为 `null`，停止时为稳定枚举：`persistence_failed`、`starting`、`session_unavailable`、`capture_gap`、`suspended`、`disconnected`、`locked`、`paused`、`no_foreground`、`ended`。`awaiting_browser_context` 随 M5 浏览器扩展加入。多个条件重叠时按上述顺序选择；`ended` 表示已结束的采集运行，运行结束的历史原因保留在采集记录中。`browser_streams` 是类型化连接列表，条目包含 `browser_stream` 标识，M5 前为空。`instance_id` 每次核心启动重新生成，`core_version` 为核心的 crate 版本。
 
-M4 能力字符串及其覆盖操作如下；客户端逐项检查能力，核心只在对应契约全部实现后声明：
-
-| capability | 操作或字段 |
-|---|---|
-| `query.documents.v1` | 文档排行、提取字段、`document_ref`、document 详情 |
-| `query.range.v1` / `query.unclassified.v1` / `query.annotations.v1` | 各自同名前缀的查询 |
-| `categories.v1` | 第 6.3.5 节分类读写 |
-| `rule_sets.v1` | 第 6.3.1 节全部规则集读写 |
-| `rules.preview.v1` | `rules.preview`、`rules_text.preview` |
-| `rules_text.v1` | validate、import、export |
-| `requests.cancel.v1` | 本连接只读请求取消 |
-| `data.delete.privacy.v1` | 隐私历史 preview、执行与 status；不授予通用范围删除 |
-
-核心只在握手能力列表中登记已实现的能力。已定义但当前核心尚未实现的操作返回 `not_implemented`；`host` 运行时实现前，`host` 握手返回 `forbidden` 并断开。
-
-客户端发现管道和普通请求等待响应各有 2 秒上限；长预览的单次期限与取消见第 6.3.2 节。使用 `CreateFileW` 连接，繁忙时在剩余连接期限内按 10 毫秒间隔重试。普通重复启动在连接失败时记录警告并成功退出；`--autostart` 重复启动直接退出。核心在取得实例锁、打开存储后启动 I/O 线程，随后启动采集来源；关闭时先停止管道并关闭连接，再结算采集与关闭数据库。管道线程的启动等待与关闭加入上限均为 8 秒。错误响应排入队列后最多等待 500 毫秒供写任务完成及客户端读取，然后断开并补建实例。运行期间槽位故障记录错误，并按 25 毫秒起步、1 秒封顶的指数退避重建；其他槽位、采集和数据库写入继续运行。
+客户端发现管道和普通请求等待响应各有 2 秒上限。使用 `CreateFileW` 连接，繁忙时在剩余连接期限内按 10 毫秒间隔重试。普通重复启动在连接失败时记录警告并成功退出；`--autostart` 重复启动直接退出。核心在取得实例锁、打开存储后启动 I/O 线程，随后启动采集来源；关闭时先停止管道并关闭连接，再结算采集与关闭数据库。管道线程的启动等待与关闭加入上限均为 8 秒。错误响应排入队列后最多等待 500 毫秒供写任务完成及客户端读取，然后断开并补建实例。运行期间槽位故障记录错误，并按 25 毫秒起步、1 秒封顶的指数退避重建；其他槽位、采集和数据库写入继续运行。
 
 核心发给界面的控制消息使用 `evt` 帧，`topic = "control"`，操作名放在 `body.op`：
 
@@ -253,7 +231,6 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 | `rule_sets.edit/set_enabled/reorder/delete/revert` | 带基础版本的原子写入；第 6.3.1 节 |
 | `rules.preview` / `rules_text.preview` | 编辑草稿或文本预览；第 6.3.2 节 |
 | `rules_text.validate/import/export` | 文本校验、导入、导出；第 6.3.3 节 |
-| `requests.cancel` | 取消本连接的只读工作；第 6.3.2 节 |
 | `data.delete.preview` / `data.delete` / `data.delete.status` | M4 仅隐私规则历史清理；第 6.3.4 节 |
 | `categories.list/create/update/reorder/archive` | 分类元数据与归档；第 6.3.5 节 |
 | `annotations.create` / `update` / `delete` | 可以一次提交多个不相交的范围，核心在一个事务里写入 |
@@ -332,20 +309,16 @@ tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树�
 {"code":"rule_set_stale","key":"user.local.classification","current_version":3}
 ```
 
-### 6.3.2 预览与期限
+### 6.3.2 预览
 
-`rules.preview`（UI）和 `rules_text.preview`（UI、CLI）共用请求 `{mutation, start_date, end_date, expected_versions, deadline_ms?, sample_limit?, cursor?}`。日期为 1–7 个逻辑日，界面默认截至所选日的 7 日；`expected_versions` 取同范围 `query.range` 的摘要。`mutation = {op, body}` 为拟提交写操作的完整内容；rules.preview 接受 rule_sets 写操作，rules_text.preview 接受 rules_text.import。预览在临时规则快照上求值，不保存草稿。
+`rules.preview`（UI）和 `rules_text.preview`（UI、CLI）共用请求 `{mutation, start_date, end_date, expected_versions, sample_limit?, cursor?}`。日期为 1–7 个逻辑日，界面默认截至所选日的 7 日；`expected_versions` 取同范围 `query.range` 的摘要。`mutation = {op, body}` 为拟提交写操作的完整内容；rules.preview 接受 rule_sets 写操作，rules_text.preview 接受 rules_text.import。预览在临时规则快照上求值，不保存草稿。
 
-- `deadline_ms` 为核心接纳请求起的相对期限，默认 30,000，范围 1–120,000；同样用于 `data.delete.preview`。这些请求的客户端等待上限为 deadline_ms + 500 ms，连接发现仍限 2 秒。每个分页请求重新计时；超时、取消不返回部分成功。
-- `requests.cancel {request_id}` 取消本连接的在途只读请求，返回 `{accepted:true}`；目标已结束或不存在也成功，在途只读目标以 `cancelled` 结束；`rules_text.validate`、`settings.get`、`categories.list` 按只读请求处理，其内部使用写入队列不改变取消语义；指向在途写操作返回 `bad_request`。断开连接取消其只读工作，草稿变更主动取消旧代次。计算至少每 5,000 个片段检查取消与期限并让出给采集写入；单个长任务也必须检查期限。已接纳的删除任务按第 6.3.4 节继续执行。
 - 初次请求的输入摘要变化返回 `stale_inputs`；翻页变化返回 `stale_cursor`。请求字段、草稿、范围和版本均进入游标；预览与正常页面共用提取、分类、活动和标注口径。
 - 响应为 `{rules, totals?, further_hidden?, samples, versions, next_cursor}`；全局 further_hidden 与 totals 的 active_ms 只在第一页返回，分组可续页。rules 每项含规则引用、`condition_match:{segments,duration_ms}`、`effective_contribution:{segments,active_ms}`；前者累计条件成立的保留事实切片（包括 idle、被其他规则遮蔽的切片），后者对分类规则只累计最终提供分类且未被标注覆盖的活跃切片；提取规则累计被选中提取结果的活跃切片；隐私规则累计其动作参与最终进一步降级的活跃采集窗口切片（`active` 或 `active_override`），同一切片可有多条隐私来源。`totals:{before,after}` 各含 `active_ms`、`categories:[{category,active_ms}]`、`applications`、`documents`，使用与 query.day 相同的排行行形状，按各自排序完整分页。after 使用草稿快照的最终结果，等于同输入与规则快照的今天页/排行口径，包含人工标注与离线活动。
 - 提取预览的 samples 附 `before` / `after` 提取输出；隐私预览另返全局及逐规则 `further_hidden:{segments,fields,duration_ms}`，只计现存事实中将进一步降级的范围，包含非活跃事实。segments 是去重后的受影响切片数，fields 按 app/window_title/web 字段动作计数；时长按切片累计一次。
 - `sample_limit` 默认且最多 50，可为 0。样本为 `{start_utc_ms,end_utc_ms,clock_segment_id,rule,before,after}`，before/after 只含该 kind 的允许字段；先按 UTC、时钟段、事实主键、规则引用选取前 N 项，再分页，翻页不补选更多；单页含规则统计和样本的总编码不超过 200 KiB。只展示当前与草稿都允许显示的字段，隐私预览不借样本暴露将隐藏的原文。
 
-核心声明 `requests.cancel.v1` 和 `rules.preview.v1`；后者覆盖两个预览端点。
-
-`expected_versions` 使用同日期范围、`bucket="day"` 的 `query.range` 摘要，dimensions 不影响该摘要。受理后先在只读事务中检查输入摘要与游标，再通过实际写入的决策路径编译草稿。游标绑定预览操作、完整 mutation 的 SHA-256 摘要、日期、expected_versions、期限、样本数量和输入版本；正文按原始字符串字节参与摘要。任何规则集新修订均使游标过期，包括生效内容未变化的修订。两个快照共享一次数据库只读事务，各逻辑日使用相同事实、活动与标注边界，批次最多 256 行或片段，批次间由现有数据库循环优先处理采集写入。分页编码与跳过续页项也按最多 256 项一批执行，文档引用仅对当页候选项生成。
+`expected_versions` 使用同日期范围、`bucket="day"` 的 `query.range` 摘要，dimensions 不影响该摘要。受理后先在只读事务中检查输入摘要与游标，再通过实际写入的决策路径编译草稿。游标绑定预览操作、完整 mutation 的 SHA-256 摘要、日期、expected_versions、样本数量和输入版本；正文按原始字符串字节参与摘要。任何规则集新修订均使游标过期，包括生效内容未变化的修订。两个快照共享一次数据库只读事务，各逻辑日使用相同事实、活动与标注边界，批次最多 256 行或片段，批次间由现有数据库循环优先处理采集写入。分页编码与跳过续页项也按最多 256 项一批执行，文档引用仅对当页候选项生成。
 
 rules 列出草稿中该类型的生效规则，保留零命中项。规则预览以保留的窗口字段为输入，Excluded 与 NoForeground 不进入规则求值，提取另要求 Full；TitleHidden 的分类与隐私条件使用仍保留的字段。分类与提取中因匹配顺序被遮蔽的规则仍计条件命中。隐私 further_hidden 对照事实实际保留的字段计算；逐规则只计该规则动作参与最终降级的字段，相同字段可以有多条规则来源，全局切片与时长去重。totals 与相同角色、相同规则快照下的 query.day 保持一致，仅读取事实已经保存的采集保留级别；查询时不重新应用隐私规则。隐私草稿影响保存后的未来采集，以及 G 步骤中明确执行的历史清理，预览中不改变 totals 的字段保留或时长；进一步隐藏的影响计于 further_hidden。文档排行引用使用所选末日 query.day 的七日详情范围与对应侧的版本摘要；这些引用依赖也进入预览游标版本。
 
@@ -353,7 +326,7 @@ rules 列出草稿中该类型的生效规则，保留零命中项。规则预�
 
 ```jsonc
 // rules_text.preview body；expected_versions 从同范围 query.range 取得
-{"mutation":{"op":"rules_text.import","body":{"key":"user.local.privacy","base_version":2,"text":"format = \"quartz-rules/1\"\n[set]\nkey = \"user.local.privacy\"\nkind = \"privacy\"\nname = \"本地隐私\"\nparent = \"builtin.privacy\"\n[[rule]]\nid = \"bank\"\npreset = \"title_hidden\"\nmatch = \"all\"\nwhen = [{ field = \"title.raw\", op = \"contains\", value = \"网银\" }]\n"}},"start_date":"2026-11-16","end_date":"2026-11-23","expected_versions":"opaque","deadline_ms":30000,"sample_limit":50}
+{"mutation":{"op":"rules_text.import","body":{"key":"user.local.privacy","base_version":2,"text":"format = \"quartz-rules/1\"\n[set]\nkey = \"user.local.privacy\"\nkind = \"privacy\"\nname = \"本地隐私\"\nparent = \"builtin.privacy\"\n[[rule]]\nid = \"bank\"\npreset = \"title_hidden\"\nmatch = \"all\"\nwhen = [{ field = \"title.raw\", op = \"contains\", value = \"网银\" }]\n"}},"start_date":"2026-11-16","end_date":"2026-11-23","expected_versions":"opaque","sample_limit":50}
 // 确认后提交 rules_text.import
 {"key":"user.local.privacy","base_version":2,"text":"format = \"quartz-rules/1\"\n[set]\nkey = \"user.local.privacy\"\nkind = \"privacy\"\nname = \"本地隐私\"\nparent = \"builtin.privacy\"\n[[rule]]\nid = \"bank\"\npreset = \"title_hidden\"\nmatch = \"all\"\nwhen = [{ field = \"title.raw\", op = \"contains\", value = \"网银\" }]\n"}
 ```
@@ -378,7 +351,7 @@ export 读取当前未删除的 key。导出保存的集合头部和条目，分
 
 | op | 请求 body | 响应 body |
 |---|---|---|
-| `data.delete.preview` | `{scope,start_utc_ms,end_utc_ms,expected_versions,backup_ids,deadline_ms?,sample_limit?,cursor?}` | `{impact,backups,samples,versions,next_cursor,preview_receipt,expires_utc_ms}`；正时长且不超过 366 天的半开 UTC 范围，expected_versions 来自同范围 query.timeline（detail=category、ms_per_pixel=1）；impact 使用 further_hidden 口径 |
+| `data.delete.preview` | `{scope,start_utc_ms,end_utc_ms,expected_versions,backup_ids,sample_limit?,cursor?}` | `{impact,backups,samples,versions,next_cursor,preview_receipt,expires_utc_ms}`；正时长且不超过 366 天的半开 UTC 范围，expected_versions 来自同范围 query.timeline（detail=category、ms_per_pixel=1）；impact 使用 further_hidden 口径 |
 | `data.delete` | `{uuid,scope,start_utc_ms,end_utc_ms,backup_ids,preview_receipt,confirmed:true}` | `{accepted:true,job}`；持久接纳后在普通 2 秒期限内响应 |
 | `data.delete.status` | `{uuid}` | `{job}`；普通 2 秒期限，只读已持久任务状态 |
 
@@ -406,34 +379,15 @@ UUID 去重先于回执校验：已存在且确认内容相同则返回原 job�
 
 不存在的 UUID、空白或超过 256 个 Unicode 标量的用户名称、使用 UUID 格式或 `builtin:` 命名空间的用户名称、非法色板或倾向、无效父级及层级环返回 `bad_request`，任一失败回滚。已有数据库中的保留命名空间名称仍可读取和改名；规则按稳定标识解析这些引用。重复显示名称可以保存，规则引用歧义名称时返回 `E-RULE-REF`，应使用 UUID 或内置键。color 为 cat.1–cat.14 或 neutral，tendency 为 focus/neutral/distraction。重复最终值不改元数据版本；真实变化同事务增加 metadata_version，刷新规则引用目录、托盘与 day 订阅。
 
-### 6.4 浏览器
-
-| op | 方向与角色 | 参数 | 返回或影响 |
-|---|---|---|---|
-| `browser.hello` | 扩展 → host | profile、会话、epoch、协议版本、浏览器种类（05 第 1.2 节） | host 据此向核心 `hello`，映射其响应 |
-| `browser.state` | host 请求 | epoch、seq、at_ms、focused、window、tab、full | 持久化后响应 `{accepted:true}`，另发 `browser.ack` |
-| `browser.gap` | host 请求 | epoch、from_seq、to_seq、from_ms、to_ms | 持久记录缺失范围，响应 `{accepted:true}` 后可推进连续 ack |
-| `browser.ack` | 核心 → host → 扩展 | epoch、upto_seq | control 推送，仅确认连续已处理或明确丢弃的序号 |
-| `browser.policy` | 核心 → host → 扩展 | excluded_domain_suffixes、privacy_mode_until_ms | control 推送；清洗队列并更新落盘策略 |
-| `browser.purge` | 核心 → host → 扩展 | purge_id、from_ms、to_ms | control 推送；清理相交队列 |
-| `browser.purge_ack` | host 请求 | purge_id | 扩展清理完成确认，返回 `{accepted:true}` |
-| `browser.query_site_today` | host 请求 | `{}` | 核心按设置时区取今日，只返回本 stream 当前域名的 `{local_date,time_zone,domain,duration_ms}`；域名由核心取。被策略隐藏时 domain 为 null、duration_ms 为 0 |
-
-握手、状态与 control 消息的完整示例见 05 第 1.2、1.5 和 2.3 节。
-
-### 6.5 图标、浏览器管理与维护
+### 6.4 隐私模式与后续操作
 
 | op | 角色 | 参数 | 返回 |
 |---|---|---|---|
-| `apps.icon` | ui、cli | app_id、size_px | PNG 的 base64；不存在时返回空图标 |
-| `browser_hosts.status` | ui、cli | `{}` | 各浏览器注册状态、连接 stream 列表 |
-| `browser_hosts.enable` | ui | browser | 写入 manifest 和注册表后的状态 |
-| `browser_hosts.disable` | ui | browser | 移除注册后的状态 |
-| `maintenance.backup` | ui | `{}` | 备份文件名、完成时间 |
-| `maintenance.compact` | ui | `{}` | 压缩后的数据库字节数 |
 | `privacy_mode.set` | ui | `{enabled, until_utc_ms?}`；启用时截止 UTC 毫秒必填且必须在未来 | 启用请求使用 `private_window` 组合（`PrivacyMode::Private`），关闭请求取消该策略；按 §6.3 返回接纳回执，采集线程触发 `policy_changed` |
 
-备份和压缩由核心执行。临时保持计时、暂停和隐私模式及其截止时间保存在 `timed_policies`，重启后按截止时间恢复。
+临时保持计时、暂停和隐私模式及其截止时间保存在 `timed_policies`，重启后按截止时间恢复。
+
+M5/M6 的操作在实现时再加入。
 
 ## 7. 订阅
 

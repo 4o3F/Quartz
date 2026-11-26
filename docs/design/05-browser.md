@@ -20,7 +20,7 @@
 
 ### 1.2 握手与上报
 
-扩展发出的第一条消息是 `browser.hello`。host 读取后，才以 `role = host` 向核心发送 `hello`，将这些字段和浏览器启动参数提供的 `extension_id` 放入 `body.browser`：
+扩展发出的第一条消息是 `browser.hello`：
 
 ```json
 { "t": "req", "id": 1, "op": "browser.hello", "body": {

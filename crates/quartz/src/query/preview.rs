@@ -4,7 +4,6 @@ use super::{
     QueryResponse, RunQueryError,
     calendar::DayCalendar,
     classification::{Classifier, QueryCategoryRef},
-    control::QueryControl,
     day_walker::DayWalker,
     documents::{DocumentDuration, DocumentIdentity},
     input::QueryRange,
@@ -71,7 +70,6 @@ pub(crate) struct PreviewRequest {
     parameters: wire::CursorQuery,
     cursor: Option<wire::QueryCursor>,
     sample_limit: usize,
-    pub(crate) control: QueryControl,
 }
 impl std::fmt::Debug for PreviewRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,7 +114,6 @@ impl PreviewRequest {
                 .map_err(|_| ProtocolError::new(ErrorKind::BadRequest))?;
         }
         Ok(Self {
-            control: QueryControl::with_deadline(request.deadline_ms.unwrap_or_default().get()),
             sample_limit: usize::try_from(request.sample_limit.unwrap_or_default().get())
                 .expect("sample limit fits usize"),
             mutation: request.mutation.into(),
@@ -190,13 +187,8 @@ impl Totals {
             *self.documents.entry(row.identity).or_default() += row.active_ms;
         }
     }
-    fn finish(
-        self,
-        position: PagePosition,
-        control: &QueryControl,
-    ) -> Result<UnencodedTotals, RunQueryError> {
+    fn finish(self, position: PagePosition) -> UnencodedTotals {
         let first = position.is_first();
-        control.check()?;
         let mut categories: Vec<_> = self.categories.into_values().collect();
         categories.sort_by(|left, right| {
             right
@@ -225,12 +217,12 @@ impl Totals {
                 .cmp(&left.active_ms)
                 .then(left.identity.cmp(&right.identity))
         });
-        Ok(UnencodedTotals {
+        UnencodedTotals {
             active_ms: first.then_some(self.active_ms),
             categories,
             applications,
             documents,
-        })
+        }
     }
 }
 #[derive(Debug)]
@@ -288,7 +280,6 @@ pub(crate) struct PreviewJob {
     after: Arc<RuleSnapshot>,
     kind: domain::RuleKind,
     privacy_actions: BTreeMap<String, domain::PrivacyAction>,
-    control: QueryControl,
     parameters: wire::CursorQuery,
     position: PagePosition,
     versions: wire::QueryVersions,
@@ -312,14 +303,12 @@ impl PreviewJob {
         request: PreviewRequest,
         registry: &RegistryShell,
     ) -> Result<Self, RunQueryError> {
-        request.control.check()?;
         let before = registry.snapshots().load();
         let mut snapshot = reader
             .take()
             .ok_or(RunQueryError::ReaderUnavailable)?
             .snapshot();
         let result = Self::prepare(&mut snapshot, &request, &before).and_then(|mut prepared| {
-            request.control.check()?;
             let key: domain::RuleSetKey = request
                 .mutation
                 .target_key()?
@@ -335,7 +324,6 @@ impl PreviewJob {
                 .set
                 .header
                 .kind;
-            request.control.check()?;
             prepared.after_versions = VersionState {
                 rule_hashes: after.hashes().clone(),
                 ..prepared.state.clone()
@@ -390,7 +378,6 @@ impl PreviewJob {
                     after,
                     kind,
                     privacy_actions,
-                    control: request.control,
                     parameters: request.parameters,
                     position: prepared.position,
                     versions: prepared.versions,
@@ -491,7 +478,6 @@ impl PreviewJob {
         })
     }
     pub(crate) fn advance(&mut self) -> Result<Option<QueryResponse>, RunQueryError> {
-        self.control.check()?;
         match std::mem::replace(&mut self.stage, Stage::Complete) {
             Stage::Read {
                 mut before,
@@ -499,7 +485,6 @@ impl PreviewJob {
             } => match self.snapshot.read_batch(self.current.range)? {
                 Some(rows) => {
                     for input in rows {
-                        self.control.check()?;
                         let row = before.classified(input.clone());
                         before.ingest_classified(row)?;
                         let row = after.classified(input);
@@ -518,7 +503,6 @@ impl PreviewJob {
                 mut after,
             } => {
                 let before_done = before.advance();
-                self.control.check()?;
                 let after_done = after.advance();
                 if before_done && after_done {
                     let before = before.into_segments();
@@ -537,7 +521,6 @@ impl PreviewJob {
             }
             Stage::Analyze(mut day) => {
                 for _ in 0..QUERY_BATCH_ROWS {
-                    self.control.check()?;
                     let Some(after) = day.after.next() else {
                         if day.before.next().is_some() {
                             return Err(RunQueryError::InvalidRuleEntry);
@@ -574,12 +557,9 @@ impl PreviewJob {
                 }
                 self.stage = Stage::Analyze(day);
             }
-            Stage::Page(mut page) => match page.advance(&self.control)? {
+            Stage::Page(mut page) => match page.advance()? {
                 PageProgress::More => self.stage = Stage::Page(page),
-                PageProgress::Complete => {
-                    self.control.check()?;
-                    return Ok(Some(QueryResponse::Preview(page.finish())));
-                }
+                PageProgress::Complete => return Ok(Some(QueryResponse::Preview(page.finish()))),
             },
             Stage::Complete => return Err(RunQueryError::InvalidRuleEntry),
         }
@@ -642,7 +622,6 @@ impl PreviewJob {
         }
         let mut sample_privacy = None;
         for outcome in evaluation.rules {
-            self.control.check()?;
             if outcome.status == domain::RuleStatus::DidNotMatch {
                 continue;
             }
@@ -817,9 +796,8 @@ impl PreviewJob {
         })
     }
     fn prepare_page(&mut self) -> Result<PreviewPage, RunQueryError> {
-        let before =
-            std::mem::take(&mut self.before_totals).finish(self.position, &self.control)?;
-        let after = std::mem::take(&mut self.after_totals).finish(self.position, &self.control)?;
+        let before = std::mem::take(&mut self.before_totals).finish(self.position);
+        let after = std::mem::take(&mut self.after_totals).finish(self.position);
         let response = wire::RulesPreviewResponse {
             rules: Vec::new(),
             totals: Some(wire::RulePreviewTotals {

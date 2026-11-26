@@ -282,11 +282,9 @@ mod tests {
 
     #[test]
     fn control_operations_are_typed_event_bodies_not_requests() {
-        let body: ControlBody = serde_json::from_value(
-            serde_json::json!({"op":"browser.ack","epoch":12,"upto_seq":345}),
-        )
-        .expect("05 control body");
-        assert_eq!(body.op, ControlOp::BrowserAck);
+        let body: ControlBody =
+            serde_json::from_value(serde_json::json!({"op":"ui.show"})).expect("04 control body");
+        assert_eq!(body.op, ControlOp::UiShow);
         let event = Envelope::Event(Event {
             topic: Topic::Control,
             seq: EventSeq(10),
@@ -294,15 +292,11 @@ mod tests {
         });
         assert_eq!(
             serde_json::to_value(event).expect("serialize event"),
-            serde_json::json!({"t":"evt","topic":"control","seq":10,"body":{"op":"browser.ack","epoch":12,"upto_seq":345}})
+            serde_json::json!({"t":"evt","topic":"control","seq":10,"body":{"op":"ui.show"}})
         );
         assert_eq!(
             serde_json::from_str::<Op>("\"ui.show\"").expect("unknown request"),
             Op::Unknown
-        );
-        assert_eq!(
-            serde_json::from_str::<ControlOp>("\"core_offline\"").expect("05 host notification"),
-            ControlOp::CoreOffline
         );
     }
 

@@ -13,11 +13,6 @@ pub(crate) enum QueryCommand {
         request: super::preview::PreviewRequest,
         reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
     },
-    Controlled {
-        request: QueryRequest,
-        control: super::control::QueryControl,
-        reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
-    },
     Query {
         request: QueryRequest,
         reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
@@ -29,9 +24,7 @@ pub(crate) enum QueryCommand {
 impl QueryCommand {
     pub(super) fn reply_is_closed(&self) -> bool {
         match self {
-            Self::Query { reply, .. }
-            | Self::Controlled { reply, .. }
-            | Self::Preview { reply, .. } => reply.is_closed(),
+            Self::Query { reply, .. } | Self::Preview { reply, .. } => reply.is_closed(),
             Self::RuleInputs { reply } => reply.is_closed(),
         }
     }
@@ -75,19 +68,6 @@ impl QueryPort {
     ) -> Result<oneshot::Receiver<Result<QueryResponse, ProtocolError>>, ProtocolError> {
         let (reply, received) = oneshot::channel();
         self.send(QueryCommand::Preview { request, reply })?;
-        Ok(received)
-    }
-    pub(crate) fn submit_controlled(
-        &self,
-        request: QueryRequest,
-        control: super::control::QueryControl,
-    ) -> Result<oneshot::Receiver<Result<QueryResponse, ProtocolError>>, ProtocolError> {
-        let (reply, received) = oneshot::channel();
-        self.send(QueryCommand::Controlled {
-            request,
-            control,
-            reply,
-        })?;
         Ok(received)
     }
     fn send(&self, command: QueryCommand) -> Result<(), ProtocolError> {

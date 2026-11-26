@@ -47,7 +47,6 @@ macro_rules! requests {
     )*};
 }
 requests! {
-    crate::CancelRequest => RequestsCancel => AcceptedBody,
     crate::RulesPreviewRequest => RulesPreview => crate::RulesPreviewResponse,
     crate::RulesTextPreviewRequest => RulesTextPreview => crate::RulesTextPreviewResponse,
     crate::RulesTextValidateRequest => RulesTextValidate => crate::RulesTextValidateResponse,

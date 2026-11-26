@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 /// Permission families matching operation prefixes in 04 §5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpFamily {
-    /// Connection-local cancellation of read-only requests.
-    Requests,
     /// The `hello` operation family.
     Hello,
     /// The `subscribe` operation family.
@@ -29,18 +27,8 @@ pub enum OpFamily {
     Annotations,
     /// The `settings` operation family.
     Settings,
-    /// The `data` operation family.
-    Data,
     /// The `tracking` operation family.
     Tracking,
-    /// The `browser` operation family.
-    Browser,
-    /// The `apps` operation family.
-    Apps,
-    /// The `browser_hosts` operation family.
-    BrowserHosts,
-    /// The `maintenance` operation family.
-    Maintenance,
     /// The `privacy_mode` operation family.
     PrivacyMode,
     /// An unrecognized operation; no role may authorize it.
@@ -53,9 +41,6 @@ pub enum OpFamily {
 /// Core-to-client pushes are represented separately by [`ControlOp`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::VariantArray)]
 pub enum Op {
-    /// Cancels a read-only request on this connection.
-    #[serde(rename = "requests.cancel")]
-    RequestsCancel,
     /// The `hello` request.
     #[serde(rename = "hello")]
     Hello,
@@ -164,9 +149,6 @@ pub enum Op {
     /// The `settings.set` request.
     #[serde(rename = "settings.set")]
     SettingsSet,
-    /// The `data.delete` request.
-    #[serde(rename = "data.delete")]
-    DataDelete,
     /// The `tracking.pause` request.
     #[serde(rename = "tracking.pause")]
     TrackingPause,
@@ -176,39 +158,6 @@ pub enum Op {
     /// The `tracking.keep_alive` request.
     #[serde(rename = "tracking.keep_alive")]
     TrackingKeepAlive,
-    /// The `browser.hello` request.
-    #[serde(rename = "browser.hello")]
-    BrowserHello,
-    /// The `browser.state` request.
-    #[serde(rename = "browser.state")]
-    BrowserState,
-    /// The `browser.gap` request.
-    #[serde(rename = "browser.gap")]
-    BrowserGap,
-    /// The `browser.purge_ack` request.
-    #[serde(rename = "browser.purge_ack")]
-    BrowserPurgeAck,
-    /// The `browser.query_site_today` request.
-    #[serde(rename = "browser.query_site_today")]
-    BrowserQuerySiteToday,
-    /// The `apps.icon` request.
-    #[serde(rename = "apps.icon")]
-    AppsIcon,
-    /// The `browser_hosts.status` request.
-    #[serde(rename = "browser_hosts.status")]
-    BrowserHostsStatus,
-    /// The `browser_hosts.enable` request.
-    #[serde(rename = "browser_hosts.enable")]
-    BrowserHostsEnable,
-    /// The `browser_hosts.disable` request.
-    #[serde(rename = "browser_hosts.disable")]
-    BrowserHostsDisable,
-    /// The `maintenance.backup` request.
-    #[serde(rename = "maintenance.backup")]
-    MaintenanceBackup,
-    /// The `maintenance.compact` request.
-    #[serde(rename = "maintenance.compact")]
-    MaintenanceCompact,
     /// The `privacy_mode.set` request.
     #[serde(rename = "privacy_mode.set")]
     PrivacyModeSet,
@@ -222,7 +171,6 @@ impl Op {
     #[must_use]
     pub const fn family(self) -> OpFamily {
         match self {
-            Self::RequestsCancel => OpFamily::Requests,
             Self::Hello => OpFamily::Hello,
             Self::Subscribe | Self::Unsubscribe => OpFamily::Subscribe,
             Self::CoreStatus => OpFamily::Core,
@@ -255,20 +203,9 @@ impl Op {
                 OpFamily::Annotations
             }
             Self::SettingsGet | Self::SettingsSet => OpFamily::Settings,
-            Self::DataDelete => OpFamily::Data,
             Self::TrackingPause | Self::TrackingResume | Self::TrackingKeepAlive => {
                 OpFamily::Tracking
             }
-            Self::BrowserHello
-            | Self::BrowserState
-            | Self::BrowserGap
-            | Self::BrowserPurgeAck
-            | Self::BrowserQuerySiteToday => OpFamily::Browser,
-            Self::AppsIcon => OpFamily::Apps,
-            Self::BrowserHostsStatus | Self::BrowserHostsEnable | Self::BrowserHostsDisable => {
-                OpFamily::BrowserHosts
-            }
-            Self::MaintenanceBackup | Self::MaintenanceCompact => OpFamily::Maintenance,
             Self::PrivacyModeSet => OpFamily::PrivacyMode,
             Self::Unknown => OpFamily::Unknown,
         }
@@ -287,18 +224,6 @@ pub enum ControlOp {
     /// The `ui.shutdown` control notification.
     #[serde(rename = "ui.shutdown")]
     UiShutdown,
-    /// The `browser.ack` control notification.
-    #[serde(rename = "browser.ack")]
-    BrowserAck,
-    /// The `browser.policy` control notification.
-    #[serde(rename = "browser.policy")]
-    BrowserPolicy,
-    /// The `browser.purge` control notification.
-    #[serde(rename = "browser.purge")]
-    BrowserPurge,
-    /// The `core_offline` control notification from the host (05 §2.3).
-    #[serde(rename = "core_offline")]
-    CoreOffline,
 }
 
 /// A typed control operation with raw, operation-specific JSON fields.

@@ -35,34 +35,22 @@ impl Default for ConnectionTimeouts {
 
 type PendingReplies<'connection> =
     FuturesUnordered<Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'connection>>>;
-type PendingTracker = std::sync::Arc<
-    std::sync::Mutex<std::collections::BTreeMap<quartz_protocol::RequestId, PendingWork>>,
->;
-enum PendingWork {
-    Write,
-    Read(crate::query::control::QueryControl),
-}
+type PendingTracker =
+    std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<quartz_protocol::RequestId>>>;
 struct PendingRegistration {
     id: quartz_protocol::RequestId,
     tracker: PendingTracker,
 }
 impl Drop for PendingRegistration {
     fn drop(&mut self) {
-        if let Some(PendingWork::Read(control)) = self
-            .tracker
+        self.tracker
             .lock()
             .expect("pending request lock")
-            .remove(&self.id)
-        {
-            control.cancel();
-        }
+            .remove(&self.id);
     }
 }
 enum PendingReply {
     Write(oneshot::Receiver<Result<crate::persistence::dispatch::WriteResponse, ProtocolError>>),
-    ReadWrite(
-        oneshot::Receiver<Result<crate::persistence::dispatch::WriteResponse, ProtocolError>>,
-    ),
     Query(oneshot::Receiver<Result<crate::query::QueryResponse, ProtocolError>>),
     Rules(crate::query::dispatch::RuleReadReply),
     Subscribe(oneshot::Receiver<Result<(), super::outbox::QueueFrameError>>),
@@ -74,7 +62,7 @@ impl PendingReply {
         id: quartz_protocol::RequestId,
     ) -> io::Result<Option<quartz_protocol::Response>> {
         let response = match self {
-            Self::Write(received) | Self::ReadWrite(received) => Some(
+            Self::Write(received) => Some(
                 match received
                     .await
                     .map_err(|_| ProtocolError::new(ErrorKind::Internal))
@@ -245,27 +233,8 @@ impl Connection {
                         Action::error_response(Some(id), ProtocolError::new(ErrorKind::Internal))
                     }
                 }),
-                Action::Cancel { id, request } => {
-                    let kind = match tracker
-                        .lock()
-                        .expect("pending request lock")
-                        .get(&request.request_id)
-                    {
-                        Some(PendingWork::Write) => Some(ErrorKind::BadRequest),
-                        Some(PendingWork::Read(control)) => {
-                            control.cancel();
-                            None
-                        }
-                        None => None,
-                    };
-                    Some(match kind {
-                        Some(kind) => Action::error_response(Some(id), ProtocolError::new(kind)),
-                        None => Action::success_response(id, quartz_protocol::AcceptedBody),
-                    })
-                }
                 Action::Preview { id, request } => {
-                    let control = request.control.clone();
-                    self.admit_request(id, &outbox, &mut requests, &tracker, Some(control), || {
+                    self.admit_request(id, &outbox, &mut requests, &tracker, || {
                         self.services
                             .queries
                             .submit_preview(request)
@@ -273,29 +242,23 @@ impl Connection {
                     })
                 }
                 Action::Write { id, request } => {
-                    let read_only = request.is_read_only();
-                    self.admit_request(id, &outbox, &mut requests, &tracker, None, || {
-                        self.services.writes.submit(request).map(|reply| {
-                            if read_only {
-                                PendingReply::ReadWrite(reply)
-                            } else {
-                                PendingReply::Write(reply)
-                            }
-                        })
+                    self.admit_request(id, &outbox, &mut requests, &tracker, || {
+                        self.services
+                            .writes
+                            .submit(request)
+                            .map(PendingReply::Write)
                     })
                 }
                 Action::Query { id, request } => {
-                    let control = crate::query::control::QueryControl::default();
-                    let worker_control = control.clone();
-                    self.admit_request(id, &outbox, &mut requests, &tracker, Some(control), || {
+                    self.admit_request(id, &outbox, &mut requests, &tracker, || {
                         self.services
                             .queries
-                            .submit_controlled(request, worker_control)
+                            .submit(request)
                             .map(PendingReply::Query)
                     })
                 }
                 Action::Rules { id, request } => {
-                    self.admit_request(id, &outbox, &mut requests, &tracker, None, || {
+                    self.admit_request(id, &outbox, &mut requests, &tracker, || {
                         self.services
                             .queries
                             .submit_rule_read(request)
@@ -304,7 +267,7 @@ impl Connection {
                 }
                 Action::Subscribe { id, subscription } => {
                     let connection = registration.as_ref().expect("subscribe follows hello").id;
-                    self.admit_request(id, &outbox, &mut requests, &tracker, None, || {
+                    self.admit_request(id, &outbox, &mut requests, &tracker, || {
                         self.registry
                             .submit_subscribe(
                                 connection,
@@ -317,7 +280,7 @@ impl Connection {
                 }
                 Action::Unsubscribe { id, subscription } => {
                     let connection = registration.as_ref().expect("unsubscribe follows hello").id;
-                    self.admit_request(id, &outbox, &mut requests, &tracker, None, || {
+                    self.admit_request(id, &outbox, &mut requests, &tracker, || {
                         self.registry
                             .submit_unsubscribe(connection, subscription)
                             .map(PendingReply::Unsubscribe)
@@ -340,14 +303,9 @@ impl Connection {
         outbox: &super::outbox::OutboxHandle,
         requests: &mut PendingReplies<'connection>,
         tracker: &PendingTracker,
-        control: Option<crate::query::control::QueryControl>,
         admit: impl FnOnce() -> Result<PendingReply, ProtocolError>,
     ) -> Option<quartz_protocol::Response> {
-        if tracker
-            .lock()
-            .expect("pending request lock")
-            .contains_key(&id)
-        {
+        if tracker.lock().expect("pending request lock").contains(&id) {
             return Some(Action::error_response(
                 Some(id),
                 ProtocolError::new(ErrorKind::BadRequest),
@@ -363,44 +321,14 @@ impl Connection {
         match admit() {
             Err(error) => Some(Action::error_response(Some(id), error)),
             Ok(reply) => {
-                let control = if matches!(
-                    reply,
-                    PendingReply::Write(_)
-                        | PendingReply::Subscribe(_)
-                        | PendingReply::Unsubscribe(_)
-                ) {
-                    None
-                } else {
-                    Some(control.unwrap_or_default())
-                };
-                let work = match &control {
-                    Some(control) => PendingWork::Read(control.clone()),
-                    None => PendingWork::Write,
-                };
-                tracker
-                    .lock()
-                    .expect("pending request lock")
-                    .insert(id, work);
+                tracker.lock().expect("pending request lock").insert(id);
                 let registration = PendingRegistration {
                     id,
                     tracker: tracker.clone(),
                 };
                 let outbox = outbox.clone();
                 requests.push(Box::pin(async move {
-                    let response = match &control {
-                        Some(control) => {
-                            let result = tokio::select! {
-                                biased;
-                                kind = control.stopped() => Ok(Some(Action::error_response(Some(id), ProtocolError::new(kind)))),
-                                result = reply.receive(id) => result,
-                            };
-                            match control.check() {
-                                Ok(()) => result,
-                                Err(error) => Ok(Some(Action::error_response(Some(id), ProtocolError::new(error.kind())))),
-                            }
-                        },
-                        None => reply.receive(id).await,
-                    }?;
+                    let response = reply.receive(id).await?;
                     drop(registration);
                     if let Some(response) = response {
                         outbox.response(response).map_err(io::Error::other)?;
@@ -631,7 +559,6 @@ pub(crate) mod tests {
                 &writer.handle,
                 &mut requests,
                 &PendingTracker::default(),
-                None,
                 || panic!("over-limit request must not enter an application queue"),
             )
             .expect("busy response");
@@ -700,7 +627,7 @@ pub(crate) mod tests {
         tokio::time::timeout(TEST_CLOSE_TIMEOUT, client.close())
             .await
             .expect("disconnect is observed promptly");
-        let crate::query::dispatch::QueryCommand::Controlled { reply, .. } = pending_query else {
+        let crate::query::dispatch::QueryCommand::Query { reply, .. } = pending_query else {
             panic!("query command");
         };
         assert!(
@@ -1119,99 +1046,6 @@ pub(crate) mod tests {
             "no duplicate unregister notifications"
         );
     }
-    #[tokio::test]
-    async fn cancellation_stops_only_this_connections_read_only_work() {
-        use quartz_protocol::{Op, Request};
-        let database = TestDatabase::start();
-        let status = StatusPublisher::new(quartz_protocol::InstanceId("cancel".into()));
-        let queries = crate::query::dispatch::QueryChannel::new();
-        let writes = crate::ipc::WriteChannel::new();
-        let mut connection = connection(&database, &status);
-        connection.services.queries = queries.port;
-        connection.services.writes = writes.port;
-        let mut client = MemoryClient::connect(
-            connection,
-            HelloRole::Ui {
-                ui: quartz_protocol::UiHello {
-                    state: quartz_protocol::UiState::Visible,
-                },
-            },
-        )
-        .await;
-        client.send_batch([
-            Request {id: RequestId(2), op: Op::RulesPreview, body: serde_json::json!({"mutation":{"op":"rule_sets.edit","body":{"key":"user.cancel","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":"opaque"})},
-            Request {id: RequestId(3), op: Op::SettingsSet, body: serde_json::json!({"resident":{"enabled":true}})},
-            Request {id: RequestId(4), op: Op::RequestsCancel, body: serde_json::json!({"request_id":2})},
-            Request {id: RequestId(5), op: Op::RequestsCancel, body: serde_json::json!({"request_id":3})},
-            Request {id: RequestId(6), op: Op::RequestsCancel, body: serde_json::json!({"request_id":999})},
-        ]).await;
-        let mut responses = std::collections::BTreeMap::new();
-        while responses.len() < 4 {
-            if let Envelope::Response(response) = client.next().await {
-                responses.insert(response.id.expect("request ID"), response.outcome);
-            }
-        }
-        assert!(
-            matches!(responses.get(&RequestId(2)),Some(ResponseOutcome::Err {error}) if error.kind==ErrorKind::Cancelled)
-        );
-        assert!(matches!(
-            responses.get(&RequestId(4)),
-            Some(ResponseOutcome::Ok { .. })
-        ));
-        assert!(
-            matches!(responses.get(&RequestId(5)),Some(ResponseOutcome::Err {error}) if error.kind==ErrorKind::BadRequest)
-        );
-        assert!(matches!(
-            responses.get(&RequestId(6)),
-            Some(ResponseOutcome::Ok { .. })
-        ));
-        let crate::query::dispatch::QueryCommand::Preview { request, reply } =
-            queries.receiver.try_recv().expect("queued preview")
-        else {
-            panic!("preview")
-        };
-        assert_eq!(
-            request
-                .control
-                .check()
-                .expect_err("cancelled worker")
-                .kind(),
-            ErrorKind::Cancelled
-        );
-        assert!(reply.is_closed());
-        assert!(
-            !writes
-                .receiver
-                .try_recv()
-                .expect("queued write")
-                .reply
-                .is_closed()
-        );
-        client.close().await;
-    }
-    #[tokio::test]
-    async fn queued_preview_deadline_returns_no_partial_body() {
-        let database = TestDatabase::start();
-        let status = StatusPublisher::new(quartz_protocol::InstanceId("deadline".into()));
-        let queries = crate::query::dispatch::QueryChannel::new();
-        let mut connection = connection(&database, &status);
-        connection.services.queries = queries.port;
-        let mut client = MemoryClient::connect(connection, HelloRole::Cli).await;
-        client.send_batch([quartz_protocol::Request {id:RequestId(2),op:quartz_protocol::Op::RulesTextPreview,body:serde_json::json!({"mutation":{"op":"rules_text.import","body":{"key":"user.deadline","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":"opaque","deadline_ms":1})}]).await;
-        let Envelope::Response(response) = client.next().await else {
-            panic!("deadline response")
-        };
-        assert!(
-            matches!(response.outcome,ResponseOutcome::Err {error} if error.kind==ErrorKind::DeadlineExceeded)
-        );
-        let crate::query::dispatch::QueryCommand::Preview { reply, .. } =
-            queries.receiver.try_recv().expect("queued preview")
-        else {
-            panic!("preview")
-        };
-        assert!(reply.is_closed());
-        client.close().await;
-    }
 
     #[tokio::test]
     async fn cli_text_preview_executes_on_the_database_query_worker() {
@@ -1238,166 +1072,6 @@ pub(crate) mod tests {
         let preview: quartz_protocol::RulesPreviewResponse =
             serde_json::from_value(body).expect("typed response");
         assert_eq!(preview.totals.expect("totals").after.active_ms, Some(4000));
-        client.close().await;
-    }
-    #[tokio::test]
-    async fn cancelling_a_request_id_does_not_cancel_another_connections_request() {
-        use quartz_protocol::{Op, Request};
-        let database = TestDatabase::start();
-        let status = StatusPublisher::new(quartz_protocol::InstanceId("connection-cancel".into()));
-        let queries = crate::query::dispatch::QueryChannel::new();
-        let mut first_connection = connection(&database, &status);
-        let mut second_connection = connection(&database, &status);
-        first_connection.services.queries = queries.port.clone();
-        second_connection.services.queries = queries.port;
-        let mut first = MemoryClient::connect(first_connection, HelloRole::Cli).await;
-        let mut second = MemoryClient::connect(second_connection, HelloRole::Cli).await;
-        first
-            .send_batch([Request {
-                id: RequestId(2),
-                op: Op::QueryDay,
-                body: serde_json::json!({"local_date":"2025-01-02"}),
-            }])
-            .await;
-        let first_job = tokio::time::timeout(HELLO_TIMEOUT, async {
-            loop {
-                if let Ok(job) = queries.receiver.try_recv() {
-                    break job;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("first admitted");
-        second
-            .send_batch([Request {
-                id: RequestId(2),
-                op: Op::QueryDay,
-                body: serde_json::json!({"local_date":"2025-01-02"}),
-            }])
-            .await;
-        let second_job = tokio::time::timeout(HELLO_TIMEOUT, async {
-            loop {
-                if let Ok(job) = queries.receiver.try_recv() {
-                    break job;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("second admitted");
-        first
-            .send_batch([Request {
-                id: RequestId(3),
-                op: Op::RequestsCancel,
-                body: serde_json::json!({"request_id":2}),
-            }])
-            .await;
-        let mut ids = std::collections::BTreeSet::new();
-        while ids.len() < 2 {
-            if let Envelope::Response(response) = first.next().await {
-                ids.insert(response.id.expect("ID"));
-            }
-        }
-        let crate::query::dispatch::QueryCommand::Controlled {
-            control: first_control,
-            ..
-        } = first_job
-        else {
-            panic!("first query")
-        };
-        let crate::query::dispatch::QueryCommand::Controlled {
-            control: second_control,
-            reply,
-            ..
-        } = second_job
-        else {
-            panic!("second query")
-        };
-        assert_eq!(
-            first_control.check().expect_err("first cancelled").kind(),
-            ErrorKind::Cancelled
-        );
-        second_control
-            .check()
-            .expect("second connection remains live");
-        assert!(!reply.is_closed());
-        first.close().await;
-        second.close().await;
-    }
-    #[tokio::test]
-    async fn cancellation_covers_read_only_operations_on_the_write_queue() {
-        use quartz_protocol::{Op, Request};
-        let database = TestDatabase::start();
-        let status = StatusPublisher::new(quartz_protocol::InstanceId("cancel-read-queue".into()));
-        let writes = crate::ipc::WriteChannel::new();
-        let mut connection = connection(&database, &status);
-        connection.services.writes = writes.port;
-        let mut client = MemoryClient::connect(
-            connection,
-            HelloRole::Ui {
-                ui: quartz_protocol::UiHello {
-                    state: quartz_protocol::UiState::Visible,
-                },
-            },
-        )
-        .await;
-        client
-            .send_batch([
-                Request {
-                    id: RequestId(2),
-                    op: Op::RulesTextValidate,
-                    body: serde_json::json!({"key":"user.validate","base_version":0,"text":""}),
-                },
-                Request {
-                    id: RequestId(3),
-                    op: Op::SettingsGet,
-                    body: serde_json::json!({}),
-                },
-                Request {
-                    id: RequestId(4),
-                    op: Op::CategoriesList,
-                    body: serde_json::json!({"include_archived":true}),
-                },
-                Request {
-                    id: RequestId(5),
-                    op: Op::RequestsCancel,
-                    body: serde_json::json!({"request_id":2}),
-                },
-                Request {
-                    id: RequestId(6),
-                    op: Op::RequestsCancel,
-                    body: serde_json::json!({"request_id":3}),
-                },
-                Request {
-                    id: RequestId(7),
-                    op: Op::RequestsCancel,
-                    body: serde_json::json!({"request_id":4}),
-                },
-            ])
-            .await;
-        let mut replies = std::collections::BTreeMap::new();
-        while replies.len() < 6 {
-            if let Envelope::Response(response) = client.next().await {
-                replies.insert(response.id.expect("ID"), response.outcome);
-            }
-        }
-        for request in [2, 3, 4] {
-            assert!(
-                matches!(replies.get(&RequestId(request)),Some(ResponseOutcome::Err {error}) if error.kind==ErrorKind::Cancelled)
-            );
-        }
-        for request in [5, 6, 7] {
-            assert!(matches!(
-                replies.get(&RequestId(request)),
-                Some(ResponseOutcome::Ok { .. })
-            ));
-        }
-        for _ in 0..3 {
-            let command = writes.receiver.try_recv().expect("queued read");
-            assert!(command.request.is_read_only());
-            assert!(command.reply.is_closed());
-        }
         client.close().await;
     }
 }

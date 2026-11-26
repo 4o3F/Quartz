@@ -3,7 +3,6 @@
 mod annotations;
 pub(crate) mod calendar;
 pub(crate) mod classification;
-pub(crate) mod control;
 mod day_walker;
 mod details;
 #[cfg(any(windows, test))]
@@ -57,10 +56,6 @@ const MAX_DOCUMENT_REFERENCE_MS: i64 =
 pub(crate) enum RunQueryError {
     #[snafu(display("invalid query range"))]
     InvalidRange,
-    #[snafu(display("read-only query was cancelled"))]
-    Cancelled,
-    #[snafu(display("read-only query exceeded its deadline"))]
-    DeadlineExceeded,
     #[snafu(display("query protocol request was rejected"))]
     RejectQueryError {
         error: quartz_protocol::ProtocolError,
@@ -146,8 +141,6 @@ impl RunQueryError {
     }
     pub(crate) fn kind(&self) -> ErrorKind {
         match self {
-            Self::Cancelled => ErrorKind::Cancelled,
-            Self::DeadlineExceeded => ErrorKind::DeadlineExceeded,
             Self::RejectQueryError { error } => error.kind.clone(),
             Self::InvalidRange | Self::Calendar { .. } => ErrorKind::InvalidRange,
             Self::InvalidCursor

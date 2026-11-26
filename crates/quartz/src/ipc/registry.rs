@@ -41,14 +41,12 @@ pub(crate) struct UiPeer {
 pub(crate) enum ConnectionPeer {
     Ui(UiPeer),
     Cli,
-    Host,
 }
 impl ConnectionPeer {
     pub(crate) fn role(self) -> Role {
         match self {
             Self::Ui(_) => Role::Ui,
             Self::Cli => Role::Cli,
-            Self::Host => Role::Host,
         }
     }
 }
@@ -419,13 +417,6 @@ impl ConnectionRegistry {
                 });
             }
             RegistryMessage::TargetControl { connection, op } => {
-                if !matches!(
-                    op,
-                    ControlOp::UiShow | ControlOp::UiActivate | ControlOp::UiShutdown
-                ) {
-                    tracing::warn!(?op, "rejected unsupported targeted control");
-                    return;
-                }
                 match self
                     .connections
                     .get(&connection)

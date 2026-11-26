@@ -237,7 +237,6 @@ pub enum CursorQuery {
         start_date: LocalDate,
         end_date: LocalDate,
         expected_versions: QueryVersions,
-        deadline_ms: crate::PreviewDeadlineMs,
         sample_limit: crate::PreviewSampleLimit,
     },
     /// Import draft digest and exact preview inputs, distinct from the editor operation.
@@ -246,7 +245,6 @@ pub enum CursorQuery {
         start_date: LocalDate,
         end_date: LocalDate,
         expected_versions: QueryVersions,
-        deadline_ms: crate::PreviewDeadlineMs,
         sample_limit: crate::PreviewSampleLimit,
     },
     /// Rule family tree inputs.
@@ -1067,10 +1065,6 @@ mod tests {
         for group_by in ["domain", "category", "APP"] {
             assert!(serde_json::from_value::<QueryUnclassifiedRequest>(serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":group_by})).is_err());
         }
-        assert_eq!(
-            serde_json::to_value(crate::Capability::QueryUnclassifiedV1).expect("capability"),
-            "query.unclassified.v1"
-        );
     }
     #[test]
     fn range_wire_snapshots_preserve_entities_dimensions_and_bucket_continuations() {
@@ -1133,10 +1127,6 @@ mod tests {
         let mut invalid = wire;
         invalid["dimensions"] = serde_json::json!(["domain"]);
         assert!(serde_json::from_value::<QueryRangeRequest>(invalid).is_err());
-        assert_eq!(
-            serde_json::to_value(crate::Capability::QueryRangeV1).expect("capability"),
-            "query.range.v1"
-        );
         assert_eq!(
             <QueryRangeRequest as crate::CoreRequest>::OP,
             crate::Op::QueryRange
@@ -1515,10 +1505,6 @@ mod tests {
         let legacy = serde_json::json!({"applications":[],"versions":"legacy","next_cursor":null});
         let decoded: QueryDayResponse = serde_json::from_value(legacy).expect("legacy day");
         assert!(decoded.documents.is_empty() && decoded.reference_range.is_none());
-        assert_eq!(
-            serde_json::to_value(crate::Capability::QueryDocumentsV1).expect("capability"),
-            "query.documents.v1"
-        );
     }
     #[test]
     fn reference_range_is_strict_in_requests_and_extensible_in_responses() {

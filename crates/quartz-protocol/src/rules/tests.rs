@@ -179,16 +179,6 @@ fn rule_text_contracts_preserve_fixtures_and_accept_additive_responses() {
         assert!(role.authorize(crate::Op::RulesTextValidate).is_ok());
         assert!(role.authorize(crate::Op::RulesTextExport).is_ok());
     }
-    assert!(
-        crate::Role::Host
-            .authorize(crate::Op::RulesTextValidate)
-            .is_err()
-    );
-    assert!(
-        crate::Role::Host
-            .authorize(crate::Op::RulesTextExport)
-            .is_err()
-    );
 }
 
 #[test]

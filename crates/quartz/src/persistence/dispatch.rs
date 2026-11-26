@@ -20,15 +20,6 @@ pub(crate) enum WriteResponse {
     Accepted(quartz_protocol::AcceptedBody),
 }
 impl WriteRequest {
-    pub(crate) fn is_read_only(&self) -> bool {
-        matches!(
-            self,
-            Self::RuleValidation(_)
-                | Self::SettingsGet
-                | Self::Categories(CategoryRequest::List(_))
-        )
-    }
-
     pub(crate) fn decode(
         op: quartz_protocol::Op,
         body: serde_json::Value,

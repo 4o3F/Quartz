@@ -1,4 +1,4 @@
-//! Version negotiation and role-specific handshake bodies (04 §4 and 05 §1.2).
+//! Version negotiation and role-specific handshake bodies (04 §4).
 
 use std::{fmt, str::FromStr};
 
@@ -165,56 +165,6 @@ pub struct CoreVersion(pub String);
 #[serde(transparent)]
 pub struct InstanceId(pub String);
 
-/// Browser extension identity checked against the registered extensions by the server.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ExtensionId(pub String);
-
-/// Persisted browser-background start counter (05 §1.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Epoch(pub u64);
-
-/// Browser implementation self-reported by the extension (05 §1.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BrowserKind {
-    /// Google Chrome.
-    Chrome,
-    /// Microsoft Edge.
-    Edge,
-    /// Mozilla Firefox, also covered by the browser design.
-    Firefox,
-    /// An implementation added by a later protocol; runtime policy decides support.
-    #[serde(other, skip_serializing)]
-    Unknown,
-}
-
-/// Browser extension's `browser.hello` body from 05 §1.2.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrowserHello {
-    /// Stable identity stored in this browser profile's local storage.
-    pub profile_instance_id: Uuid,
-    /// Identity generated for the current browser session.
-    pub browser_session_id: Uuid,
-    /// Incremented each time the extension background starts.
-    pub epoch: Epoch,
-    /// Extension's supported protocol versions.
-    pub proto: ProtoRange,
-    /// Self-reported browser implementation.
-    pub browser: BrowserKind,
-}
-
-/// Host handshake adds the extension identity supplied by the browser launch arguments.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostHello {
-    /// Flattened extension handshake fields.
-    #[serde(flatten)]
-    pub browser: BrowserHello,
-    /// Registered identity used for server-side authorization.
-    pub extension_id: ExtensionId,
-}
-
 /// UI lifecycle state declared during the handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -243,11 +193,6 @@ pub enum HelloRole {
         /// Payload carried in the `ui` object.
         ui: UiHello,
     },
-    /// Hosts must identify their browser stream and extension.
-    Host {
-        /// Payload carried in the `browser` object.
-        browser: HostHello,
-    },
     /// Command-line clients have no role-specific payload.
     Cli,
 }
@@ -258,7 +203,6 @@ impl HelloRole {
     pub const fn role(&self) -> crate::Role {
         match self {
             Self::Ui { .. } => crate::Role::Ui,
-            Self::Host { .. } => crate::Role::Host,
             Self::Cli => crate::Role::Cli,
         }
     }
@@ -276,44 +220,6 @@ pub struct Hello {
     pub role: HelloRole,
 }
 
-/// Optional protocol features reported by the core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Capability {
-    /// Connection-local cancellation of read-only requests.
-    #[serde(rename = "requests.cancel.v1")]
-    RequestsCancelV1,
-    /// Rule previews.
-    #[serde(rename = "rules.preview.v1")]
-    RulesPreviewV1,
-    /// Rule text validation, import, and export.
-    #[serde(rename = "rules_text.v1")]
-    RulesTextV1,
-    /// Browser activity reporting version 1.
-    #[serde(rename = "browser.v1")]
-    BrowserV1,
-    /// Category editing and hierarchy listing version 1.
-    #[serde(rename = "categories.v1")]
-    CategoriesV1,
-    /// Annotation operations version 1.
-    #[serde(rename = "annotations.v1")]
-    AnnotationsV1,
-    /// Visible document rankings, extraction, references and details version 1.
-    #[serde(rename = "query.documents.v1")]
-    QueryDocumentsV1,
-    /// Bounded day and week summaries version 1.
-    #[serde(rename = "query.range.v1")]
-    QueryRangeV1,
-    /// Grouped unclassified active work version 1.
-    #[serde(rename = "query.unclassified.v1")]
-    QueryUnclassifiedV1,
-    /// Saved annotation editing values and text continuations version 1.
-    #[serde(rename = "query.annotations.v1")]
-    QueryAnnotationsV1,
-    /// A feature not understood by this client.
-    #[serde(other, skip_serializing)]
-    Unknown,
-}
-
 /// Successful core handshake body from 04 §4.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloResponse {
@@ -323,8 +229,6 @@ pub struct HelloResponse {
     pub core_version: CoreVersion,
     /// Identity generated for this core start.
     pub instance_id: InstanceId,
-    /// Optional protocol features supported by this core.
-    pub capabilities: Vec<Capability>,
 }
 
 #[cfg(test)]
@@ -345,63 +249,17 @@ mod tests {
             "prewarming"
         );
         let response: HelloResponse = serde_json::from_value(serde_json::json!({
-            "proto":1,"core_version":"0.1.0","instance_id":"8c1e...",
-            "capabilities":["browser.v1","annotations.v1","future.v2"],"future":true
+            "proto":1,"core_version":"0.1.0","instance_id":"8c1e...","future":true
         }))
         .expect("04 response");
-        assert_eq!(
-            response.capabilities,
-            [
-                Capability::BrowserV1,
-                Capability::AnnotationsV1,
-                Capability::Unknown
-            ]
-        );
-        assert!(
-            serde_json::to_value(&response).is_err(),
-            "unknown capabilities are receive-only"
-        );
+        assert_eq!(response.proto, PROTOCOL_VERSION);
+        assert_eq!(response.core_version, CoreVersion("0.1.0".into()));
+        assert_eq!(response.instance_id, InstanceId("8c1e...".into()));
         assert!(
             serde_json::from_str::<Hello>(
                 r#"{"proto":{"min":1,"max":1},"client_version":"1","role":"ui"}"#
             )
             .is_err()
-        );
-    }
-
-    #[test]
-    fn browser_and_host_hello_follow_05_fields() {
-        let browser = serde_json::json!({
-            "profile_instance_id":"a286737e-3855-43cb-98ee-c366344372d0",
-            "browser_session_id":"be5a458b-e2b2-417a-b236-ab5491e2ec4d",
-            "epoch":12,"proto":{"min":1,"max":1},"browser":"edge"
-        });
-        let parsed: BrowserHello = serde_json::from_value(browser.clone()).expect("05 example");
-        assert_eq!(parsed.browser, BrowserKind::Edge);
-        let mut host_browser = browser;
-        host_browser["extension_id"] = serde_json::json!("extension-id");
-        host_browser["future"] = serde_json::json!(42);
-        let host = serde_json::json!({"proto":{"min":1,"max":1},"client_version":"0.1.0", "role":"host","browser":host_browser});
-        let parsed: Hello =
-            serde_json::from_value(host.clone()).expect("host hello with extension identity");
-        assert_eq!(parsed.role.role(), crate::Role::Host);
-        let encoded = serde_json::to_value(&parsed).expect("serialize host hello");
-        assert_eq!(encoded["browser"]["browser"], "edge");
-        assert_eq!(encoded["browser"]["epoch"], 12);
-        assert_eq!(encoded["browser"]["extension_id"], "extension-id");
-        let mut missing_id = host;
-        missing_id["browser"]
-            .as_object_mut()
-            .expect("object")
-            .remove("extension_id");
-        assert!(serde_json::from_value::<Hello>(missing_id).is_err());
-        assert_eq!(
-            serde_json::from_str::<BrowserKind>("\"firefox\"").expect("Firefox in 05"),
-            BrowserKind::Firefox
-        );
-        assert_eq!(
-            serde_json::from_str::<BrowserKind>("\"future\"").expect("future browser"),
-            BrowserKind::Unknown
         );
     }
 

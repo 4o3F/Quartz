@@ -38,28 +38,27 @@ pub use error::{ErrorKind, ProtocolError, RuleSetVersion};
 pub use frame::frame_codec;
 pub use frame::{DecodeJsonError, EncodeFrameError, MAX_FRAME_LEN, decode_json, encode_json};
 pub use handshake::{
-    BrowserHello, BrowserKind, Capability, ClientVersion, CoreVersion, Epoch, ExtensionId, Hello,
-    HelloResponse, HelloRole, HostHello, InstanceId, NegotiateProtoError, PROTOCOL_VERSION,
-    ParseProtoRangeError, ParseUuidError, ProtoRange, ProtoVersion, UiHello, UiState, Uuid,
+    ClientVersion, CoreVersion, Hello, HelloResponse, HelloRole, InstanceId, NegotiateProtoError,
+    PROTOCOL_VERSION, ParseProtoRangeError, ParseUuidError, ProtoRange, ProtoVersion, UiHello,
+    UiState, Uuid,
 };
 pub use op::{ControlBody, ControlOp, Op, OpFamily};
 pub use role::{AuthorizeOpError, Role};
 pub use rules::{
-    FurtherHidden, MAX_RULE_DIAGNOSTICS, MAX_RULE_TEXT_BYTES, MutatedRuleSet,
-    PREVIEW_DEFAULT_DEADLINE_MS, PREVIEW_MAX_DAYS, PREVIEW_MAX_DEADLINE_MS, PREVIEW_MAX_SAMPLES,
-    ParsePreviewDeadlineError, ParsePreviewSampleLimitError, PreviewCategoryRank,
-    PreviewDeadlineMs, PreviewDelete, PreviewSampleLimit, PreviewSetEnabled, RuleAction, RuleApp,
-    RuleCondition, RuleConditionMatch, RuleDiagnostic, RuleDiagnosticLocation,
-    RuleEffectiveContribution, RuleEntryContent, RuleEntryKind, RuleEntryState, RuleField,
-    RuleKind, RuleMatch, RuleOperator, RulePreviewMutation, RulePreviewOutput, RulePreviewRequest,
-    RulePreviewSample, RulePreviewSideTotals, RulePreviewStatistics, RulePreviewTotals,
-    RuleProvenance, RuleSetCounts, RuleSetEntry, RuleSetIdentityField, RuleSetNode, RuleSetSource,
-    RuleSetWarning, RuleSetsDeleteRequest, RuleSetsEditRequest, RuleSetsGetRequest,
-    RuleSetsGetResponse, RuleSetsSetEnabledRequest, RuleSetsTreeRequest, RuleSetsTreeResponse,
-    RuleSetsWriteResponse, RuleView, RuleWarningCode, RuleWebAction, RulesPreviewRequest,
-    RulesPreviewResponse, RulesTextExportRequest, RulesTextExportResponse,
-    RulesTextPreviewMutation, RulesTextPreviewRequest, RulesTextPreviewResponse,
-    RulesTextValidateRequest, RulesTextValidateResponse, ValidatePreviewDatesError,
+    FurtherHidden, MAX_RULE_DIAGNOSTICS, MAX_RULE_TEXT_BYTES, MutatedRuleSet, PREVIEW_MAX_DAYS,
+    PREVIEW_MAX_SAMPLES, ParsePreviewSampleLimitError, PreviewCategoryRank, PreviewDelete,
+    PreviewSampleLimit, PreviewSetEnabled, RuleAction, RuleApp, RuleCondition, RuleConditionMatch,
+    RuleDiagnostic, RuleDiagnosticLocation, RuleEffectiveContribution, RuleEntryContent,
+    RuleEntryKind, RuleEntryState, RuleField, RuleKind, RuleMatch, RuleOperator,
+    RulePreviewMutation, RulePreviewOutput, RulePreviewRequest, RulePreviewSample,
+    RulePreviewSideTotals, RulePreviewStatistics, RulePreviewTotals, RuleProvenance, RuleSetCounts,
+    RuleSetEntry, RuleSetIdentityField, RuleSetNode, RuleSetSource, RuleSetWarning,
+    RuleSetsDeleteRequest, RuleSetsEditRequest, RuleSetsGetRequest, RuleSetsGetResponse,
+    RuleSetsSetEnabledRequest, RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsWriteResponse,
+    RuleView, RuleWarningCode, RuleWebAction, RulesPreviewRequest, RulesPreviewResponse,
+    RulesTextExportRequest, RulesTextExportResponse, RulesTextPreviewMutation,
+    RulesTextPreviewRequest, RulesTextPreviewResponse, RulesTextValidateRequest,
+    RulesTextValidateResponse, ValidatePreviewDatesError,
 };
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};
 pub use topic::{LocalDate, ParseTopicError, Subscribe, SubscribeResponse, Topic, Unsubscribe};
@@ -104,10 +103,3 @@ pub use settings::{
     PrewarmSettings, PrewarmUpdate, ResidentEnabled, ResidentSettings, ResidentUpdate,
     SettingsGetRequest, SettingsResponse, SettingsSetRequest, UiLanguageSetting, UiSettings,
 };
-
-/// Cancels a read-only request belonging to the current connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CancelRequest {
-    pub request_id: RequestId,
-}

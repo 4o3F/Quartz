@@ -19,10 +19,7 @@ pub(crate) enum AllowedRoles {
 }
 impl AllowedRoles {
     pub(crate) fn permits(self, role: Role) -> bool {
-        matches!(
-            (self, role),
-            (Self::Quartz, Role::Ui | Role::Cli) | (Self::Host, Role::Host)
-        )
+        matches!((self, role), (Self::Quartz, Role::Ui | Role::Cli))
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,21 +46,18 @@ pub(crate) enum UiCommand {
 enum ReadyRole {
     Ui { state: UiState },
     Cli,
-    Host,
 }
 impl ReadyRole {
     fn role(self) -> Role {
         match self {
             Self::Ui { .. } => Role::Ui,
             Self::Cli => Role::Cli,
-            Self::Host => Role::Host,
         }
     }
     fn peer(self, pid: ProcessId) -> ConnectionPeer {
         match self {
             Self::Ui { state } => ConnectionPeer::Ui(UiPeer { pid, state }),
             Self::Cli => ConnectionPeer::Cli,
-            Self::Host => ConnectionPeer::Host,
         }
     }
 }
@@ -72,7 +66,6 @@ impl From<HelloRole> for ReadyRole {
         match role {
             HelloRole::Ui { ui } => Self::Ui { state: ui.state },
             HelloRole::Cli => Self::Cli,
-            HelloRole::Host { .. } => Self::Host,
         }
     }
 }
@@ -123,10 +116,6 @@ pub(crate) enum Action {
     Preview {
         id: RequestId,
         request: crate::query::preview::PreviewRequest,
-    },
-    Cancel {
-        id: RequestId,
-        request: quartz_protocol::CancelRequest,
     },
     Query {
         id: RequestId,
@@ -221,8 +210,7 @@ impl ConnectionSession {
                     }
                 };
                 let role = hello.role.role();
-                // TODO(M5): Authenticate registered host browser streams and enable host runtime.
-                if !self.allowed.permits(role) || role == Role::Host {
+                if !self.allowed.permits(role) {
                     return Action::error(Some(id), ErrorKind::Forbidden);
                 }
                 self.state = State::Ready(hello.role.into());
@@ -232,16 +220,6 @@ impl ConnectionSession {
                         proto,
                         instance_id: status.instance_id.clone(),
                         core_version: status.core_version.clone(),
-                        capabilities: vec![
-                            quartz_protocol::Capability::RequestsCancelV1,
-                            quartz_protocol::Capability::RulesPreviewV1,
-                            quartz_protocol::Capability::RulesTextV1,
-                            quartz_protocol::Capability::CategoriesV1,
-                            quartz_protocol::Capability::QueryDocumentsV1,
-                            quartz_protocol::Capability::QueryUnclassifiedV1,
-                            quartz_protocol::Capability::QueryRangeV1,
-                            quartz_protocol::Capability::QueryAnnotationsV1,
-                        ],
                     },
                 )
             }
@@ -320,10 +298,6 @@ impl ConnectionSession {
                             Err(error) => Action::Reply(Action::error_response(Some(id), error)),
                         }
                     }
-                    Op::RequestsCancel => match serde_json::from_value(request.body) {
-                        Ok(request) => Action::Cancel { id, request },
-                        Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
-                    },
                     Op::QueryFacts
                     | Op::QueryDay
                     | Op::QueryTimeline
@@ -360,19 +334,7 @@ impl ConnectionSession {
                         }
                     }
                     Op::Hello => Action::error(Some(id), ErrorKind::BadRequest),
-                    Op::DataDelete
-                    | Op::BrowserHello
-                    | Op::BrowserState
-                    | Op::BrowserGap
-                    | Op::BrowserPurgeAck
-                    | Op::BrowserQuerySiteToday
-                    | Op::AppsIcon
-                    | Op::BrowserHostsStatus
-                    | Op::BrowserHostsEnable
-                    | Op::BrowserHostsDisable
-                    | Op::MaintenanceBackup
-                    | Op::MaintenanceCompact
-                    | Op::Unknown => Action::error(Some(id), ErrorKind::NotImplemented),
+                    Op::Unknown => Action::error(Some(id), ErrorKind::UnknownOp),
                 }
             }
             State::Closing => Action::error(Some(id), ErrorKind::BadRequest),
@@ -563,24 +525,21 @@ mod tests {
                 ),
                 Action::Write { .. }
             ));
-            for role in [ReadyRole::Cli, ReadyRole::Host] {
-                let mut session = ConnectionSession {
-                    state: State::Ready(role),
-                    allowed: AllowedRoles::Quartz,
-                };
-                assert_eq!(
-                    session
-                        .receive(
-                            request(2, case.op, case.body.clone()),
-                            &status.borrow().status
-                        )
-                        .reply()
-                        .outcome,
-                    ResponseOutcome::Err {
-                        error: ProtocolError::new(ErrorKind::Forbidden)
-                    }
-                );
-            }
+            let mut cli = ConnectionSession {
+                state: State::Ready(ReadyRole::Cli),
+                allowed: AllowedRoles::Quartz,
+            };
+            assert_eq!(
+                cli.receive(
+                    request(2, case.op, case.body.clone()),
+                    &status.borrow().status
+                )
+                .reply()
+                .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::Forbidden)
+                }
+            );
             let mut invalid = case.body;
             invalid["extra"] = serde_json::json!(true);
             assert_eq!(
@@ -815,19 +774,9 @@ mod tests {
             panic!("hello response")
         };
         let hello: HelloResponse = serde_json::from_value(body).expect("hello body");
-        assert_eq!(
-            hello.capabilities,
-            vec![
-                quartz_protocol::Capability::RequestsCancelV1,
-                quartz_protocol::Capability::RulesPreviewV1,
-                quartz_protocol::Capability::RulesTextV1,
-                quartz_protocol::Capability::CategoriesV1,
-                quartz_protocol::Capability::QueryDocumentsV1,
-                quartz_protocol::Capability::QueryUnclassifiedV1,
-                quartz_protocol::Capability::QueryRangeV1,
-                quartz_protocol::Capability::QueryAnnotationsV1,
-            ]
-        );
+        assert_eq!(hello.proto, PROTOCOL_VERSION);
+        assert_eq!(hello.instance_id, status.status.instance_id);
+        assert_eq!(hello.core_version, status.status.core_version);
         assert!(matches!(
             session.receive(
                 request(2, Op::UiOpen, serde_json::json!({})),
@@ -865,14 +814,13 @@ mod tests {
         assert!(!session.closing());
     }
     #[test]
-    fn host_runtime_is_disabled_even_for_the_host_executable() {
+    fn host_executable_cannot_authenticate_any_role() {
         let publisher =
             crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("host-test".into()));
         let receiver = publisher.subscribe();
         let mut session = ConnectionSession::new(AllowedRoles::Host);
-        let hello = serde_json::json!({"proto":{"min":1,"max":1},"client_version":"test","role":"host","browser":{
-            "profile_instance_id":"12345678-1234-1234-1234-123456789abc","browser_session_id":"12345678-1234-1234-1234-123456789abc",
-            "epoch":1,"proto":{"min":1,"max":1},"browser":"edge","extension_id":"test"}});
+        let hello =
+            serde_json::json!({"proto":{"min":1,"max":1},"client_version":"test","role":"cli"});
         let decision = session.receive(request(1, Op::Hello, hello), &receiver.borrow().status);
         assert_eq!(
             decision.reply().outcome,
@@ -885,9 +833,9 @@ mod tests {
 
     #[test]
     fn executable_roles_cannot_be_promoted() {
-        for role in [Role::Ui, Role::Cli, Role::Host] {
-            assert_eq!(AllowedRoles::Quartz.permits(role), role != Role::Host);
-            assert_eq!(AllowedRoles::Host.permits(role), role == Role::Host);
+        for role in [Role::Ui, Role::Cli] {
+            assert!(AllowedRoles::Quartz.permits(role));
+            assert!(!AllowedRoles::Host.permits(role));
         }
     }
     #[test]
@@ -950,23 +898,6 @@ mod tests {
         ));
         let receiver = publisher.subscribe();
         let status = receiver.borrow();
-        for role in [ReadyRole::Host] {
-            let mut session = ConnectionSession {
-                state: State::Ready(role),
-                allowed: AllowedRoles::Quartz,
-            };
-            for op in [Op::SettingsGet, Op::SettingsSet] {
-                let response = session
-                    .receive(request(1, op, serde_json::json!({})), &status.status)
-                    .reply();
-                assert_eq!(
-                    response.outcome,
-                    ResponseOutcome::Err {
-                        error: ProtocolError::new(ErrorKind::Forbidden)
-                    }
-                );
-            }
-        }
         let mut ui = ConnectionSession {
             state: State::Ready(ReadyRole::Ui {
                 state: UiState::Starting,
@@ -1010,22 +941,20 @@ mod tests {
             Op::TrackingKeepAlive,
             Op::PrivacyModeSet,
         ];
-        for role in [ReadyRole::Cli, ReadyRole::Host] {
-            let mut session = ConnectionSession {
-                state: State::Ready(role),
-                allowed: AllowedRoles::Quartz,
-            };
-            for op in ops {
-                assert_eq!(
-                    session
-                        .receive(request(1, op, serde_json::json!({})), status)
-                        .reply()
-                        .outcome,
-                    ResponseOutcome::Err {
-                        error: ProtocolError::new(ErrorKind::Forbidden)
-                    }
-                );
-            }
+        let mut session = ConnectionSession {
+            state: State::Ready(ReadyRole::Cli),
+            allowed: AllowedRoles::Quartz,
+        };
+        for op in ops {
+            assert_eq!(
+                session
+                    .receive(request(1, op, serde_json::json!({})), status)
+                    .reply()
+                    .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::Forbidden)
+                }
+            );
         }
         let mut ui = ConnectionSession {
             state: State::Ready(ReadyRole::Ui {
@@ -1280,7 +1209,6 @@ mod tests {
                 state: UiState::Visible,
             },
             ReadyRole::Cli,
-            ReadyRole::Host,
         ] {
             for op in [Op::RulesPreview, Op::RulesTextPreview] {
                 let mut session = ConnectionSession {

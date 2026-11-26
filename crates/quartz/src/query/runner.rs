@@ -9,13 +9,11 @@ pub(crate) struct QueryRunner {
 }
 struct RunningQuery {
     job: RunningJob,
-    control: super::control::QueryControl,
     reply: tokio::sync::oneshot::Sender<Result<QueryResponse, ProtocolError>>,
 }
 struct StartedQuery {
     result: Result<RunningJob, RunQueryError>,
     reply: tokio::sync::oneshot::Sender<Result<QueryResponse, ProtocolError>>,
-    control: super::control::QueryControl,
 }
 enum RunningJob {
     Query(Box<QueryJob>),
@@ -50,11 +48,7 @@ impl QueryRunner {
         }
         let rules = registry.snapshots().load();
         let mut reader = store.take_query_reader();
-        let StartedQuery {
-            result,
-            reply,
-            control,
-        } = match command {
+        let StartedQuery { result, reply } = match command {
             QueryCommand::RuleInputs { reply } => {
                 if let Some(reader) = reader {
                     store.return_query_reader(reader);
@@ -72,46 +66,16 @@ impl QueryRunner {
             QueryCommand::Query { request, reply } => {
                 let result = QueryJob::start(&mut reader, request, rules)
                     .map(|job| RunningJob::Query(Box::new(job)));
-                StartedQuery {
-                    result,
-                    reply,
-                    control: Default::default(),
-                }
-            }
-            QueryCommand::Controlled {
-                request,
-                reply,
-                control,
-            } => {
-                let result = control
-                    .check()
-                    .and_then(|()| QueryJob::start(&mut reader, request, rules))
-                    .map(|job| RunningJob::Query(Box::new(job)));
-                StartedQuery {
-                    result,
-                    reply,
-                    control,
-                }
+                StartedQuery { result, reply }
             }
             QueryCommand::Preview { request, reply } => {
-                let control = request.control.clone();
                 let result = super::preview::PreviewJob::start(&mut reader, request, registry)
                     .map(|job| RunningJob::Preview(Box::new(job)));
-                StartedQuery {
-                    result,
-                    reply,
-                    control,
-                }
+                StartedQuery { result, reply }
             }
         };
         match result {
-            Ok(job) => {
-                self.running = Some(RunningQuery {
-                    job,
-                    reply,
-                    control,
-                })
-            }
+            Ok(job) => self.running = Some(RunningQuery { job, reply }),
             Err(error) => {
                 if let Some(reader) = reader {
                     store.return_query_reader(reader);
@@ -133,14 +97,8 @@ impl QueryRunner {
         let result = if active.reply.is_closed() {
             Some(Err(ProtocolError::new(ErrorKind::Internal)))
         } else {
-            match active.control.check().and_then(|()| active.job.advance()) {
-                Ok(Some(response)) => Some(
-                    active
-                        .control
-                        .check()
-                        .map(|()| response)
-                        .map_err(|error| ProtocolError::new(error.kind())),
-                ),
+            match active.job.advance() {
+                Ok(Some(response)) => Some(Ok(response)),
                 Ok(None) => None,
                 Err(error) => {
                     tracing::warn!(%error, "could not compute query");

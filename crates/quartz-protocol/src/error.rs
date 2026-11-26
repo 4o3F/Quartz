@@ -17,8 +17,6 @@ pub enum ErrorKind {
     BadRequest,
     /// The request operation is not recognized.
     UnknownOp,
-    /// The operation is defined but not implemented by this core.
-    NotImplemented,
     /// The first request must be hello.
     HandshakeRequired,
     /// The declared frame payload exceeds the byte limit.
@@ -42,10 +40,6 @@ pub enum ErrorKind {
     StaleInputs {
         current_versions: crate::QueryVersions,
     },
-    /// Read-only work exceeded its admission-relative deadline.
-    DeadlineExceeded,
-    /// Read-only work was cancelled by its connection.
-    Cancelled,
     /// Document reference inputs changed; refresh the originating query.
     StaleDocumentRef,
     /// The submitted base version differs from the current rule-set version.
@@ -71,8 +65,6 @@ pub enum ErrorKind {
         diagnostics: Vec<crate::RuleDiagnostic>,
         truncated: bool,
     },
-    /// The host could not connect to the core.
-    CoreOffline,
     /// The core could not complete the request because of an internal failure.
     Internal,
     /// A persisted counter cannot be incremented; the transaction was rolled back.
@@ -91,7 +83,6 @@ impl ErrorKind {
         match self {
             Self::BadRequest => "bad_request",
             Self::UnknownOp => "unknown_op",
-            Self::NotImplemented => "not_implemented",
             Self::HandshakeRequired => "handshake_required",
             Self::FrameTooLarge => "frame_too_large",
             Self::PageTooLarge => "page_too_large",
@@ -100,8 +91,6 @@ impl ErrorKind {
             Self::InvalidRange => "invalid_range",
             Self::StaleCursor => "stale_cursor",
             Self::StaleInputs { .. } => "stale_inputs",
-            Self::DeadlineExceeded => "deadline_exceeded",
-            Self::Cancelled => "cancelled",
             Self::StaleDocumentRef => "stale_document_ref",
             Self::RuleSetStale { .. } => "rule_set_stale",
             Self::RuleSetNotFound { .. } => "rule_set_not_found",
@@ -109,7 +98,6 @@ impl ErrorKind {
             Self::RuleSetHasChildren { .. } => "rule_set_has_children",
             Self::RuleSetIdentity { .. } => "rule_set_identity",
             Self::RuleValidationFailed { .. } => "rule_validation_failed",
-            Self::CoreOffline => "core_offline",
             Self::Internal => "internal",
             Self::Busy => "busy",
             Self::VersionExhausted => "version_exhausted",
@@ -148,7 +136,6 @@ mod tests {
         for name in [
             "bad_request",
             "unknown_op",
-            "not_implemented",
             "handshake_required",
             "frame_too_large",
             "page_too_large",
@@ -157,8 +144,6 @@ mod tests {
             "invalid_range",
             "stale_cursor",
             "stale_inputs",
-            "deadline_exceeded",
-            "cancelled",
             "stale_document_ref",
             "rule_set_stale",
             "rule_set_not_found",
@@ -166,7 +151,6 @@ mod tests {
             "rule_set_has_children",
             "rule_set_identity",
             "rule_validation_failed",
-            "core_offline",
             "internal",
             "version_exhausted",
             "busy",
@@ -179,17 +163,6 @@ mod tests {
                 name
             );
         }
-    }
-
-    #[test]
-    fn defined_but_unimplemented_has_stable_code() {
-        let error = ProtocolError::new(ErrorKind::NotImplemented);
-        let wire = serde_json::json!({"code":"not_implemented"});
-        assert_eq!(serde_json::to_value(&error).expect("serialize"), wire);
-        assert_eq!(
-            serde_json::from_value::<ProtocolError>(wire).expect("deserialize"),
-            error
-        );
     }
 
     #[test]
