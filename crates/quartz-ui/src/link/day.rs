@@ -4,8 +4,8 @@ use super::RequestCoreError;
 use super::{BRIDGE_CAPACITY, Link, LinkEvent};
 use quartz_pipe::CallCoreError;
 use quartz_protocol::{
-    ApplicationRank, DayMetrics, ErrorKind, HourStack, LocalDate, MillisecondsPerPixel,
-    PendingAway, TimelineSegment,
+    ApplicationRank, DayMetrics, DocumentRank, ErrorKind, HourStack, LocalDate,
+    MillisecondsPerPixel, PendingAway, ReferenceRange, TimelineSegment,
 };
 #[cfg(windows)]
 use quartz_protocol::{
@@ -168,9 +168,12 @@ pub struct DayData {
     pub date: LocalDate,
     pub bounds: UtcRange,
     pub visible: UtcRange,
+    pub reference_range: Option<ReferenceRange>,
     pub metrics: DayMetrics,
     pub hours: Vec<HourStack>,
     pub applications: Vec<ApplicationRank>,
+    pub documents: Vec<DocumentRank>,
+    pub truncated: bool,
     pub categories: Vec<TimelineSegment>,
     pub raw: Vec<TimelineSegment>,
     pub pending: Vec<PendingAway>,
@@ -181,7 +184,7 @@ struct DayCache {
     data: DayData,
     day_versions: QueryVersions,
     aggregate_versions: QueryVersions,
-    reference_range: Option<quartz_protocol::ReferenceRange>,
+    reference_range: Option<ReferenceRange>,
 }
 #[cfg(windows)]
 impl DayCache {
@@ -197,9 +200,12 @@ impl DayCache {
                 date: self.data.date,
                 bounds: self.data.bounds,
                 visible: self.data.visible,
+                reference_range: self.data.reference_range,
                 metrics: self.data.metrics.clone(),
                 hours: self.data.hours.clone(),
                 applications: self.data.applications.clone(),
+                documents: self.data.documents.clone(),
+                truncated: self.data.truncated,
                 pending: self.data.pending.clone(),
                 categories: Vec::new(),
                 raw: Vec::new(),
@@ -283,9 +289,12 @@ impl Link {
                 date: request.date,
                 bounds,
                 visible,
+                reference_range,
                 metrics: day.metrics,
                 hours: day.hours,
                 applications: day.applications,
+                documents: day.documents,
+                truncated: day.truncated,
                 categories: categories.segments,
                 raw: raw.segments,
                 pending: pending.ranges,

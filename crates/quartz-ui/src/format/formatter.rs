@@ -11,8 +11,8 @@ use crate::model::RankingKind;
 use crate::model::{
     BuiltinCategory, CategoryCatalog, CategoryName, ClassificationSource, ConditionItem,
     ConditionPolarity, Day, DiagnosticCodeKind, EntryConditionSummary, MINUTES_PER_HOUR,
-    PrivacyEffectSummary, ResolvedCategory, RuleCondition, RuleEntryLabel, SECONDS_PER_MINUTE,
-    Share, StateKind, Tendency, UnclassifiedEntityLabel,
+    PrivacyEffectSummary, RankLabel, ResolvedCategory, RuleCondition, RuleEntryLabel,
+    SECONDS_PER_MINUTE, Share, StateKind, Tendency, UnclassifiedEntityLabel,
 };
 
 /// Looks up translations and formats values for one interface language.
@@ -261,6 +261,15 @@ impl Formatter {
             StateKind::Excluded => Msg::StateExcluded,
             StateKind::CollectionGap => Msg::StateGap,
         })
+    }
+
+    /// Display label of a ranking row, using localized text for hidden document identities.
+    #[must_use]
+    pub(crate) fn rank_label(self, label: &RankLabel) -> String {
+        match label {
+            RankLabel::Visible(text) => text.clone(),
+            RankLabel::HiddenDocument => self.text(Msg::RankingHiddenDocument),
+        }
     }
 
     /// Label of a ranking tab.

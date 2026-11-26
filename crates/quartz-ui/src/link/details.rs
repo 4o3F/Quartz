@@ -3,8 +3,8 @@ use super::{DayGeneration, UtcRange};
 #[cfg(windows)]
 use super::{Link, LinkEvent, LoadDataError, RequestCoreError};
 use quartz_protocol::{
-    ApplicationId, EntityClassificationRule, EntityDailyDuration, EntityTitleDuration, LocalDate,
-    TimelineSegment, WindowInstanceRef,
+    ApplicationId, DocumentRef, EntityClassificationRule, EntityDailyDuration, EntityTitleDuration,
+    LocalDate, ReferenceRange, TimelineSegment, WindowInstanceRef,
 };
 #[cfg(windows)]
 use quartz_protocol::{DetailEntity, QueryEntityDetailRequest, QuerySegmentDetailRequest};
@@ -23,7 +23,7 @@ impl DetailGeneration {
         self == incoming
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetailTarget {
     Segment {
         range: UtcRange,
@@ -31,19 +31,28 @@ pub enum DetailTarget {
         window_instance: Option<WindowInstanceRef>,
     },
     App(ApplicationId),
+    Document {
+        document_ref: DocumentRef,
+        reference_range: ReferenceRange,
+    },
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetailRequest {
     pub date: LocalDate,
     pub target: DetailTarget,
 }
 impl DetailRequest {
-    pub fn app(self) -> Option<ApplicationId> {
-        match self.target {
-            DetailTarget::App(app) | DetailTarget::Segment { app: Some(app), .. } => Some(app),
-            DetailTarget::Segment { app: None, .. } => None,
+    pub fn app(&self) -> Option<ApplicationId> {
+        match &self.target {
+            DetailTarget::App(app) | DetailTarget::Segment { app: Some(app), .. } => Some(*app),
+            DetailTarget::Segment { app: None, .. } | DetailTarget::Document { .. } => None,
         }
     }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityKey {
+    App(ApplicationId),
+    Document(DocumentRef),
 }
 #[derive(Debug)]
 pub struct DetailData {
@@ -53,14 +62,14 @@ pub struct DetailData {
 }
 #[derive(Debug)]
 pub struct EntityData {
-    pub app: ApplicationId,
+    pub entity: EntityKey,
     pub daily: Vec<EntityDailyDuration>,
     pub titles: Vec<EntityTitleDuration>,
     pub rules: Vec<EntityClassificationRule>,
 }
 #[cfg(windows)]
 impl Link {
-    async fn entity_details(
+    async fn app_entity_details(
         &self,
         app: ApplicationId,
         date: LocalDate,
@@ -73,14 +82,50 @@ impl Link {
             })
             .await?;
         Ok(EntityData {
-            app,
+            entity: EntityKey::App(app),
+            daily: response.daily,
+            titles: response.titles,
+            rules: response.rules,
+        })
+    }
+    async fn document_entity_details(
+        &self,
+        document_ref: DocumentRef,
+        reference_range: ReferenceRange,
+        date: LocalDate,
+    ) -> Result<EntityData, LoadDataError> {
+        let response = self
+            .request(QueryEntityDetailRequest {
+                reference_range: Some(reference_range),
+                entity: DetailEntity::Document {
+                    document_ref: document_ref.clone(),
+                },
+                local_date: date,
+            })
+            .await?;
+        Ok(EntityData {
+            entity: EntityKey::Document(document_ref),
             daily: response.daily,
             titles: response.titles,
             rules: response.rules,
         })
     }
     async fn query_details(&self, request: DetailRequest) -> Result<DetailData, LoadDataError> {
-        let intervals = match request.target {
+        if let DetailTarget::Document {
+            document_ref,
+            reference_range,
+        } = &request.target
+        {
+            let entity = self
+                .document_entity_details(document_ref.clone(), *reference_range, request.date)
+                .await?;
+            return Ok(DetailData {
+                request,
+                intervals: Vec::new(),
+                entities: vec![entity],
+            });
+        }
+        let intervals = match &request.target {
             DetailTarget::Segment {
                 range,
                 app,
@@ -89,13 +134,13 @@ impl Link {
                 self.request(QuerySegmentDetailRequest {
                     start_utc_ms: range.start,
                     end_utc_ms: range.end,
-                    app,
-                    window_instance,
+                    app: *app,
+                    window_instance: *window_instance,
                 })
                 .await?
                 .intervals
             }
-            DetailTarget::App(_) => Vec::new(),
+            DetailTarget::App(_) | DetailTarget::Document { .. } => Vec::new(),
         };
         let mut apps = BTreeSet::new();
         if let Some(app) = request.app() {
@@ -110,7 +155,7 @@ impl Link {
         // deciding rule labels; an entity summary is shown only for a single application.
         let mut entities = Vec::new();
         for app in apps {
-            entities.push(self.entity_details(app, request.date).await?);
+            entities.push(self.app_entity_details(app, request.date).await?);
         }
         Ok(DetailData {
             request,
@@ -119,7 +164,7 @@ impl Link {
         })
     }
 }
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 #[cfg(windows)]
 pub(super) struct DetailIntent {
     pub request: Option<DetailRequest>,
@@ -150,10 +195,11 @@ impl DetailLoader {
             return Ok(());
         }
         self.generation = intent.generation;
+        let date = intent.request.as_ref().map(|request| request.date);
         self.intents
             .send(intent)
             .map_err(|_| RequestCoreError::Closed)?;
-        self.date = intent.request.map(|request| request.date);
+        self.date = date;
         Ok(())
     }
     pub fn changed(&self, date: LocalDate) {
@@ -179,17 +225,17 @@ impl DetailLoader {
                 // a response that becomes ready in the same runtime turn.
                 change = intents.changed() => {
                     if change.is_err() { break; }
-                    let intent = *intents.borrow_and_update();
+                    let intent = intents.borrow_and_update().clone();
                     if intent.generation < generation { continue; }
                     active = None;
                     generation = intent.generation;
                     latest = intent.request;
-                    queued = latest;
+                    queued = latest.clone();
                 }
                 change = changes.changed() => {
                     if change.is_err() { break; }
                     let date = *changes.borrow_and_update();
-                    if let Some(request) = latest.filter(|request| Some(request.date) == date) { queued = Some(request); }
+                    if let Some(request) = latest.as_ref().filter(|request| Some(request.date) == date) { queued = Some(request.clone()); }
                 }
                 result = async {
                     match active.as_mut() { Some(future) => future.await, None => std::future::pending().await }

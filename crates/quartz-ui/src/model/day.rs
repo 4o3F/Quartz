@@ -369,7 +369,11 @@ impl Day {
     #[must_use]
     pub(crate) fn ranking(&self, kind: RankingKind) -> &[RankRow] {
         if let DaySource::Live(live) = &self.source {
-            return &live.ranking;
+            return match kind {
+                RankingKind::Apps => &live.apps_ranking,
+                RankingKind::Documents => &live.documents_ranking,
+                RankingKind::Domains | RankingKind::Mixed => &[],
+            };
         }
         self.derived.rankings.get(kind)
     }

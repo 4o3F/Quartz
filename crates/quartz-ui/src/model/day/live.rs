@@ -4,9 +4,9 @@ use crate::{
     link::{DayData, UtcRange},
     model::{
         AppId, AppInfo, AwayLabel, BuiltinCategory, Category, CategoryId, ClassificationSource,
-        ClockAnomaly, DaySummary, Glyph, HourlyBar, MainBlock, RankRow, Segment, SegmentId, Share,
-        StateBlock, StateKind, Tendency, TimeOfDay, TimeSpan, ranking::Rankings,
-        summary::CategoryTotal,
+        ClockAnomaly, DaySummary, DocumentId, DocumentMeta, Glyph, HourlyBar, MainBlock, RankLabel,
+        RankRow, Segment, SegmentId, Share, StateBlock, StateKind, Tendency, TimeOfDay, TimeSpan,
+        ranking::Rankings, summary::CategoryTotal,
     },
 };
 use jiff::civil::Date;
@@ -17,10 +17,36 @@ use std::{collections::BTreeMap, time::Duration};
 #[derive(Debug, Clone, PartialEq, Eq, snafu::Snafu)]
 #[snafu(display("could not map the core day response"))]
 pub(crate) struct BuildLiveDayError;
+/// Protocol document identity and visible attribution retained for the live details sidebar.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct LiveDocumentInfo {
+    pub(crate) document_ref: wire::DocumentRef,
+    pub(crate) label: RankLabel,
+    pub(crate) project: Option<String>,
+    pub(crate) profile: Option<String>,
+    pub(crate) app_name: Option<String>,
+    pub(crate) app_exe: Option<String>,
+}
+impl std::fmt::Debug for LiveDocumentInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveDocumentInfo")
+            .field("document_ref", &self.document_ref)
+            .field("hidden", &matches!(self.label, RankLabel::HiddenDocument))
+            .field("has_project", &self.project.is_some())
+            .field("has_profile", &self.profile.is_some())
+            .field("has_app_name", &self.app_name.is_some())
+            .finish()
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LiveDay {
-    pub(super) ranking: Vec<RankRow>,
+    pub(super) apps_ranking: Vec<RankRow>,
+    pub(super) documents_ranking: Vec<RankRow>,
+    pub(super) ranking_truncated: bool,
     app_ids: BTreeMap<AppId, wire::ApplicationId>,
+    documents: BTreeMap<DocumentId, LiveDocumentInfo>,
+    reference_range: Option<wire::ReferenceRange>,
     bounds: UtcRange,
     pending: Vec<PendingAwaySpan>,
     switches_per_hour: u64,
@@ -274,14 +300,66 @@ impl Day {
                 window_instance: raw.window_instance,
             });
         }
-        let mut ranking = Vec::new();
+        let mut apps_ranking = Vec::new();
         for row in &data.applications {
             let app = map.app(&row.app)?;
-            ranking.push(RankRow::application(
+            apps_ranking.push(RankRow::application(
                 app,
                 row.app.display_name.clone(),
                 Mapping::duration(row.active_ms)?,
             ));
+        }
+        let mut documents_ranking = Vec::with_capacity(data.documents.len());
+        let mut documents = BTreeMap::new();
+        for (index, row) in data.documents.iter().enumerate() {
+            let id = DocumentId::new(u16::try_from(index).map_err(|_| BuildLiveDayError)?);
+            let label = if row.document.trim().is_empty() {
+                RankLabel::HiddenDocument
+            } else {
+                RankLabel::Visible(row.document.clone())
+            };
+            let project = row
+                .project
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned);
+            let profile = row
+                .profile
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned);
+            let app_info = map
+                .app_ids
+                .get(&row.app)
+                .and_then(|local| map.apps.iter().find(|app| app.id == *local));
+            let app_name = app_info
+                .map(|app| app.name.clone())
+                .filter(|name| !name.trim().is_empty());
+            let app_exe = app_info
+                .map(|app| app.exe.clone())
+                .filter(|exe| !exe.trim().is_empty());
+            let meta = DocumentMeta {
+                project: project.clone(),
+                profile: profile.clone(),
+                app_name: app_name.clone(),
+            };
+            documents_ranking.push(RankRow::document(
+                id,
+                label.clone(),
+                meta,
+                Mapping::duration(row.active_ms)?,
+            ));
+            documents.insert(
+                id,
+                LiveDocumentInfo {
+                    document_ref: row.document_ref.clone(),
+                    label,
+                    project,
+                    profile,
+                    app_name,
+                    app_exe,
+                },
+            );
         }
         day.categories = map.categories;
         day.apps = map.apps;
@@ -324,8 +402,12 @@ impl Day {
             app_ids.insert(local, protocol);
         }
         day.source = DaySource::Live(LiveDay {
-            ranking,
+            apps_ranking,
+            documents_ranking,
+            ranking_truncated: data.truncated,
             app_ids,
+            documents,
+            reference_range: data.reference_range,
             bounds: data.bounds,
             pending,
             switches_per_hour,
@@ -333,9 +415,33 @@ impl Day {
         });
         Ok(day)
     }
+    pub(crate) fn ranking_truncated(&self) -> bool {
+        match &self.source {
+            DaySource::Live(live) => live.ranking_truncated,
+            DaySource::Fixture | DaySource::Loading => false,
+        }
+    }
     pub(crate) fn protocol_app(&self, app: AppId) -> Option<wire::ApplicationId> {
         match &self.source {
             DaySource::Live(live) => live.app_ids.get(&app).copied(),
+            DaySource::Fixture | DaySource::Loading => None,
+        }
+    }
+    pub(crate) fn protocol_document(
+        &self,
+        id: DocumentId,
+    ) -> Option<(&wire::DocumentRef, wire::ReferenceRange)> {
+        match &self.source {
+            DaySource::Live(live) => Some((
+                &live.documents.get(&id)?.document_ref,
+                live.reference_range?,
+            )),
+            DaySource::Fixture | DaySource::Loading => None,
+        }
+    }
+    pub(crate) fn live_document(&self, id: DocumentId) -> Option<&LiveDocumentInfo> {
+        match &self.source {
+            DaySource::Live(live) => live.documents.get(&id),
             DaySource::Fixture | DaySource::Loading => None,
         }
     }
@@ -528,9 +634,15 @@ mod tests {
                 start: 0,
                 end: 86_400_000,
             },
+            reference_range: Some(wire::ReferenceRange {
+                start_utc_ms: 0,
+                end_utc_ms: 86_400_000,
+            }),
             metrics: page.metrics,
             hours: page.hours,
             applications: page.applications,
+            documents: page.documents,
+            truncated: page.truncated,
             categories: timeline.segments.clone(),
             raw: timeline.segments,
             pending: Vec::new(),
@@ -900,5 +1012,113 @@ mod tests {
             std::sync::Arc::make_mut(category).color = "#invalid".into();
         }
         assert!(Day::from_protocol(invalid).is_err());
+    }
+    #[test]
+    fn live_day_maps_documents_in_order_with_metadata_truncation_and_details_subject() {
+        use crate::{link::DetailTarget, model::DetailsSubject};
+        let mut input = data();
+        let ref_first = wire::DocumentRef::from_encoded("doc:first".into());
+        let ref_second = wire::DocumentRef::from_encoded("doc:second".into());
+        input.truncated = true;
+        input.documents = vec![
+            wire::DocumentRank {
+                document_ref: ref_first.clone(),
+                app: wire::ApplicationId(91),
+                document: "main.rs".into(),
+                project: Some("Quartz".into()),
+                profile: None,
+                active_ms: 5_000,
+            },
+            wire::DocumentRank {
+                document_ref: ref_second.clone(),
+                app: wire::ApplicationId(999),
+                document: "main.rs".into(),
+                project: Some("bench".into()),
+                profile: Some("Work".into()),
+                active_ms: 2_000,
+            },
+        ];
+        let day = Day::from_protocol(input.clone()).expect("live day with documents");
+        assert!(day.ranking_truncated());
+        let rows = day.ranking(RankingKind::Documents);
+        assert_eq!(rows.len(), 2);
+
+        let first = rows.first().expect("first document");
+        assert_eq!(first.label, RankLabel::Visible("main.rs".into()));
+        assert_eq!(first.meta.project.as_deref(), Some("Quartz"));
+        assert_eq!(first.meta.profile, None);
+        assert_eq!(first.meta.app_name.as_deref(), Some("Editor"));
+        assert_eq!(first.total, Duration::from_millis(5_000));
+        assert_eq!(first.dominant_category(), None);
+        assert!(first.parts.is_empty());
+
+        let second = rows.get(1).expect("second document");
+        assert_eq!(second.label, RankLabel::Visible("main.rs".into()));
+        assert_eq!(second.meta.project.as_deref(), Some("bench"));
+        assert_eq!(second.meta.profile.as_deref(), Some("Work"));
+        assert_eq!(second.meta.app_name, None);
+        assert_eq!(second.total, Duration::from_millis(2_000));
+
+        let first_subject = first
+            .key
+            .details_subject()
+            .expect("live document has details subject");
+        let second_subject = second
+            .key
+            .details_subject()
+            .expect("second live document has details subject");
+        assert_ne!(first_subject, second_subject);
+        let DetailsSubject::Document(first_id) = first_subject else {
+            panic!("expected document details subject");
+        };
+        let info = day.live_document(first_id).expect("live document info");
+        assert_eq!(info.app_exe.as_deref(), Some("editor.exe"));
+        assert_eq!(
+            day.detail_request(first_subject)
+                .expect("document detail request")
+                .target,
+            DetailTarget::Document {
+                document_ref: ref_first,
+                reference_range: input.reference_range.expect("reference range"),
+            }
+        );
+
+        input.reference_range = None;
+        let without_range = Day::from_protocol(input).expect("day without reference range");
+        assert!(without_range.detail_request(first_subject).is_none());
+    }
+    #[test]
+    fn hidden_or_blank_document_shows_localized_hidden_label() {
+        let mut input = data();
+        input.documents = vec![
+            wire::DocumentRank {
+                document_ref: wire::DocumentRef::from_encoded("doc:empty".into()),
+                app: wire::ApplicationId(91),
+                document: String::new(),
+                project: Some("   ".into()),
+                profile: Some(String::new()),
+                active_ms: 1_500,
+            },
+            wire::DocumentRank {
+                document_ref: wire::DocumentRef::from_encoded("doc:spaces".into()),
+                app: wire::ApplicationId(91),
+                document: "   ".into(),
+                project: None,
+                profile: None,
+                active_ms: 500,
+            },
+        ];
+        let day = Day::from_protocol(input).expect("hidden document day");
+        let rows = day.ranking(RankingKind::Documents);
+        assert_eq!(rows.len(), 2);
+        let en = Formatter::new(Language::English);
+        let zh = Formatter::new(Language::SimplifiedChinese);
+        for row in rows {
+            assert_eq!(row.label, RankLabel::HiddenDocument);
+            assert_eq!(row.meta.project, None);
+            assert_eq!(row.meta.profile, None);
+            assert_eq!(en.rank_label(&row.label), "Hidden document");
+            assert_eq!(zh.rank_label(&row.label), "已隐藏文档");
+        }
     }
 }

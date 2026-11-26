@@ -9,7 +9,7 @@ use crate::{
     layout::PanelPlacement,
     link::{DetailData, DetailGeneration, DetailRequest, DetailTarget, LoadDataError},
     model::{
-        CategoryColor, DetailsSubject,
+        CategoryColor, DetailsSubject, RankLabel,
         live_details::{CategoryDisplay, LiveDetails},
     },
 };
@@ -29,13 +29,66 @@ pub(super) enum DetailPhase {
     Ready(LiveDetails),
     Failed(LoadDataError),
 }
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum PanelHeading {
+    Intervals,
+    Text(String),
+    HiddenDocument,
+}
+impl std::fmt::Debug for PanelHeading {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Intervals => formatter.write_str("Intervals"),
+            Self::Text(_) => formatter.write_str("Text([redacted])"),
+            Self::HiddenDocument => formatter.write_str("HiddenDocument"),
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DetailUpdate {
+    Applied,
+    Ignored,
+}
 pub(super) struct LivePanel {
     pub request: DetailRequest,
-    pub heading: Option<String>,
-    pub exe: Option<String>,
+    pub heading: PanelHeading,
+    pub subtitle: Option<String>,
     pub color: Option<CategoryColor>,
     pub phase: DetailPhase,
+}
+impl std::fmt::Debug for LivePanel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LivePanel")
+            .field("request", &self.request)
+            .field("heading", &self.heading)
+            .field("has_subtitle", &self.subtitle.is_some())
+            .field("color", &self.color)
+            .field("phase", &self.phase)
+            .finish()
+    }
+}
+impl LivePanel {
+    pub(super) fn apply_loaded(
+        &mut self,
+        active_generation: DetailGeneration,
+        incoming_generation: DetailGeneration,
+        result: Result<DetailData, LoadDataError>,
+    ) -> DetailUpdate {
+        if !active_generation.accepts(incoming_generation) {
+            return DetailUpdate::Ignored;
+        }
+        self.phase = match result.and_then(|data| {
+            if data.request != self.request {
+                return Err(LoadDataError::InvalidData);
+            }
+            LiveDetails::from_protocol(data).map_err(|_| LoadDataError::InvalidData)
+        }) {
+            Ok(details) => DetailPhase::Ready(details),
+            Err(error) => DetailPhase::Failed(error),
+        };
+        DetailUpdate::Applied
+    }
 }
 impl AppShell {
     pub(super) fn cancel_details(&mut self, cx: &mut Context<Self>) {
@@ -48,32 +101,73 @@ impl AppShell {
         let Some(request) = self.day.detail_request(subject) else {
             return;
         };
-        let app = match subject {
-            DetailsSubject::App(app) => Some(self.day.app(app)),
-            DetailsSubject::Segment(id) => self
-                .day
-                .segment(id)
-                .map(|segment| self.day.app(segment.app)),
-            DetailsSubject::MainBlock(_) => None,
+        let (heading, subtitle) = match subject {
+            DetailsSubject::App(app) => {
+                let info = self.day.app(app);
+                (
+                    PanelHeading::Text(info.name.clone()),
+                    (!info.exe.is_empty()).then(|| info.exe.clone()),
+                )
+            }
+            DetailsSubject::Segment(id) => match self.day.segment(id) {
+                Some(segment) => {
+                    let info = self.day.app(segment.app);
+                    (
+                        PanelHeading::Text(info.name.clone()),
+                        (!info.exe.is_empty()).then(|| info.exe.clone()),
+                    )
+                }
+                None => (PanelHeading::Intervals, None),
+            },
+            DetailsSubject::MainBlock(_) => (PanelHeading::Intervals, None),
+            DetailsSubject::Document(id) => match self.day.live_document(id) {
+                Some(doc) => {
+                    let heading = match &doc.label {
+                        RankLabel::Visible(name) => PanelHeading::Text(name.clone()),
+                        RankLabel::HiddenDocument => PanelHeading::HiddenDocument,
+                    };
+                    let mut parts = Vec::new();
+                    if let Some(project) = &doc.project {
+                        parts.push(project.as_str());
+                    }
+                    if let Some(profile) = &doc.profile {
+                        parts.push(profile.as_str());
+                    }
+                    if let Some(app_name) = &doc.app_name {
+                        parts.push(app_name.as_str());
+                    }
+                    if let Some(app_exe) = &doc.app_exe
+                        && doc.app_name.as_deref() != Some(app_exe.as_str())
+                    {
+                        parts.push(app_exe.as_str());
+                    }
+                    let subtitle = (!parts.is_empty()).then(|| parts.join(" · "));
+                    (heading, subtitle)
+                }
+                None => (PanelHeading::HiddenDocument, None),
+            },
         };
         let color = match subject {
             DetailsSubject::Segment(id) => self
                 .day
                 .segment(id)
                 .map(|segment| self.day.category(segment.category).color),
-            _ => None,
+            DetailsSubject::App(_) | DetailsSubject::MainBlock(_) | DetailsSubject::Document(_) => {
+                None
+            }
         };
+        let intent = request.clone();
         self.details = Some(OpenDetails {
             subject,
             content: PanelContent::Live(LivePanel {
                 request,
-                heading: app.map(|app| app.name.clone()),
-                exe: app.map(|app| app.exe.clone()).filter(|exe| !exe.is_empty()),
+                heading,
+                subtitle,
                 color,
                 phase: DetailPhase::Loading,
             }),
         });
-        self.send_detail_intent(Some(request), cx);
+        self.send_detail_intent(Some(intent), cx);
     }
     pub(super) fn send_detail_intent(
         &mut self,
@@ -116,9 +210,6 @@ impl AppShell {
         result: Result<DetailData, LoadDataError>,
         cx: &mut Context<Self>,
     ) {
-        if !self.detail_generation.accepts(generation) {
-            return;
-        }
         let Some(OpenDetails {
             content: PanelContent::Live(panel),
             ..
@@ -126,16 +217,9 @@ impl AppShell {
         else {
             return;
         };
-        panel.phase = match result.and_then(|data| {
-            if data.request != panel.request {
-                return Err(LoadDataError::InvalidData);
-            }
-            LiveDetails::from_protocol(data).map_err(|_| LoadDataError::InvalidData)
-        }) {
-            Ok(details) => DetailPhase::Ready(details),
-            Err(error) => DetailPhase::Failed(error),
-        };
-        cx.notify();
+        if panel.apply_loaded(self.detail_generation, generation, result) == DetailUpdate::Applied {
+            cx.notify();
+        }
     }
     fn retry_details(&mut self, cx: &mut Context<Self>) {
         let Some(OpenDetails {
@@ -146,7 +230,7 @@ impl AppShell {
             return;
         };
         panel.phase = DetailPhase::Loading;
-        let request = panel.request;
+        let request = panel.request.clone();
         self.send_detail_intent(Some(request), cx);
         cx.notify();
     }
@@ -204,6 +288,19 @@ impl AppShell {
                     ),
                 DetailPhase::Ready(data) => self.live_detail_body(ui, measure, panel, data),
             };
+        let header_icon = match &panel.request.target {
+            DetailTarget::Document { .. } => IconName::FileText,
+            DetailTarget::App(_) => IconName::SquareTerminal,
+            DetailTarget::Segment { .. } => match &panel.heading {
+                PanelHeading::Intervals => IconName::Clock,
+                PanelHeading::Text(_) | PanelHeading::HiddenDocument => IconName::SquareTerminal,
+            },
+        };
+        let header_text = match &panel.heading {
+            PanelHeading::Intervals => self.formatter.text(Msg::DetailsIntervals),
+            PanelHeading::Text(text) => text.clone(),
+            PanelHeading::HiddenDocument => self.formatter.text(Msg::RankingHiddenDocument),
+        };
         div()
             .id("details-panel")
             .flex()
@@ -228,15 +325,7 @@ impl AppShell {
                     .items_start()
                     .gap(ui.metrics.space.s)
                     .p(ui.metrics.space.l)
-                    .child(ui.icon(
-                        if panel.heading.is_some() {
-                            IconName::SquareTerminal
-                        } else {
-                            IconName::Clock
-                        },
-                        Density::Compact,
-                        ui.palette.text_primary,
-                    ))
+                    .child(ui.icon(header_icon, Density::Compact, ui.palette.text_primary))
                     .child(
                         div()
                             .flex_1()
@@ -246,16 +335,14 @@ impl AppShell {
                                     .min_w(px(0.))
                                     .whitespace_normal()
                                     .ramp(ui, Ramp::BodyStrong)
-                                    .child(panel.heading.clone().unwrap_or_else(|| {
-                                        self.formatter.text(Msg::DetailsIntervals)
-                                    })),
+                                    .child(header_text),
                             )
-                            .children(panel.exe.as_ref().map(|exe| {
+                            .children(panel.subtitle.as_ref().map(|subtitle| {
                                 div()
                                     .ramp(ui, Ramp::Caption)
                                     .text_color(ui.palette.text_secondary)
                                     .whitespace_normal()
-                                    .child(exe.clone())
+                                    .child(subtitle.clone())
                             })),
                     )
                     .child(
@@ -618,5 +705,85 @@ mod tests {
             duration.style().text_style().font_features,
             Some(Widgets::tabular_figures())
         );
+    }
+
+    #[test]
+    fn late_detail_response_for_previous_subject_is_ignored() {
+        use crate::link::{EntityData, EntityKey};
+        use quartz_protocol::{self as wire, DocumentRef, ReferenceRange};
+
+        let date: wire::LocalDate = "2026-11-21".parse().expect("date");
+        let reference_range = ReferenceRange {
+            start_utc_ms: 0,
+            end_utc_ms: 86_400_000,
+        };
+        let doc_prev = DocumentRef::from_encoded("doc:prev".into());
+        let doc_curr = DocumentRef::from_encoded("doc:curr".into());
+        let prev_request = DetailRequest {
+            date,
+            target: DetailTarget::Document {
+                document_ref: doc_prev.clone(),
+                reference_range,
+            },
+        };
+        let curr_request = DetailRequest {
+            date,
+            target: DetailTarget::Document {
+                document_ref: doc_curr.clone(),
+                reference_range,
+            },
+        };
+        let daily: Vec<wire::EntityDailyDuration> = (0..wire::ENTITY_DETAIL_DAYS)
+            .map(|index| wire::EntityDailyDuration {
+                local_date: date
+                    .checked_sub(jiff::Span::new().days(
+                        i64::try_from(wire::ENTITY_DETAIL_DAYS - index - 1).expect("seven days"),
+                    ))
+                    .expect("daily date"),
+                active_ms: 1_000,
+            })
+            .collect();
+
+        let previous_gen = DetailGeneration::default().next();
+        let current_gen = previous_gen.next();
+        let mut panel = LivePanel {
+            request: curr_request.clone(),
+            heading: PanelHeading::Text("curr.rs".into()),
+            subtitle: None,
+            color: None,
+            phase: DetailPhase::Loading,
+        };
+
+        let late_previous = DetailData {
+            request: prev_request,
+            intervals: Vec::new(),
+            entities: vec![EntityData {
+                entity: EntityKey::Document(doc_prev),
+                daily: daily.clone(),
+                titles: Vec::new(),
+                rules: Vec::new(),
+            }],
+        };
+        assert_eq!(
+            panel.apply_loaded(current_gen, previous_gen, Ok(late_previous)),
+            DetailUpdate::Ignored
+        );
+        assert!(matches!(panel.phase, DetailPhase::Loading));
+
+        let current_response = DetailData {
+            request: curr_request,
+            intervals: Vec::new(),
+            entities: vec![EntityData {
+                entity: EntityKey::Document(doc_curr),
+                daily,
+                titles: Vec::new(),
+                rules: Vec::new(),
+            }],
+        };
+        assert_eq!(
+            panel.apply_loaded(current_gen, current_gen, Ok(current_response)),
+            DetailUpdate::Applied
+        );
+        assert!(matches!(panel.phase, DetailPhase::Ready(_)));
     }
 }

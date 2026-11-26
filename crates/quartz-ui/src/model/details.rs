@@ -8,6 +8,7 @@ use super::{
     application::AppId,
     category::CategoryId,
     day::{Day, WEEK_DAYS},
+    ranking::DocumentId,
     rule::Explanation,
     segment::{ClassificationSource, Segment, SegmentId},
     summary::{CategoryTotal, total},
@@ -20,6 +21,7 @@ pub(crate) enum DetailsSubject {
     Segment(SegmentId),
     MainBlock(TimeSpan),
     App(AppId),
+    Document(DocumentId),
 }
 
 /// The selected-interval card of the details sidebar.
@@ -82,7 +84,7 @@ impl Day {
                 (segment.app, Some(segment))
             }
             DetailsSubject::App(id) => (self.has_app(id).then_some(id)?, None),
-            DetailsSubject::MainBlock(_) => return None,
+            DetailsSubject::MainBlock(_) | DetailsSubject::Document(_) => return None,
         };
         let app_segments: Vec<&Segment> = self
             .segments

@@ -8,11 +8,11 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px, relative,
 };
 
-use super::{AppShell, Frame};
+use super::{AppShell, Frame, Page};
 use crate::{
     app::{
         metrics::{Density, Ramp},
-        widgets::{PROPORTION_BAR_MIN_WIDTH, RampExt as _, Segment, Widgets},
+        widgets::{ButtonContent, PROPORTION_BAR_MIN_WIDTH, RampExt as _, Segment, Widgets},
     },
     format::Msg,
     layout::{ChartArrangement, ColumnRange},
@@ -25,6 +25,10 @@ const RANKING_ROWS: usize = 5;
 const BAR_HEIGHT: f32 = 6.;
 /// The duration column: as wide as its widest duration, within this range (11 section 5.6).
 const VALUE_RANGE: ColumnRange = ColumnRange::new(32., 96.);
+/// Neutral icon tile size for the empty Documents ranking state.
+const EMPTY_DOCUMENTS_TILE_SIZE: f32 = 40.;
+/// Icon glyph size inside the empty Documents tile.
+const EMPTY_DOCUMENTS_ICON_SIZE: f32 = 20.;
 
 /// One category slice of a ranking proportion bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +144,7 @@ impl AppShell {
             TABS.into_iter()
                 .filter(|tab| {
                     matches!(self.day.source(), super::DaySource::Fixture)
-                        || tab.kind == RankingKind::Apps
+                        || matches!(tab.kind, RankingKind::Apps | RankingKind::Documents)
                 })
                 .map(|tab| Segment {
                     id: tab.id,
@@ -155,6 +159,13 @@ impl AppShell {
                 })
             },
         );
+        let truncated_notice = (self.day.ranking_truncated() && !rows.is_empty())
+            .then(|| self.render_truncated_notice(ui, Msg::RankingTruncated, rows.len()));
+        let content = if self.ranking == RankingKind::Documents && rows.is_empty() {
+            self.render_empty_documents(ui, cx)
+        } else {
+            list
+        };
         ui.card()
             .flex()
             .flex_col()
@@ -181,7 +192,80 @@ impl AppShell {
                     )
                     .child(tabs),
             )
-            .child(list)
+            .children(truncated_notice)
+            .child(content)
+    }
+
+    fn render_empty_documents(&self, ui: &Widgets<'_>, cx: &mut Context<Self>) -> Div {
+        let palette = ui.palette;
+        let space = &ui.metrics.space;
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(space.s)
+            .px(space.m)
+            .py(space.l)
+            .child(
+                div()
+                    .size(px(EMPTY_DOCUMENTS_TILE_SIZE))
+                    .rounded(ui.metrics.radius.overlay)
+                    .bg(palette.fill_subtle_hover)
+                    .border_1()
+                    .border_color(palette.stroke_card)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        ui.icon(
+                            IconName::FileText,
+                            Density::Standard,
+                            palette.text_secondary,
+                        )
+                        .size(px(EMPTY_DOCUMENTS_ICON_SIZE)),
+                    ),
+            )
+            .child(
+                div()
+                    .ramp(ui, Ramp::BodyStrong)
+                    .text_color(palette.text_primary)
+                    .whitespace_normal()
+                    .child(self.formatter.text(Msg::RankingDocumentsEmptyTitle)),
+            )
+            .child(
+                div()
+                    .ramp(ui, Ramp::Caption)
+                    .text_color(palette.text_secondary)
+                    .whitespace_normal()
+                    .child(self.formatter.text(Msg::RankingDocumentsEmptyMessage)),
+            )
+            .child(
+                ui.button(
+                    "ranking-documents-open-rules",
+                    Density::Compact,
+                    ButtonContent::Label(self.formatter.text(Msg::RankingDocumentsEmptyAction)),
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.set_page(Page::Rules, cx);
+                })),
+            )
+    }
+
+    fn document_pill(ui: &Widgets<'_>, text: String) -> Div {
+        div()
+            .px(ui.metrics.space.xs)
+            .rounded(ui.metrics.radius.control)
+            .bg(ui.palette.fill_control)
+            .border_1()
+            .border_color(ui.palette.stroke_control)
+            .ramp(ui, Ramp::Caption)
+            .text_color(ui.palette.text_secondary)
+            .max_w_full()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(text)
     }
 
     fn rank_row(
@@ -207,6 +291,64 @@ impl AppShell {
             RankKey::Domain(_) => IconName::Globe,
             RankKey::Document(_) => IconName::FileText,
         };
+        let name = self.formatter.rank_label(&row.label);
+        let has_meta =
+            row.meta.project.is_some() || row.meta.profile.is_some() || row.meta.app_name.is_some();
+        let name_column = if has_meta {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.))
+                .gap(space.xxs)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(space.xs)
+                        .min_w(px(0.))
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .max_w_full()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(name),
+                        )
+                        .children(
+                            row.meta
+                                .project
+                                .as_ref()
+                                .map(|project| Self::document_pill(ui, project.clone())),
+                        )
+                        .children(
+                            row.meta
+                                .profile
+                                .as_ref()
+                                .map(|profile| Self::document_pill(ui, profile.clone())),
+                        ),
+                )
+                .children(row.meta.app_name.as_ref().map(|app_name| {
+                    div()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .ramp(ui, Ramp::Caption)
+                        .text_color(palette.text_secondary)
+                        .child(app_name.clone())
+                }))
+        } else {
+            div()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(name)
+        };
         div()
             .id(("rank", cell.index))
             .relative()
@@ -216,6 +358,7 @@ impl AppShell {
             .gap(space.m)
             .min_h(row_height)
             .px(space.s)
+            .when(has_meta, |row| row.py(space.xxs))
             .rounded(ui.metrics.radius.control)
             .when(selected, |row| row.bg(palette.fill_subtle_hover))
             .when(!selected, |row| row.hover(ui.subtle_hover()))
@@ -241,14 +384,7 @@ impl AppShell {
                         Density::Compact,
                         palette.text_secondary,
                     )))
-                    .child(
-                        div()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(row.name.clone()),
-                    ),
+                    .child(name_column),
             )
             .child(
                 div()

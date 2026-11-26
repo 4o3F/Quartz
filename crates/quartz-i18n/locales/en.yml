@@ -77,6 +77,16 @@ today.ranking.documents:
   en: "Documents"
 today.ranking.mixed:
   en: "Mixed"
+today.ranking.hidden_document:
+  en: "Hidden document"
+today.ranking.truncated:
+  en: "Showing first %{count} items; list was truncated."
+today.ranking.documents_empty.title:
+  en: "No documents identified today"
+today.ranking.documents_empty.message:
+  en: "No document titles were extracted yet, or titles are hidden by privacy rules. Review extraction and privacy rules in Categories & rules."
+today.ranking.documents_empty.action:
+  en: "Open Categories & rules"
 today.pending.title:
   en: "Away to label"
 today.pending.range:

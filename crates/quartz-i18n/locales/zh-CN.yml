@@ -77,6 +77,16 @@ today.ranking.documents:
   zh-CN: "文档"
 today.ranking.mixed:
   zh-CN: "混排"
+today.ranking.hidden_document:
+  zh-CN: "已隐藏文档"
+today.ranking.truncated:
+  zh-CN: "仅显示前 %{count} 项，列表已截断。"
+today.ranking.documents_empty.title:
+  zh-CN: "今天没有识别到文档"
+today.ranking.documents_empty.message:
+  zh-CN: "尚未提取到文档标题，或标题已被隐私规则隐藏。可在“分类与规则”中查看文档提取与隐私规则。"
+today.ranking.documents_empty.action:
+  zh-CN: "前往分类与规则"
 today.pending.title:
   zh-CN: "待标注的离开"
 today.pending.range:

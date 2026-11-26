@@ -50,8 +50,61 @@ impl SingleRanking {
         match self {
             Self::Apps => Some(RankKey::App(segment.app)),
             Self::Domains => segment.domain.clone().map(RankKey::Domain),
-            Self::Documents => segment.document.clone().map(RankKey::Document),
+            Self::Documents => segment
+                .document
+                .clone()
+                .map(|doc| RankKey::Document(DocumentKey::Fixture(doc))),
         }
+    }
+}
+
+/// Identifies a document ranking entry within one live day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct DocumentId(u16);
+
+impl DocumentId {
+    /// Wraps a document id assigned during live day mapping.
+    #[must_use]
+    pub(crate) const fn new(id: u16) -> Self {
+        Self(id)
+    }
+}
+
+/// Distinguishes live document entries (with protocol details) from preview fixtures.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum DocumentKey {
+    Live(DocumentId),
+    #[cfg_attr(
+        all(not(test), not(feature = "preview")),
+        expect(dead_code, reason = "used by preview fixtures and their model tests")
+    )]
+    Fixture(String),
+}
+
+/// Language-independent display label for a ranking row; hidden document identities never
+/// synthesize a placeholder string in the model.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum RankLabel {
+    Visible(String),
+    HiddenDocument,
+}
+
+/// Optional attribution metadata displayed with a document ranking row.
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
+pub(crate) struct DocumentMeta {
+    pub(crate) project: Option<String>,
+    pub(crate) profile: Option<String>,
+    pub(crate) app_name: Option<String>,
+}
+
+impl std::fmt::Debug for DocumentMeta {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DocumentMeta")
+            .field("has_project", &self.project.is_some())
+            .field("has_profile", &self.profile.is_some())
+            .field("has_app_name", &self.app_name.is_some())
+            .finish()
     }
 }
 
@@ -64,43 +117,73 @@ pub(crate) enum RankKey {
         expect(dead_code, reason = "used by preview fixtures and their model tests")
     )]
     Domain(String),
-    #[cfg_attr(
-        all(not(test), not(feature = "preview")),
-        expect(dead_code, reason = "used by preview fixtures and their model tests")
-    )]
-    Document(String),
+    Document(DocumentKey),
 }
 
 impl RankKey {
-    /// What the details sidebar shows when the row is clicked; domains and documents have no
-    /// details view until the protocol provides their history.
+    /// What the details sidebar shows when the row is clicked; domains and fixture documents have
+    /// no details view.
     #[must_use]
     pub(crate) const fn details_subject(&self) -> Option<DetailsSubject> {
         match self {
             Self::App(app) => Some(DetailsSubject::App(*app)),
-            Self::Domain(_) | Self::Document(_) => None,
+            Self::Document(DocumentKey::Live(doc)) => Some(DetailsSubject::Document(*doc)),
+            Self::Domain(_) | Self::Document(DocumentKey::Fixture(_)) => None,
         }
     }
 }
 
 /// One ranking row with its per-category parts for the share bar.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RankRow {
     pub(crate) key: RankKey,
-    /// Display text of the key.
-    pub(crate) name: String,
+    /// Display text of the key; hidden documents stay language-independent until formatted.
+    pub(crate) label: RankLabel,
+    /// Document project, profile, and parent application attribution when available.
+    pub(crate) meta: DocumentMeta,
     pub(crate) total: Duration,
     /// Category with the most time in this row; the last one wins a tie.
     dominant: Option<CategoryId>,
-    /// Time per category in category order; never empty.
+    /// Time per category in category order; empty for core aggregate rankings.
     pub(crate) parts: Vec<CategoryTotal>,
+}
+
+impl std::fmt::Debug for RankRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RankRow")
+            .field("key", &self.key)
+            .field("hidden", &matches!(self.label, RankLabel::HiddenDocument))
+            .field("meta", &self.meta)
+            .field("total", &self.total)
+            .field("dominant", &self.dominant)
+            .field("parts_len", &self.parts.len())
+            .finish()
+    }
 }
 
 impl RankRow {
     pub(super) fn application(app: AppId, name: String, total: Duration) -> Self {
         Self {
             key: RankKey::App(app),
-            name,
+            label: RankLabel::Visible(name),
+            meta: DocumentMeta::default(),
+            total,
+            dominant: None,
+            parts: Vec::new(),
+        }
+    }
+
+    pub(super) fn document(
+        id: DocumentId,
+        label: RankLabel,
+        meta: DocumentMeta,
+        total: Duration,
+    ) -> Self {
+        Self {
+            key: RankKey::Document(DocumentKey::Live(id)),
+            label,
+            meta,
             total,
             dominant: None,
             parts: Vec::new(),
@@ -164,7 +247,7 @@ impl Day {
             .iter()
             .flat_map(|single| self.rank_single(*single))
             .collect();
-        rows.sort_by(|a, b| (Reverse(a.total), &a.name).cmp(&(Reverse(b.total), &b.name)));
+        rows.sort_by(|a, b| (Reverse(a.total), &a.label).cmp(&(Reverse(b.total), &b.label)));
         rows
     }
 
@@ -182,9 +265,12 @@ impl Day {
         groups
             .into_iter()
             .map(|(key, segments)| {
-                let name = match &key {
-                    RankKey::App(app) => self.app(*app).name.clone(),
-                    RankKey::Domain(text) | RankKey::Document(text) => text.clone(),
+                let label = match &key {
+                    RankKey::App(app) => RankLabel::Visible(self.app(*app).name.clone()),
+                    RankKey::Domain(text) | RankKey::Document(DocumentKey::Fixture(text)) => {
+                        RankLabel::Visible(text.clone())
+                    }
+                    RankKey::Document(DocumentKey::Live(_)) => RankLabel::HiddenDocument,
                 };
                 let parts = self.totals_by_category(segments.iter().map(|segment| CategoryTotal {
                     category: segment.category,
@@ -196,7 +282,8 @@ impl Day {
                     .expect("a ranking row has at least one non-empty segment")
                     .category;
                 RankRow {
-                    name,
+                    label,
+                    meta: DocumentMeta::default(),
                     total: total(segments.iter().map(|segment| segment.duration())),
                     dominant: Some(dominant),
                     parts,

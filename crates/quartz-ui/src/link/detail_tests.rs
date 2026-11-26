@@ -455,3 +455,79 @@ async fn busy_detail_is_a_typed_failure_until_an_explicit_retry() {
         .expect("retry succeeds");
     harness.ui.stop().await;
 }
+#[tokio::test]
+async fn document_selection_requests_document_entity_detail_and_drops_late_previous_response() {
+    let mut harness = DetailHarness::start().await;
+    let reference_range = wire::ReferenceRange {
+        start_utc_ms: 0,
+        end_utc_ms: 86_400_000,
+    };
+    let doc_old = wire::DocumentRef::from_encoded("doc:old".into());
+    let doc_new = wire::DocumentRef::from_encoded("doc:new".into());
+    let old = DetailGeneration::default().next();
+    harness
+        .select(
+            DetailTarget::Document {
+                document_ref: doc_old.clone(),
+                reference_range,
+            },
+            old,
+        )
+        .await;
+    let delayed = harness.core.request(Op::QueryEntityDetail).await;
+    let old_query: QueryEntityDetailRequest =
+        serde_json::from_value(delayed.body.clone()).expect("old document query");
+    assert_eq!(
+        old_query.entity,
+        DetailEntity::Document {
+            document_ref: doc_old
+        }
+    );
+    assert_eq!(old_query.reference_range, Some(reference_range));
+    assert!(matches!(
+        harness.ui.events.recv().await,
+        Some(LinkEvent::DetailLoading { .. })
+    ));
+
+    let current = old.next();
+    harness
+        .select(
+            DetailTarget::Document {
+                document_ref: doc_new.clone(),
+                reference_range,
+            },
+            current,
+        )
+        .await;
+    let query = harness.core.request(Op::QueryEntityDetail).await;
+    let new_query: QueryEntityDetailRequest =
+        serde_json::from_value(query.body.clone()).expect("new document query");
+    assert_eq!(
+        new_query.entity,
+        DetailEntity::Document {
+            document_ref: doc_new.clone()
+        }
+    );
+    assert_eq!(new_query.reference_range, Some(reference_range));
+    harness.entity(query).await;
+    let loaded = harness.loaded(current).await.expect("current document");
+    assert_eq!(
+        loaded.request.target,
+        DetailTarget::Document {
+            document_ref: doc_new,
+            reference_range
+        }
+    );
+    let mapped = LiveDetails::from_protocol(loaded).expect("mapped document detail");
+    assert!(mapped.intervals.is_empty());
+    assert!(mapped.entity.is_some());
+
+    harness.core.ok(delayed, serde_json::json!({})).await;
+    assert!(
+        tokio::time::timeout(QUIET_PERIOD, harness.ui.events.recv())
+            .await
+            .is_err(),
+        "late response for previous document subject must be ignored"
+    );
+    harness.ui.stop().await;
+}

@@ -243,9 +243,11 @@ impl OpenDetails {
             PanelContent::Fixture(details) => {
                 details.interval.as_ref().map(|interval| interval.span)
             }
-            PanelContent::Live(panel) => match panel.request.target {
-                crate::link::DetailTarget::Segment { range, .. } => day.span_for_utc(range),
-                crate::link::DetailTarget::App(_) => None,
+            PanelContent::Live(panel) => match &panel.request.target {
+                crate::link::DetailTarget::Segment { range, .. } => day.span_for_utc(*range),
+                crate::link::DetailTarget::App(_) | crate::link::DetailTarget::Document { .. } => {
+                    None
+                }
             },
         }
     }
@@ -399,8 +401,8 @@ impl AppShell {
             .as_ref()
             .and_then(|details| match &details.content {
                 PanelContent::Fixture(_) => Some(details.subject),
-                PanelContent::Live(panel) => (self.day.detail_request(details.subject)
-                    == Some(panel.request))
+                PanelContent::Live(panel) => (self.day.detail_request(details.subject).as_ref()
+                    == Some(&panel.request))
                 .then_some(details.subject),
             })
     }

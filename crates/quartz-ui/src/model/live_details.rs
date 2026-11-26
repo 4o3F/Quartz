@@ -1,6 +1,6 @@
 //! Typed sidebar content mapped from single-response detail queries.
 use super::{BuiltinCategory, CategoryColor, CategoryName, PaletteSlot};
-use crate::link::{DetailData, DetailRequest, UtcRange};
+use crate::link::{DetailData, DetailRequest, EntityKey, UtcRange};
 use quartz_protocol::{self as wire, ClassificationRuleId};
 use std::{collections::BTreeMap, time::Duration};
 
@@ -100,10 +100,21 @@ impl LiveDetails {
         ))
     }
     pub(crate) fn from_protocol(data: DetailData) -> Result<Self, MapDetailsError> {
-        if data
-            .request
-            .app()
-            .is_some_and(|app| !data.entities.iter().any(|entity| entity.app == app))
+        let expected_entity = match &data.request.target {
+            crate::link::DetailTarget::App(app)
+            | crate::link::DetailTarget::Segment { app: Some(app), .. } => {
+                Some(EntityKey::App(*app))
+            }
+            crate::link::DetailTarget::Document { document_ref, .. } => {
+                Some(EntityKey::Document(document_ref.clone()))
+            }
+            crate::link::DetailTarget::Segment { app: None, .. } => None,
+        };
+        if let Some(expected) = &expected_entity
+            && !data
+                .entities
+                .iter()
+                .any(|entity| &entity.entity == expected)
         {
             return Err(MapDetailsError);
         }
@@ -126,7 +137,7 @@ impl LiveDetails {
                 range,
                 app,
                 window_instance,
-            } = data.request.target
+            } = &data.request.target
                 && (interval.start_utc_ms < range.start
                     || interval.end_utc_ms > range.end
                     || app.is_some_and(|expected| {
@@ -166,8 +177,8 @@ impl LiveDetails {
                 source,
             });
         }
-        let selected = data.request.app().or(match data.entities.as_slice() {
-            [entity] => Some(entity.app),
+        let selected = expected_entity.or(match data.entities.as_slice() {
+            [entity] => Some(entity.entity.clone()),
             _ => None,
         });
         let mut result = Self {
@@ -175,7 +186,7 @@ impl LiveDetails {
             entity: None,
         };
         for entity in data.entities {
-            if Some(entity.app) != selected {
+            if Some(&entity.entity) != selected.as_ref() {
                 continue;
             }
             if entity.daily.len() != wire::ENTITY_DETAIL_DAYS {
@@ -252,6 +263,13 @@ impl super::Day {
                 app: None,
                 window_instance: None,
             },
+            super::DetailsSubject::Document(id) => {
+                let (document_ref, reference_range) = self.protocol_document(id)?;
+                DetailTarget::Document {
+                    document_ref: document_ref.clone(),
+                    reference_range,
+                }
+            }
         };
         Some(DetailRequest {
             date: self.date(),
@@ -346,7 +364,7 @@ mod tests {
                 },
                 intervals: segments.intervals,
                 entities: vec![EntityData {
-                    app: wire::ApplicationId(3),
+                    entity: EntityKey::App(wire::ApplicationId(3)),
                     daily: first.daily,
                     titles: first.titles,
                     rules: first.rules,
@@ -443,5 +461,56 @@ mod tests {
         let mut input = Fixture::data();
         input.intervals.first_mut().expect("interval").duration_ms = -1;
         assert!(LiveDetails::from_protocol(input).is_err());
+    }
+    #[test]
+    fn document_entity_details_map_history_titles_and_rules_and_reject_mismatched_subject() {
+        let base = Fixture::data();
+        let entity = base.entities.into_iter().next().expect("entity");
+        let doc_a = wire::DocumentRef::from_encoded("doc:a".into());
+        let doc_b = wire::DocumentRef::from_encoded("doc:b".into());
+        let reference_range = wire::ReferenceRange {
+            start_utc_ms: 0,
+            end_utc_ms: 86_400_000,
+        };
+        let matched = DetailData {
+            request: DetailRequest {
+                date: base.request.date,
+                target: DetailTarget::Document {
+                    document_ref: doc_a.clone(),
+                    reference_range,
+                },
+            },
+            intervals: Vec::new(),
+            entities: vec![EntityData {
+                entity: EntityKey::Document(doc_a.clone()),
+                daily: entity.daily.clone(),
+                titles: entity.titles.clone(),
+                rules: entity.rules.clone(),
+            }],
+        };
+        let mapped = LiveDetails::from_protocol(matched).expect("document details");
+        assert!(mapped.intervals.is_empty());
+        let details = mapped.entity.expect("document entity");
+        assert_eq!(details.daily.len(), wire::ENTITY_DETAIL_DAYS);
+        assert_eq!(details.titles.len(), 1);
+        assert_eq!(details.rules.len(), 1);
+
+        let mismatched = DetailData {
+            request: DetailRequest {
+                date: base.request.date,
+                target: DetailTarget::Document {
+                    document_ref: doc_b,
+                    reference_range,
+                },
+            },
+            intervals: Vec::new(),
+            entities: vec![EntityData {
+                entity: EntityKey::Document(doc_a),
+                daily: entity.daily,
+                titles: entity.titles,
+                rules: entity.rules,
+            }],
+        };
+        assert!(LiveDetails::from_protocol(mismatched).is_err());
     }
 }

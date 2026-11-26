@@ -17,7 +17,9 @@ pub use day::{
     DayData, DayGeneration, DayLoad, DayRequest, DayView, LoadDataError, LoadDataErrorCode,
     LocalFailureCode, UtcRange,
 };
-pub use details::{DetailData, DetailGeneration, DetailRequest, DetailTarget, EntityData};
+pub use details::{
+    DetailData, DetailGeneration, DetailRequest, DetailTarget, EntityData, EntityKey,
+};
 use quartz_pipe::CallCoreError;
 use quartz_protocol::{ControlOp, CoreVersion, DayChanged, InstanceId, StateSnapshot};
 #[cfg(windows)]

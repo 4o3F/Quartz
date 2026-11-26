@@ -34,7 +34,7 @@ pub(crate) use palette::PaletteSlotMap;
 pub(crate) use palette::{CategoryColor, PaletteSlot};
 #[cfg(windows)]
 pub(crate) use ranking::RankKey;
-pub(crate) use ranking::{RankRow, RankingKind};
+pub(crate) use ranking::{DocumentId, DocumentMeta, RankLabel, RankRow, RankingKind};
 #[cfg(windows)]
 pub(crate) use rule::Explanation;
 pub(crate) use rule::RuleCondition;
