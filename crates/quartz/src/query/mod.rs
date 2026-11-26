@@ -12,6 +12,8 @@ mod facts;
 pub(crate) mod preview;
 #[cfg(test)]
 pub(crate) use facts::FINALIZE_BATCH_RECORDS;
+#[cfg(test)]
+mod acceptance_tests;
 pub(crate) mod input;
 mod pending_away;
 pub(crate) mod pipeline;
