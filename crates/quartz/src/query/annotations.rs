@@ -1,6 +1,6 @@
 //! Single-response snapshot annotation reader bounded by item cap and frame limit.
 
-use super::{QUERY_MAX_RESPONSE_BYTES, RunQueryError, paging::JsonBytes};
+use super::{JsonBytes, QUERY_MAX_RESPONSE_BYTES, RunQueryError};
 use crate::store::query::{AnnotationScan, ReadSnapshot};
 use quartz_domain::facts::QueryRange;
 use quartz_protocol::{

@@ -1,6 +1,6 @@
 //! Incremental ordering and frame-bounded wire conversion of raw facts.
 
-use super::{QUERY_MAX_RESPONSE_BYTES, RunQueryError, paging::JsonBytes};
+use super::{JsonBytes, QUERY_MAX_RESPONSE_BYTES, RunQueryError};
 use crate::store::facts::{Fact, FactKind as StoreFactKind};
 use quartz_protocol::{
     QueryFactsResponse,

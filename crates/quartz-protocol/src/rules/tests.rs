@@ -19,20 +19,14 @@ fn read_request_json_snapshots() {
     WireSnapshot::round_trip::<RuleSetsTreeRequest>(json!({"kind":"privacy"}));
     WireSnapshot::round_trip::<RuleSetsGetRequest>(json!({"key":"user.local","view":"effective"}));
     WireSnapshot::round_trip::<RuleSetsGetRequest>(json!({"key":"user.local","view":"own"}));
-    WireSnapshot::round_trip::<RuleSetsTreeRequest>(
-        json!({"kind":"classification","cursor":{"versions":"registry-inputs","query":{"kind":"rule_sets_tree","rule_kind":"classification"},"position":5}}),
-    );
-    WireSnapshot::round_trip::<RuleSetsGetRequest>(
-        json!({"key":"user.local","view":"own","cursor":{"versions":"registry-inputs","query":{"kind":"rule_sets_get","key":"user.local","view":"own"},"position":2}}),
-    );
 }
 #[test]
 fn read_response_json_snapshots() {
     WireSnapshot::round_trip::<RuleSetsTreeResponse>(
-        json!({"kind":"classification","effective_version":"a".repeat(64),"nodes":[{"key":"user.local","parent":"builtin.classification","version":3,"enabled":true,"sibling_order":2,"source":"user","counts":{"added":1,"overridden":2,"disabled":3},"warnings":[{"code":"target_deleted","target":"builtin.classification/old"},{"code":"conflict","target":"builtin.classification/terminal"}]}],"versions":"registry-inputs","next_cursor":null}),
+        json!({"kind":"classification","effective_version":"a".repeat(64),"nodes":[{"key":"user.local","parent":"builtin.classification","version":3,"enabled":true,"sibling_order":2,"source":"user","counts":{"added":1,"overridden":2,"disabled":3},"warnings":[{"code":"target_deleted","target":"builtin.classification/old"},{"code":"conflict","target":"builtin.classification/terminal"}]}],"versions":"registry-inputs","truncated":false}),
     );
     WireSnapshot::round_trip::<RuleSetsGetResponse>(
-        json!({"key":"user.local","version":1,"parent_version":2,"entries":[WireSnapshot::rule(),{"entry_kind":"override","content":{"target":"builtin.classification/code","label":"Replacement","priority":50,"category":"11111111-1111-4111-8111-111111111111","match":"all","when":[]},"provenance":[{"key":"builtin.classification","version":2,"id":"code"},{"key":"user.local","version":1,"id":"code"}],"state":"overridden"},{"entry_kind":"disable","content":{"target":"builtin.classification/terminal","reason":"Unused"},"provenance":[{"key":"builtin.classification","version":2,"id":"terminal"},{"key":"user.local","version":1,"id":"terminal"}],"state":"disabled"}],"versions":"registry-inputs","next_cursor":null}),
+        json!({"key":"user.local","version":1,"parent_version":2,"entries":[WireSnapshot::rule(),{"entry_kind":"override","content":{"target":"builtin.classification/code","label":"Replacement","priority":50,"category":"11111111-1111-4111-8111-111111111111","match":"all","when":[]},"provenance":[{"key":"builtin.classification","version":2,"id":"code"},{"key":"user.local","version":1,"id":"code"}],"state":"overridden"},{"entry_kind":"disable","content":{"target":"builtin.classification/terminal","reason":"Unused"},"provenance":[{"key":"builtin.classification","version":2,"id":"terminal"},{"key":"user.local","version":1,"id":"terminal"}],"state":"disabled"}],"versions":"registry-inputs","truncated":false}),
     );
     WireSnapshot::round_trip::<crate::ProtocolError>(
         json!({"code":"rule_set_not_found","key":"user.local"}),
@@ -44,7 +38,7 @@ fn requests_reject_unknown_fields_and_invalid_enums() {
         json!({}),
         json!({"kind":"precedent"}),
         json!({"kind":"privacy","extra":1}),
-        json!({"kind":"privacy","cursor":"invalid"}),
+        json!({"kind":"privacy","cursor":null}),
     ] {
         assert!(serde_json::from_value::<RuleSetsTreeRequest>(body).is_err());
     }
@@ -52,6 +46,7 @@ fn requests_reject_unknown_fields_and_invalid_enums() {
         json!({"key":"user.local"}),
         json!({"key":"user.local","view":"merged"}),
         json!({"key":"user.local","view":"own","version":1}),
+        json!({"key":"user.local","view":"own","cursor":null}),
         json!({"key":"user.local","view":"own","extra":true}),
     ] {
         assert!(serde_json::from_value::<RuleSetsGetRequest>(body).is_err());
@@ -156,6 +151,9 @@ fn rule_text_contracts_preserve_fixtures_and_accept_additive_responses() {
     let mut export = fixture["export"].clone();
     export["extra"] = json!(true);
     assert!(serde_json::from_value::<RulesTextExportRequest>(export).is_err());
+    let mut with_cursor = fixture["export"].clone();
+    with_cursor["cursor"] = json!(null);
+    assert!(serde_json::from_value::<RulesTextExportRequest>(with_cursor).is_err());
     let mut versioned = fixture["export"].clone();
     versioned["version"] = json!(1);
     assert!(serde_json::from_value::<RulesTextExportRequest>(versioned).is_err());

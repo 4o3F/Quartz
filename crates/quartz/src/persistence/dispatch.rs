@@ -72,13 +72,6 @@ impl WriteRequest {
             quartz_protocol::Op::SettingsSet => serde_json::from_value(body).map(Self::SettingsSet),
             _ => unreachable!("write decoding follows implemented operation dispatch"),
         }?;
-        if let Self::Categories(CategoryRequest::List(body)) = &request
-            && let Some(cursor) = &body.cursor
-        {
-            cursor.validate_query(&quartz_protocol::CursorQuery::Categories {
-                include_archived: body.include_archived,
-            })?;
-        }
         Ok(request)
     }
     pub(crate) fn execute(

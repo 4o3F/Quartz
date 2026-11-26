@@ -1,11 +1,10 @@
 //! Bounded two-snapshot previews over one retained SQLite read transaction.
 
 use super::{
-    QueryResponse, RunQueryError,
+    JsonBytes, QueryResponse, RunQueryError,
     classification::{Classifier, QueryCategoryRef},
     day_walker::DayWalker,
     input::QueryRange,
-    paging::JsonBytes,
     pipeline::{DerivedSegment, Pipeline, QUERY_BATCH_ROWS, SegmentFacts},
 };
 use crate::{

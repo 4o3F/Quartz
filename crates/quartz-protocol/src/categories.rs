@@ -1,7 +1,10 @@
 //! Category editing bodies and metadata-versioned list responses.
 
-use crate::{BuiltinCategory, CategoryTendency, QueryCursor, QueryVersions, Uuid};
+use crate::{BuiltinCategory, CategoryTendency, QueryVersions, Uuid};
 use serde::{Deserialize, Serialize};
+
+/// Maximum categories returned in a single `categories.list` response.
+pub const CATEGORIES_MAX_ENTITIES: usize = 500;
 
 /// Category selection for hierarchy listing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -9,8 +12,6 @@ use serde::{Deserialize, Serialize};
 pub struct CategoriesListRequest {
     #[serde(default)]
     pub include_archived: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<QueryCursor>,
 }
 
 /// Complete editable values, with a client-supplied durable identity.
@@ -93,12 +94,12 @@ pub struct EditableCategory {
 pub struct CategoryResponse {
     pub entity: EditableCategory,
 }
-/// Hierarchy preorder page bound to the current metadata version.
+/// Hierarchy preorder listing bound to the current metadata version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CategoriesListResponse {
     pub entities: Vec<EditableCategory>,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    pub truncated: bool,
 }
 
 #[cfg(test)]
@@ -199,16 +200,8 @@ mod tests {
             assert!(serde_json::from_value::<CategoriesCreateRequest>(body).is_err());
         }
         let mut body = wire["list"].clone();
-        body["cursor"] = wire["list_response"]["next_cursor"].clone();
-        body["cursor"]["query"]["extra"] = serde_json::json!(true);
-        assert!(
-            serde_json::from_value::<CategoriesListRequest>(body)
-                .expect("opaque cursor")
-                .cursor
-                .expect("cursor")
-                .decode()
-                .is_err()
-        );
+        body["cursor"] = serde_json::json!(null);
+        assert!(serde_json::from_value::<CategoriesListRequest>(body).is_err());
         assert_eq!(
             serde_json::from_value::<Op>(serde_json::json!("categories.delete"))
                 .expect("obsolete op"),

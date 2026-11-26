@@ -204,6 +204,23 @@ impl DayHarness {
             )
             .await;
     }
+    async fn finish_mismatched_versions(&mut self, first: Request) {
+        self.core.ok(first, empty_day_body(None, "day-v1")).await;
+        let categories = self.core.request(Op::QueryTimeline).await;
+        self.core
+            .ok(
+                categories,
+                serde_json::json!({"segments":[],"versions":"day-v1","truncated":false}),
+            )
+            .await;
+        let raw = self.core.request(Op::QueryTimeline).await;
+        self.core
+            .ok(
+                raw,
+                serde_json::json!({"segments":[],"versions":"day-v2","truncated":false}),
+            )
+            .await;
+    }
     async fn loaded(&mut self) -> Result<DayData, LoadDataError> {
         loop {
             match self.ui.events.recv().await.expect("UI event") {
@@ -228,10 +245,7 @@ async fn single_response_day_queries_load_and_use_raw_projection_for_lanes() {
 async fn stale_restarts_the_entire_query_set_then_succeeds() {
     let mut harness = DayHarness::start().await;
     let first = harness.start_load(DayGeneration::default().next()).await;
-    harness
-        .core
-        .reject(first, quartz_protocol::ErrorKind::StaleCursor)
-        .await;
+    harness.finish_mismatched_versions(first).await;
     let first = harness.core.request(Op::QueryDay).await;
     let _: quartz_protocol::QueryDayRequest =
         serde_json::from_value(first.body.clone()).expect("fresh day");
@@ -241,34 +255,34 @@ async fn stale_restarts_the_entire_query_set_then_succeeds() {
 }
 #[tokio::test]
 async fn stale_exhaustion_and_busy_are_typed_inline_failures() {
-    for kind in [
-        quartz_protocol::ErrorKind::StaleCursor,
-        quartz_protocol::ErrorKind::Busy,
-    ] {
-        let mut harness = DayHarness::start().await;
-        let mut query = harness.start_load(DayGeneration::default().next()).await;
-        let attempts = if kind == quartz_protocol::ErrorKind::StaleCursor {
-            super::super::day::MAX_STALE_RESTARTS + 1
-        } else {
-            1
-        };
-        for attempt in 0..attempts {
-            harness.core.reject(query, kind.clone()).await;
-            if attempt + 1 == attempts {
-                break;
-            }
-            query = harness.core.request(Op::QueryDay).await;
+    let mut harness = DayHarness::start().await;
+    let mut query = harness.start_load(DayGeneration::default().next()).await;
+    for attempt in 0..=super::super::day::MAX_STALE_RESTARTS {
+        harness.finish_mismatched_versions(query).await;
+        if attempt == super::super::day::MAX_STALE_RESTARTS {
+            break;
         }
-        let error = harness.loaded().await.expect_err("typed failure");
-        let expected = match kind {
-            quartz_protocol::ErrorKind::StaleCursor => {
-                LoadDataErrorCode::Local(LocalFailureCode::StaleExhausted)
-            }
-            kind => LoadDataErrorCode::Protocol(kind),
-        };
-        assert_eq!(error.code(), expected);
-        harness.ui.stop().await;
+        query = harness.core.request(Op::QueryDay).await;
     }
+    let error = harness.loaded().await.expect_err("stale exhaustion");
+    assert_eq!(
+        error.code(),
+        LoadDataErrorCode::Local(LocalFailureCode::StaleExhausted)
+    );
+    harness.ui.stop().await;
+
+    let mut harness = DayHarness::start().await;
+    let query = harness.start_load(DayGeneration::default().next()).await;
+    harness
+        .core
+        .reject(query, quartz_protocol::ErrorKind::Busy)
+        .await;
+    let error = harness.loaded().await.expect_err("busy failure");
+    assert_eq!(
+        error.code(),
+        LoadDataErrorCode::Protocol(quartz_protocol::ErrorKind::Busy)
+    );
+    harness.ui.stop().await;
 }
 #[tokio::test]
 async fn day_events_coalesce_while_a_query_is_in_flight() {

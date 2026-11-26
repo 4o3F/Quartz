@@ -1027,87 +1027,47 @@ mod tests {
             }
         ));
     }
-    struct CursorAdmissionCase {
-        op: Op,
-        body: serde_json::Value,
-        query: serde_json::Value,
-    }
-    impl CursorAdmissionCase {
-        fn all() -> Vec<Self> {
-            vec![
-                Self {
-                    op: Op::RuleSetsTree,
-                    body: serde_json::json!({"kind":"privacy"}),
-                    query: serde_json::json!({"kind":"rule_sets_tree","rule_kind":"privacy"}),
-                },
-                Self {
-                    op: Op::RuleSetsGet,
-                    body: serde_json::json!({"key":"builtin.privacy","view":"own"}),
-                    query: serde_json::json!({"kind":"rule_sets_get","key":"builtin.privacy","view":"own"}),
-                },
-                Self {
-                    op: Op::CategoriesList,
-                    body: serde_json::json!({}),
-                    query: serde_json::json!({"kind":"categories","include_archived":false}),
-                },
-            ]
-        }
-        fn session() -> ConnectionSession {
-            ConnectionSession {
-                state: State::Ready(ReadyRole::Ui {
-                    state: UiState::Visible,
-                }),
-                allowed: AllowedRoles::Quartz,
-            }
-        }
-    }
     #[test]
-    fn forged_cursors_are_bad_request_before_worker_or_store_admission() {
-        let publisher = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(
-            "cursor-admission".into(),
-        ));
-        let status = publisher.subscribe();
-        for case in CursorAdmissionCase::all() {
-            for cursor in [
-                serde_json::json!({}),
-                serde_json::json!({"versions":"old","query":{"kind":"future"},"position":1}),
-                serde_json::json!({"versions":"old","query":case.query,"position":-1}),
-                serde_json::json!({"versions":"old","query":{"kind":"day","local_date":"2025-01-03"},"position":1}),
-                serde_json::json!({"versions":"old","query":{"kind":"day","local_date":17},"position":1}),
-                serde_json::json!({"versions":"old","query":case.query,"position":1,"extension":"x".repeat(quartz_protocol::MAX_FRAME_LEN)}),
-            ] {
-                let mut body = case.body.clone();
-                body["cursor"] = cursor;
-                assert_eq!(
-                    CursorAdmissionCase::session()
-                        .receive(request(1, case.op, body), &status.borrow().status)
-                        .reply()
-                        .outcome,
-                    ResponseOutcome::Err {
-                        error: ProtocolError::new(ErrorKind::BadRequest)
-                    },
-                    "{:?}",
-                    case.op
-                );
-            }
-        }
-    }
-    #[test]
-    fn valid_stale_cursor_versions_are_not_compared_during_admission() {
+    fn rule_and_category_reads_reject_cursor_field_before_admission() {
         let publisher =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("cursor-stale".into()));
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("read-admission".into()));
         let status = publisher.subscribe();
-        for case in CursorAdmissionCase::all() {
-            let mut body = case.body;
-            body["cursor"] = serde_json::json!({"versions":"old","query":case.query,"position":1});
+        let session = || ConnectionSession {
+            state: State::Ready(ReadyRole::Ui {
+                state: UiState::Visible,
+            }),
+            allowed: AllowedRoles::Quartz,
+        };
+        for (op, body) in [
+            (Op::RuleSetsTree, serde_json::json!({"kind":"privacy"})),
+            (
+                Op::RuleSetsGet,
+                serde_json::json!({"key":"builtin.privacy","view":"own"}),
+            ),
+            (
+                Op::RulesTextExport,
+                serde_json::json!({"key":"builtin.privacy"}),
+            ),
+            (Op::CategoriesList, serde_json::json!({})),
+        ] {
             assert!(
                 matches!(
-                    CursorAdmissionCase::session()
-                        .receive(request(1, case.op, body), &status.borrow().status),
-                    Action::Query { .. } | Action::Rules { .. } | Action::Write { .. }
+                    session().receive(request(1, op, body.clone()), &status.borrow().status),
+                    Action::Rules { .. } | Action::Write { .. }
                 ),
-                "{:?}",
-                case.op
+                "{op:?}"
+            );
+            let mut with_cursor = body;
+            with_cursor["cursor"] = serde_json::json!(null);
+            assert_eq!(
+                session()
+                    .receive(request(2, op, with_cursor), &status.borrow().status)
+                    .reply()
+                    .outcome,
+                ResponseOutcome::Err {
+                    error: ProtocolError::new(ErrorKind::BadRequest)
+                },
+                "{op:?}"
             );
         }
     }

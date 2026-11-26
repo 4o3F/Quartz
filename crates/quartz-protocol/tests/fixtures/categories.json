@@ -56,14 +56,7 @@
       }
     ],
     "versions": "categories.v1:2",
-    "next_cursor": {
-      "versions": "categories.v1:2",
-      "query": {
-        "kind": "categories",
-        "include_archived": true
-      },
-      "position": 1
-    }
+    "truncated": false
   },
   "accepted": {
     "accepted": true

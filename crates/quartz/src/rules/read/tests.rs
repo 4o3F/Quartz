@@ -84,7 +84,6 @@ impl Fixture {
                 RuleSetsGetRequest {
                     key: key.into(),
                     view,
-                    cursor: None,
                 },
                 self.inputs().versions(),
             )
@@ -96,7 +95,6 @@ impl Fixture {
             .tree(
                 RuleSetsTreeRequest {
                     kind: RuleKind::Classification,
-                    cursor: None,
                 },
                 inputs.versions(),
             )
@@ -171,7 +169,6 @@ fn deleted_sets_are_excluded_from_tree_and_current_reads() {
             RuleSetsGetRequest {
                 key: "user.history".into(),
                 view: RuleView::Own,
-                cursor: None,
             },
             inputs.versions(),
         )
@@ -349,7 +346,6 @@ fn startup_conflicts_report_both_authors_and_exclude_their_overlays() {
         .tree(
             RuleSetsTreeRequest {
                 kind: RuleKind::Classification,
-                cursor: None,
             },
             inputs.versions(),
         )
@@ -372,7 +368,6 @@ fn startup_conflicts_report_both_authors_and_exclude_their_overlays() {
                 RuleSetsGetRequest {
                     key: key.into(),
                     view: RuleView::Own,
-                    cursor: None,
                 },
                 inputs.versions(),
             )
@@ -382,55 +377,49 @@ fn startup_conflicts_report_both_authors_and_exclude_their_overlays() {
 }
 
 #[test]
-fn oversized_effective_results_split_and_import_invalidates_all_read_cursors() {
-    /// Each set remains below the 192 KiB text limit while their root tree exceeds one page.
-    const RULES_PER_SET: usize = 24;
-    const VALUE_BYTES: usize = 3000;
+fn oversized_effective_results_truncate_to_frame_limit_and_import_updates_versions() {
+    /// Each child set remains below the 192 KiB text limit while their root tree exceeds 1 MiB.
+    const CHILD_COUNT: usize = 10;
+    const RULES_PER_SET: usize = 30;
+    const VALUE_BYTES: usize = 4000;
     let mut fixture = Fixture::new();
     fixture.apply("user.root", None, &Fixture::rule("root", 50), 0);
-    for key in ["user.first", "user.second", "user.third"] {
+    let small = fixture.get("user.root", RuleView::Effective);
+    assert!(!small.truncated);
+    assert_eq!(small.entries.len(), 1);
+    for child in 0..CHILD_COUNT {
         let entries: String = (0..RULES_PER_SET)
             .map(|index| {
                 Fixture::rule(&format!("rule-{index}"), 50)
                     .replace("code.exe", &"x".repeat(VALUE_BYTES))
             })
             .collect();
-        fixture.apply(key, Some("user.root"), &entries, 0);
+        fixture.apply(
+            &format!("user.child-{child}"),
+            Some("user.root"),
+            &entries,
+            0,
+        );
     }
-    let mut request = RuleSetsGetRequest {
-        key: "user.root".into(),
-        view: RuleView::Effective,
-        cursor: None,
-    };
-    let mut count = 0;
-    let mut pages = 0;
-    let mut first_cursor = None;
-    loop {
-        let inputs = fixture.inputs();
-        let page = inputs
-            .contents(request.clone(), inputs.versions())
-            .expect("page");
-        assert!(serde_json::to_vec(&page).expect("encoded page").len() < wire::QUERY_PAGE_BYTES);
-        count += page.entries.len();
-        pages += 1;
-        if first_cursor.is_none() {
-            first_cursor = page.next_cursor.clone();
-        }
-        request.cursor = page.next_cursor;
-        if request.cursor.is_none() {
-            break;
-        }
-    }
-    assert!(pages > 1);
-    assert_eq!(count, 1 + 3 * RULES_PER_SET);
     let before = fixture.inputs();
     let old_versions = before.versions();
-    let tree_cursor = wire::QueryCursor::new(
-        old_versions.clone(),
-        wire::CursorQuery::RuleSetsTree {
-            rule_kind: RuleKind::Classification,
-        },
-        1,
+    let response = before
+        .contents(
+            RuleSetsGetRequest {
+                key: "user.root".into(),
+                view: RuleView::Effective,
+            },
+            old_versions.clone(),
+        )
+        .expect("truncated effective view");
+    assert!(response.truncated);
+    assert!(!response.entries.is_empty());
+    assert!(response.entries.len() < 1 + CHILD_COUNT * RULES_PER_SET);
+    assert!(
+        serde_json::to_vec(&response)
+            .expect("encoded response")
+            .len()
+            <= QUERY_MAX_RESPONSE_BYTES
     );
     fixture.run(RegistryCommand::Import {
         key: "user.unrelated".parse().expect("key"),
@@ -440,27 +429,6 @@ fn oversized_effective_results_split_and_import_invalidates_all_read_cursors() {
     });
     let inputs = fixture.inputs();
     assert_ne!(inputs.versions(), old_versions);
-    request.cursor = first_cursor;
-    assert_eq!(
-        inputs
-            .contents(request, inputs.versions())
-            .expect_err("stale contents")
-            .kind,
-        ErrorKind::StaleCursor
-    );
-    assert_eq!(
-        inputs
-            .tree(
-                RuleSetsTreeRequest {
-                    kind: RuleKind::Classification,
-                    cursor: Some(tree_cursor)
-                },
-                inputs.versions()
-            )
-            .expect_err("stale tree")
-            .kind,
-        ErrorKind::StaleCursor
-    );
     // An in-flight work unit retains the publication it captured before the import.
     assert_eq!(before.versions(), old_versions);
 }
@@ -520,17 +488,18 @@ fn metadata_enablement_and_deleted_revisions_are_global_version_inputs() {
 }
 
 #[test]
-fn tree_lists_split_without_losing_order() {
-    /// Long but valid keys make the tree exceed a page with bounded fixture size.
-    const SET_COUNT: usize = 900;
-    const KEY_PADDING: usize = 120;
+fn tree_lists_preserve_order_and_cap_with_truncated() {
+    const SET_COUNT: usize = wire::RULE_SETS_TREE_MAX_NODES + 20;
+    const KEY_PADDING: usize = 64;
     let mut fixture = Fixture::new();
     fixture.apply("user.history", None, "", 0);
+    let small = fixture.tree();
+    assert!(!small.truncated);
     let mut state = fixture.shell.core().state().clone();
     let template_key = "user.history".parse().expect("key");
     let template = state.sets[&template_key].clone();
     for index in 0..SET_COUNT {
-        let key = format!("user.paged-{index:04}-{}", "x".repeat(KEY_PADDING));
+        let key = format!("user.capped-{index:04}-{}", "x".repeat(KEY_PADDING));
         let mut entry = template.clone();
         entry.current.set.header.key = key.clone();
         entry.current.sibling_order = 0;
@@ -541,41 +510,29 @@ fn tree_lists_split_without_losing_order() {
         snapshot: registry.snapshots().load(),
         metadata_version: 0,
     };
-    let versions = inputs.versions();
-    let mut request = RuleSetsTreeRequest {
-        kind: RuleKind::Classification,
-        cursor: None,
-    };
-    let mut keys = Vec::new();
-    let mut pages = 0;
-    loop {
-        let page = inputs
-            .tree(request.clone(), versions.clone())
-            .expect("tree page");
-        assert!(serde_json::to_vec(&page).expect("tree JSON").len() < wire::QUERY_PAGE_BYTES);
-        keys.extend(page.nodes.into_iter().map(|node| node.key));
-        pages += 1;
-        request.cursor = page.next_cursor;
-        if request.cursor.is_none() {
-            break;
-        }
-    }
-    assert!(pages > 1);
-    assert_eq!(
-        keys.iter()
-            .filter(|key| key.starts_with("user.paged-"))
-            .count(),
-        SET_COUNT
-    );
-    let paged_keys: Vec<_> = keys
+    let tree = inputs
+        .tree(
+            RuleSetsTreeRequest {
+                kind: RuleKind::Classification,
+            },
+            inputs.versions(),
+        )
+        .expect("capped tree");
+    assert!(tree.truncated);
+    assert_eq!(tree.nodes.len(), wire::RULE_SETS_TREE_MAX_NODES);
+    assert!(serde_json::to_vec(&tree).expect("tree JSON").len() <= QUERY_MAX_RESPONSE_BYTES);
+    let capped_keys: Vec<_> = tree
+        .nodes
         .iter()
-        .filter(|key| key.starts_with("user.paged-"))
+        .map(|node| node.key.as_str())
+        .filter(|key| key.starts_with("user.capped-"))
         .collect();
-    assert!(paged_keys.windows(2).all(|window| window[0] < window[1]));
+    assert!(!capped_keys.is_empty());
+    assert!(capped_keys.windows(2).all(|window| window[0] < window[1]));
 }
 
 #[test]
-fn oversized_stored_entries_return_internal_instead_of_an_unpageable_success() {
+fn oversized_stored_entries_return_internal_instead_of_an_unbounded_success() {
     let mut fixture = Fixture::new();
     fixture.apply("user.invalid", None, &Fixture::rule("one", 50), 0);
     let mut state = fixture.shell.core().state().clone();
@@ -596,7 +553,6 @@ fn oversized_stored_entries_return_internal_instead_of_an_unpageable_success() {
                 RuleSetsGetRequest {
                     key: "user.invalid".into(),
                     view: RuleView::Own,
-                    cursor: None
                 },
                 inputs.versions()
             )
@@ -616,10 +572,7 @@ fn family_trees_reuse_evaluator_hashes_and_format_specific_fields() {
         RuleKind::Privacy,
     ] {
         let tree = inputs
-            .tree(
-                RuleSetsTreeRequest { kind, cursor: None },
-                inputs.versions(),
-            )
+            .tree(RuleSetsTreeRequest { kind }, inputs.versions())
             .expect("family tree");
         let hash = match kind {
             RuleKind::Classification => &inputs.snapshot.hashes().classification,
@@ -651,10 +604,7 @@ impl Fixture {
         inputs.export(request, versions)
     }
     fn export_request(key: &str) -> wire::RulesTextExportRequest {
-        wire::RulesTextExportRequest {
-            key: key.into(),
-            cursor: None,
-        }
+        wire::RulesTextExportRequest { key: key.into() }
     }
 }
 #[test]
@@ -747,7 +697,7 @@ fn text_exports_preserve_saved_headers_and_overlays_after_reopening() {
     assert_eq!(restored.text, first.text);
 }
 #[test]
-fn text_export_pages_fit_encoded_budget_preserve_utf8_and_reject_stale_or_rebound_cursors() {
+fn text_export_returns_complete_utf8_within_frame_and_rejects_cursor() {
     const RULE_COUNT: usize = 20;
     const LABEL_QUOTES: usize = 4000;
     let mut fixture = Fixture::new();
@@ -759,99 +709,37 @@ fn text_export_pages_fit_encoded_budget_preserve_utf8_and_reject_stale_or_reboun
                 .replace(&format!("'Rule entry-{index}'"), &label)
         })
         .collect::<String>();
-    fixture.apply("user.pages", None, &entries, 0);
-    let request = Fixture::export_request("user.pages");
-    let first = fixture.export_text(request.clone()).expect("first page");
-    assert!(first.next_cursor.is_some());
-    let mut text = first.text.clone();
-    let mut cursor = first.next_cursor.clone();
-    while let Some(next) = cursor {
-        let page = fixture
-            .export_text(wire::RulesTextExportRequest {
-                cursor: Some(next),
-                ..request.clone()
-            })
-            .expect("next UTF-8 page");
-        assert!(serde_json::to_vec(&page).expect("page bytes").len() <= wire::QUERY_PAGE_BYTES);
-        text.push_str(&page.text);
-        cursor = page.next_cursor;
-    }
+    fixture.apply("user.export-large", None, &entries, 0);
+    let exported = fixture
+        .export_text(Fixture::export_request("user.export-large"))
+        .expect("complete export");
+    assert!(serde_json::to_vec(&exported).expect("export bytes").len() <= QUERY_MAX_RESPONSE_BYTES);
     let current = fixture
         .shell
         .core()
         .state()
         .sets
-        .get(&"user.pages".parse().expect("key"))
+        .get(&"user.export-large".parse().expect("key"))
         .expect("saved set");
-    assert_eq!(text, current.current.set.canonical_text());
-    assert!(text.len() <= wire::MAX_RULE_TEXT_BYTES);
+    assert_eq!(exported.text, current.current.set.canonical_text());
+    assert!(exported.text.len() <= wire::MAX_RULE_TEXT_BYTES);
     assert!(
         crate::rules::write::RuleMutation::validate(
             wire::RulesTextValidateRequest {
-                key: "user.pages".into(),
+                key: "user.export-large".into(),
                 base_version: 1,
-                text
+                text: exported.text,
             },
             &fixture.shell
         )
         .expect("export validates")
         .valid
     );
-    let split_character = first.text.find('中').expect("multibyte text") + 1;
-    let invalid = wire::QueryCursor::new(
-        first.versions.clone(),
-        wire::CursorQuery::RulesTextExport {
-            key: request.key.clone(),
-        },
-        split_character,
-    );
-    assert_eq!(
-        fixture
-            .export_text(wire::RulesTextExportRequest {
-                cursor: Some(invalid),
-                ..request.clone()
-            })
-            .expect_err("offset splits UTF-8 character")
-            .kind,
-        ErrorKind::BadRequest
-    );
-    let cursor = first.next_cursor.expect("cursor");
-    let mut rebound = request.clone();
-    rebound.key = "user.other".into();
-    rebound.cursor = Some(cursor.clone());
     assert!(
         ReadRequest::decode(
             wire::Op::RulesTextExport,
-            serde_json::to_value(rebound).expect("body")
+            serde_json::json!({"key":"user.export-large","cursor":null}),
         )
         .is_err()
-    );
-    let invalid = wire::QueryCursor::new(
-        first.versions.clone(),
-        wire::CursorQuery::RulesTextExport {
-            key: request.key.clone(),
-        },
-        usize::MAX,
-    );
-    assert_eq!(
-        fixture
-            .export_text(wire::RulesTextExportRequest {
-                cursor: Some(invalid),
-                ..request.clone()
-            })
-            .expect_err("offset out of range")
-            .kind,
-        ErrorKind::BadRequest
-    );
-    fixture.apply("user.pages", None, &entries, 1);
-    assert_eq!(
-        fixture
-            .export_text(wire::RulesTextExportRequest {
-                cursor: Some(cursor),
-                ..request
-            })
-            .expect_err("new revision invalidates cursor")
-            .kind,
-        ErrorKind::StaleCursor
     );
 }

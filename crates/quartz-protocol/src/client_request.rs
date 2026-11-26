@@ -224,21 +224,4 @@ mod tests {
             "../tests/fixtures/unclassified-document.json"
         ));
     }
-    #[test]
-    fn cursor_json_is_forwarded_unchanged_including_future_query_shapes() {
-        for query in [
-            serde_json::json!({"kind":"categories","include_archived":false,"extra":{"id":18446744073709551615_u64}}),
-            serde_json::json!({"kind":"future_query","parameters":[null,true,"opaque"]}),
-        ] {
-            let cursor = serde_json::json!({"versions":"v","query":query,"position":3,"extension":{"nested":[1,2,3]}});
-            let wire = serde_json::json!({"entities":[],"versions":"v","next_cursor":cursor});
-            let response =
-                crate::CategoriesListRequest::response(wire).expect("opaque cursor response");
-            let request = crate::CategoriesListRequest {
-                include_archived: false,
-                cursor: response.next_cursor,
-            };
-            assert_eq!(request.body().expect("forward cursor")["cursor"], cursor);
-        }
-    }
 }

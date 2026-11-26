@@ -1,6 +1,6 @@
-//! Rule read projection and byte-bounded paging over one immutable registry publication.
+//! Rule read projection and single-frame output over one immutable registry publication.
 
-use crate::query::paging::{PageBudget, PagePosition};
+use crate::query::{JsonBytes, QUERY_MAX_RESPONSE_BYTES, fit_single_list};
 use quartz_domain::rules::{
     self as domain,
     registry::{RuleSetDeletion, RuleSnapshot},
@@ -41,39 +41,14 @@ pub(crate) enum ReadResponse {
 }
 impl ReadRequest {
     pub(crate) fn decode(op: wire::Op, body: serde_json::Value) -> Result<Self, serde_json::Error> {
-        let request = match op {
+        match op {
             wire::Op::RulesTextExport => serde_json::from_value(body).map(Self::Export),
             wire::Op::RuleSetsTree => serde_json::from_value(body).map(Self::Tree),
             wire::Op::RuleSetsGet => serde_json::from_value(body).map(Self::Get),
             _ => Err(<serde_json::Error as serde::de::Error>::custom(
                 "operation has no rule read decoder",
             )),
-        }?;
-        match &request {
-            Self::Export(body) => {
-                if let Some(cursor) = &body.cursor {
-                    cursor.validate_query(&wire::CursorQuery::RulesTextExport {
-                        key: body.key.clone(),
-                    })?;
-                }
-            }
-            Self::Tree(body) => {
-                if let Some(cursor) = &body.cursor {
-                    cursor.validate_query(&wire::CursorQuery::RuleSetsTree {
-                        rule_kind: body.kind,
-                    })?;
-                }
-            }
-            Self::Get(body) => {
-                if let Some(cursor) = &body.cursor {
-                    cursor.validate_query(&wire::CursorQuery::RuleSetsGet {
-                        key: body.key.clone(),
-                        view: body.view,
-                    })?;
-                }
-            }
         }
-        Ok(request)
     }
     pub(crate) fn execute(self, inputs: ReadInputs) -> Result<ReadResponse, ProtocolError> {
         let versions = inputs.versions();
@@ -111,10 +86,6 @@ impl ReadInputs {
         request: wire::RulesTextExportRequest,
         versions: wire::QueryVersions,
     ) -> Result<wire::RulesTextExportResponse, ProtocolError> {
-        let query = wire::CursorQuery::RulesTextExport {
-            key: request.key.clone(),
-        };
-        let position = Self::position(request.cursor.as_ref(), &versions, &query)?;
         let key: domain::RuleSetKey = request
             .key
             .parse()
@@ -132,39 +103,9 @@ impl ReadInputs {
         if text.len() > wire::MAX_RULE_TEXT_BYTES {
             return Err(ProtocolError::new(ErrorKind::BadRequest));
         }
-        let start = match position {
-            PagePosition::First => 0,
-            PagePosition::Cursor(index) => index,
-        };
-        if start >= text.len() || !text.is_char_boundary(start) {
-            return Err(ProtocolError::new(ErrorKind::BadRequest));
-        }
-        let mut response = wire::RulesTextExportResponse {
-            text: String::new(),
-            versions,
-            next_cursor: None,
-        };
-        let mut budget = Self::budget(&response, &response.versions, &query)?;
-        let mut end = start;
-        for character in text[start..].chars() {
-            if !budget
-                .admit_text_character(character)
-                .map_err(Self::paging_error)?
-            {
-                break;
-            }
-            end += character.len_utf8();
-        }
-        if end == start {
-            return Err(ProtocolError::new(ErrorKind::PageTooLarge));
-        }
-        response.text = text[start..end].into();
-        if end < text.len() {
-            response.next_cursor = Some(wire::QueryCursor::new(
-                response.versions.clone(),
-                query,
-                end,
-            ));
+        let response = wire::RulesTextExportResponse { text, versions };
+        if JsonBytes::measure(&response).map_err(|_| Self::internal())? > QUERY_MAX_RESPONSE_BYTES {
+            return Err(Self::internal());
         }
         Ok(response)
     }
@@ -180,86 +121,74 @@ impl ReadInputs {
         request: RuleSetsTreeRequest,
         versions: wire::QueryVersions,
     ) -> Result<RuleSetsTreeResponse, ProtocolError> {
-        let query = wire::CursorQuery::RuleSetsTree {
-            rule_kind: request.kind,
-        };
         let resolution = self
             .snapshot
             .resolution(Self::kind(request.kind))
             .ok_or_else(Self::internal)?;
-        let mut response = RuleSetsTreeResponse {
+        let truncated = resolution.nodes.len() > wire::RULE_SETS_TREE_MAX_NODES;
+        let mut nodes =
+            Vec::with_capacity(resolution.nodes.len().min(wire::RULE_SETS_TREE_MAX_NODES));
+        for node in resolution.nodes.iter().take(wire::RULE_SETS_TREE_MAX_NODES) {
+            let key = node.key.parse().map_err(|_| Self::internal())?;
+            let set = &self.snapshot.state().sets[&key];
+            let content = &set.current.set.content;
+            let mut warnings: Vec<_> = resolution
+                .overlay_warnings
+                .iter()
+                .filter(|warning| warning.key == node.key)
+                .map(|warning| RuleSetWarning {
+                    code: if warning.code == domain::DiagnosticCode::Conflict {
+                        RuleWarningCode::Conflict
+                    } else {
+                        RuleWarningCode::TargetDeleted
+                    },
+                    target: warning.target.clone(),
+                })
+                .collect();
+            warnings.sort_by(|left, right| {
+                left.target
+                    .cmp(&right.target)
+                    .then_with(|| left.code.cmp(&right.code))
+            });
+            warnings.dedup();
+            nodes.push(RuleSetNode {
+                key: node.key.clone(),
+                parent: set.current.set.header.parent.clone(),
+                version: set.current.version,
+                enabled: node.enabled == domain::Enablement::Enabled,
+                sibling_order: set.current.sibling_order,
+                source: match set.origin {
+                    domain::RuleOrigin::Builtin => RuleSetSource::Builtin,
+                    domain::RuleOrigin::User => RuleSetSource::User,
+                },
+                counts: RuleSetCounts {
+                    added: content.rule.len(),
+                    overridden: content.r#override.len(),
+                    disabled: content.disable.len(),
+                },
+                warnings,
+            });
+        }
+        let response = RuleSetsTreeResponse {
             kind: request.kind,
             effective_version: resolution.effective.version_hash.to_string(),
-            nodes: Vec::new(),
+            nodes,
             versions,
-            next_cursor: None,
+            truncated,
         };
-        let page = Self::budget(&response, &response.versions, &query)?
-            .page_mapped(
-                resolution.nodes.iter().collect(),
-                Self::position(request.cursor.as_ref(), &response.versions, &query)?,
-                |node| {
-                    let key = node
-                        .key
-                        .parse()
-                        .map_err(|_| crate::query::RunQueryError::InvalidRuleEntry)?;
-                    let set = &self.snapshot.state().sets[&key];
-                    let content = &set.current.set.content;
-                    let mut warnings: Vec<_> = resolution
-                        .overlay_warnings
-                        .iter()
-                        .filter(|warning| warning.key == node.key)
-                        .map(|warning| RuleSetWarning {
-                            code: if warning.code == domain::DiagnosticCode::Conflict {
-                                RuleWarningCode::Conflict
-                            } else {
-                                RuleWarningCode::TargetDeleted
-                            },
-                            target: warning.target.clone(),
-                        })
-                        .collect();
-                    warnings.sort_by(|left, right| {
-                        left.target
-                            .cmp(&right.target)
-                            .then_with(|| left.code.cmp(&right.code))
-                    });
-                    warnings.dedup();
-                    Ok(RuleSetNode {
-                        key: node.key.clone(),
-                        parent: set.current.set.header.parent.clone(),
-                        version: set.current.version,
-                        enabled: node.enabled == domain::Enablement::Enabled,
-                        sibling_order: set.current.sibling_order,
-                        source: match set.origin {
-                            domain::RuleOrigin::Builtin => RuleSetSource::Builtin,
-                            domain::RuleOrigin::User => RuleSetSource::User,
-                        },
-                        counts: RuleSetCounts {
-                            added: content.rule.len(),
-                            overridden: content.r#override.len(),
-                            disabled: content.disable.len(),
-                        },
-                        warnings,
-                    })
-                },
-            )
-            .map_err(Self::paging_error)?;
-        response.nodes = page.items;
-        response.next_cursor = page
-            .next
-            .map(|next| wire::QueryCursor::new(response.versions.clone(), query, next));
-        Ok(response)
+        fit_single_list(
+            response,
+            QUERY_MAX_RESPONSE_BYTES,
+            |r| &mut r.nodes,
+            |r| r.truncated = true,
+        )
+        .map_err(|_| Self::internal())
     }
     fn contents(
         &self,
         request: RuleSetsGetRequest,
         versions: wire::QueryVersions,
     ) -> Result<RuleSetsGetResponse, ProtocolError> {
-        let query = wire::CursorQuery::RuleSetsGet {
-            key: request.key.clone(),
-            view: request.view,
-        };
-        let position = Self::position(request.cursor.as_ref(), &versions, &query)?;
         let key: domain::RuleSetKey = request
             .key
             .parse()
@@ -297,25 +226,27 @@ impl ReadInputs {
                     })
             });
         }
-        let mut response = RuleSetsGetResponse {
-            key: request.key.clone(),
+        let truncated = entries.len() > wire::RULE_SETS_GET_MAX_ENTRIES;
+        let entries = entries
+            .into_iter()
+            .take(wire::RULE_SETS_GET_MAX_ENTRIES)
+            .map(|entry| self.entry(entry))
+            .collect::<Result<Vec<_>, _>>()?;
+        let response = RuleSetsGetResponse {
+            key: request.key,
             version,
             parent_version: revision.parent_version,
-            entries: Vec::new(),
+            entries,
             versions,
-            next_cursor: None,
+            truncated,
         };
-        let page = Self::budget(&response, &response.versions, &query)?
-            .page_mapped(entries, position, |entry| {
-                self.entry(entry)
-                    .map_err(|_| crate::query::RunQueryError::InvalidRuleEntry)
-            })
-            .map_err(Self::paging_error)?;
-        response.entries = page.items;
-        response.next_cursor = page
-            .next
-            .map(|next| wire::QueryCursor::new(response.versions.clone(), query, next));
-        Ok(response)
+        fit_single_list(
+            response,
+            QUERY_MAX_RESPONSE_BYTES,
+            |r| &mut r.entries,
+            |r| r.truncated = true,
+        )
+        .map_err(|_| Self::internal())
     }
     fn root(&self, key: &str) -> Result<String, ProtocolError> {
         let mut key: domain::RuleSetKey = key.parse().map_err(|_| Self::internal())?;
@@ -353,31 +284,6 @@ impl ReadInputs {
         }
         let result = serde_json::from_value(encoded).map_err(|_| Self::internal())?;
         Ok(result)
-    }
-    fn budget(
-        response: &impl serde::Serialize,
-        versions: &wire::QueryVersions,
-        query: &wire::CursorQuery,
-    ) -> Result<PageBudget, ProtocolError> {
-        PageBudget::new(response)
-            .and_then(|budget| {
-                budget.with_cursor(&wire::QueryCursor::new(
-                    versions.clone(),
-                    query.clone(),
-                    usize::MAX,
-                ))
-            })
-            .map_err(Self::paging_error)
-    }
-    fn position(
-        cursor: Option<&wire::QueryCursor>,
-        versions: &wire::QueryVersions,
-        query: &wire::CursorQuery,
-    ) -> Result<PagePosition, ProtocolError> {
-        PagePosition::from_cursor(cursor, versions, query).map_err(Self::paging_error)
-    }
-    fn paging_error(error: crate::query::RunQueryError) -> ProtocolError {
-        ProtocolError::new(error.kind())
     }
     fn internal() -> ProtocolError {
         ProtocolError::new(ErrorKind::Internal)

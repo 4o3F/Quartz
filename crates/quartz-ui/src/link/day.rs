@@ -87,6 +87,8 @@ pub enum LoadDataError {
     Request { source: RequestCoreError },
     #[snafu(display("could not decode valid view data"))]
     InvalidData,
+    #[snafu(display("view data changed while loading"))]
+    Stale,
     #[snafu(display("could not load a stable data version after retrying"))]
     StaleExhausted,
 }
@@ -146,21 +148,14 @@ impl LoadDataError {
             } => LoadDataErrorCode::Local(LocalFailureCode::Timeout),
             Self::Request { .. } => LoadDataErrorCode::Local(LocalFailureCode::Connection),
             Self::InvalidData => LoadDataErrorCode::Local(LocalFailureCode::InvalidResponse),
-            Self::StaleExhausted => LoadDataErrorCode::Local(LocalFailureCode::StaleExhausted),
+            Self::Stale | Self::StaleExhausted => {
+                LoadDataErrorCode::Local(LocalFailureCode::StaleExhausted)
+            }
         }
     }
     #[cfg(windows)]
     pub(super) fn is_stale(&self) -> bool {
-        matches!(
-            self,
-            Self::Request {
-                source: RequestCoreError::Call {
-                    source: CallCoreError::Protocol {
-                        kind: ErrorKind::StaleCursor
-                    }
-                }
-            }
-        )
+        matches!(self, Self::Stale)
     }
 }
 impl From<RequestCoreError> for LoadDataError {
@@ -298,11 +293,7 @@ impl Link {
         })
     }
     pub(super) fn stale_day() -> LoadDataError {
-        LoadDataError::from(RequestCoreError::Call {
-            source: CallCoreError::Protocol {
-                kind: ErrorKind::StaleCursor,
-            },
-        })
+        LoadDataError::Stale
     }
     async fn validate_cached_day(&self, cached: &DayCache) -> Result<(), LoadDataError> {
         let latest = self

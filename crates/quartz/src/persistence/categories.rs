@@ -2,7 +2,7 @@
 
 use super::{diagnostics::WriteFailure, dispatch::WriteResponse};
 use crate::{
-    query::paging::{PageBudget, PagePosition},
+    query::{QUERY_MAX_RESPONSE_BYTES, fit_single_list},
     store::{Store, categories::ExecuteCategoryCommandError},
 };
 use quartz_domain::categories::{self as domain, CategoryArchiveState, IncludeArchivedCategories};
@@ -161,38 +161,25 @@ impl CategoryRequest {
             .category_listing(selection)
             .map_err(Self::store_error)?;
         let versions = wire::QueryVersions(format!("categories.v1:{}", listing.metadata_version));
-        let query = wire::CursorQuery::Categories {
-            include_archived: request.include_archived,
-        };
-        let position = PagePosition::from_cursor(request.cursor.as_ref(), &versions, &query)
-            .map_err(|error| ProtocolError::new(error.kind()))?;
-        let mut response = wire::CategoriesListResponse {
-            entities: Vec::new(),
-            versions,
-            next_cursor: None,
-        };
-        let budget = PageBudget::new(&response)
-            .and_then(|budget| {
-                budget.with_cursor(&wire::QueryCursor::new(
-                    response.versions.clone(),
-                    query.clone(),
-                    usize::MAX,
-                ))
-            })
-            .map_err(|error| ProtocolError::new(error.kind()))?;
+        let truncated = listing.entities.len() > wire::CATEGORIES_MAX_ENTITIES;
         let entities = listing
             .entities
             .into_iter()
+            .take(wire::CATEGORIES_MAX_ENTITIES)
             .map(Self::entity)
             .collect::<Result<Vec<_>, _>>()?;
-        let page = budget
-            .page(entities, position)
-            .map_err(|error| ProtocolError::new(error.kind()))?;
-        response.entities = page.items;
-        response.next_cursor = page
-            .next
-            .map(|next| wire::QueryCursor::new(response.versions.clone(), query, next));
-        Ok(response)
+        let response = wire::CategoriesListResponse {
+            entities,
+            versions,
+            truncated,
+        };
+        fit_single_list(
+            response,
+            QUERY_MAX_RESPONSE_BYTES,
+            |r| &mut r.entities,
+            |r| r.truncated = true,
+        )
+        .map_err(|_| ProtocolError::new(ErrorKind::Internal))
     }
 }
 

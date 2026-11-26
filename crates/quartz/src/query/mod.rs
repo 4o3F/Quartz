@@ -13,7 +13,6 @@ pub(crate) mod preview;
 #[cfg(test)]
 pub(crate) use facts::FINALIZE_BATCH_RECORDS;
 pub(crate) mod input;
-pub(crate) mod paging;
 mod pending_away;
 pub(crate) mod pipeline;
 mod range;
@@ -30,7 +29,6 @@ use calendar::DayCalendar;
 use day_walker::DayWalker;
 use details::{EntityCalendar, EntityDetailAccumulator, EntitySelection, SegmentDetailProjection};
 use input::QueryRange;
-use paging::JsonBytes;
 use pipeline::{DayAccumulator, DerivedSegment, Pipeline, QUERY_BATCH_ROWS, TimelineProjection};
 use quartz_protocol::{
     DAY_MAX_APPLICATIONS, DAY_MAX_DOCUMENTS, ErrorKind, FACTS_DEFAULT_LIMIT, FACTS_MAX_LIMIT,
@@ -77,10 +75,6 @@ pub(crate) enum RunQueryError {
     InvalidFactsRequest,
     #[snafu(display("could not resolve the effective first weekday"))]
     ReadFirstWeekdayError,
-    #[snafu(display("invalid query cursor"))]
-    InvalidCursor,
-    #[snafu(display("query input versions changed"))]
-    StaleCursor,
     #[snafu(display("invalid document reference"))]
     InvalidDocumentRef,
     #[snafu(display("document reference inputs changed"))]
@@ -152,14 +146,12 @@ impl RunQueryError {
         match self {
             Self::RejectQueryError { error } => error.kind.clone(),
             Self::InvalidRange | Self::Calendar { .. } => ErrorKind::InvalidRange,
-            Self::InvalidCursor
-            | Self::InvalidDetailRange
+            Self::InvalidDetailRange
             | Self::InvalidDocumentRef
             | Self::InvalidUnclassifiedRequest
             | Self::InvalidRangeRequest
             | Self::InvalidFactsRequest => ErrorKind::BadRequest,
             Self::StaleDocumentRef => ErrorKind::StaleDocumentRef,
-            Self::StaleCursor => ErrorKind::StaleCursor,
             Self::PageTooLarge => ErrorKind::PageTooLarge,
             Self::ReadFirstWeekdayError
             | Self::InvalidDayOffset
@@ -991,12 +983,35 @@ impl QueryJob {
     }
 }
 
-fn fit_single_list<R, T>(
+/// Counts encoded bytes without retaining a serialized copy.
+#[derive(Debug, Default)]
+pub(crate) struct JsonBytes(usize);
+impl JsonBytes {
+    pub(crate) fn measure(value: &impl Serialize) -> Result<usize, serde_json::Error> {
+        let mut writer = Self::default();
+        serde_json::to_writer(&mut writer, value)?;
+        Ok(writer.0)
+    }
+}
+impl std::io::Write for JsonBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("encoded JSON size overflow"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn fit_single_list<R, T>(
     mut response: R,
     max_bytes: usize,
     list: impl Fn(&mut R) -> &mut Vec<T>,
     set_truncated: impl Fn(&mut R),
-) -> Result<R, RunQueryError>
+) -> Result<R, serde_json::Error>
 where
     R: Serialize,
     T: Serialize,
@@ -1137,12 +1152,12 @@ fn fit_range_response(
         }
         max_len = next_cap;
     }
-    fit_single_list(
+    Ok(fit_single_list(
         response,
         max_bytes,
         |r| &mut r.buckets,
         |r| r.truncated = true,
-    )
+    )?)
 }
 
 #[derive(Debug)]

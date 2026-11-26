@@ -1,5 +1,5 @@
 //! One encoded-byte budget shared by mutation failures and validation replies.
-use crate::query::paging::JsonBytes;
+use crate::query::JsonBytes;
 use quartz_domain::rules as domain;
 use quartz_protocol::{self as wire, ErrorKind, ProtocolError};
 
@@ -26,7 +26,7 @@ impl Diagnostics {
             diagnostics: Vec::new(),
             truncated: false,
         });
-        let mut remaining = wire::QUERY_PAGE_BYTES
+        let mut remaining = super::MAX_RULE_RESPONSE_BYTES
             - JsonBytes::measure(&empty).expect("validation envelope is JSON-safe");
         let mut items = Vec::new();
         for diagnostic in diagnostics.iter().take(wire::MAX_RULE_DIAGNOSTICS) {

@@ -1,8 +1,13 @@
 //! Rule-set reads and atomic mutation contracts.
 
-use crate::{QueryCursor, QueryVersions, Uuid};
+use crate::{QueryVersions, Uuid};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
+
+/// Maximum nodes returned in a single `rule_sets.tree` response.
+pub const RULE_SETS_TREE_MAX_NODES: usize = 500;
+/// Maximum entries returned in a single `rule_sets.get` response.
+pub const RULE_SETS_GET_MAX_ENTRIES: usize = 2_000;
 
 mod preview;
 pub use preview::{
@@ -31,8 +36,6 @@ pub enum RuleView {
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsTreeRequest {
     pub kind: RuleKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<QueryCursor>,
 }
 /// Reads a current active rule set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,8 +43,6 @@ pub struct RuleSetsTreeRequest {
 pub struct RuleSetsGetRequest {
     pub key: String,
     pub view: RuleView,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<QueryCursor>,
 }
 /// Saves complete quartz-rules/1 text; zero creates or restores a key.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,15 +92,12 @@ pub struct RulesTextValidateResponse {
 #[serde(deny_unknown_fields)]
 pub struct RulesTextExportRequest {
     pub key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<QueryCursor>,
 }
-/// A UTF-8 fragment of deterministic quartz-rules/1 text.
+/// Complete deterministic quartz-rules/1 text bounded by [`MAX_RULE_TEXT_BYTES`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RulesTextExportResponse {
     pub text: String,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
 }
 /// Changes enablement of a user set and its effective subtree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,14 +194,14 @@ pub struct RuleSetNode {
     pub counts: RuleSetCounts,
     pub warnings: Vec<RuleSetWarning>,
 }
-/// A family tree page; privacy effective_version is the historical deletion scope hash.
+/// Complete family tree response; privacy effective_version is the historical deletion scope hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleSetsTreeResponse {
     pub kind: RuleKind,
     pub effective_version: String,
     pub nodes: Vec<RuleSetNode>,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    pub truncated: bool,
 }
 /// Source section of a canonical entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,7 +354,7 @@ pub struct RuleSetEntry {
     pub provenance: Vec<RuleProvenance>,
     pub state: RuleEntryState,
 }
-/// Contents page bound to every registry and metadata input.
+/// Complete contents response bound to every registry and metadata input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleSetsGetResponse {
     pub key: String,
@@ -364,7 +362,7 @@ pub struct RuleSetsGetResponse {
     pub parent_version: Option<u32>,
     pub entries: Vec<RuleSetEntry>,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    pub truncated: bool,
 }
 
 #[cfg(test)]

@@ -845,7 +845,6 @@ mod tests {
             .submit_rule_read(crate::rules::read::ReadRequest::Tree(
                 quartz_protocol::RuleSetsTreeRequest {
                     kind: quartz_protocol::RuleKind::Privacy,
-                    cursor: None,
                 },
             ))
             .expect("admit read");
@@ -1282,8 +1281,9 @@ mod tests {
     }
 
     #[test]
-    fn rule_text_and_mutation_results_stay_within_page_and_frame_limits() {
-        use quartz_protocol::{ErrorKind, MAX_RULE_TEXT_BYTES, Op, QUERY_PAGE_BYTES};
+    fn rule_text_and_mutation_results_stay_within_response_and_frame_limits() {
+        use crate::rules::MAX_RULE_RESPONSE_BYTES;
+        use quartz_protocol::{ErrorKind, MAX_RULE_TEXT_BYTES, Op};
         let mut fixture = Fixture::new();
         let mut text = Fixture::rule_text("user.limit", "classification", "builtin.classification");
         text.push_str(&" ".repeat(MAX_RULE_TEXT_BYTES - text.len()));
@@ -1302,11 +1302,11 @@ mod tests {
         let result = fixture
             .ipc(Op::RuleSetsEdit, body)
             .expect("maximum text accepted");
-        assert!(serde_json::to_vec(&result).expect("response").len() <= QUERY_PAGE_BYTES);
+        assert!(serde_json::to_vec(&result).expect("response").len() <= MAX_RULE_RESPONSE_BYTES);
         fixture.take_rule_publication();
         fixture._versions.updates.borrow_and_update();
         fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.limit","base_version":1,"text":" ".repeat(MAX_RULE_TEXT_BYTES+1)}),ErrorKind::BadRequest);
-        let long_key = "a".repeat(QUERY_PAGE_BYTES);
+        let long_key = "a".repeat(MAX_RULE_RESPONSE_BYTES);
         fixture.assert_rule_failure(
             Op::RuleSetsSetEnabled,
             serde_json::json!({"key":long_key,"base_version":1,"enabled":false}),
@@ -1315,7 +1315,8 @@ mod tests {
     }
     #[test]
     fn invalid_rule_text_returns_bounded_structured_diagnostics_without_publishing() {
-        use quartz_protocol::{ErrorKind, MAX_RULE_DIAGNOSTICS, Op, QUERY_PAGE_BYTES};
+        use crate::rules::MAX_RULE_RESPONSE_BYTES;
+        use quartz_protocol::{ErrorKind, MAX_RULE_DIAGNOSTICS, Op};
         let mut fixture = Fixture::new();
         let snapshot = fixture.database.registry.snapshots().load();
         let mut text =
@@ -1330,7 +1331,7 @@ mod tests {
             )
             .expect_err("invalid fields");
         let wire = serde_json::to_vec(&error).expect("error frame");
-        assert!(wire.len() <= QUERY_PAGE_BYTES);
+        assert!(wire.len() <= MAX_RULE_RESPONSE_BYTES);
         assert!(
             !String::from_utf8(wire)
                 .expect("JSON")
@@ -1770,13 +1771,12 @@ mod tests {
     }
 
     #[test]
-    fn category_ipc_pages_are_bounded_and_metadata_changes_stale_the_cursor() {
+    fn category_ipc_list_returns_ordered_single_response_and_caps_with_truncated() {
         use quartz_domain::categories::{CategoryValues, CreateCategory};
-        use quartz_protocol::{CategoriesListResponse, ErrorKind, Op};
-        // Maximum-length four-byte names force multiple pages with a small hierarchy.
-        const CATEGORY_COUNT: usize = 220;
+        use quartz_protocol::{CATEGORIES_MAX_ENTITIES, CategoriesListResponse, ErrorKind, Op};
+        const INITIAL_COUNT: usize = 20;
         let mut fixture = Fixture::new();
-        for index in 0..CATEGORY_COUNT {
+        let create = |fixture: &mut Fixture, index: usize, name: String| {
             fixture
                 .database
                 .store
@@ -1786,46 +1786,33 @@ mod tests {
                     )),
                     values: CategoryValues {
                         parent_uuid: None,
-                        name: Some(
-                            "🦀"
-                                .repeat(quartz_domain::categories::MAX_CATEGORY_NAME_SCALARS)
-                                .parse()
-                                .expect("maximum name"),
-                        ),
+                        name: Some(name.parse().expect("valid category name")),
                         color: quartz_domain::categories::CategoryColor::Neutral,
                         tendency: quartz_domain::categories::CategoryTendency::Neutral,
                     },
                 })
-                .expect("create paging fixture");
-        }
-        let first_wire = fixture
-            .ipc(Op::CategoriesList, serde_json::json!({}))
-            .expect("first page");
-        assert!(
-            serde_json::to_vec(&first_wire).expect("page bytes").len()
-                <= quartz_protocol::QUERY_PAGE_BYTES
-        );
-        let first: CategoriesListResponse =
-            serde_json::from_value(first_wire).expect("typed first page");
-        let cursor = first.next_cursor.clone().expect("continuation");
-        let mut entities = first.entities;
-        let mut next = Some(cursor.clone());
-        while let Some(cursor) = next {
-            let wire = fixture
-                .ipc(Op::CategoriesList, serde_json::json!({"cursor":cursor}))
-                .expect("next page");
-            assert!(
-                serde_json::to_vec(&wire).expect("page bytes").len()
-                    <= quartz_protocol::QUERY_PAGE_BYTES
+                .expect("create category fixture");
+        };
+        for index in 0..INITIAL_COUNT {
+            create(
+                &mut fixture,
+                index,
+                "🦀".repeat(quartz_domain::categories::MAX_CATEGORY_NAME_SCALARS),
             );
-            let page: CategoriesListResponse = serde_json::from_value(wire).expect("typed page");
-            assert_eq!(page.versions, first.versions);
-            entities.extend(page.entities);
-            next = page.next_cursor;
         }
+        let wire = fixture
+            .ipc(Op::CategoriesList, serde_json::json!({}))
+            .expect("single response");
+        assert!(
+            serde_json::to_vec(&wire).expect("response bytes").len()
+                <= crate::query::QUERY_MAX_RESPONSE_BYTES
+        );
+        let listed: CategoriesListResponse =
+            serde_json::from_value(wire).expect("typed categories list");
+        assert!(!listed.truncated);
         assert_eq!(
-            entities.len(),
-            CATEGORY_COUNT + quartz_domain::categories::BuiltinCategory::ALL.len()
+            listed.entities.len(),
+            INITIAL_COUNT + quartz_domain::categories::BuiltinCategory::ALL.len()
         );
         let expected = fixture
             .database
@@ -1833,33 +1820,56 @@ mod tests {
             .list_categories(quartz_domain::categories::IncludeArchivedCategories::Exclude)
             .expect("hierarchy");
         assert!(
-            entities
+            listed
+                .entities
                 .iter()
                 .map(|entity| entity.uuid.to_string())
                 .eq(expected.into_iter().map(|entity| entity.uuid.0))
         );
         assert_eq!(
             fixture
-                .ipc(
-                    Op::CategoriesList,
-                    serde_json::json!({"include_archived":true,"cursor":cursor})
-                )
-                .expect_err("filter differs")
+                .ipc(Op::CategoriesList, serde_json::json!({"cursor":null}))
+                .expect_err("cursor field removed")
                 .kind,
             ErrorKind::BadRequest
         );
+        fixture
+            .ipc(Op::CategoriesCreate, fixture.category_body())
+            .expect("create over IPC");
+        let listed: CategoriesListResponse = serde_json::from_value(
+            fixture
+                .ipc(Op::CategoriesList, serde_json::json!({}))
+                .expect("list after create"),
+        )
+        .expect("typed list after create");
         let mut update = fixture.category_body();
         update["entity"]["name"] = serde_json::json!("Changed");
         fixture
             .ipc(Op::CategoriesUpdate, update)
             .expect("metadata change");
-        assert_eq!(
+        let after_update: CategoriesListResponse = serde_json::from_value(
             fixture
-                .ipc(Op::CategoriesList, serde_json::json!({"cursor":cursor}))
-                .expect_err("stale cursor")
-                .kind,
-            ErrorKind::StaleCursor
+                .ipc(Op::CategoriesList, serde_json::json!({}))
+                .expect("refreshed list"),
+        )
+        .expect("typed refreshed list");
+        assert_ne!(after_update.versions, listed.versions);
+        for index in INITIAL_COUNT..CATEGORIES_MAX_ENTITIES {
+            create(&mut fixture, index, format!("Category {index}"));
+        }
+        let capped_wire = fixture
+            .ipc(Op::CategoriesList, serde_json::json!({}))
+            .expect("capped response");
+        assert!(
+            serde_json::to_vec(&capped_wire)
+                .expect("capped bytes")
+                .len()
+                <= crate::query::QUERY_MAX_RESPONSE_BYTES
         );
+        let capped: CategoriesListResponse =
+            serde_json::from_value(capped_wire).expect("typed capped list");
+        assert!(capped.truncated);
+        assert_eq!(capped.entities.len(), CATEGORIES_MAX_ENTITIES);
     }
 
     #[test]

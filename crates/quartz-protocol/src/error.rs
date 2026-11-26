@@ -21,7 +21,7 @@ pub enum ErrorKind {
     HandshakeRequired,
     /// The declared frame payload exceeds the byte limit.
     FrameTooLarge,
-    /// One result item exceeds the encoded query page budget.
+    /// One fact record exceeds the encoded `query.facts` frame budget.
     PageTooLarge,
     /// The client and core protocol ranges do not overlap.
     ProtoMismatch {
@@ -34,8 +34,6 @@ pub enum ErrorKind {
     Forbidden,
     /// The requested date or time range is invalid.
     InvalidRange,
-    /// Query inputs changed; pagination must restart.
-    StaleCursor,
     /// Document reference inputs changed; refresh the originating query.
     StaleDocumentRef,
     /// The submitted base version differs from the current rule-set version.
@@ -85,7 +83,6 @@ impl ErrorKind {
             Self::ProtoMismatch { .. } => "proto_mismatch",
             Self::Forbidden => "forbidden",
             Self::InvalidRange => "invalid_range",
-            Self::StaleCursor => "stale_cursor",
             Self::StaleDocumentRef => "stale_document_ref",
             Self::RuleSetStale { .. } => "rule_set_stale",
             Self::RuleSetNotFound { .. } => "rule_set_not_found",
@@ -137,7 +134,6 @@ mod tests {
             "proto_mismatch",
             "forbidden",
             "invalid_range",
-            "stale_cursor",
             "stale_document_ref",
             "rule_set_stale",
             "rule_set_not_found",

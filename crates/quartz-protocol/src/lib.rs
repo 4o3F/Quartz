@@ -3,9 +3,9 @@
 mod annotations;
 mod categories;
 pub use categories::{
-    CategoriesArchiveRequest, CategoriesCreateRequest, CategoriesListRequest,
-    CategoriesListResponse, CategoriesReorderRequest, CategoriesUpdateRequest, CategoryEdit,
-    CategoryResponse, EditableCategory, NewCategory,
+    CATEGORIES_MAX_ENTITIES, CategoriesArchiveRequest, CategoriesCreateRequest,
+    CategoriesListRequest, CategoriesListResponse, CategoriesReorderRequest,
+    CategoriesUpdateRequest, CategoryEdit, CategoryResponse, EditableCategory, NewCategory,
 };
 mod client_request;
 pub use client_request::CoreRequest;
@@ -46,16 +46,17 @@ pub use op::{ControlBody, ControlOp, Op, OpFamily};
 pub use role::{AuthorizeOpError, Role};
 pub use rules::{
     MAX_RULE_DIAGNOSTICS, MAX_RULE_TEXT_BYTES, MutatedRuleSet, PREVIEW_MAX_DAYS,
-    PREVIEW_MAX_SAMPLES, PreviewCategoryRank, RuleAction, RuleApp, RuleCondition, RuleDiagnostic,
-    RuleDiagnosticLocation, RuleEntryContent, RuleEntryKind, RuleEntryState, RuleField, RuleKind,
-    RuleMatch, RuleOperator, RulePreviewMutation, RulePreviewOutput, RulePreviewSample,
-    RulePreviewSideTotals, RulePreviewStatistics, RulePreviewTotals, RuleProvenance, RuleSetCounts,
-    RuleSetEntry, RuleSetIdentityField, RuleSetNode, RuleSetSource, RuleSetWarning,
-    RuleSetsDeleteRequest, RuleSetsEditRequest, RuleSetsGetRequest, RuleSetsGetResponse,
-    RuleSetsSetEnabledRequest, RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsWriteResponse,
-    RuleView, RuleWarningCode, RuleWebAction, RulesPreviewRequest, RulesPreviewResponse,
-    RulesTextExportRequest, RulesTextExportResponse, RulesTextValidateRequest,
-    RulesTextValidateResponse, ValidatePreviewDatesError,
+    PREVIEW_MAX_SAMPLES, PreviewCategoryRank, RULE_SETS_GET_MAX_ENTRIES, RULE_SETS_TREE_MAX_NODES,
+    RuleAction, RuleApp, RuleCondition, RuleDiagnostic, RuleDiagnosticLocation, RuleEntryContent,
+    RuleEntryKind, RuleEntryState, RuleField, RuleKind, RuleMatch, RuleOperator,
+    RulePreviewMutation, RulePreviewOutput, RulePreviewSample, RulePreviewSideTotals,
+    RulePreviewStatistics, RulePreviewTotals, RuleProvenance, RuleSetCounts, RuleSetEntry,
+    RuleSetIdentityField, RuleSetNode, RuleSetSource, RuleSetWarning, RuleSetsDeleteRequest,
+    RuleSetsEditRequest, RuleSetsGetRequest, RuleSetsGetResponse, RuleSetsSetEnabledRequest,
+    RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsWriteResponse, RuleView, RuleWarningCode,
+    RuleWebAction, RulesPreviewRequest, RulesPreviewResponse, RulesTextExportRequest,
+    RulesTextExportResponse, RulesTextValidateRequest, RulesTextValidateResponse,
+    ValidatePreviewDatesError,
 };
 pub use startup_error::{CoreError, CoreErrorCode, ParseCoreErrorCodeError, cli};
 pub use topic::{LocalDate, ParseTopicError, Subscribe, SubscribeResponse, Topic, Unsubscribe};
@@ -72,24 +73,22 @@ pub use status::{
 pub use query::{
     Activity, ApplicationId, ApplicationRank, ApplicationRef, BuiltinCategory, Category,
     CategoryDuration, CategoryEntity, CategoryId, CategoryRef, CategorySource, CategoryTendency,
-    CategoryUuid, ClassificationRuleId, ClockSegmentId, CursorPosition, CursorQuery,
-    DAY_MAX_APPLICATIONS, DAY_MAX_DOCUMENTS, DayChanged, DayMetrics, DetailEntity, DocumentRank,
-    DocumentRef, ENTITY_DETAIL_DAYS, ENTITY_DETAIL_MAX_EXTRACTION, ENTITY_DETAIL_MAX_RULES,
-    ENTITY_DETAIL_TOP_TITLES, EntityClassificationRule, EntityDailyDuration,
-    EntityExtractionProvenance, EntityTitleDuration, ExtractionStatus, FACTS_DEFAULT_LIMIT,
-    FACTS_MAX_LIMIT, HourStack, MAX_CURSOR_BYTES, MillisecondsPerPixel, PENDING_AWAY_MAX_RANGES,
-    ParseClassificationRuleIdError, ParseQueryCursorError, PendingAway, QUERY_PAGE_BYTES,
-    QueryCursor, QueryDayRequest, QueryDayResponse, QueryEntityDetailRequest,
-    QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse, QueryGapReason,
-    QueryPendingAwayRequest, QueryPendingAwayResponse, QueryRangeRequest, QueryRangeResponse,
-    QuerySegmentDetailRequest, QuerySegmentDetailResponse, QueryStopReason, QueryTimelineRequest,
-    QueryTimelineResponse, QueryUnclassifiedRequest, QueryUnclassifiedResponse, QueryVersions,
-    RANGE_MAX_DAYS, RANGE_MAX_GROUPS_PER_DIMENSION, RangeBucket, RangeDimension, RangeEntity,
-    RangeGroup, RangeSummaryBucket, ReferenceRange, SEGMENT_DETAIL_MAX_INTERVALS,
-    SEGMENT_DETAIL_MAX_SPAN_MS, TIMELINE_MAX_SEGMENTS, TimelineDetail, TimelineSegment,
-    TitleExtraction, UNCLASSIFIED_MAX_DAYS, UNCLASSIFIED_MAX_ITEMS, UNCLASSIFIED_MAX_SAMPLES,
-    UNCLASSIFIED_MAX_SEARCH_SCALARS, UnclassifiedGroupBy, UnclassifiedItem,
-    UnclassifiedSampleRange, WindowInstanceRef, WorkEntity,
+    CategoryUuid, ClassificationRuleId, ClockSegmentId, DAY_MAX_APPLICATIONS, DAY_MAX_DOCUMENTS,
+    DayChanged, DayMetrics, DetailEntity, DocumentRank, DocumentRef, ENTITY_DETAIL_DAYS,
+    ENTITY_DETAIL_MAX_EXTRACTION, ENTITY_DETAIL_MAX_RULES, ENTITY_DETAIL_TOP_TITLES,
+    EntityClassificationRule, EntityDailyDuration, EntityExtractionProvenance, EntityTitleDuration,
+    ExtractionStatus, FACTS_DEFAULT_LIMIT, FACTS_MAX_LIMIT, HourStack, MillisecondsPerPixel,
+    PENDING_AWAY_MAX_RANGES, ParseClassificationRuleIdError, PendingAway, QueryDayRequest,
+    QueryDayResponse, QueryEntityDetailRequest, QueryEntityDetailResponse, QueryFactsRequest,
+    QueryFactsResponse, QueryGapReason, QueryPendingAwayRequest, QueryPendingAwayResponse,
+    QueryRangeRequest, QueryRangeResponse, QuerySegmentDetailRequest, QuerySegmentDetailResponse,
+    QueryStopReason, QueryTimelineRequest, QueryTimelineResponse, QueryUnclassifiedRequest,
+    QueryUnclassifiedResponse, QueryVersions, RANGE_MAX_DAYS, RANGE_MAX_GROUPS_PER_DIMENSION,
+    RangeBucket, RangeDimension, RangeEntity, RangeGroup, RangeSummaryBucket, ReferenceRange,
+    SEGMENT_DETAIL_MAX_INTERVALS, SEGMENT_DETAIL_MAX_SPAN_MS, TIMELINE_MAX_SEGMENTS,
+    TimelineDetail, TimelineSegment, TitleExtraction, UNCLASSIFIED_MAX_DAYS,
+    UNCLASSIFIED_MAX_ITEMS, UNCLASSIFIED_MAX_SAMPLES, UNCLASSIFIED_MAX_SEARCH_SCALARS,
+    UnclassifiedGroupBy, UnclassifiedItem, UnclassifiedSampleRange, WindowInstanceRef, WorkEntity,
 };
 
 pub use annotations::{

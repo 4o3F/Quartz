@@ -238,7 +238,7 @@ impl MutationTargets {
         if serde_json::to_vec(&response)
             .expect("mutation response contains JSON values")
             .len()
-            > wire::QUERY_PAGE_BYTES
+            > crate::rules::MAX_RULE_RESPONSE_BYTES
         {
             return Err(ProtocolError::new(ErrorKind::BadRequest));
         }
@@ -349,12 +349,17 @@ mod tests {
         let diagnostic = domain::Diagnostic {
             code: domain::DiagnosticCode::Parent,
             set_key: "user.test".into(),
-            path: "\0".repeat(wire::QUERY_PAGE_BYTES / (CONTROL_ESCAPE_BYTES * DIAGNOSTIC_COUNT)),
+            path: "\0".repeat(
+                crate::rules::MAX_RULE_RESPONSE_BYTES / (CONTROL_ESCAPE_BYTES * DIAGNOSTIC_COUNT),
+            ),
             location: domain::SourceLocation::database(&"user.test".parse().expect("key"), 1),
             message: "private text".into(),
         };
         let error = super::super::diagnostic::Diagnostics::error(&[diagnostic.clone(), diagnostic]);
-        assert!(serde_json::to_vec(&error).expect("bounded JSON").len() <= wire::QUERY_PAGE_BYTES);
+        assert!(
+            serde_json::to_vec(&error).expect("bounded JSON").len()
+                <= crate::rules::MAX_RULE_RESPONSE_BYTES
+        );
         let ErrorKind::RuleValidationFailed {
             diagnostics,
             truncated,
@@ -842,7 +847,10 @@ mod tests {
         assert!(!response.valid);
         assert_eq!(response.diagnostics.len(), wire::MAX_RULE_DIAGNOSTICS);
         assert!(response.truncated);
-        assert!(serde_json::to_vec(&response).expect("response").len() <= wire::QUERY_PAGE_BYTES);
+        assert!(
+            serde_json::to_vec(&response).expect("response").len()
+                <= crate::rules::MAX_RULE_RESPONSE_BYTES
+        );
         // Literal TOML strings can be much smaller than their canonical escaped rendering.
         let text = format!(
             "format='quartz-rules/1'\n[set]\nkey='user.budget'\nkind='classification'\nname='{}'\n",

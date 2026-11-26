@@ -802,7 +802,6 @@ mod tests {
                     .read_rules(crate::rules::read::ReadRequest::Tree(
                         quartz_protocol::RuleSetsTreeRequest {
                             kind: quartz_protocol::RuleKind::Privacy,
-                            cursor: None,
                         },
                     )),
             )

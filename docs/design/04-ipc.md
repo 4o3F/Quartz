@@ -49,7 +49,7 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 - 请求帧写入并刷新完成后，等待响应超时、取消等待或事件积压溢出会结束该请求并移除其在途编号，连接继续可用。客户端以已分配编号范围和在途编号集合识别已结束请求，丢弃其迟到或重复响应并仅记录编号的 debug 日志。发送的写入与刷新共用 2 秒期限；发送失败、到期或在完成前被取消时，客户端标记连接失效，后续发送和接收返回类型化错误，调用方丢弃连接。传输或分帧边界损坏也会结束连接。
 - 分类和标注创建由客户端提供 `uuid`，用数据库唯一约束去重，重试返回已有实体。批量创建时每个实体独立带 UUID；删除不存在的标注也返回成功。更新按 UUID 设置最终值。规则集以 `key` 标识并按 `base_version` 并发校验（第 6.3.1 节）；历史清理以任务 UUID 去重（第 6.3.4 节）。
 - 错误码是稳定的字符串枚举，定义在 `quartz-protocol`。核心只发送代码与结构化字段，`quartz-ui` 按代码本地化并呈现；host 与 UI 均不得按错误文本分支。信封中的 `msg` 若存在，仅为日志诊断文字。
-- 响应、推送和信封忽略未知字段，以便向前兼容；请求体拒绝未知字段并返回 `bad_request`，操作明确规定忽略未知字段时按该操作执行，例如 `settings.set`。已知字段仍须满足必填、类型、枚举与范围校验。查询一次返回完整结果，列表有固定上限，超出时截断并返回 truncated；单帧上限 1 MiB。query.facts 用简单位置游标分页。仍使用游标分页的规则集与分类读取将游标作为不透明 JSON 对象原样传回，版本变化时返回 `stale_cursor`。
+- 响应、推送和信封忽略未知字段，以便向前兼容；请求体拒绝未知字段并返回 `bad_request`，操作明确规定忽略未知字段时按该操作执行，例如 `settings.set`。已知字段仍须满足必填、类型、枚举与范围校验。查询、规则集与分类读取一次返回完整结果，列表有固定上限，超出时截断并返回 `truncated`；单帧上限 1 MiB。`query.facts` 用简单位置游标分页。
 - `id: null` 只用于无法取得请求 ID 的连接级错误：帧超限返回 `frame_too_large`，JSON 无法解码返回 `bad_request`。成功响应和已知请求 ID 的错误响应必须带原请求 ID。客户端保留空编号错误的类型化错误码并结束连接；UI 工作线程通过断开事件通知界面退出。
 - 客户端将无法识别的错误码解码为 `Unknown`。核心不发送 `Unknown`。
 
@@ -62,7 +62,6 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 | `proto_mismatch` | 客户端与核心支持的协议版本没有交集 | `supported: {min, max}`，核心支持的协议范围；`core_version` 必填，为核心发布版本 |
 | `forbidden` | 当前角色没有该操作的权限 | 无 |
 | `invalid_range` | 请求的日期或时间范围无效 | 无 |
-| `stale_cursor` | 分页读取的输入版本变化，须重新分页（规则集、分类与文本导出） | 无 |
 | `rule_set_stale` | 提交的规则集基础版本已过期 | `key`、`current_version`（u32）；不存在或已删除时为 0 |
 | `stale_document_ref` | 文档引用依赖已变化 | 无；重新查询产生引用的范围 |
 | `rule_set_not_found` | 规则集不存在 | `key` |
@@ -71,7 +70,7 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 | `rule_set_identity` | 已有 key 的固定身份不一致 | `key`、`field`（`kind` 或 `parent`） |
 | `rule_validation_failed` | 规则文本或编辑内容未通过校验 | `diagnostics`、`truncated`，第 6.3.3 节的有界诊断列表 |
 | `version_exhausted` | 版本计数无法继续递增 | 无；事务未写入 |
-| `page_too_large` | 分页读取中，单个结果项或固定字段超过 200 KiB 页预算（规则集读取、分类列表与文本导出） | 无 |
+| `page_too_large` | `query.facts` 中单条原始事实超过 1 MiB 帧上限 | 无 |
 | `delete_scope_unsupported` | 当前里程碑不支持此删除范围 | `scope`，请求的 kind |
 | `delete_job_not_found` | 清理任务不存在 | `uuid` |
 | `delete_job_conflict` | 已有任务 UUID 对应另一份确认内容 | `uuid` |
@@ -86,7 +85,7 @@ M2 管道建立前，启动致命错误通过 `quartz.exe ui --core-error <code>
 
 规则修订字段 `version`、`base_version`、`parent_version`、`current_version`、`builtin_revision` 统一为 u32；已保存版本范围为 1–4,294,967,295，创建哨兵为 0。协议范围与查询语义版本为 u32；日数据、元数据和统计策略计数为 u64，持久化上限为 i64::MAX。计数递增溢出返回 `version_exhausted`。UTC 毫秒、时长与数据库实体 ID 沿用 i64。JSON 以整数编码，客户端必须无损解码，不经浮点数中转。
 
-`classification_version`、`extractor_version`、`privacy_version` 为 64 个字符的小写十六进制 SHA-256 文本；响应 `versions` 为不透明字符串摘要，不是修订整数。它同时用于游标与文档引用。
+`classification_version`、`extractor_version`、`privacy_version` 为 64 个字符的小写十六进制 SHA-256 文本；响应 `versions` 为不透明字符串摘要，不是修订整数，用于一致性校验与文档引用。
 
 ## 4. 握手
 
@@ -283,13 +282,13 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 | op | 请求 body | 响应 body |
 |---|---|---|
-| `rule_sets.tree` | `{kind, cursor?}` | `{kind,effective_version,nodes,versions,next_cursor}`；节点含 `key,parent,version,enabled,sibling_order,source,counts:{added,overridden,disabled},warnings:[{code,target}]` |
-| `rule_sets.get` | `{key, view, cursor?}`，view 为 `own \| effective` | `{key, version, parent_version, entries, versions, next_cursor}`；仅读取当前活跃集；effective 使用当前祖先版本与启用状态，返回 key 所属根树的生效视图 |
+| `rule_sets.tree` | `{kind}` | `{kind,effective_version,nodes,versions,truncated}`；节点含 `key,parent,version,enabled,sibling_order,source,counts:{added,overridden,disabled},warnings:[{code,target}]` |
+| `rule_sets.get` | `{key, view}`，view 为 `own \| effective` | `{key, version, parent_version, entries, versions, truncated}`；仅读取当前活跃集；effective 使用当前祖先版本与启用状态，返回 key 所属根树的生效视图 |
 | `rule_sets.edit` | `{key, base_version, text}`，text 为完整 `quartz-rules/1` 文本 | `{sets:[{key,version,deleted}], versions}` |
 | `rule_sets.set_enabled` | `{key, base_version, enabled}` | 同上；子树的有效启用状态随之变化 |
 | `rule_sets.delete` | `{key, base_version}` | 同上；仅可删除无子级的用户集 |
 
-tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树返回的该值用作历史 scope.privacy_version。读取操作允许 UI、CLI，均按 200 KiB 页和不透明游标返回；`versions` 覆盖注册表全部修订、启停与元数据输入。tree 按同级顺序、key 的前序遍历，own 按文件顺序，effective 先按生效顺序列有效规则，再按树与文件顺序列被停用或覆盖的条目。entries 包含 `entry_kind`（`rule | override | disable`）、`content`（格式文档对应条目的字段）、`provenance`（定义与覆盖的 key/version/id 链）和 `state`（`effective | disabled | overridden | target_missing`）；告警使用稳定代码 `target_deleted | conflict` 与目标规则引用。单条目编码超过 128 KiB 时校验报 `E-RULE-VALUE`，不产生无法分页的修订。
+tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树返回的该值用作历史 scope.privacy_version。读取操作允许 UI、CLI，均单帧返回完整结果：`rule_sets.tree` 上限 `RULE_SETS_TREE_MAX_NODES`（500），`rule_sets.get` 上限 `RULE_SETS_GET_MAX_ENTRIES`（2,000），若超出条目上限或 1 MiB 帧上限则截断列表并置 `truncated: true`；`versions` 覆盖注册表全部修订、启停与元数据输入。tree 按同级顺序、key 的前序遍历，own 按文件顺序，effective 先按生效顺序列有效规则，再按树与文件顺序列被停用或覆盖的条目。entries 包含 `entry_kind`（`rule | override | disable`）、`content`（格式文档对应条目的字段）、`provenance`（定义与覆盖的 key/version/id 链）和 `state`（`effective | disabled | overridden | target_missing`）；告警使用稳定代码 `target_deleted | conflict` 与目标规则引用。单条目编码超过 128 KiB 时校验报 `E-RULE-VALUE`。
 
 写入仅允许 UI。`base_version = 0` 仅用于 edit/import 创建不存在或已删除的 key；恢复已删除 key 时沿用历史身份，版本从最后修订继续递增。其余写入必须使用当前非零版本。text 中 `[set].key` 必须等于请求 key。版本检查先于写入；过期返回 `rule_set_stale`，客户端读取确认结果，保留草稿，不用新基础版本自动重放。
 
@@ -316,13 +315,13 @@ tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树�
 |---|---|
 | `rules_text.validate` | `{key,base_version,text}` → `{valid,diagnostics,truncated}`；在已安装树与分类引用中校验，不写入；最多 100 个诊断且不超过 200 KiB |
 | `rules_text.import` | `{key,base_version,text}` → 与 edit 相同；以 key 匹配 |
-| `rules_text.export` | `{key,cursor?}` → `{text,versions,next_cursor}`；按 UTF-8 字符边界分页，按顺序拼接为规范 `quartz-rules/1` 文本，保留条目顺序、override/disable，分类用 UUID |
+| `rules_text.export` | `{key}` → `{text,versions}`；一次返回完整规范 `quartz-rules/1` 文本，保留条目顺序、override/disable，分类用 UUID |
 
-text 为 UTF-8，单个规则集的规范导出文本与导入输入均最多 192 KiB，并仍受 1 MiB JSON 帧上限约束；超长用 `bad_request`。诊断为 `{code,path,location:{line,column},params}`，行列从 1 开始，无法定位时 location 为 null；code 使用规则格式第 4.2 节的 `E-RULE-*`，不包含翻译后的句子。validate 以 valid=false 返回诊断；其他操作的校验失败使用 `rule_validation_failed`，同样限制 100 项与 200 KiB 并带 `truncated`。
+text 为 UTF-8，单个规则集的规范导出文本与导入输入均最多 192 KiB（`MAX_RULE_TEXT_BYTES`），JSON 编码后始终满足 1 MiB 帧上限；超长用 `bad_request`。诊断为 `{code,path,location:{line,column},params}`，行列从 1 开始，无法定位时 location 为 null；code 使用规则格式第 4.2 节的 `E-RULE-*`，不包含翻译后的句子。validate 以 valid=false 返回诊断；其他操作的校验失败使用 `rule_validation_failed`，同样限制 100 项与 200 KiB 并带 `truncated`。
 
 validate 与 edit 共用决策路径和校验顺序：先检查目标权限与 `base_version`，再解析文本、检查文本 key 与请求 key、固定 kind 与父级身份、已安装父链、覆盖目标和分类引用。非文本失败沿用 edit 的操作错误，包括 `bad_request`、`rule_set_read_only`、`rule_set_stale`、`rule_set_identity`、`version_exhausted`；文本内容问题返回 `valid=false`。已安装内置 key 允许只读 validate，使用已记录的内置来源权限接受 `detector`、`languages`、`verified`、`label_key`，并检查基础版本；未安装的 `builtin.*` key 在检查文本大小前返回 `rule_set_read_only`；写入内置 key 仍返回 `rule_set_read_only`。验证丢弃候选写入，不提交事务、不发布规则快照或版本通知。树诊断若指向其他已安装规则集，location 为 null；提交文本内的诊断保留来源行列。
 
-export 读取当前未删除的 key。导出保存的集合头部和条目，分类始终写 UUID，内置字段仅在内置条目中保留。游标绑定操作、key 和全局规则读取 versions 摘要，position 表示规范文本中的 UTF-8 字节偏移；请求参数不匹配或偏移不是字符边界时返回 `bad_request`，任何新修订或其他摘要依赖变化返回 `stale_cursor`。200 KiB 页预算计算 JSON 转义后的字节、响应字段和游标，并预留信封空间。规范化文本上限适用于 edit 的创建、编辑、恢复和对应的 validate。启停、删除保存既有条目，不检查规范文本大小。
+export 读取当前未删除的 key，单帧返回完整规范文本与全局规则读取 `versions` 摘要。导出保存的集合头部和条目，分类始终写 UUID，内置字段仅在内置条目中保留。规范化文本上限（192 KiB）适用于 edit 的创建、编辑、恢复、export 和对应的 validate；由于规范文本只含已转义的 TOML 字符串与换行，JSON 编码膨胀不超过 2 倍，可始终装入单个 1 MiB 帧。启停、删除保存既有条目，不检查规范文本大小。
 
 ### 6.3.4 历史隐私清理
 
@@ -349,7 +348,7 @@ UUID 去重先于回执校验：已存在且确认内容相同则返回原 job�
 
 ### 6.3.5 分类操作
 
-分类操作仅允许 UI；读取 `categories.list {include_archived?,cursor?}`（include_archived 默认 false）返回 `{entities,versions,next_cursor}`，按层级前序、sort_order、UUID 排序并完整分页。每页沿用 200 KiB 上限；`versions` 为 `categories.v1:<metadata_version>`，游标绑定该版本及 `include_archived`，元数据版本变化返回 `stale_cursor`，参数或位置无效返回 `bad_request`。实体为 `{uuid,builtin_key,parent_uuid,name,color,tendency,sort_order,archived}`，内置 name 可为 null，按 builtin_key 本地化。
+分类操作仅允许 UI；读取 `categories.list {include_archived?}`（include_archived 默认 false）返回 `{entities,versions,truncated}`，按层级前序、sort_order、UUID 排序单帧返回，上限 `CATEGORIES_MAX_ENTITIES`（500），超出条目上限或 1 MiB 帧上限时截断并置 `truncated: true`；`versions` 为 `categories.v1:<metadata_version>`。实体为 `{uuid,builtin_key,parent_uuid,name,color,tendency,sort_order,archived}`，内置 name 可为 null，按 builtin_key 本地化。
 
 - `categories.create {entity}`：客户端提供 uuid、parent_uuid、name、color、tendency；tendency 缺省 neutral，追加到同级末尾，返回 `{entity}`。UUID 已存在先返回已有实体。
 - `categories.update {entity}`：uuid、parent_uuid、name、color、tendency 为完整最终值；返回 `{entity}`。内置分类 name=null 恢复默认名称；builtin_key 固定，不允许客户端创建内置身份。
@@ -418,5 +417,5 @@ M5/M6 的操作在实现时再加入。
 
 - 分帧编解码：边界长度、超限、短读、半帧、非 UTF-8、深层嵌套 JSON。
 - 权限：用一个非 Quartz exe、其他用户或其他会话连接应被拒绝；未登记扩展 ID 被拒绝；`host` 调用 `data.delete` 应返回 `forbidden`。Edge 直接启动与 `cmd.exe` 中转分别验收。
-- 创建已提交但响应丢失后，重启核心并以同一 UUID 重试，实体不重复；规则集与分类分页中修改规则或元数据，旧游标返回 `stale_cursor`。
+- 创建已提交但响应丢失后，重启核心并以同一 UUID 重试，实体不重复。
 - 慢客户端：一个连接停止读取 10 分钟，核心的采集和写入延迟不受影响，发送预算不超过 1 MiB。自动测试将此场景缩短为数秒，检查发布耗时、其他连接的状态响应延迟、预算峰值和响应洪泛后的隔离关闭；实际 10 分钟运行纳入 M2-F 验收。
