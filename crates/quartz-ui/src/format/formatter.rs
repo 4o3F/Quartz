@@ -10,9 +10,9 @@ use super::message::{Arg, ArgValue, Msg};
 use crate::model::RankingKind;
 use crate::model::{
     BuiltinCategory, CategoryCatalog, CategoryName, ClassificationSource, ConditionItem,
-    ConditionPolarity, Day, EntryConditionSummary, MINUTES_PER_HOUR, PrivacyEffectSummary,
-    ResolvedCategory, RuleCondition, RuleEntryLabel, SECONDS_PER_MINUTE, Share, StateKind,
-    Tendency,
+    ConditionPolarity, Day, DiagnosticCodeKind, EntryConditionSummary, MINUTES_PER_HOUR,
+    PrivacyEffectSummary, ResolvedCategory, RuleCondition, RuleEntryLabel, SECONDS_PER_MINUTE,
+    Share, StateKind, Tendency,
 };
 
 /// Looks up translations and formats values for one interface language.
@@ -480,6 +480,131 @@ impl Formatter {
         self.text_with(Msg::RulesEntryPrivacyEffect, &[Arg::Value.with(&joined)])
     }
 
+    /// Formats a validation diagnostic by its stable code; unknown codes display the code and any
+    /// server-supplied path/params so they are never silently dropped.
+    #[must_use]
+    pub(crate) fn rule_diagnostic_message(
+        self,
+        diagnostic: &quartz_protocol::RuleDiagnostic,
+    ) -> String {
+        let params_text = format_diagnostic_params(&diagnostic.params);
+        let msg = match DiagnosticCodeKind::parse(&diagnostic.code) {
+            DiagnosticCodeKind::Format => Msg::RulesDiagFormat,
+            DiagnosticCodeKind::Key => Msg::RulesDiagKey,
+            DiagnosticCodeKind::Set => Msg::RulesDiagSet,
+            DiagnosticCodeKind::Parent => Msg::RulesDiagParent,
+            DiagnosticCodeKind::Target => Msg::RulesDiagTarget,
+            DiagnosticCodeKind::Conflict => Msg::RulesDiagConflict,
+            DiagnosticCodeKind::Field => Msg::RulesDiagField,
+            DiagnosticCodeKind::Op => Msg::RulesDiagOp,
+            DiagnosticCodeKind::Value => Msg::RulesDiagValue,
+            DiagnosticCodeKind::Regex => Msg::RulesDiagRegex,
+            DiagnosticCodeKind::Ref => Msg::RulesDiagRef,
+            DiagnosticCodeKind::Dup => Msg::RulesDiagDup,
+            DiagnosticCodeKind::Unknown => {
+                let mut detail_parts = Vec::new();
+                if !diagnostic.path.is_empty() {
+                    detail_parts.push(diagnostic.path.clone());
+                }
+                if !params_text.is_empty() {
+                    detail_parts.push(params_text);
+                }
+                let detail = if detail_parts.is_empty() {
+                    diagnostic.code.clone()
+                } else {
+                    detail_parts.join(" · ")
+                };
+                return self.text_with(
+                    Msg::RulesDiagUnknown,
+                    &[Arg::Code.with(&diagnostic.code), Arg::Value.with(&detail)],
+                );
+            }
+        };
+        let base = self.text(msg);
+        if params_text.is_empty() {
+            base
+        } else {
+            format!("{base} ({params_text})")
+        }
+    }
+
+    /// Formats a protocol category reference from `rules.preview` totals or samples.
+    #[must_use]
+    pub(crate) fn preview_category_ref(self, category: &quartz_protocol::CategoryRef) -> String {
+        match category {
+            quartz_protocol::CategoryRef::Unclassified => self.text(Msg::CategoryUncategorized),
+            quartz_protocol::CategoryRef::Classified { category } => {
+                if let Some(name) = category.name.as_deref().map(str::trim)
+                    && !name.is_empty()
+                {
+                    return name.to_owned();
+                }
+                match category.builtin_key {
+                    Some(quartz_protocol::BuiltinCategory::Development) => {
+                        self.text(Msg::CategoryDevelopment)
+                    }
+                    Some(quartz_protocol::BuiltinCategory::Learning) => {
+                        self.text(Msg::CategoryLearning)
+                    }
+                    Some(quartz_protocol::BuiltinCategory::Communication) => {
+                        self.text(Msg::CategoryCommunication)
+                    }
+                    Some(quartz_protocol::BuiltinCategory::Entertainment) => {
+                        self.text(Msg::CategoryEntertainment)
+                    }
+                    Some(quartz_protocol::BuiltinCategory::System) => {
+                        self.text(Msg::CategorySystem)
+                    }
+                    None => self.text(Msg::CategoryUncategorized),
+                }
+            }
+        }
+    }
+
+    /// Formats one side of a `rules.preview` sample while strictly respecting privacy redactions.
+    #[must_use]
+    pub(crate) fn preview_output(self, output: &quartz_protocol::RulePreviewOutput) -> String {
+        match output {
+            quartz_protocol::RulePreviewOutput::Classification { category } => {
+                self.preview_category_ref(category)
+            }
+            quartz_protocol::RulePreviewOutput::Extraction { extraction } => {
+                let mut parts = Vec::new();
+                if let Some(document) = extraction.document.as_deref().filter(|s| !s.is_empty()) {
+                    parts.push(format!("doc={document}"));
+                }
+                if let Some(project) = extraction.project.as_deref().filter(|s| !s.is_empty()) {
+                    parts.push(format!("project={project}"));
+                }
+                if let Some(profile) = extraction.profile.as_deref().filter(|s| !s.is_empty()) {
+                    parts.push(format!("profile={profile}"));
+                }
+                if let Some(title) = extraction
+                    .normalized_title
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                {
+                    parts.push(format!("title={title}"));
+                }
+                if parts.is_empty() {
+                    self.text(Msg::RulesPreviewSampleHiddenOrEmpty)
+                } else {
+                    parts.join(" · ")
+                }
+            }
+            quartz_protocol::RulePreviewOutput::Privacy {
+                app,
+                window_title,
+                web,
+            } => format!(
+                "app={}, title={}, web={}",
+                rule_action_str(*app),
+                rule_action_str(*window_title),
+                rule_web_action_str(*web),
+            ),
+        }
+    }
+
     /// The hour number on the compact chart axis; the axis omits minutes and the day period.
     pub(crate) fn hour_tick(self, hour: u32) -> String {
         hour.to_string()
@@ -588,6 +713,14 @@ const fn rule_web_action_str(action: quartz_protocol::RuleWebAction) -> &'static
         quartz_protocol::RuleWebAction::DomainOnly => "domain_only",
         quartz_protocol::RuleWebAction::None => "none",
     }
+}
+
+fn format_diagnostic_params(params: &std::collections::BTreeMap<String, String>) -> String {
+    params
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -849,5 +982,46 @@ mod tests {
         let rendered_active = ZH.entry_condition_summary(&active_cat_cond, Some(&catalog));
         assert!(rendered_active.contains("开发"));
         assert!(!rendered_active.contains("00000000-0000-4000-8000-000000000001"));
+    }
+
+    #[test]
+    fn rule_diagnostics_and_preview_outputs_format_known_unknown_and_hidden_cases() {
+        let known = quartz_protocol::RuleDiagnostic {
+            code: "E-RULE-FIELD".to_owned(),
+            path: "rule[0].when[0].field".to_owned(),
+            location: None,
+            params: Default::default(),
+        };
+        assert!(!ZH.rule_diagnostic_message(&known).is_empty());
+        assert!(!EN.rule_diagnostic_message(&known).is_empty());
+
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("detail".to_owned(), "custom_server_hint".to_owned());
+        let unknown = quartz_protocol::RuleDiagnostic {
+            code: "E-RULE-FUTURE".to_owned(),
+            path: "rule[0]".to_owned(),
+            location: None,
+            params,
+        };
+        let rendered_unknown = EN.rule_diagnostic_message(&unknown);
+        assert!(rendered_unknown.contains("E-RULE-FUTURE"));
+        assert!(rendered_unknown.contains("custom_server_hint"));
+
+        let hidden_extraction = quartz_protocol::RulePreviewOutput::Extraction {
+            extraction: quartz_protocol::TitleExtraction::default(),
+        };
+        assert_eq!(
+            EN.preview_output(&hidden_extraction),
+            EN.text(Msg::RulesPreviewSampleHiddenOrEmpty)
+        );
+        let privacy = quartz_protocol::RulePreviewOutput::Privacy {
+            app: quartz_protocol::RuleAction::Keep,
+            window_title: quartz_protocol::RuleAction::Drop,
+            web: quartz_protocol::RuleWebAction::DomainOnly,
+        };
+        assert_eq!(
+            EN.preview_output(&privacy),
+            "app=keep, title=drop, web=domain_only"
+        );
     }
 }

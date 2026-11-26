@@ -28,10 +28,10 @@ use crate::{
     model::{
         ArchiveConfirmation, ArchivedVisibility, CategoryCatalog, CategoryColor,
         CategoryEditorDraft, CategoryEditorMode, CategoryItem, CategoryMutation, CategoryName,
-        CategoryOrigin, DeleteConfirmation, FlatTreeRow, LoadState, MutationActivity,
-        NodeEnablement, ReorderDirection, ResolvedCategory, RuleEntryDetail, RuleSetDetail,
-        RuleSetEnablement, RuleTree, RuleTreeNode, RulesEffect, RulesKeyAction, RulesMutation,
-        RulesTab, Tendency, TreeDirection, ValidateCategoryNameError,
+        CategoryOrigin, DeleteConfirmation, FlatTreeRow, LeaveConfirmation, LeaveTarget, LoadState,
+        MutationActivity, NodeEnablement, ReorderDirection, ResolvedCategory, RuleEntryDetail,
+        RuleSetDetail, RuleSetEnablement, RuleTree, RuleTreeNode, RulesEffect, RulesKeyAction,
+        RulesMutation, RulesTab, Tendency, TreeDirection, ValidateCategoryNameError,
     },
 };
 
@@ -117,6 +117,10 @@ impl AppShell {
     }
 
     fn select_rule_set(&mut self, key: String, cx: &mut Context<Self>) {
+        if self.rule_editor.is_open() {
+            self.leave_rule_editor_or(LeaveTarget::SelectRuleSet(key), cx);
+            return;
+        }
         let effect = self.rules.select(key);
         self.run_rules_effect(effect, cx);
         cx.notify();
@@ -145,6 +149,10 @@ impl AppShell {
     }
 
     fn set_rules_tab(&mut self, tab: RulesTab, cx: &mut Context<Self>) {
+        if self.rule_editor.is_open() {
+            self.leave_rule_editor_or(LeaveTarget::SwitchTab(tab), cx);
+            return;
+        }
         self.rules.set_active_tab(tab);
         cx.notify();
     }
@@ -300,6 +308,22 @@ impl AppShell {
         event: &KeyDownEvent,
         cx: &mut Context<Self>,
     ) -> KeyHandled {
+        if self.rule_editor.is_open() {
+            if event.keystroke.key == "escape" {
+                if matches!(
+                    self.rule_editor
+                        .session()
+                        .map(|session| &session.leave_confirm),
+                    Some(LeaveConfirmation::Pending { .. })
+                ) {
+                    self.cancel_leave_rule_editor(cx);
+                } else {
+                    self.request_close_rule_editor(cx);
+                }
+                return KeyHandled::Handled;
+            }
+            return KeyHandled::Ignored;
+        }
         if self.rules.active_tab() == RulesTab::Categories {
             if event.keystroke.key == "escape"
                 && (matches!(
@@ -385,7 +409,7 @@ impl AppShell {
         .detach();
     }
 
-    fn run_rules_effect(&mut self, effect: RulesEffect, cx: &mut Context<Self>) {
+    pub(super) fn run_rules_effect(&mut self, effect: RulesEffect, cx: &mut Context<Self>) {
         match effect {
             RulesEffect::None => {}
             RulesEffect::LoadPage {
@@ -520,6 +544,21 @@ impl AppShell {
             |tab| cx.listener(move |this, _, _, cx| this.set_rules_tab(tab, cx)),
         );
 
+        let new_rule_set_button = (active_tab == RulesTab::RuleSets).then(|| {
+            let content = ButtonContent::IconLabel(
+                IconName::Plus,
+                self.formatter.text(Msg::RulesActionNewSet),
+            );
+            if tree_busy || self.rule_editor.is_open() {
+                ui.disabled_button("rules-new-set", Density::Compact, content)
+            } else {
+                ui.accent_button("rules-new-set", Density::Compact, content)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open_new_rule_set(cx);
+                    }))
+            }
+        });
+
         let new_category_button = (active_tab == RulesTab::Categories).then(|| {
             let content = ButtonContent::IconLabel(
                 IconName::Plus,
@@ -582,6 +621,7 @@ impl AppShell {
                     .flex_wrap()
                     .items_center()
                     .gap(space.s)
+                    .children(new_rule_set_button)
                     .children(new_category_button)
                     .child(reload_button),
             );
@@ -589,7 +629,11 @@ impl AppShell {
         let body = match active_tab {
             RulesTab::RuleSets => {
                 let tree_pane = self.render_rules_tree_pane(ui, arrangement, cx);
-                let detail_pane = self.render_rules_detail_pane(ui, arrangement, cx);
+                let right_pane = if self.rule_editor.is_open() {
+                    self.render_rule_editor_pane(ui, arrangement, cx)
+                } else {
+                    self.render_rules_detail_pane(ui, arrangement, cx)
+                };
                 match arrangement {
                     ChartArrangement::SideBySide => div()
                         .flex()
@@ -597,13 +641,13 @@ impl AppShell {
                         .items_start()
                         .gap(space.s)
                         .child(tree_pane)
-                        .child(detail_pane),
+                        .child(right_pane),
                     ChartArrangement::Stacked => div()
                         .flex()
                         .flex_col()
                         .gap(space.s)
                         .child(tree_pane)
-                        .child(detail_pane),
+                        .child(right_pane),
                 }
                 .into_any_element()
             }
@@ -973,7 +1017,9 @@ impl AppShell {
             LoadState::Stale => self
                 .render_rules_stale_block(ui, "reload-stale-detail", cx)
                 .into_any_element(),
-            LoadState::Ready(detail) => self.render_detail_entries(ui, detail).into_any_element(),
+            LoadState::Ready(detail) => self
+                .render_detail_entries(ui, node, detail, cx)
+                .into_any_element(),
         };
 
         card.child(header)
@@ -1000,6 +1046,26 @@ impl AppShell {
             RuleSetEnablement::Enabled => self.formatter.text(Msg::RulesActionDisable),
             RuleSetEnablement::Disabled => self.formatter.text(Msg::RulesActionEnable),
         };
+        let edit_button = is_user.then(|| {
+            let content =
+                ButtonContent::IconLabel(IconName::Code, self.formatter.text(Msg::RulesActionEdit));
+            if busy || display_version == 0 {
+                ui.disabled_button("rules-edit", Density::Compact, content)
+            } else {
+                let key_for_edit = display_key.to_owned();
+                let kind_for_edit = node.kind;
+                ui.accent_button("rules-edit", Density::Compact, content)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_edit_rule_set(
+                            key_for_edit.clone(),
+                            kind_for_edit,
+                            display_version,
+                            cx,
+                        );
+                    }))
+            }
+        });
+
         let key_for_toggle = node.key.clone();
         let toggle_button = if is_user && !busy && node.version > 0 {
             ui.button(
@@ -1130,6 +1196,7 @@ impl AppShell {
                     .flex_wrap()
                     .items_center()
                     .gap(space.s)
+                    .children(edit_button)
                     .child(toggle_button)
                     .children(delete_button),
             )
@@ -1300,7 +1367,13 @@ impl AppShell {
         notices
     }
 
-    fn render_detail_entries(&self, ui: &Widgets<'_>, detail: &RuleSetDetail) -> Div {
+    fn render_detail_entries(
+        &self,
+        ui: &Widgets<'_>,
+        node: &RuleTreeNode,
+        detail: &RuleSetDetail,
+        cx: &Context<Self>,
+    ) -> Div {
         let space = &ui.metrics.space;
         let mut container = div().flex().flex_col().gap(space.s).child(
             div()
@@ -1335,15 +1408,17 @@ impl AppShell {
                 .entries
                 .iter()
                 .enumerate()
-                .map(|(index, entry)| self.render_entry_row(ui, index, entry)),
+                .map(|(index, entry)| self.render_entry_row(ui, node, index, entry, cx)),
         )
     }
 
     fn render_entry_row(
         &self,
         ui: &Widgets<'_>,
+        node: &RuleTreeNode,
         index: usize,
         entry: &RuleEntryDetail,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let space = &ui.metrics.space;
         let palette = ui.palette;
@@ -1456,6 +1531,30 @@ impl AppShell {
                 )
         });
 
+        let override_child_btn = (node.source == RuleSetSource::Builtin
+            && entry.entry_kind == RuleEntryKind::Rule)
+            .then(|| entry.qualified_target(&node.key))
+            .flatten()
+            .map(|target| {
+                let parent_key = node.key.clone();
+                let kind = node.kind;
+                let rule_id = entry.rule_id.clone().unwrap_or_else(|| target.clone());
+                ui.button(
+                    ("rules-override-child", index),
+                    Density::Compact,
+                    ButtonContent::Label(self.formatter.text(Msg::RulesActionOverrideInChild)),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_override_child_rule_set(
+                        parent_key.clone(),
+                        kind,
+                        rule_id.clone(),
+                        target.clone(),
+                        cx,
+                    );
+                }))
+            });
+
         div()
             .id(("rules-entry", index))
             .flex()
@@ -1517,6 +1616,7 @@ impl AppShell {
                     ),
             )
             .children(provenance_line)
+            .children(override_child_btn.map(|btn| div().pt(space.xxs).child(btn)))
     }
 
     fn render_truncated_notice(&self, ui: &Widgets<'_>, msg: Msg, count: usize) -> Div {

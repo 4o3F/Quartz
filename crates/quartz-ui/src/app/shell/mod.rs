@@ -10,6 +10,7 @@ mod pending;
 #[cfg(feature = "preview")]
 mod preview;
 mod ranking;
+mod rule_editor;
 mod rules;
 mod stat_grid;
 mod timeline;
@@ -248,6 +249,14 @@ impl OpenDetails {
     }
 }
 
+/// Whether a GPUI text input entity needs to be updated from its view model during render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum InputSyncState {
+    #[default]
+    Synced,
+    NeedsSync,
+}
+
 /// Root view of the main window; headless controller tests supply unit focus handles.
 #[derive(Debug)]
 pub(crate) struct AppShell<Focus = FocusHandle> {
@@ -275,6 +284,13 @@ pub(crate) struct AppShell<Focus = FocusHandle> {
     rules: crate::model::RulesPage,
     rules_focus: Focus,
     category_name_input: Option<Entity<gpui_kit::component::input::InputState>>,
+    rule_editor: crate::model::RuleEditor,
+    rule_editor_key_input: Option<Entity<gpui_kit::component::input::InputState>>,
+    rule_editor_text_input: Option<Entity<gpui_kit::component::input::EditorState>>,
+    rule_editor_key_sync: InputSyncState,
+    rule_editor_text_sync: InputSyncState,
+    rule_editor_validate_task: Option<gpui_kit::Task<()>>,
+    pending_leave_page: Option<Page>,
     ranking: RankingKind,
     lanes: LaneMode,
     range: RangeChoice,
@@ -331,6 +347,13 @@ impl AppShell {
             rules: crate::model::RulesPage::new(),
             rules_focus: cx.focus_handle(),
             category_name_input: None,
+            rule_editor: crate::model::RuleEditor::new(),
+            rule_editor_key_input: None,
+            rule_editor_text_input: None,
+            rule_editor_key_sync: InputSyncState::Synced,
+            rule_editor_text_sync: InputSyncState::Synced,
+            rule_editor_validate_task: None,
+            pending_leave_page: None,
             ranking: RankingKind::default(),
             lanes: LaneMode::Swimlanes,
             range: init.range,
@@ -446,6 +469,25 @@ impl AppShell {
 
     fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.page != page {
+            if self.page == Page::Rules && self.rule_editor.is_open() {
+                match self
+                    .rule_editor
+                    .request_leave(crate::model::LeaveTarget::LeavePage)
+                {
+                    crate::model::LeaveDecision::Proceed(_) => {
+                        self.rule_editor_validate_task = None;
+                        self.pending_leave_page = None;
+                    }
+                    crate::model::LeaveDecision::NeedsConfirm => {
+                        self.pending_leave_page = Some(page);
+                        cx.notify();
+                        return;
+                    }
+                    crate::model::LeaveDecision::Busy => {
+                        return;
+                    }
+                }
+            }
             self.page = page;
             self.hover = None;
             self.cancel_details(cx);
@@ -481,6 +523,7 @@ fn open_details(day: &Day, subject: DetailsSubject) -> Option<OpenDetails> {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_rule_editor_inputs_if_needed(window, cx);
         let (font_family, mode) = {
             let theme = cx.theme();
             (theme.font_family.clone(), theme.mode)

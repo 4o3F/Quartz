@@ -9,6 +9,7 @@ pub(crate) mod live_details;
 mod palette;
 mod ranking;
 mod rule;
+pub(crate) mod rule_editor;
 pub(crate) mod rules;
 mod segment;
 mod state;
@@ -37,6 +38,13 @@ pub(crate) use rule::Explanation;
 pub(crate) use rule::RuleCondition;
 #[cfg(any(test, feature = "preview"))]
 pub(crate) use rule::{Rule, RuleField, RuleId, RuleOperator};
+pub(crate) use rule_editor::DiagnosticCodeKind;
+#[cfg(windows)]
+pub(crate) use rule_editor::{
+    DirtyState, EditorLoadState, LeaveConfirmation, LeaveDecision, LeaveTarget, PreviewState,
+    RuleEditor, RuleEditorEffect, RuleEditorMode, RuleEditorSession, SaveOutcome, StaleNotice,
+    VALIDATE_DEBOUNCE_DELAY, ValidateRuleSetKeyError, ValidationState, valid_parents_for_kind,
+};
 #[cfg(windows)]
 pub(crate) use rules::{
     ArchiveConfirmation, ArchivedVisibility, CategoryEditorDraft, CategoryEditorMode, CategoryItem,

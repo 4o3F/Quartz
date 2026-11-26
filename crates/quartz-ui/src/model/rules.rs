@@ -425,6 +425,7 @@ pub(crate) enum EntryConditionSummary {
 pub(crate) struct RuleEntryDetail {
     pub(crate) entry_kind: wire::RuleEntryKind,
     pub(crate) state: wire::RuleEntryState,
+    pub(crate) rule_id: Option<String>,
     pub(crate) label: RuleEntryLabel,
     pub(crate) category: Option<wire::Uuid>,
     pub(crate) target: Option<String>,
@@ -434,10 +435,28 @@ pub(crate) struct RuleEntryDetail {
 }
 
 impl RuleEntryDetail {
+    /// Returns the qualified `<set-key>/<rule-id>` target for overriding or disabling this rule.
+    #[cfg(windows)]
+    #[must_use]
+    pub(crate) fn qualified_target(&self, set_key: &str) -> Option<String> {
+        if let Some(first) = self.provenance.first() {
+            return Some(format!("{}/{}", first.key, first.id));
+        }
+        self.rule_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("{set_key}/{id}"))
+    }
+
     /// Maps a single protocol rule-set entry into a typed detail row.
     #[must_use]
     pub(crate) fn from_protocol(entry: wire::RuleSetEntry) -> Self {
         let content = entry.content;
+        let rule_id = content
+            .id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .or_else(|| entry.provenance.first().map(|step| step.id.clone()));
         let label = if let Some(text) = content.label.filter(|text| !text.is_empty()) {
             RuleEntryLabel::Text(text)
         } else if let Some(key) = content.label_key.filter(|key| !key.is_empty()) {
@@ -504,6 +523,7 @@ impl RuleEntryDetail {
         Self {
             entry_kind: entry.entry_kind,
             state: entry.state,
+            rule_id,
             label,
             category: content.category,
             target: content.target,
@@ -1106,6 +1126,14 @@ impl RulesPage {
         RulesEffect::LoadTree {
             generation: self.tree_generation,
         }
+    }
+
+    /// Reloads the rule-set tree and preserves `key` as the active selection once loaded.
+    #[cfg(windows)]
+    #[must_use]
+    pub(crate) fn reload_tree_selecting(&mut self, key: String) -> RulesEffect {
+        self.selected_key = Some(key);
+        self.reload_tree()
     }
 
     /// Applies the result of a `rule_sets.tree` load, ignoring stale generations.

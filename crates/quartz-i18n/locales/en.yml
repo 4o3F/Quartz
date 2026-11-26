@@ -722,4 +722,144 @@ rules.categories.mutation_failed.busy:
   en: "Core is busy. Try again in a moment."
 rules.categories.mutation_failed.generic:
   en: "Could not update categories. Try again."
+rules.action.edit:
+  en: "Edit"
+rules.action.new_set:
+  en: "New rule set"
+rules.action.override_in_child:
+  en: "Override/disable in child set"
+rules.editor.title.edit:
+  en: "Edit rule set %{name}"
+rules.editor.title.new:
+  en: "New rule set"
+rules.editor.badge.dirty:
+  en: "Unsaved"
+rules.editor.loading:
+  en: "Loading rule text…"
+rules.editor.load_failed:
+  en: "Could not load rule set text. Try again."
+rules.editor.key.label:
+  en: "Rule set key (user.<slug>)"
+rules.editor.key.placeholder:
+  en: "e.g. user.my-rules"
+rules.editor.kind.label:
+  en: "Rule kind"
+rules.editor.parent.label:
+  en: "Parent rule set"
+rules.editor.parent.none:
+  en: "No parent (root set)"
+rules.editor.text.label:
+  en: "Rule text (quartz-rules/1)"
+rules.editor.text.placeholder:
+  en: "Enter quartz-rules/1 TOML…"
+rules.editor.key_error.empty:
+  en: "Enter a rule set key."
+rules.editor.key_error.prefix:
+  en: "User rule set keys must start with user."
+rules.editor.key_error.missing_slug:
+  en: "Enter a non-empty name after user."
+rules.editor.key_error.invalid_chars:
+  en: "Keys may only contain lowercase letters, digits, '.', '-', and '_'."
+rules.editor.key_error.exists:
+  en: "A rule set with this key already exists."
+rules.editor.validation.pending:
+  en: "Waiting to validate…"
+rules.editor.validation.checking:
+  en: "Validating…"
+rules.editor.validation.valid:
+  en: "Valid"
+rules.editor.validation.invalid_count:
+  en: "%{count} validation errors"
+rules.editor.validation.failed:
+  en: "Validation request failed. Try again."
+rules.editor.diagnostics.truncated:
+  en: "Showing first %{count} diagnostics; output was truncated."
+rules.editor.diagnostics.location:
+  en: "Line %{line}, Col %{column}"
+rules.diag.format:
+  en: "Missing or unsupported format version, or invalid TOML syntax."
+rules.diag.key:
+  en: "Unknown key or missing required key."
+rules.diag.set:
+  en: "Invalid [set] header: bad key format, reserved prefix, unknown kind, or kind differs from parent."
+rules.diag.parent:
+  en: "Invalid, missing, or deleted parent rule set, or parent chain forms a cycle."
+rules.diag.target:
+  en: "Override or disable target does not exist or is not in the ancestor chain."
+rules.diag.conflict:
+  en: "Duplicate modification of the same target, or conflict with a non-ancestor rule set."
+rules.diag.field:
+  en: "Unknown field or field not permitted for this rule kind."
+rules.diag.op:
+  en: "Unknown operator or operator not valid for this field."
+rules.diag.value:
+  en: "Empty, oversized, malformed, or unknown enum value."
+rules.diag.regex:
+  en: "Regular expression failed to compile, exceeded size limit, or uses unsupported syntax."
+rules.diag.ref:
+  en: "Referenced category does not exist or display name is ambiguous."
+rules.diag.dup:
+  en: "Duplicate rule id within the rule set."
+rules.diag.unknown:
+  en: "Unrecognized validation error (%{code}): %{value}"
+rules.editor.action.preview:
+  en: "Preview last 7 days"
+rules.editor.action.save:
+  en: "Save"
+rules.editor.action.saving:
+  en: "Saving…"
+rules.editor.action.close:
+  en: "Close"
+rules.editor.stale.title:
+  en: "Rule set is out of date"
+rules.editor.stale.message:
+  en: "This rule set was updated to v%{value}. Reload the latest version before saving."
+rules.editor.unsaved.prompt:
+  en: "You have unsaved changes. Discard them and leave?"
+rules.editor.unsaved.discard:
+  en: "Discard changes"
+rules.editor.unsaved.stay:
+  en: "Keep editing"
+rules.editor.save_failed.identity_kind:
+  en: "An existing rule set cannot change its kind. Create a new key instead."
+rules.editor.save_failed.identity_parent:
+  en: "An existing rule set cannot change its parent. Create a new key instead."
+rules.editor.save_failed.generic:
+  en: "Could not save rule set. Try again."
+rules.preview.heading:
+  en: "Last 7 days preview (%{range})"
+rules.preview.loading:
+  en: "Computing 7-day preview…"
+rules.preview.failed:
+  en: "Preview failed. Try again."
+rules.preview.summary.before:
+  en: "Active before: %{duration}"
+rules.preview.summary.after:
+  en: "Active after: %{duration}"
+rules.preview.summary.document_changes:
+  en: "Document changes: %{count}"
+rules.preview.summary.further_hidden:
+  en: "Further hidden: %{count}"
+rules.preview.categories.heading:
+  en: "Category totals (before → after)"
+rules.preview.categories.before_after:
+  en: "%{name}: %{value}"
+rules.preview.rules.heading:
+  en: "Per-rule matches (%{count})"
+rules.preview.rules.empty:
+  en: "No rules matched during these 7 days."
+rules.preview.rule_stats:
+  en: "%{count} matches · matched %{duration} · effective %{value}"
+rules.preview.samples.heading:
+  en: "Samples (%{count})"
+rules.preview.samples.empty:
+  en: "No visible sample changes in these 7 days."
+rules.preview.samples.truncated:
+  en: "Showing first %{count} samples; remaining samples were truncated."
+rules.preview.sample.hidden_or_empty:
+  en: "Hidden or empty"
+rules.preview.sample.change:
+  en: "Change: %{value}"
+rules.preview.hint.validate_first:
+  en: "Fix validation errors to preview the last 7 days."
 

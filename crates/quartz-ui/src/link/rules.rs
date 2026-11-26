@@ -4,9 +4,10 @@ use super::{Link, LoadDataError};
 use quartz_protocol::{
     AcceptedBody, CategoriesArchiveRequest, CategoriesCreateRequest, CategoriesListRequest,
     CategoriesListResponse, CategoriesReorderRequest, CategoriesUpdateRequest, CategoryResponse,
-    RuleKind, RuleSetsDeleteRequest, RuleSetsGetRequest, RuleSetsGetResponse,
+    RuleKind, RuleSetsDeleteRequest, RuleSetsEditRequest, RuleSetsGetRequest, RuleSetsGetResponse,
     RuleSetsSetEnabledRequest, RuleSetsTreeRequest, RuleSetsTreeResponse, RuleSetsWriteResponse,
-    RuleView,
+    RuleView, RulesPreviewRequest, RulesPreviewResponse, RulesTextExportRequest,
+    RulesTextExportResponse, RulesTextValidateRequest, RulesTextValidateResponse,
 };
 
 /// All rule families queried when building the Rules page tree, in display order.
@@ -128,6 +129,53 @@ impl Link {
         &self,
         request: CategoriesReorderRequest,
     ) -> Result<AcceptedBody, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Exports the canonical `quartz-rules/1` text of an active rule set.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn export_rule_set_text(
+        &self,
+        key: String,
+    ) -> Result<RulesTextExportResponse, LoadDataError> {
+        self.request(RulesTextExportRequest { key })
+            .await
+            .map_err(LoadDataError::from)
+    }
+
+    /// Validates rule-set text against an observed installed version without saving it.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure (such as `rule_set_stale`).
+    pub(crate) async fn validate_rule_set_text(
+        &self,
+        request: RulesTextValidateRequest,
+    ) -> Result<RulesTextValidateResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Previews the impact of a rule-set mutation over one to seven logical days.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn preview_rules(
+        &self,
+        request: RulesPreviewRequest,
+    ) -> Result<RulesPreviewResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Creates or saves a user rule set with optimistic concurrency via `base_version`.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure (such as `rule_set_stale` or
+    /// `rule_validation_failed`).
+    pub(crate) async fn edit_rule_set(
+        &self,
+        request: RuleSetsEditRequest,
+    ) -> Result<RuleSetsWriteResponse, LoadDataError> {
         self.request(request).await.map_err(LoadDataError::from)
     }
 }

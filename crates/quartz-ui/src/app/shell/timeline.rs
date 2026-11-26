@@ -1167,6 +1167,13 @@ mod tests {
             rules: crate::model::RulesPage::new(),
             rules_focus: (),
             category_name_input: None,
+            rule_editor: crate::model::RuleEditor::new(),
+            rule_editor_key_input: None,
+            rule_editor_text_input: None,
+            rule_editor_key_sync: crate::app::shell::InputSyncState::Synced,
+            rule_editor_text_sync: crate::app::shell::InputSyncState::Synced,
+            rule_editor_validate_task: None,
+            pending_leave_page: None,
             ranking: Default::default(),
             lanes: LaneMode::Swimlanes,
             range: RangeChoice::Zoomed(

@@ -722,4 +722,144 @@ rules.categories.mutation_failed.busy:
   zh-CN: "核心正忙，请稍后重试。"
 rules.categories.mutation_failed.generic:
   zh-CN: "无法更新分类，请重试。"
+rules.action.edit:
+  zh-CN: "编辑"
+rules.action.new_set:
+  zh-CN: "新建规则集"
+rules.action.override_in_child:
+  zh-CN: "在子规则集中覆盖/停用"
+rules.editor.title.edit:
+  zh-CN: "编辑规则集 %{name}"
+rules.editor.title.new:
+  zh-CN: "新建规则集"
+rules.editor.badge.dirty:
+  zh-CN: "未保存"
+rules.editor.loading:
+  zh-CN: "正在加载规则文本…"
+rules.editor.load_failed:
+  zh-CN: "无法读取规则集文本，请重试。"
+rules.editor.key.label:
+  zh-CN: "规则集键名（user.<名称>）"
+rules.editor.key.placeholder:
+  zh-CN: "例如：user.my-rules"
+rules.editor.kind.label:
+  zh-CN: "规则类型"
+rules.editor.parent.label:
+  zh-CN: "父规则集"
+rules.editor.parent.none:
+  zh-CN: "无父级（根规则集）"
+rules.editor.text.label:
+  zh-CN: "规则文本（quartz-rules/1）"
+rules.editor.text.placeholder:
+  zh-CN: "输入 TOML 格式的规则集文本…"
+rules.editor.key_error.empty:
+  zh-CN: "请输入规则集键名。"
+rules.editor.key_error.prefix:
+  zh-CN: "用户规则集键名必须以 user. 开头。"
+rules.editor.key_error.missing_slug:
+  zh-CN: "请在 user. 后输入非空名称。"
+rules.editor.key_error.invalid_chars:
+  zh-CN: "键名只能包含小写字母、数字、.、- 和 _。"
+rules.editor.key_error.exists:
+  zh-CN: "该规则集键名已存在，请换一个名称。"
+rules.editor.validation.pending:
+  zh-CN: "等待校验…"
+rules.editor.validation.checking:
+  zh-CN: "正在校验规则…"
+rules.editor.validation.valid:
+  zh-CN: "校验通过"
+rules.editor.validation.invalid_count:
+  zh-CN: "发现 %{count} 个校验错误"
+rules.editor.validation.failed:
+  zh-CN: "校验请求失败，请重试。"
+rules.editor.diagnostics.truncated:
+  zh-CN: "仅显示前 %{count} 条诊断，结果已截断。"
+rules.editor.diagnostics.location:
+  zh-CN: "第 %{line} 行，第 %{column} 列"
+rules.diag.format:
+  zh-CN: "缺少或不支持的 format 版本，或 TOML 语法无效。"
+rules.diag.key:
+  zh-CN: "包含未知的键或缺少必填键。"
+rules.diag.set:
+  zh-CN: "[set] 配置无效：键名格式错误、使用了保留前缀、规则类型未知，或与父级类型不同。"
+rules.diag.parent:
+  zh-CN: "父规则集键名无效、不存在、已删除，或父级链形成了环。"
+rules.diag.target:
+  zh-CN: "override 或 disable 的目标不存在，或不在祖先规则集链上。"
+rules.diag.conflict:
+  zh-CN: "同一规则集重复修改了同一目标，或与非祖先规则集产生冲突。"
+rules.diag.field:
+  zh-CN: "字段未知，或当前规则类型不允许使用此字段。"
+rules.diag.op:
+  zh-CN: "操作符未知，或不适用于该字段。"
+rules.diag.value:
+  zh-CN: "条件值为空、超长、格式错误，或枚举值无效。"
+rules.diag.regex:
+  zh-CN: "正则表达式无法编译、超出大小限制，或使用了不支持的语法。"
+rules.diag.ref:
+  zh-CN: "引用的分类不存在，或分类显示名称存在歧义。"
+rules.diag.dup:
+  zh-CN: "同一规则集内存在重复的规则 id。"
+rules.diag.unknown:
+  zh-CN: "未识别的校验错误（%{code}）：%{value}"
+rules.editor.action.preview:
+  zh-CN: "预览最近 7 天"
+rules.editor.action.save:
+  zh-CN: "保存"
+rules.editor.action.saving:
+  zh-CN: "正在保存…"
+rules.editor.action.close:
+  zh-CN: "关闭"
+rules.editor.stale.title:
+  zh-CN: "规则集版本已过期"
+rules.editor.stale.message:
+  zh-CN: "该规则集已被更新至 v%{value}，请重新加载最新版本后再继续编辑。"
+rules.editor.unsaved.prompt:
+  zh-CN: "当前规则文本有未保存的更改，确定放弃并离开吗？"
+rules.editor.unsaved.discard:
+  zh-CN: "放弃更改"
+rules.editor.unsaved.stay:
+  zh-CN: "继续编辑"
+rules.editor.save_failed.identity_kind:
+  zh-CN: "已存在的规则集不能更改规则类型，请新建其他键名。"
+rules.editor.save_failed.identity_parent:
+  zh-CN: "已存在的规则集不能更改父规则集，请新建其他键名。"
+rules.editor.save_failed.generic:
+  zh-CN: "保存规则集失败，请重试。"
+rules.preview.heading:
+  zh-CN: "最近 7 天预览（%{range}）"
+rules.preview.loading:
+  zh-CN: "正在计算最近 7 天预览…"
+rules.preview.failed:
+  zh-CN: "预览失败，请重试。"
+rules.preview.summary.before:
+  zh-CN: "修改前活跃：%{duration}"
+rules.preview.summary.after:
+  zh-CN: "修改后活跃：%{duration}"
+rules.preview.summary.document_changes:
+  zh-CN: "文档变更：%{count}"
+rules.preview.summary.further_hidden:
+  zh-CN: "额外隐藏：%{count}"
+rules.preview.categories.heading:
+  zh-CN: "分类汇总（修改前 → 修改后）"
+rules.preview.categories.before_after:
+  zh-CN: "%{name}：%{value}"
+rules.preview.rules.heading:
+  zh-CN: "规则命中统计（%{count}）"
+rules.preview.rules.empty:
+  zh-CN: "所选 7 天内没有规则命中记录。"
+rules.preview.rule_stats:
+  zh-CN: "命中 %{count} 次 · 匹配 %{duration} · 生效 %{value}"
+rules.preview.samples.heading:
+  zh-CN: "变更样本（%{count}）"
+rules.preview.samples.empty:
+  zh-CN: "所选 7 天内没有产生可见变更的样本。"
+rules.preview.samples.truncated:
+  zh-CN: "仅显示前 %{count} 条样本，其余样本已截断。"
+rules.preview.sample.hidden_or_empty:
+  zh-CN: "未提取或已隐藏"
+rules.preview.sample.change:
+  zh-CN: "变化：%{value}"
+rules.preview.hint.validate_first:
+  zh-CN: "通过校验后即可预览最近 7 天的影响。"
 
