@@ -40,6 +40,7 @@ pub(crate) struct DayCalendar {
 #[cfg(test)]
 std::thread_local! { pub(super) static BUILT_HOURS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 impl DayCalendar {
+    #[cfg(test)]
     pub(crate) fn current_date(
         now: jiff::Timestamp,
         offset: DayStartOffset,

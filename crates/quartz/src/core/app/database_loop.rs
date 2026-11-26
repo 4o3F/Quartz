@@ -107,6 +107,26 @@ enum DrainProgress {
     Waiting,
 }
 impl DatabaseLoop {
+    fn version_command(
+        &mut self,
+        command: crate::query::versions::VersionCommand,
+    ) -> Result<(), RunDatabaseLoopError> {
+        if matches!(command, crate::query::versions::VersionCommand::Refresh)
+            && self.store.has_committed_metadata()
+        {
+            self.registry
+                .refresh_category_references(&mut self.store)
+                .map_err(|source| RunDatabaseLoopError::RefreshReferences { source })?;
+        }
+        if let Some(offset) = self
+            .versions
+            .receive(&mut self.store, command)
+            .map_err(|source| RunDatabaseLoopError::Query { source })?
+        {
+            self.main.send(MainCommand::DayOffsetChanged { offset })?;
+        }
+        Ok(())
+    }
     fn publish_versions(&mut self) -> Result<(), RunDatabaseLoopError> {
         if self.store.has_committed_metadata() {
             self.registry
@@ -201,7 +221,7 @@ impl DatabaseLoop {
                 continue;
             }
             if let Ok(command) = self.versions.requests.try_recv() {
-                self.versions.receive(command);
+                self.version_command(command)?;
                 continue;
             }
             if self.runner.is_running() {
@@ -221,7 +241,7 @@ impl DatabaseLoop {
                         .start(&mut self.store, command, &self.registry)
                         .map_err(|source| RunDatabaseLoopError::Query { source })?;
                 }
-                DatabaseInput::Versions(command) => self.versions.receive(command),
+                DatabaseInput::Versions(command) => self.version_command(command)?,
                 DatabaseInput::UserWrite(command) => self.write_command(command)?,
             }
         }
@@ -658,13 +678,15 @@ mod tests {
                 let mut subscription = std::pin::pin!(subscription);
                 let mut context = std::task::Context::from_waker(std::task::Waker::noop());
                 assert!(subscription.as_mut().poll(&mut context).is_pending());
-                self.database.versions.receive(
-                    self.database
-                        .versions
-                        .requests
-                        .try_recv()
-                        .expect("subscription request"),
-                );
+                self.database
+                    .version_command(
+                        self.database
+                            .versions
+                            .requests
+                            .try_recv()
+                            .expect("subscription request"),
+                    )
+                    .expect("service day subscription");
                 assert!(matches!(
                     subscription.poll(&mut context),
                     std::task::Poll::Ready(Ok(_))
@@ -673,13 +695,15 @@ mod tests {
             let mut subscription = std::pin::pin!(port.set_summary_day(date));
             let mut context = std::task::Context::from_waker(std::task::Waker::noop());
             assert!(subscription.as_mut().poll(&mut context).is_pending());
-            self.database.versions.receive(
-                self.database
-                    .versions
-                    .requests
-                    .try_recv()
-                    .expect("tray subscription request"),
-            );
+            self.database
+                .version_command(
+                    self.database
+                        .versions
+                        .requests
+                        .try_recv()
+                        .expect("tray subscription request"),
+                )
+                .expect("service tray subscription");
             assert!(matches!(
                 subscription.poll(&mut context),
                 std::task::Poll::Ready(Ok(_))

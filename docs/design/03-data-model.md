@@ -170,7 +170,7 @@
   - 提取缓存 `HashMap<(app_id, title_id, capture_level), Arc<ExtractedTitle>>`；
   - 分类匹配缓存 `HashMap<MatchKey, ClassificationId>`，其中 `MatchKey` 仅包含当前生效规则实际读取的字段（如纯应用规则不带 `title_id` / `window_class`，按应用预求值一次 `PreparedClassifier` 后可跨标题复用）；`Excluded` 不入缓存。
   - 查询结束立即释放，不跨查询常驻内存。
-- **版本失效**：`data_day_versions`、`settings.metadata_version`、规则生效 SHA-256 哈希、时区、日起点偏移与 `QUERY_SEMANTICS_VERSION` 组成查询版本摘要，驱动 `day:<日期>` 订阅、托盘摘要按需刷新与 `document_ref` 过期检查。
+- **版本失效**：`data_day_versions`、`settings.metadata_version`、规则生效 SHA-256 哈希、时区、日起点偏移、`stats_policy_version` 与 `QUERY_SEMANTICS_VERSION` 组成查询版本摘要（按周范围查询额外绑定生效首工作日），驱动 `day:<日期>` 订阅、托盘摘要按需刷新与 `document_ref` 过期检查；系统时区变化复位时区缓存后主动触发版本重算，托盘摘要同步跟随最新时区与日起点偏移。
 - 跨查询 LRU 或持久派生缓存暂不启用，待真实基准表明需要时再独立引入。
 
 ### 5.5 正则安全

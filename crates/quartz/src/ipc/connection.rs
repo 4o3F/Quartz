@@ -527,7 +527,10 @@ pub(crate) mod tests {
             })
             .await
             .expect("ordered version subscription update");
-            versions.publisher.receive(command);
+            versions
+                .publisher
+                .receive(&mut fixture.store, command)
+                .expect("version command");
         }
         let mut responses = std::collections::BTreeSet::new();
         while responses.len() < 2 {

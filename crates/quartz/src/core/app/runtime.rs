@@ -228,7 +228,7 @@ impl CoreRuntime {
         let timed = workers
             .sender
             .timed_port(Arc::clone(&ports.clock), day_offset);
-        let summary = crate::ipc::summary::SummaryTask::channel(day_offset, ports.wake);
+        let summary = crate::ipc::summary::SummaryTask::channel(ports.wake);
         let pipe_ports = PipePorts {
             shutdown_timeout: SHUTDOWN_TIMEOUT,
             services: Services {
@@ -258,6 +258,9 @@ impl CoreRuntime {
     }
     pub(crate) fn writes(&self) -> crate::persistence::dispatch::WritePort {
         self.workers().writes.clone()
+    }
+    pub(crate) fn versions(&self) -> crate::query::versions::VersionPort {
+        self.workers().versions.clone()
     }
     pub(crate) fn sender(&self) -> CaptureSender {
         self.workers().sender.clone()

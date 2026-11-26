@@ -182,6 +182,7 @@ pub(crate) struct CoreProcess {
     persistence: PersistenceState,
     untriggered_changes: u64,
     summary: Option<crate::ipc::summary::SummaryPort>,
+    versions: Option<crate::query::versions::VersionPort>,
     annotation: crate::core::app::annotation::QuickAnnotation,
     annotation_reply: Option<PendingAnnotation>,
 }
@@ -204,6 +205,7 @@ impl CoreProcess {
             persistence: PersistenceState::Ready,
             untriggered_changes: 0,
             summary: None,
+            versions: None,
             annotation: Default::default(),
             annotation_reply: None,
         }
@@ -279,6 +281,7 @@ impl CoreProcess {
             tracing::error!(%error, "could not apply initial tray language");
         }
         self.summary = Some(runtime.summary.clone());
+        self.versions = Some(runtime.versions());
         tray.attach_summary(runtime.summary.clone());
         tray.attach_commands(runtime.commands().clone());
         let ingress = SystemIngress::new(runtime.sender(), runtime.shutdown_port());
@@ -480,6 +483,9 @@ impl CoreProcess {
     fn refresh_logical_day(&self, status: &StatusPublisher, change: RefreshLogicalDay) {
         if matches!(change, RefreshLogicalDay::ResetZone) {
             jiff::tz::reset_system_time_zone_cache();
+            if let Some(versions) = &self.versions {
+                versions.refresh();
+            }
         }
         status.request_logical_day(change);
     }
@@ -1247,5 +1253,30 @@ mod tests {
             assert!(!matches!(state.tooltip, TrayTooltip::Paused { .. }));
             assert_eq!(state.timed, paused);
         }
+    }
+
+    #[test]
+    fn reset_zone_queues_version_refresh() {
+        let mut fixture = crate::store::query::test_support::QueryFixture::new(0);
+        let snapshots =
+            quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+                .expect("rules")
+                .snapshots();
+        let crate::query::versions::VersionChannel { publisher, port } =
+            crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
+                .expect("versions");
+        let status = StatusPublisher::new(quartz_protocol::InstanceId("tz-refresh".into()));
+        let mut process = CoreProcess::new();
+        process.versions = Some(port);
+        process.refresh_logical_day(
+            &status,
+            RefreshLogicalDay::SetOffset(crate::query::calendar::DayStartOffset::MIDNIGHT),
+        );
+        assert!(publisher.requests.try_recv().is_err());
+        process.refresh_logical_day(&status, RefreshLogicalDay::ResetZone);
+        assert!(matches!(
+            publisher.requests.try_recv().expect("refresh command"),
+            crate::query::versions::VersionCommand::Refresh
+        ));
     }
 }

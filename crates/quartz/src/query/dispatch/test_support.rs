@@ -45,7 +45,14 @@ impl TestDatabase {
                         }
                         Ok(TestWrite::Stop) | Err(_) => return,
                     },
-                    recv(publisher.requests) -> request => match request { Ok(request) => publisher.receive(request), Err(_) => return },
+                    recv(publisher.requests) -> request => match request {
+                        Ok(request) => {
+                            publisher
+                                .receive(&mut fixture.store, request)
+                                .expect("service version command");
+                        }
+                        Err(_) => return,
+                    },
                     recv(channel.receiver) -> query => match query {
                         Ok(QueryCommand::Query {request, reply}) => { let result = fixture.run(request).map_err(|error| ProtocolError::new(error.kind())); let _ = reply.send(result); }
                         Ok(QueryCommand::RuleInputs {reply}) => { let result = fixture.store.rule_read_metadata().map(|metadata_version| crate::rules::read::ReadInputs {snapshot: snapshots.load(), metadata_version}).map_err(|_| ProtocolError::new(ErrorKind::Internal)); let _ = reply.send(result); }

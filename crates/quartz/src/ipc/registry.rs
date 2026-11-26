@@ -894,7 +894,10 @@ mod tests {
                 .requests
                 .try_recv()
                 .expect("last subscriber prunes its date");
-            channel.publisher.receive(command);
+            channel
+                .publisher
+                .receive(&mut fixture.store, command)
+                .expect("prune date");
             assert!(channel.publisher.requests.is_empty());
         });
     }
@@ -1017,16 +1020,91 @@ mod tests {
             .expect("subscribe");
         let request = SelfContainedVersions::next(&channel.publisher.requests).await;
         writer.handle.close();
-        channel.publisher.receive(request);
+        channel
+            .publisher
+            .receive(&mut fixture.store, request)
+            .expect("subscribe");
         assert!(reply.await.expect("subscription reply").is_err());
         let reconciliation = SelfContainedVersions::next(&channel.publisher.requests).await;
         drop(reconciliation); // Simulate a failed reconciliation round trip.
         assert!(!updates.borrow().days.is_empty());
         let retry = SelfContainedVersions::next(&channel.publisher.requests).await;
-        channel.publisher.receive(retry);
+        channel
+            .publisher
+            .receive(&mut fixture.store, retry)
+            .expect("reconcile");
         assert!(
             updates.borrow().days.is_empty(),
             "no subscriber owns the abandoned date"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn date_scoped_commit_republishes_only_affected_subscribed_days() {
+        let status =
+            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("date-scoped".into()));
+        let mut fixture = crate::store::query::test_support::QueryFixture::new(1);
+        let snapshots =
+            quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
+                .expect("rules")
+                .snapshots();
+        let mut channel =
+            crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
+                .expect("versions");
+        let registry =
+            RegistryHandle::start(status.subscribe(), channel.port, Arc::new(|_| Ok(())));
+        let (write, read) = tokio::io::duplex(8192);
+        let writer = super::super::outbox::OutboxTask::spawn(write);
+        let mut reader = tokio_util::codec::FramedRead::new(read, quartz_protocol::frame_codec());
+        let registration = registry
+            .register(ConnectionPeer::Cli, writer.handle.clone())
+            .expect("register");
+        let affected: quartz_protocol::LocalDate = "2025-01-02".parse().expect("affected");
+        let unaffected: quartz_protocol::LocalDate = "2025-01-20".parse().expect("unaffected");
+        let reply = registry
+            .submit_subscribe(
+                registration.id,
+                Subscribe {
+                    topics: vec![Topic::Day(affected), Topic::Day(unaffected)],
+                },
+                Response {
+                    id: Some(quartz_protocol::RequestId(1)),
+                    outcome: quartz_protocol::ResponseOutcome::Ok {
+                        body: serde_json::json!({}),
+                    },
+                },
+            )
+            .expect("subscribe");
+        let request = SelfContainedVersions::next(&channel.publisher.requests).await;
+        channel
+            .publisher
+            .receive(&mut fixture.store, request)
+            .expect("subscribe");
+        reply
+            .await
+            .expect("subscription reply")
+            .expect("subscribed");
+        for _ in 0..3 {
+            reader.next().await.expect("initial frame").expect("frame");
+        }
+        fixture.bump_fact_version();
+        channel
+            .publisher
+            .publish(&mut fixture.store)
+            .expect("publish");
+        tokio::time::advance(super::super::outbox::DAY_PUSH_INTERVAL).await;
+        let payload = reader.next().await.expect("affected event").expect("frame");
+        let quartz_protocol::Envelope::Event(event) =
+            quartz_protocol::decode_json(&payload).expect("event JSON")
+        else {
+            panic!("day event");
+        };
+        assert_eq!(event.topic, Topic::Day(affected));
+        assert!(
+            tokio::time::timeout(super::super::outbox::DAY_PUSH_INTERVAL, reader.next())
+                .await
+                .is_err(),
+            "unaffected subscribed date must not republish"
         );
     }
     struct SelfContainedVersions;

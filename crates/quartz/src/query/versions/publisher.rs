@@ -5,31 +5,58 @@ use crate::store::Store;
 use crossbeam_channel::{Receiver, Sender};
 use quartz_domain::rules::registry::SnapshotCell;
 use quartz_protocol::{DayChanged, ErrorKind, LocalDate, ProtocolError};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::sync::{oneshot, watch};
 
 /// Version requests are bounded independently of capture writes and query jobs.
 const VERSION_CHANNEL_CAPACITY: usize = 8;
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct PublishedVersions {
     pub days: BTreeMap<LocalDate, DayChanged>,
+    pub day_start_offset: crate::query::calendar::DayStartOffset,
+    pub time_zone: jiff::tz::TimeZone,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum VersionSubscriber {
     Registry,
     Tray,
 }
-pub(crate) struct VersionCommand {
+pub(crate) struct SubscribeCommand {
     subscriber: VersionSubscriber,
     dates: BTreeSet<LocalDate>,
     reply: oneshot::Sender<Result<PublishedVersions, ProtocolError>>,
 }
+pub(crate) enum VersionCommand {
+    Subscribe(SubscribeCommand),
+    Refresh,
+}
 #[derive(Clone)]
 pub(crate) struct VersionPort {
     requests: Sender<VersionCommand>,
+    refresh_queued: Arc<AtomicBool>,
     pub updates: watch::Receiver<PublishedVersions>,
 }
+impl std::fmt::Debug for VersionPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VersionPort").finish_non_exhaustive()
+    }
+}
 impl VersionPort {
+    /// Coalesces nonblocking refresh notifications after system time-zone changes.
+    pub(crate) fn refresh(&self) {
+        if !self.refresh_queued.swap(true, Ordering::AcqRel)
+            && let Err(error) = self.requests.try_send(VersionCommand::Refresh)
+        {
+            self.refresh_queued.store(false, Ordering::Release);
+            tracing::warn!(%error, "could not request version refresh");
+        }
+    }
     #[cfg(test)]
     pub(crate) async fn set_days(
         &self,
@@ -66,11 +93,11 @@ impl VersionPort {
     ) -> Result<oneshot::Receiver<Result<PublishedVersions, ProtocolError>>, ProtocolError> {
         let (reply, received) = oneshot::channel();
         self.requests
-            .try_send(VersionCommand {
+            .try_send(VersionCommand::Subscribe(SubscribeCommand {
                 subscriber,
                 dates,
                 reply,
-            })
+            }))
             .map_err(|error| {
                 ProtocolError::new(match error {
                     crossbeam_channel::TrySendError::Full(_) => ErrorKind::Busy,
@@ -90,6 +117,7 @@ pub(crate) struct VersionPublisher {
     state: VersionState,
     snapshots: SnapshotCell,
     publication: PublicationState,
+    refresh_queued: Arc<AtomicBool>,
     pub requests: Receiver<VersionCommand>,
     published: watch::Sender<PublishedVersions>,
 }
@@ -100,29 +128,72 @@ impl VersionPublisher {
     ) -> Result<VersionChannel, RunQueryError> {
         let state =
             VersionState::from_stored(store.version_state()?, snapshots.load().hashes().clone())?;
+        let day_start_offset = state.settings.day_start_offset;
+        let time_zone = state.time_zone.clone();
         let (requests, received) = crossbeam_channel::bounded(VERSION_CHANNEL_CAPACITY);
-        let (published, updates) = watch::channel(PublishedVersions::default());
+        let (published, updates) = watch::channel(PublishedVersions {
+            days: BTreeMap::new(),
+            day_start_offset,
+            time_zone,
+        });
+        let refresh_queued = Arc::new(AtomicBool::new(false));
         let publisher = Self {
             subscriptions: BTreeMap::new(),
             state,
             snapshots,
             publication: PublicationState::Current,
+            refresh_queued: Arc::clone(&refresh_queued),
             requests: received,
             published,
         };
-        let port = VersionPort { requests, updates };
+        let port = VersionPort {
+            requests,
+            refresh_queued,
+            updates,
+        };
         Ok(VersionChannel { publisher, port })
     }
-    pub(crate) fn receive(&mut self, command: VersionCommand) {
-        self.receive_days(
-            command,
-            RunQueryError::system_time_zone(jiff::tz::TimeZone::try_system),
-            VersionState::day_in_zone,
-        );
+    pub(crate) fn receive(
+        &mut self,
+        store: &mut Store,
+        command: VersionCommand,
+    ) -> Result<Option<crate::query::calendar::DayStartOffset>, RunQueryError> {
+        match command {
+            VersionCommand::Subscribe(command) => {
+                self.receive_days(
+                    command,
+                    RunQueryError::system_time_zone(jiff::tz::TimeZone::try_system),
+                    VersionState::day_in_zone,
+                );
+                Ok(None)
+            }
+            VersionCommand::Refresh => {
+                self.refresh_queued.store(false, Ordering::Release);
+                self.publish(store)
+            }
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn receive_in_zone(
+        &mut self,
+        store: &mut Store,
+        command: VersionCommand,
+        time_zone: jiff::tz::TimeZone,
+    ) -> Result<Option<crate::query::calendar::DayStartOffset>, RunQueryError> {
+        match command {
+            VersionCommand::Subscribe(command) => {
+                self.receive_days(command, Ok(time_zone), VersionState::day_in_zone);
+                Ok(None)
+            }
+            VersionCommand::Refresh => {
+                self.refresh_queued.store(false, Ordering::Release);
+                self.publish_days_in_zone(store, time_zone, VersionState::day)
+            }
+        }
     }
     fn receive_days(
         &mut self,
-        command: VersionCommand,
+        command: SubscribeCommand,
         zone: Result<jiff::tz::TimeZone, RunQueryError>,
         day: impl Fn(&VersionState, LocalDate, &jiff::tz::TimeZone) -> Result<DayChanged, RunQueryError>,
     ) {
@@ -137,7 +208,11 @@ impl VersionPublisher {
                 }
                 self.subscriptions = subscriptions;
                 self.state.time_zone = zone;
-                let published = PublishedVersions { days };
+                let published = PublishedVersions {
+                    days,
+                    day_start_offset: self.state.settings.day_start_offset,
+                    time_zone: self.state.time_zone.clone(),
+                };
                 self.published.send_replace(published.clone());
                 self.publication = PublicationState::Current;
                 Ok(published)
@@ -156,13 +231,22 @@ impl VersionPublisher {
         store: &mut Store,
         day: impl Fn(&VersionState, LocalDate) -> Result<DayChanged, RunQueryError>,
     ) -> Result<Option<crate::query::calendar::DayStartOffset>, RunQueryError> {
-        let hashes = self.snapshots.load().hashes().clone();
         let time_zone = RunQueryError::system_time_zone(jiff::tz::TimeZone::try_system)?;
+        self.publish_days_in_zone(store, time_zone, day)
+    }
+    fn publish_days_in_zone(
+        &mut self,
+        store: &mut Store,
+        time_zone: jiff::tz::TimeZone,
+        day: impl Fn(&VersionState, LocalDate) -> Result<DayChanged, RunQueryError>,
+    ) -> Result<Option<crate::query::calendar::DayStartOffset>, RunQueryError> {
+        let hashes = self.snapshots.load().hashes().clone();
         let settings = store.query_settings()?;
         let changes = store.take_committed_versions();
         if self.publication == PublicationState::Current
             && changes.facts.is_empty()
             && changes.metadata_version.is_none()
+            && self.state.settings.metadata_version == settings.metadata_version
             && self.state.rule_hashes == hashes
             && self.state.time_zone == time_zone
             && self.state.settings.stats_policy_version == settings.stats_policy_version
@@ -176,9 +260,9 @@ impl VersionPublisher {
         for fact in changes.facts {
             self.state.days.insert(fact.key, fact.version);
         }
-        if let Some(version) = changes.metadata_version {
-            self.state.settings.metadata_version = version;
-        }
+        self.state.settings.metadata_version = changes
+            .metadata_version
+            .unwrap_or(settings.metadata_version);
         self.state.rule_hashes = hashes;
         self.state.time_zone = time_zone;
         self.state.settings.stats_policy_version = settings.stats_policy_version;
@@ -196,7 +280,11 @@ impl VersionPublisher {
                 }
             }
         }
-        self.published.send_replace(PublishedVersions { days });
+        self.published.send_replace(PublishedVersions {
+            days,
+            day_start_offset: self.state.settings.day_start_offset,
+            time_zone: self.state.time_zone.clone(),
+        });
         self.publication = PublicationState::Current;
         Ok(changed_offset)
     }
@@ -226,12 +314,12 @@ mod tests {
             mut port,
         } = VersionPublisher::open(&mut fixture.store, snapshots).expect("publisher");
         let date = "2025-01-02".parse().expect("date");
-        let first = set_days(&mut publisher, BTreeSet::from([date]));
+        let first = set_days(&mut publisher, &mut fixture.store, BTreeSet::from([date]));
         fixture.bump_fact_version();
         publisher
             .publish_days(&mut fixture.store, |_, _| Err(RunQueryError::InvalidRange))
             .expect("failed projection retains retry");
-        let fresh = set_days(&mut publisher, BTreeSet::from([date]));
+        let fresh = set_days(&mut publisher, &mut fixture.store, BTreeSet::from([date]));
         assert_ne!(fresh.days[&date].versions, first.days[&date].versions);
         port.updates.borrow_and_update();
         let projected = std::cell::Cell::new(0);
@@ -259,12 +347,12 @@ mod tests {
             port,
         } = VersionPublisher::open(&mut fixture.store, snapshots).expect("publisher");
         let date: LocalDate = "2025-01-02".parse().expect("date");
-        let first = set_days(&mut publisher, BTreeSet::from([date]));
+        let first = set_days(&mut publisher, &mut fixture.store, BTreeSet::from([date]));
         let subscriptions = publisher.subscriptions.clone();
         let zone = publisher.state.time_zone.clone();
         let (reply, received) = oneshot::channel();
         publisher.receive_days(
-            VersionCommand {
+            SubscribeCommand {
                 subscriber: VersionSubscriber::Registry,
                 dates: BTreeSet::from([date.tomorrow().expect("tomorrow")]),
                 reply,
@@ -304,7 +392,7 @@ mod tests {
             );
             let (reply, received) = oneshot::channel();
             publisher.receive_days(
-                VersionCommand {
+                SubscribeCommand {
                     subscriber: VersionSubscriber::Registry,
                     dates: BTreeSet::from([date]),
                     reply,
@@ -446,7 +534,7 @@ mod tests {
             port,
         } = VersionPublisher::open(&mut fixture.store, snapshots).expect("publisher");
         let date = "2025-01-02".parse().expect("date");
-        let first = set_days(&mut publisher, BTreeSet::from([date]));
+        let first = set_days(&mut publisher, &mut fixture.store, BTreeSet::from([date]));
         fixture
             .store
             .test_day_offset_write(240)
@@ -476,13 +564,22 @@ mod tests {
         );
     }
 
-    fn set_days(publisher: &mut VersionPublisher, dates: BTreeSet<LocalDate>) -> PublishedVersions {
+    fn set_days(
+        publisher: &mut VersionPublisher,
+        store: &mut Store,
+        dates: BTreeSet<LocalDate>,
+    ) -> PublishedVersions {
         let (reply, received) = oneshot::channel();
-        publisher.receive(VersionCommand {
-            subscriber: VersionSubscriber::Registry,
-            dates,
-            reply,
-        });
+        publisher
+            .receive(
+                store,
+                VersionCommand::Subscribe(SubscribeCommand {
+                    subscriber: VersionSubscriber::Registry,
+                    dates,
+                    reply,
+                }),
+            )
+            .expect("subscribe command");
         received
             .blocking_recv()
             .expect("version reply")
@@ -511,7 +608,7 @@ mod tests {
         }
         assert!(port.updates.borrow().days.is_empty());
         let date = "2025-01-02".parse().expect("date");
-        let first = set_days(&mut publisher, BTreeSet::from([date]));
+        let first = set_days(&mut publisher, &mut fixture.store, BTreeSet::from([date]));
         assert_eq!(first.days.len(), 1);
         assert_eq!(port.updates.borrow().days.len(), 1);
         fixture.bump_fact_version();
@@ -525,7 +622,7 @@ mod tests {
             .publish(&mut fixture.store)
             .expect("publish versions");
         assert_ne!(fact.versions, port.updates.borrow().days[&date].versions);
-        set_days(&mut publisher, BTreeSet::new());
+        set_days(&mut publisher, &mut fixture.store, BTreeSet::new());
         assert!(port.updates.borrow().days.is_empty());
         fixture.bump_fact_version();
         publisher
@@ -546,16 +643,25 @@ mod tests {
         let today: LocalDate = "2025-01-02".parse().expect("today");
         let history = today.yesterday().expect("yesterday");
         let (reply, received) = oneshot::channel();
-        publisher.receive(VersionCommand {
-            subscriber: VersionSubscriber::Tray,
-            dates: BTreeSet::from([today]),
-            reply,
-        });
+        publisher
+            .receive(
+                &mut fixture.store,
+                VersionCommand::Subscribe(SubscribeCommand {
+                    subscriber: VersionSubscriber::Tray,
+                    dates: BTreeSet::from([today]),
+                    reply,
+                }),
+            )
+            .expect("tray subscribe");
         received
             .blocking_recv()
             .expect("tray subscription")
             .expect("valid date");
-        set_days(&mut publisher, BTreeSet::from([history]));
+        set_days(
+            &mut publisher,
+            &mut fixture.store,
+            BTreeSet::from([history]),
+        );
         assert_eq!(
             port.updates
                 .borrow()
@@ -565,7 +671,7 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([history, today])
         );
-        set_days(&mut publisher, BTreeSet::new());
+        set_days(&mut publisher, &mut fixture.store, BTreeSet::new());
         assert_eq!(
             port.updates
                 .borrow()
@@ -600,7 +706,7 @@ mod tests {
             .publish(&mut fixture.store)
             .expect("publish versions");
         let date = "2025-01-02".parse().expect("date");
-        let first = set_days(&mut publisher, BTreeSet::from([date]));
+        let first = set_days(&mut publisher, &mut fixture.store, BTreeSet::from([date]));
         let changed =
             rules::BUILTIN_CLASSIFICATION.replace("builtin:development", "builtin:learning");
         let set = RuleSet::parse(
@@ -636,5 +742,191 @@ mod tests {
             .publish(&mut fixture.store)
             .expect("publish versions");
         assert_eq!(upgraded, port.updates.borrow().days[&date].versions);
+    }
+
+    #[test]
+    fn timezone_refresh_republishes_subscribed_days_and_updates_published_zone() {
+        let mut fixture = QueryFixture::new(0);
+        let snapshots = RuleRegistry::from_state(Default::default())
+            .expect("rules")
+            .snapshots();
+        let VersionChannel {
+            mut publisher,
+            mut port,
+        } = VersionPublisher::open(&mut fixture.store, snapshots).expect("publisher");
+        let date: LocalDate = "2025-01-02".parse().expect("date");
+        let (reply, received) = oneshot::channel();
+        publisher
+            .receive_in_zone(
+                &mut fixture.store,
+                VersionCommand::Subscribe(SubscribeCommand {
+                    subscriber: VersionSubscriber::Registry,
+                    dates: BTreeSet::from([date]),
+                    reply,
+                }),
+                jiff::tz::TimeZone::UTC,
+            )
+            .expect("subscribe UTC");
+        let initial = received.blocking_recv().expect("reply").expect("UTC");
+        port.updates.borrow_and_update();
+        port.refresh();
+        port.refresh();
+        let command = publisher.requests.try_recv().expect("refresh command");
+        assert!(
+            publisher.requests.try_recv().is_err(),
+            "concurrent refreshes coalesce"
+        );
+        let tokyo = jiff::tz::TimeZone::get("Asia/Tokyo").expect("tokyo");
+        publisher
+            .receive_in_zone(&mut fixture.store, command, tokyo.clone())
+            .expect("refresh Tokyo");
+        assert!(port.updates.has_changed().expect("watch open"));
+        let updated = port.updates.borrow_and_update().clone();
+        assert_eq!(updated.time_zone, tokyo);
+        assert_ne!(updated.days[&date].versions, initial.days[&date].versions);
+        port.refresh();
+        let repeat = publisher.requests.try_recv().expect("repeat refresh");
+        publisher
+            .receive_in_zone(&mut fixture.store, repeat, tokyo)
+            .expect("unchanged zone");
+        assert!(!port.updates.has_changed().expect("watch open"));
+    }
+
+    #[test]
+    fn extraction_rule_change_republishes_subscribed_days() {
+        use crate::rules::registry::RegistryShell;
+        use quartz_domain::{capture::UtcInstant, rules::registry::RegistryCommand};
+        let mut fixture = QueryFixture::new(0);
+        let now = UtcInstant::try_from(0).expect("UTC");
+        let mut shell = RegistryShell::open(&mut fixture.store, now).expect("registry");
+        let VersionChannel {
+            mut publisher,
+            port,
+        } = VersionPublisher::open(&mut fixture.store, shell.snapshots()).expect("publisher");
+        let date: LocalDate = "2025-01-02".parse().expect("date");
+        let before = set_days(&mut publisher, &mut fixture.store, BTreeSet::from([date]));
+        shell
+            .run(
+                &mut fixture.store,
+                now,
+                RegistryCommand::Apply {
+                    key: "user.local.extraction".parse().expect("key"),
+                    file: "overlay.toml".into(),
+                    text: r"format='quartz-rules/1'
+[set]
+key='user.local.extraction'
+kind='extraction'
+name='Extraction'
+parent='builtin.extraction'
+[[rule]]
+id='notes'
+label='Notes'
+app=[{field='app.exe_name',op='equals',value='notes.exe'}]
+pattern='\ANote: (?P<document>[^\r\n]+)\z'
+"
+                    .into(),
+                    base_version: 0,
+                },
+            )
+            .expect("save extraction rule");
+        publisher
+            .publish(&mut fixture.store)
+            .expect("publish extraction change");
+        assert_ne!(
+            before.days[&date].versions,
+            port.updates.borrow().days[&date].versions
+        );
+    }
+
+    #[test]
+    fn date_scoped_fact_and_annotation_changes_leave_unaffected_dates_unchanged() {
+        let mut fixture = QueryFixture::new(1);
+        let snapshots = RuleRegistry::from_state(Default::default())
+            .expect("rules")
+            .snapshots();
+        let VersionChannel {
+            mut publisher,
+            port,
+        } = VersionPublisher::open(&mut fixture.store, snapshots).expect("publisher");
+        let prior: LocalDate = "2025-01-01".parse().expect("prior");
+        let affected: LocalDate = "2025-01-02".parse().expect("affected");
+        let next: LocalDate = "2025-01-03".parse().expect("next");
+        let unaffected: LocalDate = "2025-01-20".parse().expect("unaffected");
+        let (reply, received) = oneshot::channel();
+        publisher
+            .receive_in_zone(
+                &mut fixture.store,
+                VersionCommand::Subscribe(SubscribeCommand {
+                    subscriber: VersionSubscriber::Registry,
+                    dates: BTreeSet::from([prior, affected, next, unaffected]),
+                    reply,
+                }),
+                jiff::tz::TimeZone::UTC,
+            )
+            .expect("subscribe");
+        let initial = received.blocking_recv().expect("reply").expect("dates");
+        fixture.bump_fact_version();
+        publisher
+            .publish_days_in_zone(
+                &mut fixture.store,
+                jiff::tz::TimeZone::UTC,
+                VersionState::day,
+            )
+            .expect("publish fact");
+        let after_fact = port.updates.borrow().days.clone();
+        assert_ne!(
+            after_fact[&affected].versions,
+            initial.days[&affected].versions
+        );
+        assert_eq!(
+            after_fact[&unaffected].versions,
+            initial.days[&unaffected].versions
+        );
+        let midnight = "2025-01-03T00:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .expect("midnight")
+            .as_millisecond();
+        fixture
+            .store
+            .create_annotations(
+                quartz_protocol::AnnotationsCreateRequest {
+                    entities: vec![quartz_protocol::CreateAnnotation {
+                        uuid: quartz_protocol::AnnotationId(
+                            "00000000-0000-4000-8000-000000000099"
+                                .parse()
+                                .expect("uuid"),
+                        ),
+                        kind: quartz_protocol::AnnotationKind::Note,
+                        values: quartz_protocol::AnnotationValues {
+                            start_utc_ms: midnight - 1000,
+                            end_utc_ms: midnight + 1000,
+                            category: None,
+                            label_preset: Some(quartz_protocol::AnnotationLabelPreset::Rest),
+                            label: None,
+                            note: None,
+                        },
+                    }],
+                },
+                quartz_domain::capture::UtcInstant::try_from(midnight).expect("UTC"),
+            )
+            .expect("midnight annotation");
+        publisher
+            .publish_days_in_zone(
+                &mut fixture.store,
+                jiff::tz::TimeZone::UTC,
+                VersionState::day,
+            )
+            .expect("publish annotation");
+        let after_ann = port.updates.borrow().days.clone();
+        assert_ne!(
+            after_ann[&affected].versions,
+            after_fact[&affected].versions
+        );
+        assert_ne!(after_ann[&next].versions, after_fact[&next].versions);
+        assert_eq!(after_ann[&prior].versions, after_fact[&prior].versions);
+        assert_eq!(
+            after_ann[&unaffected].versions,
+            after_fact[&unaffected].versions
+        );
     }
 }
