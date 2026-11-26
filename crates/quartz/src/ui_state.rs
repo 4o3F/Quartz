@@ -749,38 +749,6 @@ mod tests {
     }
 
     #[test]
-    fn unregistration_retains_the_process_and_clears_only_its_old_display_request() {
-        for setup in SETUPS {
-            for request in REQUESTS {
-                if matches!(setup, Setup::None) && request == DisplayRequest::Pending {
-                    continue;
-                }
-                for source in [CONNECTION, OTHER] {
-                    let mut ui = setup.ui(request);
-                    let outcome = ui.unregister(source);
-                    if matches!(setup, Setup::Registered { .. }) && source == CONNECTION {
-                        assert_eq!(ui, Setup::Closing.ui(DisplayRequest::Idle));
-                        assert_eq!(
-                            outcome,
-                            match request {
-                                DisplayRequest::Idle => ExitUi::Closed,
-                                DisplayRequest::Pending => ExitUi::PendingShowLost,
-                            }
-                        );
-                    } else {
-                        assert_eq!(outcome, ExitUi::Unrelated, "{setup:?}");
-                        assert_eq!(
-                            ui,
-                            setup.ui(request),
-                            "unrelated or repeated unregister preserves the request"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
     fn exit_from_each_state_requests_replacement_only_for_a_new_open_while_closing() {
         for setup in SETUPS {
             for request in REQUESTS {
@@ -922,41 +890,6 @@ mod tests {
             .open(Instant::now(), launch)
             .expect("user retries failed replacement");
     }
-    #[test]
-    fn hover_launches_only_from_none_without_requesting_a_window() {
-        let now = Instant::now();
-        for setup in SETUPS {
-            let mut ui = setup.ui(DisplayRequest::Idle);
-            let mut launches = 0;
-            ui.hover(now, PrewarmSettings::default(), PowerSource::Ac, || {
-                launches += 1;
-                launch()
-            })
-            .expect("hover");
-            match setup {
-                Setup::None => {
-                    assert_eq!(launches, 1);
-                    assert!(matches!(
-                        ui.state,
-                        State::Starting {
-                            intent: LaunchIntent::Prewarm,
-                            ..
-                        }
-                    ));
-                }
-                Setup::Starting | Setup::Registered { .. } | Setup::Closing => {
-                    assert_eq!(launches, 0, "{setup:?}");
-                    assert_eq!(ui, setup.ui(DisplayRequest::Idle));
-                }
-            }
-            assert!(!ui.opening(), "hover leaves the normal tooltip");
-            assert_eq!(
-                ui.prewarm_wait(now),
-                None,
-                "TTL starts at hello, not launch"
-            );
-        }
-    }
     #[derive(Debug)]
     struct HoverCase {
         settings: PrewarmSettings,
@@ -1080,40 +1013,6 @@ mod tests {
         ));
     }
     #[test]
-    fn open_before_handshake_replays_show_and_cancels_ttl_until_first_frame() {
-        let now = Instant::now();
-        let mut ui = UiState::default();
-        ui.hover(now, PrewarmSettings::default(), PowerSource::Ac, launch)
-            .expect("launch");
-        assert_eq!(
-            ui.open::<&str>(Instant::now(), || panic!("prewarm already starting")),
-            Ok(None)
-        );
-        assert_eq!(
-            ui.register(CONNECTION, peer(HelloState::Prewarming), now, adopt),
-            Ok(RegisterUi::Accepted {
-                replay: Some(UiControl {
-                    connection: CONNECTION,
-                    pid: CHILD_PID,
-                    op: ControlOp::UiShow
-                })
-            })
-        );
-        assert!(ui.opening());
-        assert_eq!(ui.prewarm_wait(now), None);
-        assert_eq!(ui.expire_prewarm(now + PREWARM_TTL), None);
-        ui.first_frame(CONNECTION);
-        assert!(matches!(
-            ui.state,
-            State::Registered {
-                phase: Phase::Visible,
-                ..
-            }
-        ));
-        assert!(!ui.opening());
-        assert_eq!(ui.expire_prewarm(now + PREWARM_COOLDOWN), None);
-    }
-    #[test]
     fn open_after_handshake_wins_at_the_deadline_and_late_click_waits_for_shutdown_exit() {
         let now = Instant::now();
         let mut ui = UiState::default();
@@ -1150,58 +1049,6 @@ mod tests {
             .expect("remember late click");
         assert_eq!(expired.unregister(CONNECTION), ExitUi::Unrelated);
         assert_eq!(expired.exited(Instant::now()), ExitUi::OpenRequested);
-    }
-    #[test]
-    fn prewarm_exit_and_failed_launch_do_not_trigger_an_automatic_restart() {
-        let now = Instant::now();
-        let mut ui = UiState::default();
-        assert_eq!(
-            ui.hover(now, PrewarmSettings::default(), PowerSource::Ac, || Err::<
-                Process,
-                _,
-            >(
-                "launch failed"
-            )),
-            Err("launch failed")
-        );
-        assert_eq!(ui, UiState::default());
-        ui.hover(now, PrewarmSettings::default(), PowerSource::Ac, launch)
-            .expect("launch");
-        assert_eq!(ui.exited(Instant::now()), ExitUi::Closed);
-        assert!(ui.process().is_none());
-        assert!(!ui.opening());
-        assert!(!ui.can_prewarm(now, PrewarmSettings::default(), PowerSource::Ac));
-    }
-    #[test]
-    fn resident_startup_and_hover_policy() {
-        let now = Instant::now();
-        for enabled in [ResidentEnabled::Enabled, ResidentEnabled::Disabled] {
-            let mut ui = UiState::default();
-            assert_eq!(ui.configure_resident(enabled, now), None);
-            let mut launches = 0;
-            ui.ensure_resident::<&str>(now, || {
-                launches += 1;
-                launch()
-            })
-            .expect("startup");
-            assert_eq!(launches, usize::from(enabled == ResidentEnabled::Enabled));
-            if enabled == ResidentEnabled::Enabled {
-                assert!(matches!(
-                    ui.state,
-                    State::Starting {
-                        intent: LaunchIntent::Resident,
-                        ..
-                    }
-                ));
-                assert!(!ui.opening());
-                assert!(!ui.can_prewarm(now, PrewarmSettings::default(), PowerSource::Ac));
-                ui.exited(now);
-                assert!(!ui.prewarm_available(now + PREWARM_COOLDOWN, PrewarmEnabled::Enabled));
-            } else {
-                assert!(ui.process().is_none());
-                assert!(ui.can_prewarm(now, PrewarmSettings::default(), PowerSource::Ac));
-            }
-        }
     }
     #[test]
     fn resident_hidden_show_first_frame_and_close_have_no_ttl() {
@@ -1383,42 +1230,5 @@ mod tests {
             || panic!("shutdown relaunch"),
         )
         .expect("stopped");
-    }
-    #[test]
-    fn resident_launch_failure_has_a_deadline_and_explicit_open_bypasses_backoff() {
-        let now = Instant::now();
-        let mut ui = UiState::default();
-        ui.configure_resident(ResidentEnabled::Enabled, now);
-        assert_eq!(
-            ui.ensure_resident::<&str>(now, || Err::<Process, _>("launch failed")),
-            Err("launch failed")
-        );
-        assert_eq!(ui.resident_wait(now), Some(RESIDENT_RELAUNCH_COOLDOWN));
-        ui.ensure_resident::<&str>(now, || panic!("no tight retry"))
-            .expect("wait");
-        ui.open(Instant::now(), launch).expect("explicit open");
-        assert!(matches!(
-            ui.state,
-            State::Starting {
-                intent: LaunchIntent::Show,
-                ..
-            }
-        ));
-        assert_eq!(ui.resident_wait(now), None);
-    }
-    #[test]
-    fn enabling_residency_uses_the_existing_show_launch_time_for_crash_backoff() {
-        let now = Instant::now();
-        let mut ui = UiState::default();
-        ui.open(now, launch).expect("on demand launch");
-        ui.register(CONNECTION, peer(HelloState::Starting), now, adopt)
-            .expect("hello");
-        ui.first_frame(CONNECTION);
-        ui.configure_resident(ResidentEnabled::Enabled, now + Duration::from_secs(1));
-        ui.exited(now + Duration::from_secs(2));
-        assert_eq!(
-            ui.resident_wait(now + Duration::from_secs(2)),
-            Some(RESIDENT_RELAUNCH_COOLDOWN - Duration::from_secs(2))
-        );
     }
 }

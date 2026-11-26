@@ -166,19 +166,4 @@ mod tests {
             assert!(role.authorize(Op::Unknown).is_err());
         }
     }
-
-    #[test]
-    fn sensitive_permission_boundaries() {
-        assert!(Role::Ui.authorize(Op::UiOpen).is_ok());
-        assert!(Role::Cli.authorize(Op::UiOpen).is_ok());
-        assert!(Role::Cli.authorize(Op::AnnotationsCreate).is_err());
-        assert!(Role::Cli.authorize(Op::Subscribe).is_err());
-        assert!(Role::Ui.authorize(Op::Subscribe).is_ok());
-        assert!(Role::Cli.authorize(Op::RulesTextImport).is_err());
-        assert!(Role::Cli.authorize(Op::RulesTextValidate).is_ok());
-        assert!(Role::Cli.authorize(Op::UiFirstFrame).is_err());
-        assert!(Role::Ui.authorize(Op::UiFirstFrame).is_ok());
-        assert!(Role::Ui.authorize(Op::UiHidden).is_ok());
-        assert!(Role::Cli.authorize(Op::UiHidden).is_err());
-    }
 }

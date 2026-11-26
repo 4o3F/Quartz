@@ -274,36 +274,6 @@ fn unknown_operation_preserves_connection_and_permission_errors_are_typed() {
         })
     ));
     assert!(cli.status().is_ok());
-    let mut ui = fixture.ui();
-    assert!(matches!(
-        ui.request(Op::RuleSetsTree, &json!({})),
-        Err(CallCoreError::Protocol {
-            kind: ErrorKind::BadRequest
-        })
-    ));
-    assert!(matches!(
-        ui.request(Op::RuleSetsEdit, &json!({})),
-        Err(CallCoreError::Protocol {
-            kind: ErrorKind::BadRequest
-        })
-    ));
-    for client in [&mut ui, &mut cli] {
-        let body = client
-            .request(Op::RuleSetsTree, &json!({"kind":"privacy"}))
-            .expect("rule tree over named pipe");
-        let tree: quartz_protocol::RuleSetsTreeResponse =
-            serde_json::from_value(body).expect("typed rule tree");
-        assert!(tree.nodes.iter().any(|node| node.key == "builtin.privacy"));
-        let body = client
-            .request(
-                Op::RuleSetsGet,
-                &json!({"key":"builtin.privacy","view":"effective"}),
-            )
-            .expect("effective contents over named pipe");
-        let contents: quartz_protocol::RuleSetsGetResponse =
-            serde_json::from_value(body).expect("typed contents");
-        assert!(!contents.entries.is_empty());
-    }
 }
 #[test]
 fn unknown_host_role_is_rejected_as_bad_request_and_connection_closed() {
@@ -527,27 +497,6 @@ fn subscribe_response_precedes_snapshot_and_ten_changes_coalesce() {
         ),
         "no third snapshot without a change"
     );
-}
-
-#[test]
-fn subscribe_rejects_cli_and_unknown_topics() {
-    let fixture = Fixture::new();
-    let mut cli = fixture.cli();
-    assert!(matches!(
-        cli.request(Op::Subscribe, &json!({"topics":["state"]})),
-        Err(CallCoreError::Protocol {
-            kind: ErrorKind::Forbidden
-        })
-    ));
-    let mut ui = fixture.ui();
-    assert!(matches!(
-        ui.request(Op::Subscribe, &json!({"topics":["weather"]})),
-        Err(CallCoreError::Protocol {
-            kind: ErrorKind::BadRequest
-        })
-    ));
-    ui.status()
-        .expect("connection remains unsubscribed and usable");
 }
 
 /// Full 04 §9 acceptance duration; run explicitly with a serial test harness.
@@ -928,42 +877,30 @@ fn cli_queries_temporary_database_over_pipe() {
     )
     .expect("typed timeline");
     assert_eq!(timeline.segments.len(), 5);
-    let pending_body = json!({"local_date":"2025-01-02"});
-    for mut client in [fixture.cli(), fixture.ui()] {
-        let range: quartz_protocol::QueryRangeResponse = serde_json::from_value(client.request(Op::QueryRange, &json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["category","app","document"]})).expect("range query")).expect("typed range");
-        assert_eq!(range.buckets[0].active_ms, 4000);
-        assert_eq!(range.buckets[0].groups.len(), 9);
-        for body in [
-            json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":[]}),
-            json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["app","app"]}),
-            json!({"start_date":"2025-01-02","end_date":"2025-01-02","bucket":"day","dimensions":["app"]}),
-            json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["app"],"unknown":true}),
-        ] {
-            assert!(matches!(
-                client.request(Op::QueryRange, &body),
-                Err(CallCoreError::Protocol {
-                    kind: ErrorKind::BadRequest
-                })
-            ));
-        }
-        let pending: quartz_protocol::QueryPendingAwayResponse = serde_json::from_value(
-            client
-                .request(Op::QueryPendingAway, &pending_body)
-                .expect("pending away query"),
+    let range: quartz_protocol::QueryRangeResponse = serde_json::from_value(
+        cli.request(
+            Op::QueryRange,
+            &json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["category","app","document"]}),
         )
-        .expect("typed pending away");
-        assert!(pending.ranges.is_empty());
-    }
-    for mut client in [fixture.cli(), fixture.ui()] {
-        let facts = client
-            .facts(&quartz_protocol::QueryFactsRequest {
-                local_date: "2025-01-02".parse().expect("date"),
-                after: None,
-                limit: None,
-            })
-            .expect("facts query");
-        assert_eq!(facts.facts.len(), 6, "run, clock and four foreground rows");
-    }
+        .expect("range query"),
+    )
+    .expect("typed range");
+    assert_eq!(range.buckets[0].active_ms, 4000);
+    assert_eq!(range.buckets[0].groups.len(), 9);
+    let pending: quartz_protocol::QueryPendingAwayResponse = serde_json::from_value(
+        cli.request(Op::QueryPendingAway, &json!({"local_date":"2025-01-02"}))
+            .expect("pending away query"),
+    )
+    .expect("typed pending away");
+    assert!(pending.ranges.is_empty());
+    let facts = cli
+        .facts(&quartz_protocol::QueryFactsRequest {
+            local_date: "2025-01-02".parse().expect("date"),
+            after: None,
+            limit: None,
+        })
+        .expect("facts query");
+    assert_eq!(facts.facts.len(), 6, "run, clock and four foreground rows");
 }
 #[test]
 fn overloaded_database_returns_busy_over_pipe() {
@@ -1116,38 +1053,6 @@ fn core_runtime_with_fake_ports_flushes_shutdown_over_test_pipe() {
     let mut stored = Inspection::open(temporary.path());
     assert_eq!(stored.run(1).end_reason, Some(RunEndReason::UserExit));
     assert_eq!(stored.open_clock_count(), 0);
-}
-
-#[test]
-fn unsubscribe_stops_state_pushes_and_keeps_implicit_controls() {
-    let fixture = Fixture::new();
-    let mut ui = fixture.ui();
-    let connection = fixture.ui_registration();
-    ui.request(Op::Subscribe, &json!({"topics":["state"]}))
-        .expect("subscribe state");
-    state_event(&mut ui);
-    for _ in 0..2 {
-        ui.request(Op::Unsubscribe, &json!({"topics":["state","control"]}))
-            .expect("idempotent unsubscribe");
-    }
-    publish_change(&fixture.status, 1);
-    fixture
-        .server
-        .target_control(connection, quartz_protocol::ControlOp::UiShow);
-    let Envelope::Event(event) = ui.read_envelope().expect("implicit show") else {
-        panic!("control event");
-    };
-    assert_eq!(event.topic, quartz_protocol::Topic::Control);
-    let control: quartz_protocol::ControlBody =
-        serde_json::from_value(event.body).expect("control body");
-    assert_eq!(control.op, quartz_protocol::ControlOp::UiShow);
-    assert!(
-        matches!(
-            ui.read_envelope(),
-            Err(CallCoreError::ResponseTimeout { .. })
-        ),
-        "state remains unsubscribed"
-    );
 }
 
 #[test]

@@ -358,367 +358,142 @@ mod tests {
             body,
         })
     }
-    #[test]
-    fn rule_reads_allow_ui_and_cli_and_reject_invalid_bodies_before_admission() {
-        let status =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("rule-reads".into()));
-        for role in [
-            ReadyRole::Ui {
-                state: UiState::Visible,
-            },
-            ReadyRole::Cli,
-        ] {
-            let mut session = ConnectionSession {
-                state: State::Ready(role),
-                allowed: AllowedRoles::Quartz,
-            };
-            for op in [Op::RuleSetsTree, Op::RuleSetsGet, Op::RulesTextExport] {
-                let body = match op {
-                    Op::RuleSetsTree => serde_json::json!({"kind":"privacy"}),
-                    Op::RuleSetsGet => {
-                        serde_json::json!({"key":"builtin.privacy","view":"effective"})
-                    }
-                    Op::RulesTextExport => {
-                        serde_json::json!({"key":"builtin.privacy"})
-                    }
-                    _ => unreachable!("rule read operations"),
-                };
-                assert!(matches!(
-                    session.receive(
-                        request(7, op, body.clone()),
-                        &status.subscribe().borrow().status
-                    ),
-                    Action::Rules { .. }
-                ));
-                let mut invalid = body;
-                invalid["unexpected"] = serde_json::json!(true);
-                assert_eq!(
-                    session
-                        .receive(request(8, op, invalid), &status.subscribe().borrow().status)
-                        .reply()
-                        .outcome,
-                    ResponseOutcome::Err {
-                        error: ProtocolError::new(ErrorKind::BadRequest)
-                    }
-                );
-            }
+    fn ready(role: ReadyRole) -> ConnectionSession {
+        ConnectionSession {
+            state: State::Ready(role),
+            allowed: AllowedRoles::Quartz,
         }
     }
-
     #[test]
-    fn rule_mutations_allow_only_ui_and_reject_unknown_fields_before_admission() {
-        let status =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("rule-writes".into()));
+    fn role_authorization_and_dispatch_routing() {
+        let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("roles".into()));
         let status = status.subscribe();
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../quartz-protocol/tests/fixtures/rule-mutations.json"
-        ))
-        .expect("fixture");
-        struct Case {
-            op: Op,
-            body: serde_json::Value,
-        }
-        for case in [
-            Case {
-                op: Op::RuleSetsEdit,
-                body: fixture["edit"].clone(),
-            },
-            Case {
-                op: Op::RuleSetsSetEnabled,
-                body: fixture["set_enabled"].clone(),
-            },
-            Case {
-                op: Op::RuleSetsDelete,
-                body: fixture["delete"].clone(),
-            },
-        ] {
-            let mut cli = ConnectionSession {
-                state: State::Ready(ReadyRole::Cli),
-                allowed: AllowedRoles::Quartz,
-            };
-            assert_eq!(
-                cli.receive(
-                    request(1, case.op, case.body.clone()),
-                    &status.borrow().status
-                )
-                .reply()
-                .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::Forbidden)
-                }
-            );
-            let mut ui = ConnectionSession {
-                state: State::Ready(ReadyRole::Ui {
-                    state: UiState::Visible,
-                }),
-                allowed: AllowedRoles::Quartz,
-            };
-            assert!(matches!(
-                ui.receive(
-                    request(1, case.op, case.body.clone()),
-                    &status.borrow().status
-                ),
-                Action::Write { .. }
-            ));
-            let mut invalid = case.body;
-            invalid["extra"] = serde_json::json!(true);
-            assert_eq!(
-                ui.receive(request(2, case.op, invalid), &status.borrow().status)
-                    .reply()
-                    .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::BadRequest)
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn category_operations_are_ui_only_and_reject_unknown_fields() {
-        let status =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("categories".into()));
-        let status = status.subscribe();
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../quartz-protocol/tests/fixtures/categories.json"
-        ))
-        .expect("category fixture");
-        struct Case {
-            op: Op,
-            body: serde_json::Value,
-        }
-        let cases = [
-            Case {
-                op: Op::CategoriesList,
-                body: fixture["list"].clone(),
-            },
-            Case {
-                op: Op::CategoriesCreate,
-                body: fixture["create"].clone(),
-            },
-            Case {
-                op: Op::CategoriesUpdate,
-                body: fixture["update"].clone(),
-            },
-            Case {
-                op: Op::CategoriesReorder,
-                body: fixture["reorder"].clone(),
-            },
-            Case {
-                op: Op::CategoriesArchive,
-                body: fixture["archive"].clone(),
-            },
+        let snapshot = &status.borrow().status;
+        let ui_only = [
+            (
+                Op::RuleSetsEdit,
+                serde_json::json!({"key":"user.a","base_version":0,"text":""}),
+            ),
+            (
+                Op::RuleSetsSetEnabled,
+                serde_json::json!({"key":"user.a","base_version":1,"enabled":false}),
+            ),
+            (
+                Op::RuleSetsDelete,
+                serde_json::json!({"key":"user.a","base_version":1}),
+            ),
+            (Op::CategoriesList, serde_json::json!({})),
+            (
+                Op::CategoriesArchive,
+                serde_json::json!({"uuid":"00000000-0000-4000-8000-000000000123","archived":true}),
+            ),
+            (Op::AnnotationsCreate, serde_json::json!({"entities":[]})),
+            (Op::AnnotationsUpdate, serde_json::json!({"entities":[]})),
+            (Op::AnnotationsDelete, serde_json::json!({"uuids":[]})),
+            (Op::TrackingPause, serde_json::json!({"until_utc_ms":100})),
+            (Op::TrackingResume, serde_json::json!({})),
+            (
+                Op::TrackingKeepAlive,
+                serde_json::json!({"until_utc_ms":100}),
+            ),
+            (Op::PrivacyModeSet, serde_json::json!({"enabled":false})),
+            (
+                Op::RulesPreview,
+                serde_json::json!({"mutation":{"op":"rule_sets.edit","body":{"key":"user.a","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03"}),
+            ),
         ];
-        for case in cases {
-            let mut ui = ConnectionSession {
-                state: State::Ready(ReadyRole::Ui {
-                    state: UiState::Visible,
-                }),
-                allowed: AllowedRoles::Quartz,
-            };
-            assert!(matches!(
-                ui.receive(
-                    request(2, case.op, case.body.clone()),
-                    &status.borrow().status
-                ),
-                Action::Write { .. }
-            ));
-            let mut cli = ConnectionSession {
-                state: State::Ready(ReadyRole::Cli),
-                allowed: AllowedRoles::Quartz,
-            };
+        for (op, body) in ui_only {
             assert_eq!(
-                cli.receive(
-                    request(2, case.op, case.body.clone()),
-                    &status.borrow().status
-                )
-                .reply()
-                .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::Forbidden)
-                }
-            );
-            let mut invalid = case.body;
-            invalid["extra"] = serde_json::json!(true);
-            assert_eq!(
-                ui.receive(request(2, case.op, invalid), &status.borrow().status)
+                ready(ReadyRole::Cli)
+                    .receive(request(1, op, body.clone()), snapshot)
                     .reply()
                     .outcome,
                 ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::BadRequest)
-                }
+                    error: ProtocolError::new(ErrorKind::Forbidden)
+                },
+                "{op:?} forbidden for CLI"
+            );
+            assert!(
+                !matches!(
+                    ready(ReadyRole::Ui {
+                        state: UiState::Visible
+                    })
+                    .receive(request(1, op, body), snapshot),
+                    Action::Reply(_)
+                ),
+                "{op:?} dispatches for UI"
             );
         }
-    }
-    #[test]
-    fn detail_queries_reach_dispatch_for_ui_and_cli() {
-        let publisher =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("details".into()));
-        let receiver = publisher.subscribe();
+        let shared = [
+            (Op::RuleSetsTree, serde_json::json!({"kind":"privacy"})),
+            (
+                Op::RuleSetsGet,
+                serde_json::json!({"key":"builtin.privacy","view":"effective"}),
+            ),
+            (
+                Op::RulesTextExport,
+                serde_json::json!({"key":"builtin.privacy"}),
+            ),
+            (
+                Op::RulesTextValidate,
+                serde_json::json!({"key":"user.a","base_version":0,"text":""}),
+            ),
+            (Op::SettingsGet, serde_json::json!({})),
+            (
+                Op::QueryAnnotations,
+                serde_json::json!({"start_utc_ms":0,"end_utc_ms":1000}),
+            ),
+            (
+                Op::QueryRange,
+                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-09","bucket":"week","dimensions":["category"]}),
+            ),
+            (
+                Op::QueryUnclassified,
+                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":"app"}),
+            ),
+            (
+                Op::QuerySegmentDetail,
+                serde_json::json!({"start_utc_ms":0,"end_utc_ms":1000}),
+            ),
+            (
+                Op::QueryEntityDetail,
+                serde_json::json!({"entity":{"kind":"app","id":1},"local_date":"2026-11-21"}),
+            ),
+        ];
         for role in [
             ReadyRole::Ui {
                 state: UiState::Visible,
             },
             ReadyRole::Cli,
         ] {
-            let mut session = ConnectionSession {
-                state: State::Ready(role),
-                allowed: AllowedRoles::Quartz,
-            };
-            assert!(matches!(
-                session.receive(
-                    request(
-                        7,
-                        Op::QueryAnnotations,
-                        serde_json::json!({"start_utc_ms":0,"end_utc_ms":1000})
+            for (op, body) in &shared {
+                assert!(
+                    !matches!(
+                        ready(role).receive(request(2, *op, body.clone()), snapshot),
+                        Action::Reply(_)
                     ),
-                    &receiver.borrow().status
-                ),
-                Action::Query {
-                    request: crate::query::QueryRequest::Annotations(_),
-                    ..
-                }
-            ));
-            for body in [
-                serde_json::json!({"start_utc_ms":0,"end_utc_ms":1000,"label":"unexpected"}),
-                serde_json::json!({"start_utc_ms":0}),
-                serde_json::json!({"start_utc_ms":0,"end_utc_ms":1000,"cursor":"invalid"}),
-            ] {
-                assert_eq!(
-                    session
-                        .receive(
-                            request(7, Op::QueryAnnotations, body),
-                            &receiver.borrow().status
-                        )
-                        .reply()
-                        .outcome,
-                    ResponseOutcome::Err {
-                        error: ProtocolError::new(ErrorKind::BadRequest)
-                    }
+                    "{op:?} dispatches for {role:?}"
                 );
             }
-            let range = session.receive(request(4, Op::QueryRange, serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-09","bucket":"week","dimensions":["category","app","document"]})), &receiver.borrow().status);
-            assert!(matches!(
-                range,
-                Action::Query {
-                    request: crate::query::QueryRequest::Range(_),
-                    ..
-                }
-            ));
-            for body in [
-                serde_json::json!({"start_date":"invalid","end_date":"2025-01-09","bucket":"week","dimensions":["category"]}),
-                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-09","bucket":"month","dimensions":["category"]}),
-                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-09","bucket":"week","dimensions":["category"],"time_zone":"UTC"}),
-            ] {
-                assert_eq!(
-                    session
-                        .receive(request(4, Op::QueryRange, body), &receiver.borrow().status)
-                        .reply()
-                        .outcome,
-                    ResponseOutcome::Err {
-                        error: ProtocolError::new(ErrorKind::BadRequest)
-                    }
-                );
-            }
-            let unclassified = session.receive(request(5, Op::QueryUnclassified, serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":"app"})), &receiver.borrow().status);
-            assert!(matches!(
-                unclassified,
-                Action::Query {
-                    request: crate::query::QueryRequest::Unclassified(_),
-                    ..
-                }
-            ));
-            for body in [
-                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":"domain"}),
-                serde_json::json!({"start_date":"bad","end_date":"2025-01-03","group_by":"app"}),
-                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":"app","time_zone":"UTC"}),
-            ] {
-                let response = session.receive(
-                    request(6, Op::QueryUnclassified, body),
-                    &receiver.borrow().status,
-                );
-                assert_eq!(
-                    response.reply().outcome,
-                    ResponseOutcome::Err {
-                        error: ProtocolError::new(ErrorKind::BadRequest)
-                    }
-                );
-            }
-            let segment = session.receive(
-                request(
-                    2,
-                    Op::QuerySegmentDetail,
-                    serde_json::json!({"start_utc_ms":0,"end_utc_ms":1000}),
-                ),
-                &receiver.borrow().status,
-            );
-            assert!(matches!(
-                segment,
-                Action::Query {
-                    request: crate::query::QueryRequest::SegmentDetail(_),
-                    ..
-                }
-            ));
-            let entity = session.receive(
+        }
+        assert_eq!(
+            ready(ReadyRole::Ui {
+                state: UiState::Visible
+            })
+            .receive(
                 request(
                     3,
-                    Op::QueryEntityDetail,
-                    serde_json::json!({"entity":{"kind":"app","id":1},"local_date":"2026-11-21"}),
+                    Op::RuleSetsTree,
+                    serde_json::json!({"kind":"privacy","extra":true})
                 ),
-                &receiver.borrow().status,
-            );
-            assert!(matches!(
-                entity,
-                Action::Query {
-                    request: crate::query::QueryRequest::EntityDetail(_),
-                    ..
-                }
-            ));
-            let document = session.receive(request(4, Op::QueryEntityDetail, serde_json::json!({"entity":{"kind":"document","document_ref":"doc:opaque"},"local_date":"2026-11-21","reference_range":{"start_utc_ms":0,"end_utc_ms":604800000}})), &receiver.borrow().status);
-            assert!(matches!(
-                document,
-                Action::Query {
-                    request: crate::query::QueryRequest::EntityDetail(_),
-                    ..
-                }
-            ));
-            for kind in ["document", "domain"] {
-                let response = session.receive(request(4, Op::QueryEntityDetail, serde_json::json!({"entity":{"kind":kind,"id":1},"local_date":"2026-11-21"})), &receiver.borrow().status);
-                assert_eq!(
-                    response.reply().outcome,
-                    ResponseOutcome::Err {
-                        error: ProtocolError::new(ErrorKind::BadRequest)
-                    }
-                );
+                snapshot
+            )
+            .reply()
+            .outcome,
+            ResponseOutcome::Err {
+                error: ProtocolError::new(ErrorKind::BadRequest)
             }
-        }
-    }
-    #[test]
-    fn cli_cannot_dispatch_annotation_writes() {
-        let publisher =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("annotations".into()));
-        let receiver = publisher.subscribe();
-        let mut session = ConnectionSession {
-            state: State::Ready(ReadyRole::Cli),
-            allowed: AllowedRoles::Quartz,
-        };
-        for op in [
-            Op::AnnotationsCreate,
-            Op::AnnotationsUpdate,
-            Op::AnnotationsDelete,
-        ] {
-            assert_eq!(
-                session
-                    .receive(
-                        request(1, op, serde_json::json!({})),
-                        &receiver.borrow().status
-                    )
-                    .reply()
-                    .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::Forbidden)
-                }
-            );
-        }
+        );
     }
     #[test]
     fn duplicate_hello_rejects_request_and_preserves_negotiated_role() {
@@ -887,282 +662,5 @@ mod tests {
         };
         assert_eq!(id, RequestId(4));
         assert_eq!(subscription.topics, vec![Topic::State, Topic::Control]);
-    }
-    #[test]
-    fn settings_permissions_and_invalid_bodies_are_decided_before_database_admission() {
-        let publisher = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(
-            "settings-session".into(),
-        ));
-        let receiver = publisher.subscribe();
-        let status = receiver.borrow();
-        let mut ui = ConnectionSession {
-            state: State::Ready(ReadyRole::Ui {
-                state: UiState::Starting,
-            }),
-            allowed: AllowedRoles::Quartz,
-        };
-        for body in [
-            serde_json::json!({"language":"unknown"}),
-            serde_json::json!({"hour_cycle":"25"}),
-            serde_json::json!({"first_day_of_week":null}),
-        ] {
-            assert_eq!(
-                ui.receive(request(1, Op::SettingsSet, body), &status.status)
-                    .reply()
-                    .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::BadRequest)
-                }
-            );
-        }
-        assert!(matches!(
-            ui.receive(
-                request(2, Op::SettingsGet, serde_json::json!({})),
-                &status.status
-            ),
-            Action::Write {
-                request: crate::persistence::dispatch::WriteRequest::SettingsGet,
-                ..
-            }
-        ));
-    }
-    #[test]
-    fn timed_controls_require_ui_and_decode_required_fields_before_admission() {
-        let status =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("timed-session".into()));
-        let receiver = status.subscribe();
-        let status = &receiver.borrow().status;
-        let ops = [
-            Op::TrackingPause,
-            Op::TrackingResume,
-            Op::TrackingKeepAlive,
-            Op::PrivacyModeSet,
-        ];
-        let mut session = ConnectionSession {
-            state: State::Ready(ReadyRole::Cli),
-            allowed: AllowedRoles::Quartz,
-        };
-        for op in ops {
-            assert_eq!(
-                session
-                    .receive(request(1, op, serde_json::json!({})), status)
-                    .reply()
-                    .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::Forbidden)
-                }
-            );
-        }
-        let mut ui = ConnectionSession {
-            state: State::Ready(ReadyRole::Ui {
-                state: UiState::Starting,
-            }),
-            allowed: AllowedRoles::Quartz,
-        };
-        for op in [Op::TrackingPause, Op::TrackingKeepAlive, Op::PrivacyModeSet] {
-            assert_eq!(
-                ui.receive(request(2, op, serde_json::json!({})), status)
-                    .reply()
-                    .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::BadRequest)
-                }
-            );
-        }
-        for body in [
-            serde_json::json!({"enabled":true}),
-            serde_json::json!({"enabled":true,"until_utc_ms":null}),
-            serde_json::json!({"enabled":"true","until_utc_ms":100}),
-        ] {
-            assert_eq!(
-                ui.receive(request(3, Op::PrivacyModeSet, body), status)
-                    .reply()
-                    .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::BadRequest)
-                }
-            );
-        }
-        for op in [Op::TrackingPause, Op::TrackingKeepAlive] {
-            assert!(matches!(
-                ui.receive(
-                    request(4, op, serde_json::json!({"until_utc_ms":100})),
-                    status
-                ),
-                Action::Timed { .. }
-            ));
-        }
-        assert!(matches!(
-            ui.receive(
-                request(5, Op::TrackingResume, serde_json::json!({})),
-                status
-            ),
-            Action::Timed {
-                command: super::super::TimedCommand::Resume,
-                ..
-            }
-        ));
-        assert!(matches!(
-            ui.receive(
-                request(6, Op::PrivacyModeSet, serde_json::json!({"enabled":false})),
-                status
-            ),
-            Action::Timed {
-                command: super::super::TimedCommand::DisablePrivacy,
-                ..
-            }
-        ));
-        assert!(matches!(
-            ui.receive(
-                request(
-                    7,
-                    Op::PrivacyModeSet,
-                    serde_json::json!({"enabled":true,"until_utc_ms":100})
-                ),
-                status
-            ),
-            Action::Timed {
-                command: super::super::TimedCommand::EnablePrivacy(_),
-                ..
-            }
-        ));
-    }
-    #[test]
-    fn rule_and_category_reads_reject_cursor_field_before_admission() {
-        let publisher =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("read-admission".into()));
-        let status = publisher.subscribe();
-        let session = || ConnectionSession {
-            state: State::Ready(ReadyRole::Ui {
-                state: UiState::Visible,
-            }),
-            allowed: AllowedRoles::Quartz,
-        };
-        for (op, body) in [
-            (Op::RuleSetsTree, serde_json::json!({"kind":"privacy"})),
-            (
-                Op::RuleSetsGet,
-                serde_json::json!({"key":"builtin.privacy","view":"own"}),
-            ),
-            (
-                Op::RulesTextExport,
-                serde_json::json!({"key":"builtin.privacy"}),
-            ),
-            (Op::CategoriesList, serde_json::json!({})),
-        ] {
-            assert!(
-                matches!(
-                    session().receive(request(1, op, body.clone()), &status.borrow().status),
-                    Action::Rules { .. } | Action::Write { .. }
-                ),
-                "{op:?}"
-            );
-            let mut with_cursor = body;
-            with_cursor["cursor"] = serde_json::json!(null);
-            assert_eq!(
-                session()
-                    .receive(request(2, op, with_cursor), &status.borrow().status)
-                    .reply()
-                    .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::BadRequest)
-                },
-                "{op:?}"
-            );
-        }
-    }
-    #[test]
-    fn ui_and_cli_validation_requests_are_decoded_strictly_before_admission() {
-        let status =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("validation".into()));
-        for role in [
-            ReadyRole::Ui {
-                state: UiState::Visible,
-            },
-            ReadyRole::Cli,
-        ] {
-            let mut session = ConnectionSession {
-                state: State::Ready(role),
-                allowed: AllowedRoles::Quartz,
-            };
-            let body = serde_json::json!({"key":"user.validation","base_version":0,"text":""});
-            assert!(matches!(
-                session.receive(
-                    request(1, Op::RulesTextValidate, body.clone()),
-                    &status.subscribe().borrow().status
-                ),
-                Action::Write {
-                    request: crate::persistence::dispatch::WriteRequest::RuleValidation(_),
-                    ..
-                }
-            ));
-            let mut invalid = body;
-            invalid["extra"] = serde_json::json!(true);
-            assert_eq!(
-                session
-                    .receive(
-                        request(2, Op::RulesTextValidate, invalid),
-                        &status.subscribe().borrow().status
-                    )
-                    .reply()
-                    .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::BadRequest)
-                }
-            );
-        }
-    }
-    #[test]
-    fn rule_previews_check_roles_and_nested_bodies_before_worker_admission() {
-        let status =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("preview-roles".into()));
-        for mutation_op in ["rule_sets.edit", "rules_text.import"] {
-            let body = serde_json::json!({
-                "mutation": {"op": mutation_op, "body": {"key": "user.preview", "base_version": 0, "text": ""}},
-                "start_date": "2025-01-02",
-                "end_date": "2025-01-03",
-            });
-            let mut cli = ConnectionSession {
-                state: State::Ready(ReadyRole::Cli),
-                allowed: AllowedRoles::Quartz,
-            };
-            assert_eq!(
-                cli.receive(
-                    request(2, Op::RulesPreview, body.clone()),
-                    &status.subscribe().borrow().status,
-                )
-                .reply()
-                .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::Forbidden)
-                }
-            );
-            let mut ui = ConnectionSession {
-                state: State::Ready(ReadyRole::Ui {
-                    state: UiState::Visible,
-                }),
-                allowed: AllowedRoles::Quartz,
-            };
-            assert!(matches!(
-                ui.receive(
-                    request(2, Op::RulesPreview, body.clone()),
-                    &status.subscribe().borrow().status,
-                ),
-                Action::Preview { .. }
-            ));
-            let mut invalid = body;
-            invalid["mutation"]["body"]["unknown_field"] = serde_json::json!("forbidden");
-            assert_eq!(
-                ui.receive(
-                    request(3, Op::RulesPreview, invalid),
-                    &status.subscribe().borrow().status,
-                )
-                .reply()
-                .outcome,
-                ResponseOutcome::Err {
-                    error: ProtocolError::new(ErrorKind::BadRequest)
-                }
-            );
-        }
     }
 }

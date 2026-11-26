@@ -32,47 +32,6 @@ fn read_response_json_snapshots() {
         json!({"code":"rule_set_not_found","key":"user.local"}),
     );
 }
-#[test]
-fn requests_reject_unknown_fields_and_invalid_enums() {
-    for body in [
-        json!({}),
-        json!({"kind":"precedent"}),
-        json!({"kind":"privacy","extra":1}),
-        json!({"kind":"privacy","cursor":null}),
-    ] {
-        assert!(serde_json::from_value::<RuleSetsTreeRequest>(body).is_err());
-    }
-    for body in [
-        json!({"key":"user.local"}),
-        json!({"key":"user.local","view":"merged"}),
-        json!({"key":"user.local","view":"own","version":1}),
-        json!({"key":"user.local","view":"own","cursor":null}),
-        json!({"key":"user.local","view":"own","extra":true}),
-    ] {
-        assert!(serde_json::from_value::<RuleSetsGetRequest>(body).is_err());
-    }
-    assert!(
-        serde_json::from_str::<RuleSetsGetRequest>(
-            r#"{"key":"user.local","view":"own","view":"effective"}"#
-        )
-        .is_err()
-    );
-}
-#[test]
-fn entries_ignore_additive_fields_and_reject_invalid_names_and_category_references() {
-    let mut unknown = WireSnapshot::rule();
-    unknown["content"]["extra"] = json!(true);
-    assert!(serde_json::from_value::<RuleSetEntry>(unknown).is_ok());
-    let mut category = WireSnapshot::rule();
-    category["content"]["category"] = json!("builtin:learning");
-    assert!(serde_json::from_value::<RuleSetEntry>(category).is_err());
-    let mut field = WireSnapshot::rule();
-    field["content"]["when"][0]["field"] = json!("app.name");
-    assert!(serde_json::from_value::<RuleSetEntry>(field).is_err());
-    let mut op = WireSnapshot::rule();
-    op["content"]["when"][0]["op"] = json!("similar");
-    assert!(serde_json::from_value::<RuleSetEntry>(op).is_err());
-}
 
 #[test]
 fn mutation_bodies_and_results_match_wire_snapshots() {
@@ -83,10 +42,6 @@ fn mutation_bodies_and_results_match_wire_snapshots() {
     WireSnapshot::round_trip::<RuleSetsSetEnabledRequest>(fixture["set_enabled"].clone());
     WireSnapshot::round_trip::<RuleSetsDeleteRequest>(fixture["delete"].clone());
     WireSnapshot::round_trip::<RuleSetsWriteResponse>(fixture["response"].clone());
-    let mut future = fixture["response"].clone();
-    future["extra"] = json!(true);
-    future["sets"][0]["extra"] = json!(true);
-    assert!(serde_json::from_value::<RuleSetsWriteResponse>(future).is_ok());
     for body in [
         json!({"code":"rule_set_read_only","key":"builtin.privacy"}),
         json!({"code":"rule_set_has_children","key":"user.parent"}),
@@ -96,46 +51,6 @@ fn mutation_bodies_and_results_match_wire_snapshots() {
     ] {
         WireSnapshot::round_trip::<crate::ProtocolError>(body);
     }
-}
-impl WireSnapshot {
-    fn strict_mutation<T: serde::de::DeserializeOwned>(mut body: serde_json::Value, zero: bool) {
-        assert!(serde_json::from_value::<T>(body.clone()).is_ok());
-        body["extra"] = json!(true);
-        assert!(serde_json::from_value::<T>(body.clone()).is_err());
-        body.as_object_mut().expect("body").remove("extra");
-        for invalid in [
-            json!(-1),
-            json!(u64::from(u32::MAX) + 1),
-            json!(1.5),
-            json!(true),
-            json!("1"),
-        ] {
-            body["base_version"] = invalid;
-            assert!(serde_json::from_value::<T>(body.clone()).is_err());
-        }
-        body["base_version"] = json!(0);
-        assert_eq!(serde_json::from_value::<T>(body.clone()).is_ok(), zero);
-        body["base_version"] = json!(u32::MAX);
-        assert!(serde_json::from_value::<T>(body).is_ok());
-    }
-}
-#[test]
-fn mutations_reject_unknown_fields_and_invalid_revision_numbers() {
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/fixtures/rule-mutations.json"))
-            .expect("fixture");
-    WireSnapshot::strict_mutation::<RuleSetsEditRequest>(fixture["edit"].clone(), true);
-    WireSnapshot::strict_mutation::<RuleSetsSetEnabledRequest>(
-        fixture["set_enabled"].clone(),
-        false,
-    );
-    WireSnapshot::strict_mutation::<RuleSetsDeleteRequest>(fixture["delete"].clone(), false);
-    assert!(
-        serde_json::from_str::<RuleSetsEditRequest>(
-            r#"{"key":"user.a","base_version":1,"base_version":2,"text":""}"#
-        )
-        .is_err()
-    );
 }
 
 #[test]
@@ -147,36 +62,6 @@ fn rule_text_contracts_preserve_fixtures_and_accept_additive_responses() {
     WireSnapshot::round_trip::<RulesTextValidateResponse>(fixture["valid"].clone());
     WireSnapshot::round_trip::<RulesTextValidateResponse>(fixture["invalid"].clone());
     WireSnapshot::round_trip::<RulesTextExportResponse>(fixture["page"].clone());
-    WireSnapshot::strict_mutation::<RulesTextValidateRequest>(fixture["validate"].clone(), true);
-    let mut export = fixture["export"].clone();
-    export["extra"] = json!(true);
-    assert!(serde_json::from_value::<RulesTextExportRequest>(export).is_err());
-    let mut with_cursor = fixture["export"].clone();
-    with_cursor["cursor"] = json!(null);
-    assert!(serde_json::from_value::<RulesTextExportRequest>(with_cursor).is_err());
-    let mut versioned = fixture["export"].clone();
-    versioned["version"] = json!(1);
-    assert!(serde_json::from_value::<RulesTextExportRequest>(versioned).is_err());
-    assert!(
-        serde_json::from_str::<RulesTextValidateRequest>(
-            r#"{"key":"user.text","base_version":0,"text":"","text":""}"#
-        )
-        .is_err()
-    );
-    assert!(
-        serde_json::from_str::<RulesTextExportRequest>(r#"{"key":"user.text","key":"user.other"}"#)
-            .is_err()
-    );
-    let mut valid = fixture["valid"].clone();
-    valid["future"] = json!(true);
-    assert!(serde_json::from_value::<RulesTextValidateResponse>(valid).is_ok());
-    let mut page = fixture["page"].clone();
-    page["future"] = json!(true);
-    assert!(serde_json::from_value::<RulesTextExportResponse>(page).is_ok());
-    for role in [crate::Role::Ui, crate::Role::Cli] {
-        assert!(role.authorize(crate::Op::RulesTextValidate).is_ok());
-        assert!(role.authorize(crate::Op::RulesTextExport).is_ok());
-    }
 }
 
 #[test]

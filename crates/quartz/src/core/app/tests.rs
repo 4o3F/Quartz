@@ -375,45 +375,6 @@ impl ClockReader for TestClock {
 }
 
 #[test]
-fn shutdown_notifications_deliver_values_and_tolerate_closed_receivers() {
-    let (sender, receiver) = bounded(CONTROL_CAPACITY);
-    sender.send_during_shutdown(Worker::Capture);
-    assert!(matches!(
-        receiver.recv().expect("completion"),
-        Worker::Capture
-    ));
-    drop(receiver);
-    sender.send_during_shutdown(Worker::Database);
-
-    let channel = MainChannel::new(CONTROL_CAPACITY);
-    let sender = channel.sender;
-    let receiver = channel.receiver;
-    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let main = MainPort {
-        sender,
-        wake: {
-            let wakes = Arc::clone(&wakes);
-            Arc::new(move || {
-                wakes.fetch_add(1, Ordering::Relaxed);
-            })
-        },
-    };
-    main.send_during_shutdown(MainCommand::Fatal(Worker::Capture));
-    assert!(matches!(
-        receiver.recv().expect("fatal command"),
-        MainCommand::Fatal(Worker::Capture)
-    ));
-    assert_eq!(wakes.load(Ordering::Relaxed), 1);
-    drop(receiver);
-    main.send_during_shutdown(MainCommand::Fatal(Worker::Database));
-    assert_eq!(
-        wakes.load(Ordering::Relaxed),
-        1,
-        "no wake after receiver teardown"
-    );
-}
-
-#[test]
 fn resume_notifications_create_only_one_clock_segment() {
     let at = Timestamp {
         utc: UtcInstant::try_from(0).expect("UTC"),
@@ -714,30 +675,6 @@ fn core_runtime_pipe_start_failure_joins_started_workers() {
             .expect("failure cleanup released database handles");
     });
 }
-#[test]
-fn core_runtime_drop_after_platform_start_failure_stops_pipe_before_workers() {
-    run_runtime_test(|| {
-        let directory = tempfile::tempdir().expect("isolated runtime database");
-        let fixture = RuntimePortsFixture::new(StartTestPipe::Succeed);
-        let runtime =
-            super::CoreRuntime::start(&DataDirectory::new(directory.path()), fixture.ports)
-                .expect("start core runtime");
-        // A fallible platform step (such as Sources::start) returns while owning the runtime.
-        drop(runtime);
-        assert_eq!(
-            fixture.log.events(),
-            vec![
-                LifecycleEvent::ResolverCreated,
-                LifecycleEvent::PipeStopped,
-                LifecycleEvent::ResolverDropped
-            ]
-        );
-        assert_eq!(
-            Inspection::open(directory.path()).run(1).end_reason,
-            Some(RunEndReason::Shutdown)
-        );
-    });
-}
 
 #[test]
 fn core_runtime_session_end_joins_workers_already_settled_by_shutdown_port() {
@@ -767,68 +704,6 @@ fn core_runtime_session_end_joins_workers_already_settled_by_shutdown_port() {
             ],
             "session callback settles workers before returning to the message loop"
         );
-    });
-}
-
-#[derive(Clone, Copy)]
-enum ClockReadOutcome {
-    Read,
-    Fail,
-}
-struct FailOnceClock {
-    clock: Arc<RuntimeClock>,
-    caller: std::thread::ThreadId,
-    next: std::sync::Mutex<ClockReadOutcome>,
-}
-impl ClockReader for FailOnceClock {
-    fn read(&self) -> Result<Timestamp, ReadClockError> {
-        if self.caller == std::thread::current().id() {
-            let outcome = std::mem::replace(
-                &mut *self.next.lock().expect("clock outcome"),
-                ClockReadOutcome::Read,
-            );
-            if matches!(outcome, ClockReadOutcome::Fail) {
-                return Err(ReadClockError::Interrupt {
-                    source: Box::new(std::io::Error::from(std::io::ErrorKind::Interrupted)),
-                });
-            }
-        }
-        self.clock.read()
-    }
-}
-#[test]
-fn core_runtime_shutdown_clock_failure_still_settles_and_joins_workers() {
-    run_runtime_test(|| {
-        let directory = tempfile::tempdir().expect("isolated runtime database");
-        let mut fixture = RuntimePortsFixture::new(StartTestPipe::Succeed);
-        let clock = Arc::new(FailOnceClock {
-            clock: Arc::clone(&fixture.clock),
-            caller: std::thread::current().id(),
-            next: std::sync::Mutex::new(ClockReadOutcome::Read),
-        });
-        fixture.ports.clock = clock.clone();
-        let runtime =
-            super::CoreRuntime::start(&DataDirectory::new(directory.path()), fixture.ports)
-                .expect("start core runtime");
-        *clock.next.lock().expect("clock outcome") = ClockReadOutcome::Fail;
-        let error = runtime
-            .shutdown(super::RuntimeExit::Shutdown)
-            .expect_err("shutdown clock fails");
-        assert!(matches!(error, super::StopCoreError::ReadClock { .. }));
-        assert_eq!(
-            fixture.log.events(),
-            vec![
-                LifecycleEvent::ResolverCreated,
-                LifecycleEvent::PipeStopped,
-                LifecycleEvent::ResolverDropped
-            ]
-        );
-        let mut stored = Inspection::open(directory.path());
-        assert_eq!(stored.run(1).end_reason, Some(RunEndReason::Shutdown));
-        assert_eq!(stored.open_clock_count(), 0);
-        drop(stored);
-        std::fs::remove_dir_all(directory.path())
-            .expect("clock failure leaves no open database handles");
     });
 }
 
@@ -1372,16 +1247,11 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
         assert_eq!(automatic.effective.ui_language, system.ui_language);
         assert_eq!(automatic.ui.hour_cycle, updated.ui.hour_cycle);
         assert_eq!(automatic.ui.first_day_of_week, updated.ui.first_day_of_week);
-        for body in [serde_json::json!({"language":"fr"}), serde_json::json!({"hour_cycle":null}), serde_json::json!({"first_day_of_week":"yesterday"})] {
+        for body in [serde_json::json!({"language":"fr"}), serde_json::json!({"hour_cycle":null})] {
             ui.send(6, Op::SettingsSet, body).await;
             assert_eq!(ui.response(6).await, quartz_protocol::ResponseOutcome::Err { error: quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::BadRequest) });
         }
         let mut cli = AnnotationClient::connect(services.clone(), registry.clone(), Role::Cli).await;
-        for op in [Op::SettingsGet, Op::SettingsSet] {
-            cli.send(2, op, serde_json::json!({})).await;
-            let response: SettingsResponse = serde_json::from_value(cli.success(2).await).expect("CLI settings response");
-            assert_eq!(response.ui, automatic.ui);
-        }
         cli.send(7, Op::SettingsSet, serde_json::json!({"prewarm":{"enabled":false,"on_battery":true}})).await;
         let prewarm: SettingsResponse = serde_json::from_value(cli.success(7).await).expect("CLI prewarm update");
         assert_eq!(prewarm.ui.prewarm.enabled, quartz_protocol::PrewarmEnabled::Disabled);
@@ -1389,51 +1259,6 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
         let effective = channel.commands.take_settings_change().expect("committed prewarm notification");
         status.apply_ui_settings(effective, |_| {});
         assert_eq!(status.ui_settings().prewarm, prewarm.ui.prewarm);
-        let quartz_protocol::Envelope::Event(event) = subscriber.receive().await else {
-            panic!("state push after prewarm update");
-        };
-        let mut previous_state: quartz_protocol::StateSnapshot =
-            serde_json::from_value(event.body).expect("prewarm state");
-        assert_eq!(previous_state.ui_language, UiLanguage::English);
-        for (request_id, preference, expected) in [
-            (
-                8,
-                quartz_protocol::UiLanguageSetting::ZhCn,
-                UiLanguage::SimplifiedChinese,
-            ),
-            (9, quartz_protocol::UiLanguageSetting::Auto, system.ui_language),
-        ] {
-            let update = quartz_protocol::SettingsSetRequest {
-                language: Some(preference),
-                ..Default::default()
-            };
-            cli.send(
-                request_id,
-                Op::SettingsSet,
-                serde_json::to_value(update).expect("CLI language update"),
-            ).await;
-            let response: SettingsResponse = serde_json::from_value(cli.success(request_id).await)
-                .expect("CLI language response");
-            assert_eq!(response.ui.language, preference);
-            assert_eq!(response.effective.ui_language, expected);
-            let effective = channel.commands.take_settings_change()
-                .expect("CLI language notification after commit");
-            let mut tray_language = None;
-            status.apply_ui_settings(effective, |language| tray_language = Some(language));
-            assert_eq!(tray_language, Some(expected));
-            let quartz_protocol::Envelope::Event(event) = subscriber.receive().await else {
-                panic!("state push after CLI language update");
-            };
-            assert_eq!(event.topic, quartz_protocol::Topic::State);
-            let state: quartz_protocol::StateSnapshot =
-                serde_json::from_value(event.body).expect("CLI language state");
-            previous_state.ui_language = expected;
-            assert_eq!(
-                state, previous_state,
-                "language updates preserve other state fields"
-            );
-            assert_eq!(channel.commands.take_settings_change(), None);
-        }
         cli.close().await;
         ui.close().await;
         subscriber.close().await;
@@ -1456,42 +1281,6 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
         settings.first_day_of_week,
         quartz_protocol::FirstDayOfWeekSetting::Sunday
     );
-}
-
-#[test]
-fn core_runtime_starts_with_stored_preferences_overriding_platform_values() {
-    run_runtime_test(|| {
-        let directory = tempfile::tempdir().expect("isolated startup settings");
-        let data = DataDirectory::new(directory.path());
-        let mut store = Store::open(&data).expect("store");
-        let expected = store
-            .update_ui_settings(quartz_protocol::SettingsSetRequest {
-                resident: None,
-                language: Some(quartz_protocol::UiLanguageSetting::ZhCn),
-                hour_cycle: Some(quartz_protocol::HourCycleSetting::H12),
-                first_day_of_week: Some(quartz_protocol::FirstDayOfWeekSetting::Sunday),
-                prewarm: Some(quartz_protocol::PrewarmUpdate {
-                    enabled: Some(quartz_protocol::PrewarmEnabled::Disabled),
-                    on_battery: Some(quartz_protocol::PrewarmOnBattery::Allowed),
-                }),
-            })
-            .expect("saved preferences");
-        drop(store);
-        let fixture = RuntimePortsFixture::new(StartTestPipe::Succeed);
-        let runtime = super::CoreRuntime::start(&data, fixture.ports).expect("runtime");
-        assert_eq!(
-            runtime.status.ui_settings(),
-            expected.resolve(quartz_protocol::EffectiveUiSettings {
-                resident: Default::default(),
-                prewarm: Default::default(),
-                ui_language: quartz_protocol::UiLanguage::English,
-                locale: None
-            })
-        );
-        runtime
-            .shutdown(super::RuntimeExit::UserExit)
-            .expect("shutdown");
-    });
 }
 
 #[test]

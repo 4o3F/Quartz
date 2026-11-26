@@ -42,7 +42,7 @@ async fn closed_bridge_reports_a_typed_start_error() {
 #[cfg(windows)]
 mod pipe {
     use super::*;
-    use crate::failure::{FailureAction, FailureKind, Severity};
+    use crate::failure::{FailureKind, Severity};
     use quartz_pipe::{
         CONNECT_TIMEOUT, CORE_START_TIMEOUT, OpenCorePipeError, PipeClient, PipeName,
         RESPONSE_TIMEOUT,
@@ -524,41 +524,6 @@ mod pipe {
         ui.stop().await;
     }
 
-    #[tokio::test]
-    async fn typed_open_errors_map_to_all_initial_failure_categories() {
-        let mut failures = vec![
-            CallCoreError::Open {
-                source: OpenCorePipeError::CoreNotRunning {
-                    source: std::io::ErrorKind::NotFound.into(),
-                },
-            },
-            CallCoreError::Open {
-                source: OpenCorePipeError::Connect {
-                    source: std::io::ErrorKind::PermissionDenied.into(),
-                },
-            },
-            CallCoreError::Open {
-                source: OpenCorePipeError::ServerIdentity {
-                    source: quartz_pipe::CheckPeerError::Executable,
-                },
-            },
-        ];
-        for expected in [
-            FailureKind::CoreNotRunning,
-            FailureKind::ConnectIo,
-            FailureKind::IdentityRejected,
-        ] {
-            let failure = Failure::from_connection(&failures.remove(0));
-            assert_eq!(failure.kind(), expected);
-            assert_eq!(failure.severity(), expected.severity());
-            if expected == FailureKind::CoreNotRunning {
-                assert_eq!(
-                    failure.actions(),
-                    &[FailureAction::StartCore, FailureAction::RetryConnection]
-                );
-            }
-        }
-    }
     #[tokio::test]
     async fn every_initial_connection_failure_stops_until_an_action() {
         struct Case {

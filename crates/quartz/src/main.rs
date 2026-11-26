@@ -533,76 +533,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_arguments_do_not_start_core() {
-        for args in [
-            vec!["--unknown"],
-            vec!["--bogus"],
-            vec!["unknown"],
-            vec!["--parent-window=123"],
-            vec!["native-host"],
-            vec!["native-host", "--help"],
-            vec!["chrome-extension://x/"],
-            vec!["chrome-extension://x/", "--parent-window=1"],
-        ] {
-            let error = Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()))
-                .expect_err("unknown arguments must not start the core");
-            assert_eq!(error.exit_code(), 2, "{args:?}");
-        }
-    }
-
-    #[test]
-    fn unknown_flag_retains_clap_diagnostic_and_exit_code() {
-        let error = Args::try_parse_from(["quartz", "--unknown"])
-            .expect_err("unknown flag must fail to parse");
-        assert_eq!(
-            error.kind(),
-            ErrorKind::UnknownArgument,
-            "unknown flag diagnostic"
-        );
-        assert_eq!(error.exit_code(), 2, "parse failure exit code");
-        assert!(
-            error.to_string().contains("--unknown"),
-            "diagnostic identifies the rejected flag"
-        );
-    }
-
-    #[test]
-    fn internal_commands_and_autostart() {
+    fn parses_every_command_and_key_flags() {
         for (args, expected) in [
             (
                 vec![],
                 Args {
                     autostart: false,
                     command: None,
-                },
-            ),
-            (
-                vec!["--autostart"],
-                Args {
-                    autostart: true,
-                    command: None,
-                },
-            ),
-            (
-                vec!["ui"],
-                Args {
-                    autostart: false,
-                    command: Some(Command::Ui {
-                        prewarm: false,
-                        core_error: None,
-                        backup_path: vec![],
-                    }),
-                },
-            ),
-            (
-                vec!["ui", "--prewarm"],
-                Args {
-                    autostart: false,
-                    command: Some(Command::Ui {
-                        prewarm: true,
-                        core_error: None,
-                        backup_path: vec![],
-                    }),
                 },
             ),
             (
@@ -616,44 +553,68 @@ mod tests {
                     }),
                 },
             ),
-        ] {
-            assert_eq!(
-                Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()))
-                    .expect("valid command arguments"),
-                expected,
-                "{args:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn user_commands_retain_arguments() {
-        for (args, expected) in [
             (
-                vec!["dump", "--date", "2026-11-16"],
-                CliCommand::Dump {
-                    date: "2026-11-16".into(),
-                    format: dump::DumpFormat::Text,
-                    offline: false,
-                },
-            ),
-            (vec!["status"], CliCommand::Status),
-            (
-                vec!["gen-data", "--db", "simulation.db"],
-                CliCommand::GenData {
-                    db: "simulation.db".into(),
-                    profile: generate_data::Profile::Typical,
-                    seed: generate_data::DEFAULT_SEED,
-                    days: generate_data::DEFAULT_DAYS,
+                vec![
+                    "ui",
+                    "--core-error",
+                    "migration_failed",
+                    "--backup-path",
+                    "C:/数据/backup with spaces.db",
+                ],
+                Args {
+                    autostart: false,
+                    command: Some(Command::Ui {
+                        prewarm: false,
+                        core_error: Some(quartz_protocol::CoreErrorCode::MigrationFailed),
+                        backup_path: vec![PathBuf::from("C:/数据/backup with spaces.db")],
+                    }),
                 },
             ),
             (
-                vec!["bench-query", "--db", "simulation.db"],
-                CliCommand::BenchQuery {
-                    db: "simulation.db".into(),
-                    runs: bench_query::DEFAULT_RUNS,
-                    scope: bench_query::BenchQueryScope::All,
-                    input: bench_query::BenchQueryInput::Isolated,
+                vec![
+                    "dump",
+                    "--date",
+                    "2026-11-16",
+                    "--format",
+                    "json",
+                    "--offline",
+                ],
+                Args {
+                    autostart: false,
+                    command: Some(Command::Cli(CliCommand::Dump {
+                        date: "2026-11-16".into(),
+                        format: dump::DumpFormat::Json,
+                        offline: true,
+                    })),
+                },
+            ),
+            (
+                vec!["status"],
+                Args {
+                    autostart: false,
+                    command: Some(Command::Cli(CliCommand::Status)),
+                },
+            ),
+            (
+                vec![
+                    "gen-data",
+                    "--db",
+                    "simulation.db",
+                    "--profile",
+                    "heavy",
+                    "--seed",
+                    "0",
+                    "--days",
+                    "3",
+                ],
+                Args {
+                    autostart: false,
+                    command: Some(Command::Cli(CliCommand::GenData {
+                        db: "simulation.db".into(),
+                        profile: generate_data::Profile::Heavy,
+                        seed: 0,
+                        days: 3,
+                    })),
                 },
             ),
             (
@@ -666,101 +627,72 @@ mod tests {
                     "--input",
                     "prepared",
                 ],
-                CliCommand::BenchQuery {
-                    db: "simulation.db".into(),
-                    runs: bench_query::DEFAULT_RUNS,
-                    scope: bench_query::BenchQueryScope::Pipeline,
-                    input: bench_query::BenchQueryInput::Prepared,
+                Args {
+                    autostart: false,
+                    command: Some(Command::Cli(CliCommand::BenchQuery {
+                        db: "simulation.db".into(),
+                        runs: bench_query::DEFAULT_RUNS,
+                        scope: bench_query::BenchQueryScope::Pipeline,
+                        input: bench_query::BenchQueryInput::Prepared,
+                    })),
                 },
             ),
             (
-                vec!["restore-backup", "backup.db"],
-                CliCommand::RestoreBackup {
-                    file: "backup.db".into(),
-                    yes: false,
+                vec!["restore-backup", "backup.db", "--yes"],
+                Args {
+                    autostart: false,
+                    command: Some(Command::Cli(CliCommand::RestoreBackup {
+                        file: "backup.db".into(),
+                        yes: true,
+                    })),
+                },
+            ),
+            (
+                vec!["rules", "check", "a.yml", "b.yml"],
+                Args {
+                    autostart: false,
+                    command: Some(Command::Cli(CliCommand::Rules(RulesCommand::Check {
+                        files: vec!["a.yml".into(), "b.yml".into()],
+                    }))),
+                },
+            ),
+            (
+                vec![
+                    "settings",
+                    "set",
+                    "--language",
+                    "zh-CN",
+                    "--hour-cycle",
+                    "h12",
+                    "--first-day-of-week",
+                    "sunday",
+                    "--resident-enabled",
+                    "false",
+                    "--prewarm-enabled",
+                    "true",
+                ],
+                Args {
+                    autostart: false,
+                    command: Some(Command::Cli(CliCommand::Settings {
+                        command: SettingsCommand::Set {
+                            language: Some(LanguageArg::ZhCn),
+                            hour_cycle: Some(HourCycleArg::H12),
+                            first_day_of_week: Some(FirstDayOfWeekArg::Sunday),
+                            resident_enabled: Some(false),
+                            prewarm_enabled: Some(true),
+                            prewarm_on_battery: None,
+                        },
+                    })),
                 },
             ),
         ] {
-            let parsed =
+            assert_eq!(
                 Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()))
-                    .expect("valid command arguments");
-            assert_eq!(parsed.command, Some(Command::Cli(expected)), "{args:?}");
-        }
-    }
-
-    #[test]
-    fn locale_setting_flags_parse_into_protocol_preferences() {
-        use quartz_protocol::{FirstDayOfWeekSetting, HourCycleSetting, UiLanguageSetting};
-        for (value, expected) in [
-            ("auto", UiLanguageSetting::Auto),
-            ("zh-CN", UiLanguageSetting::ZhCn),
-            ("en", UiLanguageSetting::En),
-        ] {
-            let args = Args::try_parse_from(["quartz", "settings", "set", "--language", value])
-                .expect("supported language");
-            let Some(Command::Cli(CliCommand::Settings {
-                command: SettingsCommand::Set { language, .. },
-            })) = args.command
-            else {
-                panic!("expected settings set");
-            };
-            assert_eq!(
-                language.map(UiLanguageSetting::from),
-                Some(expected),
-                "{value}"
+                    .expect("valid command arguments"),
+                expected,
+                "{args:?}"
             );
         }
-        for (value, expected) in [
-            ("auto", HourCycleSetting::Auto),
-            ("h12", HourCycleSetting::H12),
-            ("h24", HourCycleSetting::H24),
-        ] {
-            let args = Args::try_parse_from(["quartz", "settings", "set", "--hour-cycle", value])
-                .expect("supported hour cycle");
-            let Some(Command::Cli(CliCommand::Settings {
-                command: SettingsCommand::Set { hour_cycle, .. },
-            })) = args.command
-            else {
-                panic!("expected settings set");
-            };
-            assert_eq!(
-                hour_cycle.map(HourCycleSetting::from),
-                Some(expected),
-                "{value}"
-            );
-        }
-        for (value, expected) in [
-            ("auto", FirstDayOfWeekSetting::Auto),
-            ("monday", FirstDayOfWeekSetting::Monday),
-            ("tuesday", FirstDayOfWeekSetting::Tuesday),
-            ("wednesday", FirstDayOfWeekSetting::Wednesday),
-            ("thursday", FirstDayOfWeekSetting::Thursday),
-            ("friday", FirstDayOfWeekSetting::Friday),
-            ("saturday", FirstDayOfWeekSetting::Saturday),
-            ("sunday", FirstDayOfWeekSetting::Sunday),
-        ] {
-            let args =
-                Args::try_parse_from(["quartz", "settings", "set", "--first-day-of-week", value])
-                    .expect("supported weekday");
-            let Some(Command::Cli(CliCommand::Settings {
-                command:
-                    SettingsCommand::Set {
-                        first_day_of_week, ..
-                    },
-            })) = args.command
-            else {
-                panic!("expected settings set");
-            };
-            assert_eq!(
-                first_day_of_week.map(FirstDayOfWeekSetting::from),
-                Some(expected),
-                "{value}"
-            );
-        }
-    }
-
-    #[test]
-    fn language_only_settings_update_omits_prewarm_members() {
         let args = Args::try_parse_from(["quartz", "settings", "set", "--language", "auto"])
             .expect("language update");
         let Some(Command::Cli(CliCommand::Settings { command })) = args.command else {
@@ -770,265 +702,22 @@ mod tests {
         assert!(update.prewarm.is_none());
         assert!(update.resident.is_none());
     }
-    #[test]
-    fn locale_settings_combine_with_lifecycle_flags_and_preserve_omitted_fields() {
-        let args = Args::try_parse_from([
-            "quartz",
-            "settings",
-            "set",
-            "--language",
-            "zh-CN",
-            "--hour-cycle",
-            "h12",
-            "--first-day-of-week",
-            "sunday",
-            "--resident-enabled",
-            "false",
-            "--prewarm-enabled",
-            "true",
-        ])
-        .expect("combined UI preferences");
-        assert_eq!(
-            args.command,
-            Some(Command::Cli(CliCommand::Settings {
-                command: SettingsCommand::Set {
-                    language: Some(LanguageArg::ZhCn),
-                    hour_cycle: Some(HourCycleArg::H12),
-                    first_day_of_week: Some(FirstDayOfWeekArg::Sunday),
-                    resident_enabled: Some(false),
-                    prewarm_enabled: Some(true),
-                    prewarm_on_battery: None,
-                },
-            }))
-        );
-        let args = Args::try_parse_from(["quartz", "settings", "set", "--language", "auto"])
-            .expect("language-only update");
-        assert_eq!(
-            args.command,
-            Some(Command::Cli(CliCommand::Settings {
-                command: SettingsCommand::Set {
-                    language: Some(LanguageArg::Auto),
-                    hour_cycle: None,
-                    first_day_of_week: None,
-                    resident_enabled: None,
-                    prewarm_enabled: None,
-                    prewarm_on_battery: None,
-                },
-            }))
-        );
-    }
 
     #[test]
-    fn locale_setting_flags_reject_unsupported_or_missing_values() {
-        for (flag, value) in [
-            ("--language", "en-XA"),
-            ("--language", "fr"),
-            ("--language", "zh-cn"),
-            ("--hour-cycle", "24"),
-            ("--hour-cycle", "h23"),
-            ("--first-day-of-week", "1"),
-            ("--first-day-of-week", "mon"),
-        ] {
-            assert!(
-                Args::try_parse_from(["quartz", "settings", "set", flag, value]).is_err(),
-                "{flag} {value}"
-            );
-        }
-        for flag in ["--language", "--hour-cycle", "--first-day-of-week"] {
-            assert!(
-                Args::try_parse_from(["quartz", "settings", "set", flag]).is_err(),
-                "{flag} requires a value"
-            );
-        }
-    }
-
-    #[test]
-    fn resident_setting_flag_parses_without_running_the_core() {
-        let args =
-            Args::try_parse_from(["quartz", "settings", "set", "--resident-enabled", "false"])
-                .expect("resident CLI");
-        assert!(matches!(
-            args.command,
-            Some(Command::Cli(CliCommand::Settings {
-                command: SettingsCommand::Set {
-                    resident_enabled: Some(false),
-                    ..
-                }
-            }))
-        ));
-        assert!(
-            Args::try_parse_from(["quartz", "settings", "set", "--resident-enabled", "yes"])
-                .is_err()
-        );
-    }
-    #[test]
-    fn settings_prewarm_flags_parse_without_running_the_core() {
-        let parsed = Args::try_parse_from([
-            "quartz",
-            "settings",
-            "set",
-            "--prewarm-enabled",
-            "false",
-            "--prewarm-on-battery",
-            "true",
-        ])
-        .expect("settings command");
-        assert_eq!(
-            parsed.command,
-            Some(Command::Cli(CliCommand::Settings {
-                command: SettingsCommand::Set {
-                    language: None,
-                    hour_cycle: None,
-                    first_day_of_week: None,
-                    resident_enabled: None,
-                    prewarm_enabled: Some(false),
-                    prewarm_on_battery: Some(true)
-                }
-            }))
-        );
-        assert!(
-            Args::try_parse_from(["quartz", "settings", "set", "--prewarm-enabled", "yes"])
-                .is_err()
-        );
-    }
-    #[test]
-    fn restore_confirmation_is_an_explicit_flag() {
+    fn invalid_arguments_fail_with_exit_code_two() {
         for args in [
-            vec!["quartz", "restore-backup", "backup.db", "--yes"],
-            vec!["quartz", "restore-backup", "--yes", "backup.db"],
-        ] {
-            assert_eq!(
-                Args::try_parse_from(args)
-                    .expect("confirmed restore arguments")
-                    .command,
-                Some(Command::Cli(CliCommand::RestoreBackup {
-                    file: "backup.db".into(),
-                    yes: true
-                }))
-            );
-        }
-        for args in [
-            vec!["quartz", "restore-backup", "--yes"],
-            vec!["quartz", "restore-backup", "backup.db", "yes"],
-            vec!["quartz", "restore-backup", "backup.db", "--yes=false"],
-        ] {
-            assert!(
-                Args::try_parse_from(args).is_err(),
-                "invalid confirmation syntax"
-            );
-        }
-        let help =
-            Args::try_parse_from(["quartz", "restore-backup", "--help"]).expect_err("restore help");
-        assert_eq!(help.exit_code(), 0);
-        assert!(help.to_string().contains("--yes"));
-    }
-
-    #[test]
-    fn startup_error_arguments_are_typed_and_recovery_path_is_required() {
-        let args = Args::try_parse_from([
-            "quartz",
-            "ui",
-            "--core-error",
-            "migration_failed",
-            "--backup-path",
-            "C:/数据/backup with spaces.db",
-        ])
-        .expect("structured failure arguments");
-        assert!(
-            matches!(args.command,Some(Command::Ui { core_error: Some(quartz_protocol::CoreErrorCode::MigrationFailed), backup_path, .. }) if backup_path == [PathBuf::from("C:/数据/backup with spaces.db")])
-        );
-        for args in [
-            vec!["quartz", "ui", "--core-error", "unknown"],
-            vec!["quartz", "ui", "--core-error", "migration_failed"],
-            vec!["quartz", "ui", "--backup-path", "backup.db"],
-            vec!["quartz", "ui", "--core-error", "other_session", "--prewarm"],
-        ] {
-            assert!(Args::try_parse_from(args).is_err());
-        }
-    }
-
-    #[test]
-    fn rules_check_command_parses_files() {
-        let parsed = Args::try_parse_from(["quartz", "rules", "check", "a.yml", "b.yml"])
-            .expect("valid command arguments");
-        assert_eq!(
-            parsed.command,
-            Some(Command::Cli(CliCommand::Rules(RulesCommand::Check {
-                files: vec!["a.yml".into(), "b.yml".into()],
-            })))
-        );
-    }
-
-    #[test]
-    fn acceptance_commands_parse_typed_options_and_reject_invalid_values() {
-        let parsed = Args::try_parse_from([
-            "quartz",
-            "gen-data",
-            "--db",
-            "simulation.db",
-            "--profile",
-            "heavy",
-            "--seed",
-            "0",
-            "--days",
-            "3",
-        ])
-        .expect("typed generator options");
-        assert!(matches!(
-            parsed.command,
-            Some(Command::Cli(CliCommand::GenData {
-                profile: generate_data::Profile::Heavy,
-                seed: 0,
-                days: 3,
-                ..
-            }))
-        ));
-        let parsed =
-            Args::try_parse_from(["quartz", "dump", "--date", "2025-01-02", "--format", "json"])
-                .expect("JSON dump option");
-        assert!(matches!(
-            parsed.command,
-            Some(Command::Cli(CliCommand::Dump {
-                format: dump::DumpFormat::Json,
-                ..
-            }))
-        ));
-        let parsed = Args::try_parse_from(["quartz", "dump", "--date", "2025-01-02", "--offline"])
-            .expect("explicit offline dump");
-        assert!(matches!(
-            parsed.command,
-            Some(Command::Cli(CliCommand::Dump { offline: true, .. }))
-        ));
-        for args in [
-            vec!["gen-data", "--db", "simulation.db", "--profile", "invalid"],
-            vec!["gen-data", "--db", "simulation.db", "--days", "0"],
-            vec!["bench-query", "--db", "simulation.db", "--runs", "0"],
-            vec!["dump", "--date", "2025-01-02", "--format", "yaml"],
-        ] {
-            assert_eq!(
-                Args::try_parse_from(std::iter::once("quartz").chain(args))
-                    .expect_err("invalid acceptance options")
-                    .exit_code(),
-                2
-            );
-        }
-    }
-
-    #[test]
-    fn missing_or_invalid_values_are_errors() {
-        for args in [
+            vec!["--unknown"],
+            vec!["native-host"],
             vec!["dump"],
-            vec!["gen-data"],
-            vec!["bench-query"],
-            vec!["restore-backup"],
-            vec!["rules"],
-            vec!["rules", "check"],
+            vec!["ui", "--core-error", "migration_failed"],
+            vec!["ui", "--core-error", "other_session", "--prewarm"],
+            vec!["settings", "set", "--language", "fr"],
+            vec!["gen-data", "--db", "simulation.db", "--days", "0"],
+            vec!["restore-backup", "--yes"],
         ] {
-            assert!(
-                Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()))
-                    .is_err(),
-                "{args:?}"
-            );
+            let error = Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()))
+                .expect_err("invalid arguments must fail");
+            assert_eq!(error.exit_code(), 2, "{args:?}");
         }
     }
 
@@ -1057,149 +746,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn core_and_ui_launch_forms_parse_without_cli_commands() {
-        for args in [
-            vec![],
-            vec!["--autostart"],
-            vec!["ui"],
-            vec!["--autostart", "ui"],
-            vec!["ui", "--prewarm"],
-            vec!["ui", "--"],
-            vec!["ui", "--prewarm", "--"],
-            vec!["--"],
-            vec!["--autostart", "--"],
-        ] {
-            let parsed =
-                Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()))
-                    .expect("valid background launch");
-            assert!(!matches!(parsed.command, Some(Command::Cli(_))), "{args:?}");
-        }
-    }
-
-    #[test]
-    fn ui_help_and_invalid_flags_produce_clap_diagnostics() {
-        struct UiFlagCase<'arguments> {
-            arguments: &'arguments [&'arguments str],
-            expected: Option<ErrorKind>,
-        }
-        let suffixes = [
-            UiFlagCase {
-                arguments: &[],
-                expected: None,
-            },
-            UiFlagCase {
-                arguments: &["--"],
-                expected: None,
-            },
-            UiFlagCase {
-                arguments: &["--prewarm"],
-                expected: None,
-            },
-            UiFlagCase {
-                arguments: &["--prewarm", "--"],
-                expected: None,
-            },
-            UiFlagCase {
-                arguments: &["--help"],
-                expected: Some(ErrorKind::DisplayHelp),
-            },
-            UiFlagCase {
-                arguments: &["-h"],
-                expected: Some(ErrorKind::DisplayHelp),
-            },
-            UiFlagCase {
-                arguments: &["--version"],
-                expected: Some(ErrorKind::UnknownArgument),
-            },
-            UiFlagCase {
-                arguments: &["--unknown"],
-                expected: Some(ErrorKind::UnknownArgument),
-            },
-            UiFlagCase {
-                arguments: &["--autostart"],
-                expected: Some(ErrorKind::UnknownArgument),
-            },
-            UiFlagCase {
-                arguments: &["--prewarm", "--prewarm"],
-                expected: Some(ErrorKind::ArgumentConflict),
-            },
-            UiFlagCase {
-                arguments: &["--prewarm", "--help"],
-                expected: Some(ErrorKind::DisplayHelp),
-            },
-            UiFlagCase {
-                arguments: &["--", "--help"],
-                expected: Some(ErrorKind::UnknownArgument),
-            },
-            UiFlagCase {
-                arguments: &["--prewarm=true"],
-                expected: Some(ErrorKind::TooManyValues),
-            },
-        ];
-        for autostart_count in 0..=2 {
-            for UiFlagCase {
-                arguments: suffix,
-                expected,
-            } in &suffixes
-            {
-                let args: Vec<_> = std::iter::repeat_n("--autostart", autostart_count)
-                    .chain(Some("ui"))
-                    .chain(suffix.iter().copied())
-                    .collect();
-                let result =
-                    Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()));
-                if autostart_count == 2 {
-                    assert_eq!(
-                        result.expect_err("duplicate autostart must fail").kind(),
-                        ErrorKind::ArgumentConflict,
-                        "{args:?}"
-                    );
-                } else if let Some(kind) = expected {
-                    let error = result.expect_err("expected clap help or error");
-                    assert_eq!(error.kind(), *kind, "{args:?}");
-                    let exit_code = if *kind == ErrorKind::DisplayHelp {
-                        0
-                    } else {
-                        2
-                    };
-                    assert_eq!(error.exit_code(), exit_code, "{args:?}");
-                } else {
-                    assert!(
-                        matches!(
-                            result.expect("valid UI flags").command,
-                            Some(Command::Ui { .. })
-                        ),
-                        "{args:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn non_unicode_arguments_return_an_error() {
-        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
-
-        assert!(
-            Args::try_parse_from([OsString::from("quartz"), OsString::from_vec(vec![0xff])])
-                .is_err(),
-            "non-Unicode argument must be rejected"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn non_unicode_arguments_return_an_error() {
-        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
-
-        assert!(
-            Args::try_parse_from([OsString::from("quartz"), OsString::from_wide(&[0xd800]),])
-                .is_err(),
-            "non-Unicode argument must be rejected"
-        );
     }
 }

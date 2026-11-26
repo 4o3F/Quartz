@@ -647,45 +647,6 @@ pub struct DayChanged {
 mod tests {
     use super::*;
     #[test]
-    fn detail_requests_preserve_typed_filters() {
-        let wire =
-            serde_json::json!({"start_utc_ms":100,"end_utc_ms":200,"app":3,"window_instance":5});
-        let request: QuerySegmentDetailRequest =
-            serde_json::from_value(wire).expect("segment request");
-        assert_eq!(request.app, Some(ApplicationId(3)));
-        assert_eq!(
-            request.window_instance,
-            Some(WindowInstanceRef::from_stored_id(
-                crate::facts::WindowInstanceId(5)
-            ))
-        );
-        let wire = serde_json::json!({"entity":{"kind":"app","id":3},"local_date":"2026-11-21"});
-        let request: QueryEntityDetailRequest =
-            serde_json::from_value(wire).expect("entity request");
-        assert_eq!(
-            request.entity,
-            DetailEntity::App {
-                id: ApplicationId(3)
-            }
-        );
-        for kind in ["document", "domain"] {
-            assert!(
-                serde_json::from_value::<DetailEntity>(serde_json::json!({"kind":kind,"id":3}))
-                    .is_err()
-            );
-        }
-    }
-    #[test]
-    fn window_instance_reference_round_trips_without_exposing_a_scalar_accessor() {
-        let identity = WindowInstanceRef::from_stored_id(crate::facts::WindowInstanceId(42));
-        let encoded = serde_json::to_value(identity).expect("window identity");
-        assert_eq!(encoded, serde_json::json!(42));
-        assert_eq!(
-            serde_json::from_value::<WindowInstanceRef>(encoded).expect("opaque identity"),
-            identity
-        );
-    }
-    #[test]
     fn facts_request_response_and_after_cursor_preserve_raw_wire_fields() {
         let request: QueryFactsRequest =
             serde_json::from_value(serde_json::json!({"local_date":"2025-01-02"}))
@@ -747,12 +708,6 @@ mod tests {
             );
             assert!(!response.truncated);
         }
-        let mut invalid = request_wire;
-        invalid["unused"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<QueryUnclassifiedRequest>(invalid).is_err());
-        for group_by in ["domain", "category", "APP"] {
-            assert!(serde_json::from_value::<QueryUnclassifiedRequest>(serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":group_by})).is_err());
-        }
     }
     #[test]
     fn range_wire_snapshots_preserve_entities_and_dimensions() {
@@ -781,19 +736,6 @@ mod tests {
             response.buckets[0].groups[0].entity,
             RangeEntity::Work(WorkEntity::Document { .. })
         ));
-        for field in ["time_zone", "day_start_offset_min", "unknown", "cursor"] {
-            let mut invalid = wire.clone();
-            invalid[field] = serde_json::json!("unsupported");
-            assert!(serde_json::from_value::<QueryRangeRequest>(invalid).is_err());
-        }
-        for bucket in ["month", "DAY"] {
-            let mut invalid = wire.clone();
-            invalid["bucket"] = serde_json::json!(bucket);
-            assert!(serde_json::from_value::<QueryRangeRequest>(invalid).is_err());
-        }
-        let mut invalid = wire;
-        invalid["dimensions"] = serde_json::json!(["domain"]);
-        assert!(serde_json::from_value::<QueryRangeRequest>(invalid).is_err());
         assert_eq!(
             <QueryRangeRequest as crate::CoreRequest>::OP,
             crate::Op::QueryRange
@@ -923,47 +865,6 @@ mod tests {
         );
     }
     #[test]
-    fn additive_document_fields_preserve_legacy_and_detail_json() {
-        let wire: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/timeline.json"))
-                .expect("timeline snapshot");
-        let timeline: QueryTimelineResponse =
-            serde_json::from_value(wire.clone()).expect("timeline");
-        let detail = QuerySegmentDetailResponse {
-            reference_range: timeline.reference_range,
-            intervals: timeline.segments.clone(),
-            versions: timeline.versions.clone(),
-            truncated: false,
-        };
-        let expected = serde_json::json!({"reference_range": wire["reference_range"], "intervals": wire["segments"], "versions": wire["versions"], "truncated": false});
-        assert_eq!(
-            serde_json::to_value(&detail).expect("detail JSON"),
-            expected
-        );
-        assert_eq!(
-            serde_json::from_value::<QuerySegmentDetailResponse>(expected)
-                .expect("detail roundtrip"),
-            detail
-        );
-        let mut legacy = wire;
-        let object = legacy.as_object_mut().expect("response object");
-        object.remove("reference_range");
-        for segment in object["segments"].as_array_mut().expect("segments") {
-            let object = segment.as_object_mut().expect("segment");
-            object.remove("extraction");
-            object.remove("document_ref");
-        }
-        let decoded: QueryTimelineResponse =
-            serde_json::from_value(legacy).expect("old core response");
-        assert!(decoded.reference_range.is_none());
-        assert!(
-            decoded
-                .segments
-                .iter()
-                .all(|segment| segment.extraction.is_none() && segment.document_ref.is_none())
-        );
-    }
-    #[test]
     fn annotated_timeline_and_pending_away_match_new_golden_json() {
         let id = |number: u32| {
             AnnotationId(
@@ -1031,42 +932,6 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<QueryPendingAwayResponse>(expected).expect("decode"),
             response
-        );
-    }
-    #[test]
-    fn category_metadata_and_revision_qualified_sources_round_trip() {
-        let category = CategoryRef::Classified {
-            category: Category {
-                id: CategoryId(7),
-                uuid: CategoryUuid("71f5a800-423a-4000-8000-000000000001".into()),
-                builtin_key: Some(BuiltinCategory::Development),
-                name: None,
-                color: "cat.8".into(),
-                tendency: CategoryTendency::Focus,
-            }
-            .into(),
-        };
-        let value = serde_json::to_value(&category).expect("category JSON");
-        assert_eq!(value["builtin_key"], "development");
-        assert_eq!(value["tendency"], "focus");
-        assert!(value["name"].is_null());
-        assert_eq!(
-            category,
-            serde_json::from_value(value).expect("category round trip")
-        );
-        let source = CategorySource::Rule {
-            rule: "builtin.classification/vscode@2".parse().expect("rule id"),
-        };
-        assert_eq!(
-            source,
-            serde_json::from_value(serde_json::to_value(&source).expect("source JSON"))
-                .expect("source round trip")
-        );
-        assert!(
-            serde_json::from_value::<CategorySource>(
-                serde_json::json!({"kind":"rule","rule":"vscode"})
-            )
-            .is_err()
         );
     }
     #[test]

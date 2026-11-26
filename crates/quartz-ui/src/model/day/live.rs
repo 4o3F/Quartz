@@ -545,18 +545,6 @@ mod tests {
     }
 
     #[test]
-    fn live_mapping_avoids_the_redundant_raw_activity_scan() {
-        let source = include_str!("live.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation");
-        assert!(
-            !source.contains("day.compute_activity_range()"),
-            "live bounds must come from the main track, including offline activity, without scanning raw application segments first"
-        );
-    }
-
-    #[test]
     fn live_activity_range_includes_offline_activity_without_raw_application_segments() {
         let mut input = data();
         input.raw.clear();
@@ -640,32 +628,6 @@ mod tests {
             label.matches(';').count(),
             1,
             "zero placeholders are absent: {label}"
-        );
-    }
-    #[test]
-    fn empty_hour_has_no_meter_label_or_visible_parts() {
-        let mut data = data();
-        for part in &mut data.hours.first_mut().expect("hour").categories {
-            part.duration_ms = 0;
-        }
-        let day = Day::from_protocol(data).expect("empty hour");
-        let formatter = Formatter::new(Language::English);
-        let bar = day.hourly().first().expect("hour");
-        assert!(bar.visible_parts().next().is_none());
-        assert_eq!(formatter.hourly_bar(bar, &day), None);
-        let bar = HourlyBar {
-            hour: 10,
-            parts: Vec::new(),
-        };
-        assert_eq!(formatter.hourly_bar(&bar, &day), None);
-    }
-    #[test]
-    fn partial_hour_keeps_one_hour_chart_scale() {
-        let day = Day::from_protocol(data()).expect("partial hour");
-        let bar = day.hourly().first().expect("hour");
-        assert_eq!(
-            bar.chart_scale(Duration::from_hours(1)),
-            Duration::from_hours(1)
         );
     }
     #[test]

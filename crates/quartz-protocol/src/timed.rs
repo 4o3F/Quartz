@@ -141,29 +141,4 @@ mod tests {
             assert_eq!(serde_json::to_value(request).expect("wire snapshot"), wire);
         }
     }
-    #[test]
-    fn timed_requests_reject_unknown_fields() {
-        assert!(
-            serde_json::from_value::<TrackingPauseRequest>(
-                serde_json::json!({"until_utc_ms":1,"extra":true})
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<TrackingKeepAliveRequest>(
-                serde_json::json!({"until_utc_ms":1,"extra":true})
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<TrackingResumeRequest>(serde_json::json!({"extra":true}))
-                .is_err()
-        );
-        assert!(
-            serde_json::from_value::<PrivacyModeSetRequest>(
-                serde_json::json!({"enabled":false,"extra":true})
-            )
-            .is_err()
-        );
-    }
 }

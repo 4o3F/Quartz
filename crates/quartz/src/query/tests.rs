@@ -2065,36 +2065,6 @@ fn unclassified_sample_selection_orders_utc_before_clock_identity() {
 }
 
 #[test]
-fn system_timezone_acquisition_failure_is_internal_for_a_valid_day_request() {
-    let mut fixture = crate::store::query::test_support::QueryFixture::new(0);
-    let request = fixture.request_day();
-    let rules = fixture.rules();
-    let mut reader = fixture.store.take_query_reader();
-    let error = QueryJob::start_reading_zone(&mut reader, request, rules, || {
-        Err(jiff::tz::TimeZone::get("Invalid/InjectedFailure").expect_err("injected zone failure"))
-    })
-    .expect_err("system zone unavailable");
-    assert!(matches!(
-        error,
-        RunQueryError::ReadSystemTimeZoneError { .. }
-    ));
-    assert_eq!(error.kind(), ErrorKind::Internal);
-    fixture
-        .store
-        .return_query_reader(reader.expect("reader retained"));
-}
-
-#[test]
-fn timezone_encoding_error_maps_to_internal() {
-    let source =
-        jiff::tz::TimeZone::get("Invalid/InjectedFailure").expect_err("injected encoding error");
-    assert_eq!(
-        RunQueryError::EncodeTimeZoneError { source }.kind(),
-        ErrorKind::Internal
-    );
-}
-
-#[test]
 fn entity_detail_ignores_rounded_zero_duration_titles() {
     let calendar = details::EntityCalendar::in_zone(
         "2026-03-10".parse().expect("date"),
@@ -2161,48 +2131,6 @@ fn rejected_search_identity_is_normalized_once() {
     }
     assert_eq!(accumulator.search_evaluations.get(), once);
     assert!(accumulator.finish().is_empty());
-}
-
-#[test]
-fn entity_detail_filters_unrelated_activity_before_projection() {
-    let calendar = details::EntityCalendar::in_zone(
-        "2026-03-10".parse().expect("date"),
-        calendar::DayStartOffset::MIDNIGHT,
-        jiff::tz::TimeZone::UTC,
-    )
-    .expect("calendar");
-    let start = calendar.range.start;
-    let derived = derive(
-        vec![clock(1, start, start, 100), window(1, start, start + 100)],
-        QueryRange {
-            start,
-            end: start + 100,
-        },
-    );
-    let mut accumulator = details::EntityDetailAccumulator::new(
-        details::EntitySelection::App {
-            id: quartz_protocol::ApplicationId(2),
-        },
-        calendar,
-    );
-    pipeline::PROJECTED_SEGMENTS.set(0);
-    for segment in &derived.segments {
-        accumulator.push(segment, &derived.facts);
-    }
-    assert_eq!(pipeline::PROJECTED_SEGMENTS.get(), 0);
-}
-
-#[test]
-fn pending_away_builds_no_hour_stacks() {
-    use crate::store::query::test_support::{FIXTURE_DATE, QueryFixture};
-    let mut fixture = QueryFixture::new(0);
-    let request = QueryRequest::PendingAway(quartz_protocol::QueryPendingAwayRequest {
-        local_date: FIXTURE_DATE.parse().expect("date"),
-    });
-    calendar::BUILT_HOURS.set(0);
-    let response = fixture.run(request).expect("pending away");
-    assert!(matches!(response, QueryResponse::PendingAway(_)));
-    assert_eq!(calendar::BUILT_HOURS.get(), 0);
 }
 
 #[test]

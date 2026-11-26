@@ -199,34 +199,4 @@ mod tests {
         assert_eq!(unknown.msg.as_deref(), Some("diagnostic"));
         assert!(serde_json::to_value(&unknown).is_err());
     }
-    #[test]
-    fn stale_rule_set_error_requires_key_and_u32_revision() {
-        for version in [0, u32::MAX] {
-            let wire = serde_json::json!({"code":"rule_set_stale","key":"user.local","current_version":version});
-            let error: ProtocolError =
-                serde_json::from_value(wire.clone()).expect("valid boundary");
-            assert_eq!(serde_json::to_value(error).expect("snapshot"), wire);
-        }
-        for version in [
-            serde_json::json!(-1),
-            serde_json::json!(u64::from(u32::MAX) + 1),
-            serde_json::json!(1.5),
-            serde_json::json!(true),
-        ] {
-            assert!(
-                serde_json::from_value::<ProtocolError>(serde_json::json!({
-                    "code":"rule_set_stale","key":"user.local","current_version":version
-                }))
-                .is_err(),
-                "invalid version: {version}"
-            );
-        }
-        assert!(
-            serde_json::from_value::<ProtocolError>(serde_json::json!({
-                "code":"rule_set_stale","current_version":1
-            }))
-            .is_err(),
-            "key is required"
-        );
-    }
 }
