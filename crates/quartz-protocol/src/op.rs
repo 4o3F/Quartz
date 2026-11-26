@@ -131,18 +131,12 @@ pub enum Op {
     /// The `rules.preview` request.
     #[serde(rename = "rules.preview")]
     RulesPreview,
-    /// The `rules.explain` request.
-    #[serde(rename = "rules.explain")]
-    RulesExplain,
     /// The `rules_text.validate` request.
     #[serde(rename = "rules_text.validate")]
     RulesTextValidate,
     /// The `rules_text.preview` request.
     #[serde(rename = "rules_text.preview")]
     RulesTextPreview,
-    /// The `rules_text.diff` request.
-    #[serde(rename = "rules_text.diff")]
-    RulesTextDiff,
     /// The `rules_text.import` request.
     #[serde(rename = "rules_text.import")]
     RulesTextImport,
@@ -259,10 +253,9 @@ impl Op {
             | Self::RuleSetsDelete
             | Self::RuleSetsRevert
             | Self::RuleSetsEdit => OpFamily::RuleSets,
-            Self::RulesPreview | Self::RulesExplain => OpFamily::Rules,
+            Self::RulesPreview => OpFamily::Rules,
             Self::RulesTextValidate
             | Self::RulesTextPreview
-            | Self::RulesTextDiff
             | Self::RulesTextImport
             | Self::RulesTextExport => OpFamily::RulesText,
             Self::CategoriesList

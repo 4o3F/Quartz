@@ -279,16 +279,13 @@ pub struct Hello {
 /// Optional protocol features reported by the core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Capability {
-    /// Retained-fragment explanations with extraction, classification, and historical privacy.
-    #[serde(rename = "rules.explain.v1")]
-    RulesExplainV1,
     /// Connection-local cancellation of read-only requests.
     #[serde(rename = "requests.cancel.v1")]
     RequestsCancelV1,
     /// Rule previews and privacy-save receipt verification.
     #[serde(rename = "rules.preview.v1")]
     RulesPreviewV1,
-    /// Rule text validation, comparison, import, and export.
+    /// Rule text validation, import, and export.
     #[serde(rename = "rules_text.v1")]
     RulesTextV1,
     /// Browser activity reporting version 1.

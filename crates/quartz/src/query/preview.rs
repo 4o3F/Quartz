@@ -6,10 +6,6 @@ use super::{
     classification::{Classifier, QueryCategoryRef},
     control::QueryControl,
     day_walker::DayWalker,
-    diff::{
-        CategoryDeltas, ComparedSnapshots, ComparisonData, ComparisonSource, DiffPage,
-        DiffPageProgress,
-    },
     documents::{DocumentDuration, DocumentIdentity},
     input::QueryRange,
     paging::PagePosition,
@@ -74,7 +70,7 @@ impl PreviewCalendar {
 }
 
 pub(crate) struct PreviewRequest {
-    source: ComparisonSource,
+    mutation: RuleMutation,
     pub(crate) receipts: Option<crate::rules::receipts::ReceiptContext>,
     start_date: wire::LocalDate,
     end_date: wire::LocalDate,
@@ -96,10 +92,6 @@ impl std::fmt::Debug for PreviewRequest {
 impl PreviewRequest {
     pub(crate) fn decode(op: wire::Op, body: serde_json::Value) -> Result<Self, ProtocolError> {
         match op {
-            wire::Op::RulesTextDiff => Self::from_diff(
-                serde_json::from_value(body)
-                    .map_err(|_| ProtocolError::new(ErrorKind::BadRequest))?,
-            ),
             wire::Op::RulesPreview => Self::from_request(
                 serde_json::from_value::<wire::RulesPreviewRequest>(body)
                     .map_err(|_| ProtocolError::new(ErrorKind::BadRequest))?,
@@ -110,33 +102,6 @@ impl PreviewRequest {
             ),
             _ => Err(ProtocolError::new(ErrorKind::BadRequest)),
         }
-    }
-    fn from_diff(request: wire::RulesTextDiffRequest) -> Result<Self, ProtocolError> {
-        request
-            .validate_dates()
-            .map_err(|_| ProtocolError::new(ErrorKind::InvalidRange))?;
-        let digest = quartz_domain::text::encode_hex(&Sha256::digest(
-            serde_json::to_vec(&request.comparison)
-                .map_err(|_| ProtocolError::new(ErrorKind::Internal))?,
-        ));
-        let parameters = request.cursor_parameters(digest);
-        if let Some(cursor) = &request.cursor {
-            cursor
-                .validate_query(&parameters)
-                .map_err(|_| ProtocolError::new(ErrorKind::BadRequest))?;
-        }
-        Ok(Self {
-            source: ComparisonSource::Diff(request.comparison),
-            receipts: None,
-            start_date: request.start_date,
-            end_date: request.end_date,
-            expected_versions: request.expected_versions,
-            parameters,
-            cursor: request.cursor,
-            sample_limit: usize::try_from(request.sample_limit.unwrap_or_default().get())
-                .expect("sample limit fits usize"),
-            control: QueryControl::with_deadline(request.deadline_ms.unwrap_or_default().get()),
-        })
     }
     fn from_request<M: Serialize + Into<RuleMutation>>(
         request: wire::RulePreviewRequest<M>,
@@ -161,7 +126,7 @@ impl PreviewRequest {
             control: QueryControl::with_deadline(request.deadline_ms.unwrap_or_default().get()),
             sample_limit: usize::try_from(request.sample_limit.unwrap_or_default().get())
                 .expect("sample limit fits usize"),
-            source: ComparisonSource::Preview(request.mutation.into()),
+            mutation: request.mutation.into(),
             receipts: None,
             start_date: request.start_date,
             end_date: request.end_date,
@@ -299,10 +264,6 @@ impl SamplePrivacy {
         }
     }
 }
-struct PrivacyComparison {
-    before: domain::Evaluation,
-    after: domain::Evaluation,
-}
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct SampleOrder {
@@ -317,7 +278,6 @@ enum Stage {
     Sweep { before: Pipeline, after: Pipeline },
     Analyze(Box<AnalyzeDay>),
     Page(Box<PreviewPage>),
-    DiffPage(Box<DiffPage>),
     Complete,
 }
 #[derive(Debug)]
@@ -333,8 +293,6 @@ struct AnalyzeDay {
 pub(crate) struct PreviewJob {
     snapshot: ReadSnapshot,
     receipt: Option<PendingReceipt>,
-    comparison: Option<ComparisonData>,
-    document_changes: u64,
     receipt_grant: Option<crate::rules::receipts::ReceiptGrant>,
     before: Arc<RuleSnapshot>,
     after: Arc<RuleSnapshot>,
@@ -377,33 +335,34 @@ impl PreviewJob {
             .snapshot();
         let result = Self::prepare(&mut snapshot, &request, &before).and_then(|mut prepared| {
             request.control.check()?;
-            let ComparedSnapshots {
-                before: comparison_before,
-                after,
-                kind,
-                comparison,
-            } = request.source.prepare(registry, &request.control)?;
+            let key: domain::RuleSetKey = request
+                .mutation
+                .target_key()?
+                .parse()
+                .map_err(|_| ProtocolError::new(ErrorKind::BadRequest))?;
+            let after = request.mutation.clone().draft(registry)?;
+            let kind = after
+                .state()
+                .sets
+                .get(&key)
+                .ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?
+                .current
+                .set
+                .header
+                .kind;
             request.control.check()?;
-            prepared.before_versions = VersionState {
-                rule_hashes: comparison_before.hashes().clone(),
-                ..prepared.state.clone()
-            }
-            .digest(prepared.reference_range)?;
             prepared.after_versions = VersionState {
                 rule_hashes: after.hashes().clone(),
                 ..prepared.state.clone()
             }
             .digest(prepared.reference_range)?;
-            let receipt = if let ComparisonSource::Preview(mutation) = &request.source
-                && kind == domain::RuleKind::Privacy
-                && prepared.position.is_first()
-            {
+            let receipt = if kind == domain::RuleKind::Privacy && prepared.position.is_first() {
                 request
                     .receipts
                     .clone()
                     .map(|context| {
                         crate::rules::receipts::ReceiptBinding::new(
-                            mutation.digest()?,
+                            request.mutation.digest()?,
                             &before,
                             &prepared.state,
                             crate::rules::receipts::ReceiptDates {
@@ -420,8 +379,6 @@ impl PreviewJob {
                 None
             };
             Ok(PreparedDraft {
-                before: comparison_before,
-                comparison,
                 prepared,
                 after,
                 kind,
@@ -430,8 +387,6 @@ impl PreviewJob {
         });
         match result {
             Ok(PreparedDraft {
-                before,
-                comparison,
                 prepared,
                 after,
                 kind,
@@ -471,8 +426,6 @@ impl PreviewJob {
                 Ok(Self {
                     snapshot,
                     receipt,
-                    comparison,
-                    document_changes: 0,
                     receipt_grant: None,
                     before,
                     after,
@@ -644,11 +597,7 @@ impl PreviewJob {
                             };
                             return Ok(None);
                         }
-                        self.stage = if self.comparison.is_some() {
-                            Stage::DiffPage(Box::new(self.prepare_diff_page()?))
-                        } else {
-                            Stage::Page(Box::new(self.prepare_page()?))
-                        };
+                        self.stage = Stage::Page(Box::new(self.prepare_page()?));
                         return Ok(None);
                     };
                     let before = day.before.next().ok_or(RunQueryError::InvalidRuleEntry)?;
@@ -660,13 +609,6 @@ impl PreviewJob {
                 }
                 self.stage = Stage::Analyze(day);
             }
-            Stage::DiffPage(mut page) => match page.advance(&self.control)? {
-                DiffPageProgress::Complete => {
-                    self.control.check()?;
-                    return Ok(Some(QueryResponse::Diff(page.finish())));
-                }
-                DiffPageProgress::More => self.stage = Stage::DiffPage(page),
-            },
             Stage::Page(mut page) => match page.advance(&self.control)? {
                 PageProgress::More => self.stage = Stage::Page(page),
                 PageProgress::Complete => {
@@ -692,9 +634,6 @@ impl PreviewJob {
         before_facts: &SegmentFacts,
         after_facts: &SegmentFacts,
     ) -> Result<(), RunQueryError> {
-        if self.comparison.is_some() {
-            return self.observe_diff(before, after, before_facts, after_facts);
-        }
         let Some(row) = after_facts.retained_foreground(after) else {
             return Ok(());
         };
@@ -815,166 +754,6 @@ impl PreviewJob {
             }
         }
         Ok(())
-    }
-    fn observe_diff(
-        &mut self,
-        before: &DerivedSegment,
-        after: &DerivedSegment,
-        before_facts: &SegmentFacts,
-        after_facts: &SegmentFacts,
-    ) -> Result<(), RunQueryError> {
-        let Some(row) = after_facts.retained_foreground(after) else {
-            return Ok(());
-        };
-        let accepts_input = match self.kind {
-            domain::RuleKind::Classification | domain::RuleKind::Privacy => {
-                row.is_retained_window()
-            }
-            domain::RuleKind::Extraction => Classifier::accepts_extraction(row),
-            _ => return Err(RunQueryError::InvalidRuleEntry),
-        };
-        if !accepts_input {
-            return Ok(());
-        }
-        let old_identity = before_facts.app(before).and_then(|app| {
-            DocumentIdentity::new(
-                wire::ApplicationId(app.id.0),
-                &before_facts.extraction(before),
-            )
-        });
-        let new_identity = after_facts.app(after).and_then(|app| {
-            DocumentIdentity::new(
-                wire::ApplicationId(app.id.0),
-                &after_facts.extraction(after),
-            )
-        });
-        if old_identity != new_identity {
-            self.document_changes += 1;
-        }
-        let evaluations = if self.kind == domain::RuleKind::Privacy {
-            let evaluations = PrivacyComparison {
-                before: self.evaluate_privacy(row, self.before.privacy()),
-                after: self.evaluate_privacy(row, self.after.privacy()),
-            };
-            HiddenFields::changes(row, evaluations.before.privacy, evaluations.after.privacy)
-                .accumulate(
-                    &mut self.hidden,
-                    row.span.duration_within(QueryRange {
-                        start: after.span.start_utc_ms,
-                        end: after.span.end_utc_ms,
-                    }),
-                );
-            Some(evaluations)
-        } else {
-            None
-        };
-        if self.sample_limit == 0 {
-            return Ok(());
-        }
-        let privacy = evaluations.as_ref().map(|evaluations| {
-            SamplePrivacy::new(row, evaluations.before.privacy, evaluations.after.privacy)
-        });
-        let mut before_output = self.output(
-            before,
-            before_facts,
-            privacy
-                .as_ref()
-                .map_or_else(domain::PrivacyAction::default, |privacy| privacy.before),
-            domain::PrivacyAction::default(),
-        )?;
-        let mut after_output = self.output(
-            after,
-            after_facts,
-            privacy
-                .as_ref()
-                .map_or_else(domain::PrivacyAction::default, |privacy| privacy.after),
-            domain::PrivacyAction::default(),
-        )?;
-        if before_output == after_output {
-            return Ok(());
-        }
-        let rule = match self.kind {
-            domain::RuleKind::Classification => after
-                .classification_rule()
-                .or_else(|| before.classification_rule())
-                .map(str::to_owned),
-            domain::RuleKind::Extraction => after_facts
-                .extraction(after)
-                .extractor_rule
-                .or_else(|| before_facts.extraction(before).extractor_rule),
-            domain::RuleKind::Privacy => {
-                let evaluations = evaluations
-                    .as_ref()
-                    .expect("privacy comparison evaluates both sides");
-                let matched: BTreeSet<_> = evaluations
-                    .before
-                    .rules
-                    .iter()
-                    .chain(&evaluations.after.rules)
-                    .filter(|outcome| outcome.status != domain::RuleStatus::DidNotMatch)
-                    .map(|outcome| outcome.rule_id.clone())
-                    .collect();
-                matched.into_iter().next()
-            }
-            _ => return Err(RunQueryError::InvalidRuleEntry),
-        }
-        .ok_or(RunQueryError::InvalidRuleEntry)?;
-        if !self.accepts_sample(row, after.span.start_utc_ms, &rule) {
-            return Ok(());
-        }
-        if privacy.is_none() {
-            let privacy = self.sample_privacy(row, None);
-            // Project only changed candidate outputs; both non-privacy snapshots share privacy rules.
-            before_output = self.output(before, before_facts, privacy.before, privacy.mask)?;
-            after_output = self.output(after, after_facts, privacy.after, privacy.mask)?;
-            if before_output == after_output {
-                return Ok(());
-            }
-        }
-        let order = SampleOrder {
-            start: after.span.start_utc_ms,
-            clock: row.span.segment.0,
-            fact: row.span.id.0,
-            rule: rule.clone(),
-        };
-        self.samples.insert(
-            order,
-            wire::RulePreviewSample {
-                start_utc_ms: after.span.start_utc_ms,
-                end_utc_ms: after.span.end_utc_ms,
-                clock_segment_id: wire::ClockSegmentId(row.span.segment.0),
-                rule,
-                before: before_output,
-                after: after_output,
-            },
-        );
-        if self.samples.len() > self.sample_limit {
-            self.samples.pop_last();
-        }
-        Ok(())
-    }
-    fn prepare_diff_page(&mut self) -> Result<DiffPage, RunQueryError> {
-        let before =
-            std::mem::take(&mut self.before_totals).finish(self.position, &self.control)?;
-        let after = std::mem::take(&mut self.after_totals).finish(self.position, &self.control)?;
-        let comparison = self.comparison.take().expect("comparison job");
-        DiffPage::new(
-            wire::RulesTextDiffResponse {
-                changes: comparison.changes,
-                impact: wire::RuleDiffImpact {
-                    category_deltas: CategoryDeltas::new(before.categories, after.categories)
-                        .finish(),
-                    document_changes: self.position.is_first().then_some(self.document_changes),
-                    further_hidden: self.position.is_first().then(|| self.hidden.clone()),
-                },
-                samples: std::mem::take(&mut self.samples).into_values().collect(),
-                sides: comparison.sides,
-                versions: self.versions.clone(),
-                next_cursor: None,
-            },
-            self.parameters.clone(),
-            self.position,
-        )
     }
     fn evaluate_privacy(
         &self,
@@ -1132,8 +911,6 @@ impl PreviewJob {
 }
 #[derive(Debug)]
 struct PreparedDraft {
-    before: Arc<RuleSnapshot>,
-    comparison: Option<ComparisonData>,
     receipt: Option<PendingReceipt>,
     prepared: PreparedPreview,
     after: Arc<RuleSnapshot>,
@@ -1182,18 +959,6 @@ impl HiddenFields {
             fields.insert(HiddenField::Title);
         }
         Self { fields }
-    }
-    fn changes(
-        row: &Foreground,
-        before: domain::PrivacyAction,
-        after: domain::PrivacyAction,
-    ) -> Self {
-        let mut hidden = Self::new(row, after);
-        hidden.fields.retain(|field| match field {
-            HiddenField::App => before.app == domain::Action::Keep,
-            HiddenField::Title => before.window_title == domain::Action::Keep,
-        });
-        hidden
     }
     fn accumulate(&self, total: &mut wire::FurtherHidden, duration: i64) {
         if !self.fields.is_empty() {

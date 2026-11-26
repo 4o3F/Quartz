@@ -301,16 +301,12 @@ when = [{ field = "category", op = "equals", value = "builtin:entertainment" }]
 | 命令 | 作用 | 需要核心运行 |
 |---|---|---|
 | `quartz rules check <文件>...` | 校验一个或多个规则文件，包括它们与已安装规则集组成的树 | 否（树检查使用本地已安装规则集的只读副本） |
-| `quartz rules preview <文件> --days 7` | 每条规则的条件命中段数/时长、有效活跃贡献及最多 50 个样例 | 是 |
-| `quartz rules diff <文件> --days 7` | 与同一 `key` 当前版本对比：规则级差异，以及过去几天哪些片段的结果会改变 | 是 |
-| `quartz rules explain --at "2026-11-16 14:05"` | 解释某一时刻的片段：每个规则集、每条规则、每个条件是否成立，最终采用了哪条规则，哪些规则被遮蔽 | 是 |
-| `quartz rules tree [--kind classification]` | 显示已安装的规则集树、版本与启用状态 | 是 |
 
-界面中有相同功能：导入时的校验、预览与 diff，片段详情中的“为什么是这个结果”，以及规则集树视图。
+界面中有相同功能：导入时的校验与预览，以及规则集树视图。
 
-导出通过 `rules_text.export` 协议操作取得；`rules_text.validate` 对指定 key 与基础版本作上下文校验。M4-D3 不新增命令行语法，规则命令行接入安排在 M4-E5。
+导出通过 `rules_text.export` 协议操作取得；`rules_text.validate` 对指定 key 与基础版本作上下文校验。
 
-规范导出使用 LF 换行，末尾保留一个换行，先写 `format` 和 `[set]`，随后按保存的跨节顺序写 `[[rule]]`、`[[override]]`、`[[disable]]`。表内键按字典序排列，条件使用内联表并保留条件数组顺序；字符串使用双引号及 TOML 转义。默认 priority、match、case_sensitive、negate 写出，隐私 preset 展开为 app/window_title/web，分类名称和内置键均写为保存的 UUID。可选空值省略；内置条目保留 detector、verified、label_key 和非空的 languages；languages 为空时省略，与未提供该字段等价。用户条目不增加这些字段。相同保存内容重复导出得到相同字节，导出后解析再导出也得到相同字节。内置 key 的只读验证权限与诊断返回方式见 [04 第 6.3.3 节](../design/04-ipc.md#633-文本与解释)。
+规范导出使用 LF 换行，末尾保留一个换行，先写 `format` 和 `[set]`，随后按保存的跨节顺序写 `[[rule]]`、`[[override]]`、`[[disable]]`。表内键按字典序排列，条件使用内联表并保留条件数组顺序；字符串使用双引号及 TOML 转义。默认 priority、match、case_sensitive、negate 写出，隐私 preset 展开为 app/window_title/web，分类名称和内置键均写为保存的 UUID。可选空值省略；内置条目保留 detector、verified、label_key 和非空的 languages；languages 为空时省略，与未提供该字段等价。用户条目不增加这些字段。相同保存内容重复导出得到相同字节，导出后解析再导出也得到相同字节。内置 key 的只读验证权限与诊断返回方式见 [04 第 6.3.3 节](../design/04-ipc.md#633-文本)。
 
 ### 4.2 错误
 
@@ -347,9 +343,7 @@ M4 隐私保存必须携带对应预览回执，覆盖导入、编辑、启停�
 内置规则集随 Quartz 升级。你的子规则集不受影响，但可能出现两种情况，导入或升级后会在规则集树中标出：
 
 - **目标已删除**：`override` 或 `disable` 指向的内置规则在新版本中不存在。这条差异暂时不生效，请删除它或改为 `[[rule]]`。
-- **上游已变更**：被覆盖的内置规则在新版本中改了内容。Quartz 显示三方对比（你覆盖时的内置版本、新的内置版本、你的覆盖），由你决定保留覆盖还是删除它。
-
-三方比较通过 rules_text.diff 的 upstream 模式读取指定用户修订的保存父链、当前父链和自身条目，并在同一事实快照上比较结果。历史父链沿已保存的 parent_version 逐级追溯；未保存的历史启停、排序和祖先即时状态的处理见 [04 第 6.3.3 节](../design/04-ipc.md#633-文本与解释)。draft 模式沿实际写入路径校验临时修改，不签发保存回执。`quartz rules diff` 接线安排在 M4-E5。
+- **上游已变更**：被覆盖的内置规则在新版本中改了内容，由你决定保留覆盖还是删除它。
 
 ## 5. 示例
 
@@ -429,4 +423,4 @@ when = [
 
 - 本文对应 `format = "quartz-rules/1"`。规则格式只增加可选内容时不改版本；字段改名、语义变化或删除时升级为 `/2`，Quartz 继续接受旧版本并在导入时转换。
 - 字段表、操作符表和错误码表由 Quartz 源码中的类型生成或校验，与程序保持一致。
-- 内置规则集的 `key` 与规则 `id`（例如 `builtin.classification/windows-terminal`）是公开接口，只在大版本中改名；`quartz rules tree` 与 `quartz rules explain` 可以查到它们。
+- 内置规则集的 `key` 与规则 `id`（例如 `builtin.classification/windows-terminal`）是公开接口，只在大版本中改名。

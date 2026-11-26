@@ -6,11 +6,9 @@ pub(crate) mod classification;
 pub(crate) mod control;
 mod day_walker;
 mod details;
-mod diff;
 #[cfg(any(windows, test))]
 pub(crate) mod dispatch;
 pub(crate) mod documents;
-pub(crate) mod explain;
 mod facts;
 pub(crate) mod preview;
 #[cfg(test)]
@@ -254,8 +252,6 @@ impl QueryRequest {
 #[serde(untagged)]
 pub(crate) enum QueryResponse {
     Preview(quartz_protocol::RulesPreviewResponse),
-    Diff(quartz_protocol::RulesTextDiffResponse),
-    Explain(quartz_protocol::RulesExplainResponse),
     Annotations(quartz_protocol::QueryAnnotationsResponse),
     Facts(QueryFactsResponse),
     Day(QueryDayResponse),
@@ -988,8 +984,6 @@ impl QueryJob {
             }
 
             QueryResponse::Preview(_)
-            | QueryResponse::Explain(_)
-            | QueryResponse::Diff(_)
             | QueryResponse::Annotations(_)
             | QueryResponse::Day(_)
             | QueryResponse::Unclassified(_)

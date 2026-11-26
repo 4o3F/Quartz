@@ -120,10 +120,6 @@ pub(crate) enum Action {
         id: RequestId,
         request: crate::rules::read::ReadRequest,
     },
-    Explain {
-        id: RequestId,
-        request: crate::query::explain::ExplainRequest,
-    },
     Preview {
         id: RequestId,
         request: crate::query::preview::PreviewRequest,
@@ -240,7 +236,6 @@ impl ConnectionSession {
                             quartz_protocol::Capability::RequestsCancelV1,
                             quartz_protocol::Capability::RulesPreviewV1,
                             quartz_protocol::Capability::RulesTextV1,
-                            quartz_protocol::Capability::RulesExplainV1,
                             quartz_protocol::Capability::CategoriesV1,
                             quartz_protocol::Capability::QueryDocumentsV1,
                             quartz_protocol::Capability::QueryUnclassifiedV1,
@@ -319,13 +314,7 @@ impl ConnectionSession {
                             Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
                         }
                     }
-                    Op::RulesExplain => {
-                        match crate::query::explain::ExplainRequest::decode(request.body) {
-                            Ok(request) => Action::Explain { id, request },
-                            Err(error) => Action::Reply(Action::error_response(Some(id), error)),
-                        }
-                    }
-                    Op::RulesPreview | Op::RulesTextPreview | Op::RulesTextDiff => {
+                    Op::RulesPreview | Op::RulesTextPreview => {
                         match crate::query::preview::PreviewRequest::decode(
                             request.op,
                             request.body,
@@ -850,7 +839,6 @@ mod tests {
                 quartz_protocol::Capability::RequestsCancelV1,
                 quartz_protocol::Capability::RulesPreviewV1,
                 quartz_protocol::Capability::RulesTextV1,
-                quartz_protocol::Capability::RulesExplainV1,
                 quartz_protocol::Capability::CategoriesV1,
                 quartz_protocol::Capability::QueryDocumentsV1,
                 quartz_protocol::Capability::QueryUnclassifiedV1,
@@ -1307,7 +1295,7 @@ mod tests {
         }
     }
     #[test]
-    fn rule_previews_and_comparisons_check_roles_and_nested_bodies_before_worker_admission() {
+    fn rule_previews_check_roles_and_nested_bodies_before_worker_admission() {
         let status =
             crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("preview-roles".into()));
         for role in [
@@ -1317,7 +1305,7 @@ mod tests {
             ReadyRole::Cli,
             ReadyRole::Host,
         ] {
-            for op in [Op::RulesPreview, Op::RulesTextPreview, Op::RulesTextDiff] {
+            for op in [Op::RulesPreview, Op::RulesTextPreview] {
                 let mut session = ConnectionSession {
                     state: State::Ready(role),
                     allowed: AllowedRoles::Quartz,
@@ -1328,18 +1316,6 @@ mod tests {
                     "rules_text.import"
                 };
                 let body = serde_json::json!({"mutation":{"op":mutation_op,"body":{"key":"user.preview","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":"opaque"});
-                let body = if op == Op::RulesTextDiff {
-                    let mut comparison_body = body.clone();
-                    comparison_body["comparison"] =
-                        serde_json::json!({"kind":"draft","mutation":body["mutation"].clone()});
-                    comparison_body
-                        .as_object_mut()
-                        .expect("request")
-                        .remove("mutation");
-                    comparison_body
-                } else {
-                    body
-                };
                 let allowed = role.role().authorize(op).is_ok();
                 let action = session.receive(
                     request(2, op, body.clone()),
@@ -1357,13 +1333,7 @@ mod tests {
                 }
                 if allowed {
                     let mut invalid = body;
-                    if op == Op::RulesTextDiff {
-                        invalid["comparison"]["mutation"]["body"]["preview_receipt"] =
-                            serde_json::json!("forbidden");
-                    } else {
-                        invalid["mutation"]["body"]["preview_receipt"] =
-                            serde_json::json!("forbidden");
-                    }
+                    invalid["mutation"]["body"]["preview_receipt"] = serde_json::json!("forbidden");
                     assert_eq!(
                         session
                             .receive(request(3, op, invalid), &status.subscribe().borrow().status)
@@ -1374,56 +1344,6 @@ mod tests {
                         }
                     );
                 }
-            }
-        }
-    }
-    #[test]
-    fn explanations_check_roles_selectors_and_cursors_before_database_admission() {
-        let status =
-            crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("explain-roles".into()));
-        for role in [
-            ReadyRole::Ui {
-                state: UiState::Visible,
-            },
-            ReadyRole::Cli,
-            ReadyRole::Host,
-        ] {
-            let mut session = ConnectionSession {
-                state: State::Ready(role),
-                allowed: AllowedRoles::Quartz,
-            };
-            let body = serde_json::json!({"at_utc_ms":100});
-            let action = session.receive(
-                request(2, Op::RulesExplain, body.clone()),
-                &status.subscribe().borrow().status,
-            );
-            if role.role().authorize(Op::RulesExplain).is_ok() {
-                assert!(matches!(action, Action::Explain { .. }));
-                for invalid in [
-                    serde_json::json!({"at_utc_ms":100,"start_utc_ms":0,"end_utc_ms":200}),
-                    serde_json::json!({"start_utc_ms":200,"end_utc_ms":100}),
-                    serde_json::json!({"at_utc_ms":100,"cursor":{"versions":"v","query":{"kind":"day","local_date":"2025-01-02"},"position":1}}),
-                ] {
-                    assert_eq!(
-                        session
-                            .receive(
-                                request(3, Op::RulesExplain, invalid),
-                                &status.subscribe().borrow().status
-                            )
-                            .reply()
-                            .outcome,
-                        ResponseOutcome::Err {
-                            error: ProtocolError::new(ErrorKind::BadRequest)
-                        }
-                    );
-                }
-            } else {
-                assert_eq!(
-                    action.reply().outcome,
-                    ResponseOutcome::Err {
-                        error: ProtocolError::new(ErrorKind::Forbidden)
-                    }
-                );
             }
         }
     }

@@ -499,11 +499,6 @@ impl ReadSnapshot {
                     title_id: row.title_id.map(quartz_domain::facts::TitleId),
                 },
             );
-            let foreground = foreground.with_privacy(quartz_domain::facts::HistoricalPrivacy {
-                rule: row.privacy_rule_id,
-                label_key: row.privacy_label_key,
-                label: row.privacy_label,
-            });
             if app_id.is_some()
                 && foreground.visible_app().is_none()
                 && foreground.capture_level() != CaptureLevel::Excluded

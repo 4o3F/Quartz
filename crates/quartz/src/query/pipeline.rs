@@ -137,29 +137,6 @@ impl SegmentFacts {
     pub(super) fn provides_category(&self, segment: &DerivedSegment, rule: &str) -> bool {
         matches!(&segment.category_source, CategorySource::Rule(source) if source.as_str() == rule)
     }
-    pub(super) fn explain_fields(
-        &self,
-        segment: &DerivedSegment,
-    ) -> quartz_domain::rules::FieldSnapshot {
-        let Some(row) = self.explain_foreground(segment) else {
-            return Default::default();
-        };
-        let extraction = segment
-            .foreground
-            .and_then(|index| self.rows[index.0].extraction.as_deref());
-        quartz_domain::rules::FieldSnapshot::from_foreground(
-            row,
-            quartz_domain::rules::Field::ALL.iter().copied(),
-            extraction.map(|value| &value.fields),
-        )
-    }
-    pub(super) fn explain_classification_rule(&self, segment: &DerivedSegment) -> Option<String> {
-        let index = segment.foreground?;
-        match &self.rows[index.0].source {
-            CategorySource::Rule(rule) => Some(rule.as_str().into()),
-            CategorySource::Annotation(_) | CategorySource::Unclassified => None,
-        }
-    }
     pub(super) fn preview_fields(
         &self,
         segment: &DerivedSegment,
@@ -191,15 +168,6 @@ impl SegmentFacts {
                 InputRow::Foreground(row) => row,
                 _ => unreachable!("retained index references a foreground fact"),
             })
-    }
-    pub(super) fn explain_foreground(&self, segment: &DerivedSegment) -> Option<&Foreground> {
-        self.foreground(segment)
-    }
-    pub(super) fn accepts_category(
-        &self,
-        category: &quartz_domain::categories::CategoryUuid,
-    ) -> bool {
-        self.classifier.active_category(category).is_some()
     }
     fn foreground(&self, segment: &DerivedSegment) -> Option<&Foreground> {
         segment
@@ -748,13 +716,6 @@ impl Pipeline {
     }
 }
 impl DerivedSegment {
-    pub(super) fn classification_rule(&self) -> Option<&str> {
-        match &self.category_source {
-            CategorySource::Rule(source) => Some(source.as_str()),
-            CategorySource::Annotation(_) | CategorySource::Unclassified => None,
-        }
-    }
-
     fn apply_offline(&mut self, annotation: &QueryAnnotation, classification: ClassificationId) {
         self.activity = Activity::OfflineActivity(annotation.id.clone());
         self.classification = classification;

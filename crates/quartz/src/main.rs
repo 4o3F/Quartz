@@ -151,28 +151,6 @@ enum RulesCommand {
         #[arg(required = true, num_args = 1..)]
         files: Vec<PathBuf>,
     },
-    /// Preview rule matches.
-    Preview {
-        file: PathBuf,
-        #[arg(long, default_value_t = 7)]
-        days: u32,
-    },
-    /// Compare rule results.
-    Diff {
-        file: PathBuf,
-        #[arg(long, default_value_t = 7)]
-        days: u32,
-    },
-    /// Explain a timestamp's classification.
-    Explain {
-        #[arg(long)]
-        at: String,
-    },
-    /// Display the effective rule tree.
-    Tree {
-        #[arg(long)]
-        kind: Option<String>,
-    },
 }
 
 impl std::fmt::Display for CliCommand {
@@ -336,6 +314,7 @@ enum DispatchCommandError {
     CheckRules {
         source: rules_check::CheckRulesError,
     },
+    #[cfg(not(windows))]
     #[snafu(display("not implemented yet: {operation}"))]
     NotImplemented { operation: CliCommand },
     #[cfg(windows)]
@@ -356,19 +335,15 @@ impl DispatchCommandError {
 impl CliCommand {
     fn dispatch(self) -> Result<(), DispatchCommandError> {
         use snafu::ResultExt as _;
-        let command = match self {
+        match self {
             #[cfg(windows)]
-            Self::Settings { command } => {
-                return command
-                    .run(quartz_pipe::CoreClient::connect().context(SettingsSnafu)?)
-                    .context(SettingsSnafu);
-            }
+            Self::Settings { command } => command
+                .run(quartz_pipe::CoreClient::connect().context(SettingsSnafu)?)
+                .context(SettingsSnafu),
             #[cfg(windows)]
             Self::Status => {
-                return ipc::client::print_status(
-                    quartz_pipe::CoreClient::connect().context(StatusSnafu)?,
-                )
-                .context(StatusSnafu);
+                ipc::client::print_status(quartz_pipe::CoreClient::connect().context(StatusSnafu)?)
+                    .context(StatusSnafu)
             }
             Self::Dump {
                 date,
@@ -380,49 +355,43 @@ impl CliCommand {
                 } else {
                     dump::DumpSource::Pipe
                 };
-                return dump::DumpDay::new(&date, format)
+                dump::DumpDay::new(&date, format)
                     .run(source)
-                    .context(DumpSnafu);
+                    .context(DumpSnafu)
             }
             Self::GenData {
                 db,
                 profile,
                 seed,
                 days,
-            } => {
-                return generate_data::GenerateData::new(&db, profile, seed, days)
-                    .run()
-                    .context(GenerateSnafu);
-            }
+            } => generate_data::GenerateData::new(&db, profile, seed, days)
+                .run()
+                .context(GenerateSnafu),
             Self::BenchQuery {
                 db,
                 runs,
                 scope,
                 input,
-            } => {
-                return bench_query::BenchQuery::new(&db, runs)
-                    .with_scope(scope)
-                    .with_input(input)
+            } => bench_query::BenchQuery::new(&db, runs)
+                .with_scope(scope)
+                .with_input(input)
+                .run()
+                .context(BenchSnafu),
+            Self::Rules(RulesCommand::Check { files }) => {
+                rules_check::CheckRulesCommand::new(&files)
                     .run()
-                    .context(BenchSnafu);
+                    .context(CheckRulesSnafu)
             }
-            command => command,
-        };
-        if let CliCommand::Rules(RulesCommand::Check { files }) = &command {
-            use snafu::ResultExt as _;
-            return rules_check::CheckRulesCommand::new(files)
-                .run()
-                .context(CheckRulesSnafu);
+            #[cfg(windows)]
+            Self::RestoreBackup { file, yes } => {
+                let confirmation = commands::RestoreConfirmation::from(yes);
+                commands::RestoreBackupCommand::new(&file, confirmation)
+                    .run()
+                    .context(RestoreSnafu)
+            }
+            #[cfg(not(windows))]
+            command => NotImplementedSnafu { operation: command }.fail(),
         }
-        #[cfg(windows)]
-        if let CliCommand::RestoreBackup { file, yes } = &command {
-            use snafu::ResultExt as _;
-            let confirmation = commands::RestoreConfirmation::from(*yes);
-            return commands::RestoreBackupCommand::new(file, confirmation)
-                .run()
-                .context(RestoreSnafu);
-        }
-        NotImplementedSnafu { operation: command }.fail()
     }
 }
 
@@ -561,27 +530,6 @@ mod tests {
         assert!(error.to_string().contains("--offline"));
         assert_eq!(error.report(), ExitCode::FAILURE);
         assert!(output.is_empty());
-    }
-
-    #[test]
-    fn unsupported_command_error_keeps_the_subcommand_and_display_name() {
-        let error = CliCommand::Rules(RulesCommand::Preview {
-            file: "private-rules.toml".into(),
-            days: 14,
-        })
-        .dispatch()
-        .expect_err("preview remains unimplemented");
-        assert_eq!(error.to_string(), "not implemented yet: rules preview");
-        let DispatchCommandError::NotImplemented { operation } = error else {
-            panic!("expected unsupported command error");
-        };
-        assert_eq!(
-            operation,
-            CliCommand::Rules(RulesCommand::Preview {
-                file: "private-rules.toml".into(),
-                days: 14,
-            })
-        );
     }
 
     #[test]
@@ -737,28 +685,6 @@ mod tests {
                 Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()))
                     .expect("valid command arguments");
             assert_eq!(parsed.command, Some(Command::Cli(expected)), "{args:?}");
-            let Some(Command::Cli(command)) = parsed.command else {
-                panic!("expected CLI command for {args:?}");
-            };
-            if matches!(
-                command,
-                CliCommand::RestoreBackup { .. }
-                    | CliCommand::Dump { .. }
-                    | CliCommand::GenData { .. }
-                    | CliCommand::BenchQuery { .. }
-            ) {
-                continue;
-            }
-            if matches!(command, CliCommand::Rules(RulesCommand::Check { .. })) {
-                continue;
-            }
-            if matches!(command, CliCommand::Status) {
-                continue;
-            }
-            assert!(
-                matches!(command.dispatch(), Err(DispatchCommandError::NotImplemented { operation }) if operation.to_string() == args[0]),
-                "dispatch operation for {args:?}"
-            );
         }
     }
 
@@ -1022,99 +948,15 @@ mod tests {
     }
 
     #[test]
-    fn every_rules_command_parses_and_reports_not_implemented() {
-        for (args, expected, name) in [
-            (
-                vec!["check", "a.yml", "b.yml"],
-                RulesCommand::Check {
-                    files: vec!["a.yml".into(), "b.yml".into()],
-                },
-                "rules check",
-            ),
-            (
-                vec!["preview", "a.yml"],
-                RulesCommand::Preview {
-                    file: "a.yml".into(),
-                    days: 7,
-                },
-                "rules preview",
-            ),
-            (
-                vec!["diff", "a.yml"],
-                RulesCommand::Diff {
-                    file: "a.yml".into(),
-                    days: 7,
-                },
-                "rules diff",
-            ),
-            (
-                vec!["explain", "--at", "2026-11-16T12:00:00Z"],
-                RulesCommand::Explain {
-                    at: "2026-11-16T12:00:00Z".into(),
-                },
-                "rules explain",
-            ),
-            (
-                vec!["tree"],
-                RulesCommand::Tree { kind: None },
-                "rules tree",
-            ),
-        ] {
-            let args = [&["rules"][..], &args].concat();
-            let parsed =
-                Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()))
-                    .expect("valid command arguments");
-            assert_eq!(
-                parsed.command,
-                Some(Command::Cli(CliCommand::Rules(expected))),
-                "{args:?}"
-            );
-            let Some(Command::Cli(command)) = parsed.command else {
-                panic!("expected rules command for {args:?}");
-            };
-            if matches!(command, CliCommand::Rules(RulesCommand::Check { .. })) {
-                continue;
-            }
-            assert!(
-                matches!(command.dispatch(), Err(DispatchCommandError::NotImplemented { operation }) if operation.to_string() == name),
-                "dispatch operation for {args:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn rules_optional_arguments() {
-        for (args, expected) in [
-            (
-                vec!["preview", "a.yml", "--days", "14"],
-                RulesCommand::Preview {
-                    file: "a.yml".into(),
-                    days: 14,
-                },
-            ),
-            (
-                vec!["diff", "a.yml", "--days", "3"],
-                RulesCommand::Diff {
-                    file: "a.yml".into(),
-                    days: 3,
-                },
-            ),
-            (
-                vec!["tree", "--kind", "privacy"],
-                RulesCommand::Tree {
-                    kind: Some("privacy".into()),
-                },
-            ),
-        ] {
-            let args = [&["rules"][..], &args].concat();
-            assert_eq!(
-                Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()))
-                    .expect("valid command arguments")
-                    .command,
-                Some(Command::Cli(CliCommand::Rules(expected))),
-                "rules arguments: {args:?}"
-            );
-        }
+    fn rules_check_command_parses_files() {
+        let parsed = Args::try_parse_from(["quartz", "rules", "check", "a.yml", "b.yml"])
+            .expect("valid command arguments");
+        assert_eq!(
+            parsed.command,
+            Some(Command::Cli(CliCommand::Rules(RulesCommand::Check {
+                files: vec!["a.yml".into(), "b.yml".into()],
+            })))
+        );
     }
 
     #[test]
@@ -1181,11 +1023,6 @@ mod tests {
             vec!["restore-backup"],
             vec!["rules"],
             vec!["rules", "check"],
-            vec!["rules", "preview"],
-            vec!["rules", "diff"],
-            vec!["rules", "explain"],
-            vec!["rules", "tree", "--unknown"],
-            vec!["rules", "preview", "a.yml", "--days", "invalid"],
         ] {
             assert!(
                 Args::try_parse_from(std::iter::once("quartz").chain(args.iter().copied()))

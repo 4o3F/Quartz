@@ -104,37 +104,12 @@ pub struct ForegroundContent {
 /// A foreground fact whose visible fields obey its persisted capture level.
 #[derive(Debug, Clone)]
 pub struct Foreground {
-    privacy: Option<HistoricalPrivacy>,
     pub span: FactSpan,
     pub kind: ForegroundKind,
     level: CaptureLevel,
     content: ForegroundContent,
 }
-/// Attribution persisted when the capture privacy projection was applied.
-#[derive(Clone, PartialEq, Eq)]
-pub struct HistoricalPrivacy {
-    pub rule: Option<String>,
-    pub label_key: Option<String>,
-    pub label: Option<String>,
-}
-impl std::fmt::Debug for HistoricalPrivacy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("HistoricalPrivacy { .. }")
-    }
-}
 impl Foreground {
-    /// Attaches the original stored attribution without evaluating current rules.
-    pub fn with_privacy(mut self, privacy: HistoricalPrivacy) -> Self {
-        self.privacy =
-            (privacy.rule.is_some() || privacy.label_key.is_some() || privacy.label.is_some())
-                .then_some(privacy);
-        self
-    }
-    /// Borrows the attribution stored with this fact.
-    pub fn privacy(&self) -> Option<&HistoricalPrivacy> {
-        self.privacy.as_ref()
-    }
-
     /// Projects privacy once when a stored fact is read: excluded rows lose the application, and only full rows retain title text and identity.
     pub fn new(
         span: FactSpan,
@@ -154,7 +129,6 @@ impl Foreground {
             content.title_id = None;
         }
         Self {
-            privacy: None,
             span,
             kind,
             level,

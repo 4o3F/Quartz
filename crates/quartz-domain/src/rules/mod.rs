@@ -2,7 +2,6 @@
 
 mod content_hash;
 mod diagnostic;
-mod diff;
 mod evaluate;
 mod export;
 mod format;
@@ -14,7 +13,6 @@ mod resolve;
 
 pub use content_hash::{ContentHash, ParseContentHashError};
 pub use diagnostic::{Diagnostic, DiagnosticCode, SourceLocation};
-pub use diff::{EntryChange, EntryChangeKind};
 pub use evaluate::{
     ClassificationMatch, CompileRulesError, CompiledRules, ConditionOutcome, Evaluation,
     ExplanationId, ExtractedTitle, Extraction, ExtractionStatus, FieldSnapshot,

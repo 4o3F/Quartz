@@ -9,10 +9,6 @@ use tokio::sync::oneshot;
 pub(crate) const QUERY_CHANNEL_CAPACITY: usize = 8;
 #[derive(Debug)]
 pub(crate) enum QueryCommand {
-    Explain {
-        request: super::explain::ExplainRequest,
-        reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
-    },
     Preview {
         request: super::preview::PreviewRequest,
         reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
@@ -35,7 +31,6 @@ impl QueryCommand {
         match self {
             Self::Query { reply, .. }
             | Self::Controlled { reply, .. }
-            | Self::Explain { reply, .. }
             | Self::Preview { reply, .. } => reply.is_closed(),
             Self::RuleInputs { reply } => reply.is_closed(),
         }
@@ -74,14 +69,6 @@ impl RuleReadReply {
     }
 }
 impl QueryPort {
-    pub(crate) fn submit_explain(
-        &self,
-        request: super::explain::ExplainRequest,
-    ) -> Result<oneshot::Receiver<Result<QueryResponse, ProtocolError>>, ProtocolError> {
-        let (reply, received) = oneshot::channel();
-        self.send(QueryCommand::Explain { request, reply })?;
-        Ok(received)
-    }
     pub(crate) fn submit_preview(
         &self,
         request: super::preview::PreviewRequest,
