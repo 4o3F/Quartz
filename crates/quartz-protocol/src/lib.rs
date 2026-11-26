@@ -33,7 +33,7 @@ pub use timed::{
 };
 
 pub use envelope::{Envelope, Event, EventSeq, Request, RequestId, Response, ResponseOutcome};
-pub use error::{ErrorKind, PreviewMismatchReason, ProtocolError, RuleSetVersion};
+pub use error::{ErrorKind, ProtocolError, RuleSetVersion};
 #[cfg(feature = "codec")]
 pub use frame::frame_codec;
 pub use frame::{DecodeJsonError, EncodeFrameError, MAX_FRAME_LEN, decode_json, encode_json};

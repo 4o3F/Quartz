@@ -14,7 +14,6 @@ enum TestWrite {
 pub(crate) struct TestDatabase {
     pub port: QueryPort,
     pub versions: VersionPort,
-    pub mutations: crate::persistence::dispatch::WritePort,
     writes: Sender<TestWrite>,
     thread: Option<JoinHandle<()>>,
 }
@@ -24,8 +23,7 @@ impl TestDatabase {
     }
     pub(crate) fn with_fixture(mut fixture: QueryFixture) -> Self {
         let channel = QueryChannel::new();
-        let mutations = crate::persistence::dispatch::WriteChannel::new();
-        let mut registry = crate::rules::registry::RegistryShell::open(
+        let registry = crate::rules::registry::RegistryShell::open(
             &mut fixture.store,
             quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"),
         )
@@ -47,14 +45,6 @@ impl TestDatabase {
                         }
                         Ok(TestWrite::Stop) | Err(_) => return,
                     },
-                    recv(mutations.receiver) -> command => match command {
-                        Ok(command) => {
-                            let result = command.request.execute(&mut fixture.store, quartz_domain::capture::UtcInstant::try_from(0).expect("UTC"), None, &mut registry);
-                            publisher.publish(&mut fixture.store).expect("publish committed mutation");
-                            let _ = command.reply.send(result);
-                        }
-                        Err(_) => return,
-                    },
                     recv(publisher.requests) -> request => match request { Ok(request) => publisher.receive(request), Err(_) => return },
                     recv(channel.receiver) -> query => match query {
                         Ok(QueryCommand::Query {request, reply}) => { let result = fixture.run(request).map_err(|error| ProtocolError::new(error.kind())); let _ = reply.send(result); }
@@ -72,7 +62,6 @@ impl TestDatabase {
         Self {
             port: channel.port,
             versions,
-            mutations: mutations.port,
             writes,
             thread: Some(thread),
         }

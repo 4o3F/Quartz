@@ -20,13 +20,6 @@ pub(crate) enum WriteResponse {
     Accepted(quartz_protocol::AcceptedBody),
 }
 impl WriteRequest {
-    pub(crate) fn bind_receipts(self, receipts: crate::rules::receipts::ReceiptContext) -> Self {
-        match self {
-            Self::Rules(mutation) => Self::AuthorizedRules { mutation, receipts },
-            request => request,
-        }
-    }
-
     pub(crate) fn is_read_only(&self) -> bool {
         matches!(
             self,
@@ -120,11 +113,6 @@ impl WriteRequest {
                     .execute(registry, store, now)
                     .map(WriteResponse::Rules);
             }
-            Self::AuthorizedRules { mutation, receipts } => {
-                return mutation
-                    .execute_with_receipts(registry, store, now, Some(receipts))
-                    .map(WriteResponse::Rules);
-            }
             Self::Categories(request) => return request.execute(store),
             Self::SettingsGet | Self::SettingsSet(_) => {
                 let system = system.ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?;
@@ -192,10 +180,6 @@ pub(crate) const WRITE_CHANNEL_CAPACITY: usize = 8;
 #[derive(Debug)]
 pub(crate) enum WriteRequest {
     Rules(crate::rules::write::RuleMutation),
-    AuthorizedRules {
-        mutation: crate::rules::write::RuleMutation,
-        receipts: crate::rules::receipts::ReceiptContext,
-    },
     RuleValidation(quartz_protocol::RulesTextValidateRequest),
     SettingsGet,
     SettingsSet(quartz_protocol::SettingsSetRequest),

@@ -22,13 +22,6 @@ enum RunningJob {
     Preview(Box<super::preview::PreviewJob>),
 }
 impl RunningJob {
-    fn take_receipt_grant(&mut self) -> Option<crate::rules::receipts::ReceiptGrant> {
-        match self {
-            Self::Query(_) => None,
-            Self::Preview(job) => job.take_receipt_grant(),
-        }
-    }
-
     fn advance(&mut self) -> Result<Option<QueryResponse>, RunQueryError> {
         match self {
             Self::Query(job) => job.advance(),
@@ -156,8 +149,6 @@ impl QueryRunner {
             }
         };
         if let Some(result) = result {
-            let grant = active.job.take_receipt_grant();
-            let successful = result.is_ok();
             match active.job.finish() {
                 Ok(reader) => store.return_query_reader(reader),
                 Err(source) => {
@@ -167,12 +158,7 @@ impl QueryRunner {
                     return Err(source.recover_reader(store));
                 }
             }
-            if successful && let Some(grant) = grant {
-                active.control.hold_receipt(grant);
-            }
-            if active.reply.send(result).is_err() {
-                drop(active.control.take_receipt());
-            }
+            let _ = active.reply.send(result);
         } else {
             self.running = Some(active);
         }

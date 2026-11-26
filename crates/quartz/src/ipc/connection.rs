@@ -151,7 +151,6 @@ impl Connection {
         let mut reader = FramedRead::new(read, frame_codec());
         let outbox = writer.handle.clone();
         let mut registration = None;
-        let mut receipt_owner = None;
         let mut requests = PendingReplies::new();
         let tracker = PendingTracker::default();
         loop {
@@ -192,7 +191,6 @@ impl Connection {
             if registration.is_none()
                 && let Some(peer) = session.peer(self.peer_pid)
             {
-                receipt_owner = Some(crate::rules::receipts::ReceiptOwner::new(peer.role()));
                 registration = Some(
                     self.registry
                         .register(peer, outbox.clone())
@@ -265,13 +263,7 @@ impl Connection {
                         None => Action::success_response(id, quartz_protocol::AcceptedBody),
                     })
                 }
-                Action::Preview { id, mut request } => {
-                    request.receipts = Some(
-                        receipt_owner
-                            .as_ref()
-                            .expect("preview follows hello")
-                            .context(),
-                    );
+                Action::Preview { id, request } => {
                     let control = request.control.clone();
                     self.admit_request(id, &outbox, &mut requests, &tracker, Some(control), || {
                         self.services
@@ -281,12 +273,6 @@ impl Connection {
                     })
                 }
                 Action::Write { id, request } => {
-                    let request = request.bind_receipts(
-                        receipt_owner
-                            .as_ref()
-                            .expect("write follows hello")
-                            .context(),
-                    );
                     let read_only = request.is_read_only();
                     self.admit_request(id, &outbox, &mut requests, &tracker, None, || {
                         self.services.writes.submit(request).map(|reply| {
@@ -415,14 +401,9 @@ impl Connection {
                         },
                         None => reply.receive(id).await,
                     }?;
-                    let grant = control.as_ref().and_then(|control| control.take_receipt());
                     drop(registration);
                     if let Some(response) = response {
-                        let successful = matches!(response.outcome, quartz_protocol::ResponseOutcome::Ok { .. });
-                        match (successful, grant) {
-                            (true, Some(grant)) => outbox.receipt_response(response, grant).map_err(io::Error::other)?,
-                            _ => outbox.response(response).map_err(io::Error::other)?,
-                        }
+                        outbox.response(response).map_err(io::Error::other)?;
                     }
                     Ok(())
                 }));
@@ -1425,80 +1406,5 @@ pub(crate) mod tests {
             assert!(command.reply.is_closed());
         }
         client.close().await;
-    }
-    #[tokio::test]
-    async fn connection_preview_receipt_authorizes_import_only_on_its_issuing_connection() {
-        use quartz_protocol::{Op, Request};
-        let database = TestDatabase::start();
-        let status = StatusPublisher::new(quartz_protocol::InstanceId("privacy-save".into()));
-        let mut transport = connection(&database, &status);
-        transport.services.writes = database.mutations.clone();
-        let mut second_transport = connection(&database, &status);
-        second_transport.services.writes = database.mutations.clone();
-        let mut first = MemoryClient::connect(
-            transport,
-            HelloRole::Ui {
-                ui: quartz_protocol::UiHello {
-                    state: quartz_protocol::UiState::Visible,
-                },
-            },
-        )
-        .await;
-        let mut second = MemoryClient::connect(
-            second_transport,
-            HelloRole::Ui {
-                ui: quartz_protocol::UiHello {
-                    state: quartz_protocol::UiState::Visible,
-                },
-            },
-        )
-        .await;
-        first.send_batch([Request {id:RequestId(2),op:Op::QueryRange,body:serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["category"]})}]).await;
-        let Envelope::Response(response) = first.next().await else {
-            panic!("range response")
-        };
-        let ResponseOutcome::Ok { body } = response.outcome else {
-            panic!("range success")
-        };
-        let mutation = serde_json::json!({"key":"user.private","base_version":0,"text":"format='quartz-rules/1'\n[set]\nkey='user.private'\nkind='privacy'\nname='Private'\n"});
-        first.send_batch([Request {id:RequestId(3),op:Op::RulesTextPreview,body:serde_json::json!({"mutation":{"op":"rules_text.import","body":mutation},"start_date":"2025-01-02","end_date":"2025-01-03","expected_versions":body["versions"]})}]).await;
-        let Envelope::Response(response) = first.next().await else {
-            panic!("preview response")
-        };
-        let ResponseOutcome::Ok { body } = response.outcome else {
-            panic!("preview success")
-        };
-        let mut mutation = mutation;
-        mutation["preview_receipt"] = body["preview_receipt"].clone();
-        assert!(mutation["preview_receipt"].is_string());
-        second
-            .send_batch([Request {
-                id: RequestId(2),
-                op: Op::RulesTextImport,
-                body: mutation.clone(),
-            }])
-            .await;
-        let Envelope::Response(response) = second.next().await else {
-            panic!("other connection response")
-        };
-        assert!(
-            matches!(response.outcome, ResponseOutcome::Err { error } if error.kind == ErrorKind::PreviewExpired)
-        );
-        first
-            .send_batch([Request {
-                id: RequestId(4),
-                op: Op::RulesTextImport,
-                body: mutation,
-            }])
-            .await;
-        let Envelope::Response(response) = first.next().await else {
-            panic!("save response")
-        };
-        let ResponseOutcome::Ok { body } = response.outcome else {
-            panic!("save success")
-        };
-        assert_eq!(body["sets"][0]["version"], 1);
-        first.close().await;
-        second.close().await;
     }
 }

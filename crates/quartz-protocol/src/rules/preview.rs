@@ -83,7 +83,7 @@ impl From<PreviewSampleLimit> for u32 {
 #[snafu(display("preview sample limit must be between 0 and 50"))]
 pub struct ParsePreviewSampleLimitError;
 
-/// User-set enablement without a preview receipt.
+/// User-set enablement preview body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewSetEnabled {
@@ -91,13 +91,13 @@ pub struct PreviewSetEnabled {
     pub base_version: NonZeroU32,
     pub enabled: bool,
 }
-/// Complete sibling order without a preview receipt.
+/// Complete sibling order preview body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewReorder {
     pub siblings: Vec<RuleSetSibling>,
 }
-/// Childless user-set deletion without a preview receipt.
+/// Childless user-set deletion preview body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewDelete {
@@ -112,7 +112,7 @@ pub struct PreviewRevert {
     pub base_version: NonZeroU32,
     pub version: NonZeroU32,
 }
-/// Exact rule_sets write operation, with a strictly typed receipt-free body.
+/// Exact rule_sets write operation for preview.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", content = "body", deny_unknown_fields)]
 pub enum RulePreviewMutation {
@@ -142,7 +142,7 @@ impl std::fmt::Debug for RulePreviewMutation {
             .finish()
     }
 }
-/// Text previews accept only an import, with the receipt omitted.
+/// Text previews accept only an import.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", content = "body", deny_unknown_fields)]
 pub enum RulesTextPreviewMutation {
@@ -310,13 +310,9 @@ pub struct RulePreviewSample {
     pub before: RulePreviewOutput,
     pub after: RulePreviewOutput,
 }
-/// Completed preview page, with privacy confirmation on its first page.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Completed preview page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RulesPreviewResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview_receipt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_utc_ms: Option<i64>,
     pub rules: Vec<RulePreviewStatistics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub totals: Option<RulePreviewTotals>,
@@ -325,17 +321,6 @@ pub struct RulesPreviewResponse {
     pub samples: Vec<RulePreviewSample>,
     pub versions: QueryVersions,
     pub next_cursor: Option<QueryCursor>,
-}
-impl std::fmt::Debug for RulesPreviewResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RulesPreviewResponse")
-            .field("preview_receipt", &"[redacted]")
-            .field("expires_utc_ms", &self.expires_utc_ms)
-            .field("rules", &self.rules.len())
-            .field("samples", &self.samples.len())
-            .field("versions", &self.versions)
-            .finish_non_exhaustive()
-    }
 }
 /// Text and editor previews return the same result shape.
 pub type RulesTextPreviewResponse = RulesPreviewResponse;

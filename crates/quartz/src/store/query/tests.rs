@@ -4730,7 +4730,6 @@ fn committed_rule_mutations_stale_issued_rule_and_day_page_cursors() {
         text: format!(
             "format='quartz-rules/1'\n[set]\nkey='{root}'\nkind='classification'\nname='Root'\n"
         ),
-        preview_receipt: None,
     })
     .execute(&mut registry, &mut fixture.store, now)
     .expect("root");
@@ -4745,7 +4744,6 @@ fn committed_rule_mutations_stale_issued_rule_and_day_page_cursors() {
             key,
             base_version: 0,
             text,
-            preview_receipt: None,
         })
         .execute(&mut registry, &mut fixture.store, now)
         .expect("bounded child");
@@ -4790,7 +4788,13 @@ fn committed_rule_mutations_stale_issued_rule_and_day_page_cursors() {
         panic!("day response")
     };
     day.cursor = Some(first_day.next_cursor.expect("issued day continuation"));
-    RuleMutation::Edit(RuleSetsEditRequest {key:"user.after-cursor".into(),base_version:0,text:"format='quartz-rules/1'\n[set]\nkey='user.after-cursor'\nkind='classification'\nname='Changed'\n".into(),preview_receipt:None}).execute(&mut registry,&mut fixture.store,now).expect("committed mutation");
+    RuleMutation::Edit(RuleSetsEditRequest {
+        key: "user.after-cursor".into(),
+        base_version: 0,
+        text: "format='quartz-rules/1'\n[set]\nkey='user.after-cursor'\nkind='classification'\nname='Changed'\n".into(),
+    })
+    .execute(&mut registry, &mut fixture.store, now)
+    .expect("committed mutation");
     for request in [
         ReadRequest::Get(get.clone()),
         ReadRequest::Tree(tree.clone()),

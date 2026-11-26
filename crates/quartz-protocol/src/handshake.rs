@@ -282,7 +282,7 @@ pub enum Capability {
     /// Connection-local cancellation of read-only requests.
     #[serde(rename = "requests.cancel.v1")]
     RequestsCancelV1,
-    /// Rule previews and privacy-save receipt verification.
+    /// Rule previews.
     #[serde(rename = "rules.preview.v1")]
     RulesPreviewV1,
     /// Rule text validation, import, and export.

@@ -40,9 +40,6 @@ fn preview_requests_reject_unknown_fields_at_every_mutation_level() {
         request.pointer_mut(pointer).expect("object")["extra"] = json!(true);
         assert!(serde_json::from_value::<RulesTextPreviewRequest>(request).is_err());
     }
-    let mut request = fixture()["editor"].clone();
-    request["mutation"]["body"]["preview_receipt"] = json!("receipt");
-    assert!(serde_json::from_value::<RulesPreviewRequest>(request).is_err());
     assert!(serde_json::from_value::<RulesPreviewRequest>(fixture()["text"].clone()).is_err());
     assert!(
         serde_json::from_value::<RulesTextPreviewRequest>(fixture()["editor"].clone()).is_err()
@@ -52,7 +49,7 @@ fn preview_requests_reject_unknown_fields_at_every_mutation_level() {
     assert!(serde_json::from_str::<RulePreviewMutation>(duplicate).is_err());
 }
 #[test]
-fn preview_accepts_all_rule_set_write_shapes_and_rejects_receipts() {
+fn preview_accepts_all_rule_set_write_shapes() {
     for mutation in [
         json!({"op":"rule_sets.edit","body":{"key":"user.x","base_version":0,"text":"text"}}),
         json!({"op":"rule_sets.set_enabled","body":{"key":"user.x","base_version":1,"enabled":false}}),
@@ -61,12 +58,9 @@ fn preview_accepts_all_rule_set_write_shapes_and_rejects_receipts() {
         json!({"op":"rule_sets.revert","body":{"key":"user.x","base_version":1,"version":1}}),
     ] {
         round_trip::<RulePreviewMutation>(mutation.clone());
-        let mut unknown = mutation.clone();
+        let mut unknown = mutation;
         unknown["body"]["extra"] = json!(true);
         assert!(serde_json::from_value::<RulePreviewMutation>(unknown).is_err());
-        let mut receipt = mutation;
-        receipt["body"]["preview_receipt"] = Value::Null;
-        assert!(serde_json::from_value::<RulePreviewMutation>(receipt).is_err());
     }
     let mut reorder = json!({"op":"rule_sets.reorder","body":{"siblings":[{"key":"user.x","base_version":1,"extra":true}]}});
     assert!(serde_json::from_value::<RulePreviewMutation>(reorder.clone()).is_err());
@@ -119,18 +113,14 @@ fn preview_deadlines_samples_and_logical_dates_have_documented_bounds() {
     }
 }
 #[test]
-fn preview_responses_accept_additive_fields_without_receipts() {
+fn preview_responses_accept_additive_fields() {
     let mut response = fixture()["response"].clone();
     response["extra"] = json!(true);
     response["rules"][0]["extra"] = json!(true);
     response["totals"]["before"]["extra"] = json!(true);
     response["samples"][0]["extra"] = json!(true);
     response["samples"][0]["after"]["extra"] = json!(true);
-    let response: RulesPreviewResponse =
-        serde_json::from_value(response).expect("additive response");
-    let encoded = serde_json::to_value(response).expect("response");
-    assert!(encoded.get("preview_receipt").is_none());
-    assert!(encoded.get("expires_utc_ms").is_none());
+    let _: RulesPreviewResponse = serde_json::from_value(response).expect("additive response");
 }
 #[test]
 fn preview_roles_and_capability_match_the_contract() {
@@ -240,10 +230,4 @@ fn cancellation_requests_are_strict_and_exclude_host_roles() {
 fn privacy_preview_fixture_preserves_stored_retention_totals() {
     let totals = fixture()["response"]["totals"].clone();
     assert_eq!(totals["before"], totals["after"]);
-}
-
-#[test]
-fn preview_response_debug_redacts_receipt() {
-    let response: RulesPreviewResponse = serde_json::from_value(json!({"rules":[],"samples":[],"versions":"v","next_cursor":null,"preview_receipt":"private-receipt-marker"})).expect("response");
-    assert!(!format!("{response:?}").contains("private-receipt-marker"));
 }

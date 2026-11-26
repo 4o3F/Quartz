@@ -9,7 +9,3 @@ pub(crate) mod write;
 
 #[cfg(any(windows, test))]
 mod diagnostic;
-
-pub(crate) mod receipts;
-
-pub(crate) mod digest;

@@ -65,8 +65,6 @@ pub struct RuleSetsEditRequest {
     pub key: String,
     pub base_version: u32,
     pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview_receipt: Option<String>,
 }
 impl std::fmt::Debug for RuleSetsEditRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -74,7 +72,6 @@ impl std::fmt::Debug for RuleSetsEditRequest {
             .field("key", &self.key)
             .field("base_version", &self.base_version)
             .field("text", &"[redacted]")
-            .field("preview_receipt", &"[redacted]")
             .finish()
     }
 }
@@ -122,24 +119,12 @@ pub struct RulesTextExportResponse {
     pub next_cursor: Option<QueryCursor>,
 }
 /// Changes enablement of a user set and its effective subtree.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsSetEnabledRequest {
     pub key: String,
     pub base_version: NonZeroU32,
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview_receipt: Option<String>,
-}
-impl std::fmt::Debug for RuleSetsSetEnabledRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RuleSetsSetEnabledRequest")
-            .field("key", &self.key)
-            .field("base_version", &self.base_version)
-            .field("enabled", &self.enabled)
-            .field("preview_receipt", &"[redacted]")
-            .finish()
-    }
 }
 
 /// One observed revision in a complete sibling ordering.
@@ -150,60 +135,27 @@ pub struct RuleSetSibling {
     pub base_version: NonZeroU32,
 }
 /// Replaces the entire same-parent, same-kind sibling order atomically.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsReorderRequest {
     pub siblings: Vec<RuleSetSibling>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview_receipt: Option<String>,
-}
-impl std::fmt::Debug for RuleSetsReorderRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RuleSetsReorderRequest")
-            .field("siblings", &self.siblings)
-            .field("preview_receipt", &"[redacted]")
-            .finish()
-    }
 }
 
 /// Deletes a childless user set while retaining its history.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsDeleteRequest {
     pub key: String,
     pub base_version: NonZeroU32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview_receipt: Option<String>,
-}
-impl std::fmt::Debug for RuleSetsDeleteRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RuleSetsDeleteRequest")
-            .field("key", &self.key)
-            .field("base_version", &self.base_version)
-            .field("preview_receipt", &"[redacted]")
-            .finish()
-    }
 }
 
 /// Copies historical contents into a new current revision.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSetsRevertRequest {
     pub key: String,
     pub base_version: NonZeroU32,
     pub version: NonZeroU32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview_receipt: Option<String>,
-}
-impl std::fmt::Debug for RuleSetsRevertRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RuleSetsRevertRequest")
-            .field("key", &self.key)
-            .field("base_version", &self.base_version)
-            .field("version", &self.version)
-            .field("preview_receipt", &"[redacted]")
-            .finish()
-    }
 }
 
 /// A committed revision, including the revision recording a deletion.

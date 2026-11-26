@@ -922,44 +922,40 @@ mod tests {
         );
     }
     #[test]
-    fn privacy_edits_require_preview_without_publishing_or_writing() {
-        use quartz_protocol::ErrorKind;
+    fn privacy_edits_save_and_take_effect_without_preview() {
         let mut fixture = Fixture::new();
         let before = fixture.database.registry.snapshots().load();
-        for receipt in [serde_json::Value::Null, serde_json::json!("unissued")] {
-            let error = fixture.ipc(quartz_protocol::Op::RuleSetsEdit, serde_json::json!({"key":"user.privacy","base_version":0,"text":Fixture::rule_text("user.privacy","privacy","builtin.privacy"),"preview_receipt":receipt})).expect_err("preview unavailable");
-            assert_eq!(
-                error.kind,
-                if receipt.is_null() {
-                    ErrorKind::PreviewRequired
-                } else {
-                    ErrorKind::PreviewExpired
-                }
-            );
-            assert!(Arc::ptr_eq(
-                &before,
-                &fixture.database.registry.snapshots().load()
-            ));
-            assert_eq!(
-                fixture
-                    .database
-                    .store
-                    .rule_sets()
-                    .load()
-                    .expect("stored state")
-                    .sets
-                    .len(),
-                before.state().sets.len()
-            );
-            assert!(fixture._feedback.is_empty());
-            assert!(
-                !fixture
-                    ._versions
-                    .updates
-                    .has_changed()
-                    .expect("version publisher")
-            );
-        }
+        let text = Fixture::rule_text("user.privacy", "privacy", "builtin.privacy")
+            + "[[rule]]\nid='hide'\nlabel='Hide'\npreset='title_hidden'\nwhen=[{field='app.exe_name',op='equals',value='secret.exe'}]\n";
+        let saved = fixture
+            .ipc(
+                quartz_protocol::Op::RuleSetsEdit,
+                serde_json::json!({"key":"user.privacy","base_version":0,"text":text}),
+            )
+            .expect("privacy edit saves without receipt");
+        assert_eq!(
+            saved["sets"],
+            serde_json::json!([{"key":"user.privacy","version":1,"deleted":false}])
+        );
+        fixture.take_rule_publication();
+        assert!(
+            fixture
+                ._versions
+                .updates
+                .has_changed()
+                .expect("version publisher")
+        );
+        let after = fixture.database.registry.snapshots().load();
+        assert_ne!(before.hashes().privacy, after.hashes().privacy);
+        let mut fields = quartz_domain::rules::FieldSnapshot::default();
+        fields.text.insert(
+            quartz_domain::rules::Field::ExeName,
+            quartz_domain::text::NfcText::new("secret.exe"),
+        );
+        assert_eq!(
+            after.privacy().evaluate(&fields).privacy.window_title,
+            quartz_domain::rules::Action::Drop
+        );
     }
 
     impl Fixture {
@@ -1016,41 +1012,6 @@ mod tests {
             self.ipc(quartz_protocol::Op::RuleSetsEdit, serde_json::json!({"key":key,"base_version":0,"text":Self::rule_text(key,kind,parent)})).expect("save set");
             self.take_rule_publication();
             self._versions.updates.borrow_and_update();
-        }
-        fn seed_privacy_history(&mut self) {
-            use quartz_domain::rules::registry::RuleRegistry;
-            let state = self
-                .database
-                .store
-                .rule_sets()
-                .load()
-                .expect("stored fixture");
-            let registry = RuleRegistry::from_state(state).expect("fixture registry");
-            let decision = registry
-                .decide(RegistryCommand::Apply {
-                    key: "user.privacy".parse().expect("key"),
-                    file: "fixture.toml".into(),
-                    text: Self::rule_text("user.privacy", "privacy", "builtin.privacy"),
-                    base_version: 0,
-                })
-                .into_parts();
-            decision.reply.expect("fixture decision");
-            self.database
-                .store
-                .rule_transaction(|transaction| transaction.execute(&decision.writes, 0))
-                .expect("seed existing privacy revision");
-            self.database.registry = RegistryShell::open(
-                &mut self.database.store,
-                UtcInstant::try_from(0).expect("UTC"),
-            )
-            .expect("load persisted fixture");
-            let channel = crate::query::versions::VersionPublisher::open(
-                &mut self.database.store,
-                self.database.registry.snapshots(),
-            )
-            .expect("fixture publisher");
-            self.database.versions = channel.publisher;
-            self._versions = channel.port;
         }
     }
     #[test]
@@ -1181,12 +1142,12 @@ mod tests {
         }
     }
     #[test]
-    fn edits_reject_key_kind_and_parent_changes_before_preview() {
+    fn edits_reject_key_kind_and_parent_changes() {
         use quartz_protocol::{ErrorKind, Op, RuleSetIdentityField};
         let mut fixture = Fixture::new();
         fixture.save_rule("user.test", "classification", "builtin.classification");
         fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":1,"text":Fixture::rule_text("user.other","classification","builtin.classification")}),ErrorKind::BadRequest);
-        fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":1,"text":Fixture::rule_text("user.test","privacy","builtin.classification"),"preview_receipt":"unissued"}),ErrorKind::RuleSetIdentity { key:"user.test".into(),field:RuleSetIdentityField::Kind });
+        fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":1,"text":Fixture::rule_text("user.test","privacy","builtin.classification")}),ErrorKind::RuleSetIdentity { key:"user.test".into(),field:RuleSetIdentityField::Kind });
         fixture.assert_rule_failure(Op::RuleSetsEdit,serde_json::json!({"key":"user.test","base_version":1,"text":Fixture::rule_text("user.test","classification","builtin.extraction")}),ErrorKind::RuleSetIdentity { key:"user.test".into(),field:RuleSetIdentityField::Parent });
     }
     #[test]
@@ -1248,73 +1209,6 @@ mod tests {
         );
         fixture.assert_rule_failure(Op::RuleSetsReorder,serde_json::json!({"siblings":[{"key":"user.b","base_version":1},{"key":"user.a","base_version":1}]}),ErrorKind::RuleSetStale {key:"user.a".into(),current_version:RuleSetVersion(2)});
         fixture.assert_rule_failure(Op::RuleSetsReorder,serde_json::json!({"siblings":[{"key":"user.b","base_version":1},{"key":"user.a","base_version":2}]}),ErrorKind::RuleSetStale {key:"user.b".into(),current_version:RuleSetVersion(2)});
-    }
-    #[test]
-    fn privacy_mutations_and_imports_require_preview_without_changing_history() {
-        use quartz_protocol::{ErrorKind, Op};
-        struct Case {
-            op: Op,
-            body: serde_json::Value,
-        }
-        let mut fixture = Fixture::new();
-        fixture.seed_privacy_history();
-        for receipt in [serde_json::Value::Null, serde_json::json!("unissued")] {
-            for mut case in [
-                Case {
-                    op: Op::RuleSetsEdit,
-                    body: serde_json::json!({"key":"user.privacy","base_version":1,"text":Fixture::rule_text("user.privacy","privacy","builtin.privacy")}),
-                },
-                Case {
-                    op: Op::RuleSetsSetEnabled,
-                    body: serde_json::json!({"key":"user.privacy","base_version":1,"enabled":false}),
-                },
-                Case {
-                    op: Op::RuleSetsReorder,
-                    body: serde_json::json!({"siblings":[{"key":"user.privacy","base_version":1}]}),
-                },
-                Case {
-                    op: Op::RuleSetsDelete,
-                    body: serde_json::json!({"key":"user.privacy","base_version":1}),
-                },
-                Case {
-                    op: Op::RuleSetsRevert,
-                    body: serde_json::json!({"key":"user.privacy","base_version":1,"version":1}),
-                },
-            ] {
-                case.body["preview_receipt"] = receipt.clone();
-                fixture.assert_rule_failure(
-                    case.op,
-                    case.body,
-                    if receipt.is_null() {
-                        ErrorKind::PreviewRequired
-                    } else {
-                        ErrorKind::PreviewExpired
-                    },
-                );
-            }
-        }
-        let snapshot = fixture.database.registry.snapshots().load();
-        {
-            let error = fixture
-                .database
-                .registry
-                .run(
-                    &mut fixture.database.store,
-                    UtcInstant::try_from(0).expect("UTC"),
-                    RegistryCommand::Import {
-                        key: "user.privacy".parse().expect("key"),
-                        file: "fixture.toml".into(),
-                        text: Fixture::rule_text("user.privacy", "privacy", "builtin.privacy"),
-                        base_version: 1,
-                    },
-                )
-                .expect_err("import requires receipt issuance");
-            assert!(matches!(error, RunRegistryCommandError::PreviewRequired));
-            assert!(Arc::ptr_eq(
-                &snapshot,
-                &fixture.database.registry.snapshots().load()
-            ));
-        }
     }
     #[test]
     fn extraction_edits_and_reverts_restore_historical_contents_as_new_revisions() {

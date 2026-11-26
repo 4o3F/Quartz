@@ -9,16 +9,6 @@ use crate::ProtoRange;
 #[serde(transparent)]
 pub struct RuleSetVersion(pub u32);
 
-/// Dependency group that invalidated a preview confirmation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PreviewMismatchReason {
-    Mutation,
-    Inputs,
-    Range,
-    Backups,
-}
-
 /// Typed error fields serialized flat beside the `code` discriminator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
@@ -81,12 +71,6 @@ pub enum ErrorKind {
         diagnostics: Vec<crate::RuleDiagnostic>,
         truncated: bool,
     },
-    /// Privacy mutations require a preview receipt.
-    PreviewRequired,
-    /// The receipt is unknown, consumed, disconnected, evicted, or expired.
-    PreviewExpired,
-    /// The confirmation differs from the completed preview.
-    PreviewMismatch { reason: PreviewMismatchReason },
     /// The host could not connect to the core.
     CoreOffline,
     /// The core could not complete the request because of an internal failure.
@@ -125,9 +109,6 @@ impl ErrorKind {
             Self::RuleSetHasChildren { .. } => "rule_set_has_children",
             Self::RuleSetIdentity { .. } => "rule_set_identity",
             Self::RuleValidationFailed { .. } => "rule_validation_failed",
-            Self::PreviewRequired => "preview_required",
-            Self::PreviewExpired => "preview_expired",
-            Self::PreviewMismatch { .. } => "preview_mismatch",
             Self::CoreOffline => "core_offline",
             Self::Internal => "internal",
             Self::Busy => "busy",
@@ -185,7 +166,6 @@ mod tests {
             "rule_set_has_children",
             "rule_set_identity",
             "rule_validation_failed",
-            "preview_required",
             "core_offline",
             "internal",
             "version_exhausted",
@@ -284,39 +264,6 @@ mod tests {
             }))
             .is_err(),
             "key is required"
-        );
-    }
-    #[test]
-    fn preview_errors_preserve_codes_and_structured_reasons() {
-        for kind in [
-            ErrorKind::PreviewRequired,
-            ErrorKind::PreviewExpired,
-            ErrorKind::PreviewMismatch {
-                reason: PreviewMismatchReason::Mutation,
-            },
-            ErrorKind::PreviewMismatch {
-                reason: PreviewMismatchReason::Inputs,
-            },
-            ErrorKind::PreviewMismatch {
-                reason: PreviewMismatchReason::Range,
-            },
-            ErrorKind::PreviewMismatch {
-                reason: PreviewMismatchReason::Backups,
-            },
-        ] {
-            let encoded =
-                serde_json::to_value(ProtocolError::new(kind.clone())).expect("typed error");
-            assert_eq!(encoded["code"], kind.code());
-            assert_eq!(
-                serde_json::from_value::<ProtocolError>(encoded)
-                    .expect("round trip")
-                    .kind,
-                kind
-            );
-        }
-        assert!(
-            serde_json::from_value::<ProtocolError>(serde_json::json!({"code":"preview_mismatch"}))
-                .is_err()
         );
     }
 }

@@ -73,9 +73,6 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 | `rule_set_identity` | 已有 key 的固定身份不一致 | `key`、`field`（`kind` 或 `parent`） |
 | `rule_validation_failed` | 规则文本或编辑内容未通过校验 | `diagnostics`、`truncated`，第 6.3.3 节的有界诊断列表 |
 | `version_exhausted` | 版本计数无法继续递增 | 无；事务未写入 |
-| `preview_required` | 隐私写入或历史清理缺少预览回执 | 无 |
-| `preview_expired` | 回执无法识别、已到期、被逐出或核心已重启 | 无 |
-| `preview_mismatch` | 回执与本次确认不一致 | `reason`：`mutation`、`inputs`、`range` 或 `backups` |
 | `page_too_large` | 所有分页读取中，单个结果项或固定字段超过 200 KiB 页预算；包括 query.*、规则预览与差异、规则集读取和文本导出 | 无 |
 | `deadline_exceeded` | 只读工作超过本次期限 | 无 |
 | `cancelled` | 只读工作被取消 | 无 |
@@ -162,7 +159,7 @@ M4 能力字符串及其覆盖操作如下；客户端逐项检查能力，核�
 | `query.range.v1` / `query.unclassified.v1` / `query.annotations.v1` | 各自同名前缀的查询 |
 | `categories.v1` | 第 6.3.5 节分类读写 |
 | `rule_sets.v1` | 第 6.3.1 节全部规则集读写 |
-| `rules.preview.v1` | `rules.preview`、`rules_text.preview` 及隐私保存回执校验 |
+| `rules.preview.v1` | `rules.preview`、`rules_text.preview` |
 | `rules_text.v1` | validate、import、export |
 | `requests.cancel.v1` | 本连接只读请求取消 |
 | `data.delete.privacy.v1` | 隐私历史 preview、执行与 status；不授予通用范围删除 |
@@ -254,7 +251,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 |---|---|
 | `rule_sets.tree/get/versions` | 规则集树、自身或生效内容、版本列表；第 6.3.1 节 |
 | `rule_sets.edit/set_enabled/reorder/delete/revert` | 带基础版本的原子写入；第 6.3.1 节 |
-| `rules.preview` / `rules_text.preview` | 编辑草稿或文本预览、隐私保存回执；第 6.3.2 节 |
+| `rules.preview` / `rules_text.preview` | 编辑草稿或文本预览；第 6.3.2 节 |
 | `rules_text.validate/import/export` | 文本校验、导入、导出；第 6.3.3 节 |
 | `requests.cancel` | 取消本连接的只读工作；第 6.3.2 节 |
 | `data.delete.preview` / `data.delete` / `data.delete.status` | M4 仅隐私规则历史清理；第 6.3.4 节 |
@@ -317,15 +314,15 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 | `rule_sets.tree` | `{kind, cursor?}` | `{kind,effective_version,nodes,versions,next_cursor}`；节点含 `key,parent,version,enabled,sibling_order,source,counts:{added,overridden,disabled},warnings:[{code,target}]` |
 | `rule_sets.get` | `{key, version?, view, cursor?}`，view 为 `own \| effective` | `{key, version, parent_version, entries, versions, next_cursor}`；历史 version 可读取已删除集；省略 version 时 effective 使用当前祖先版本与启用状态，返回 key 所属根树的生效视图；显式指定历史 version 时只解析该修订及其保存的祖先链 |
 | `rule_sets.versions` | `{key, cursor?}` | `{revisions:[{version,parent_version,created_utc_ms,note}], versions, next_cursor}`；包含删除前历史 |
-| `rule_sets.edit` | `{key, base_version, text, preview_receipt?}`，text 为完整 `quartz-rules/1` 文本 | `{sets:[{key,version,deleted}], versions}` |
-| `rule_sets.set_enabled` | `{key, base_version, enabled, preview_receipt?}` | 同上；子树的有效启用状态随之变化 |
-| `rule_sets.reorder` | `{siblings:[{key,base_version}], preview_receipt?}`，完整同父同 kind 用户集列表，数组即最终顺序；根级仅包含该 kind 的活跃用户根集 | 同上；全部版本检查与写入原子完成 |
-| `rule_sets.delete` | `{key, base_version, preview_receipt?}` | 同上；仅可删除无子级的用户集，保留历史 |
-| `rule_sets.revert` | `{key, base_version, version, preview_receipt?}`，version 为历史来源 | 同上；生成新的当前修订 |
+| `rule_sets.edit` | `{key, base_version, text}`，text 为完整 `quartz-rules/1` 文本 | `{sets:[{key,version,deleted}], versions}` |
+| `rule_sets.set_enabled` | `{key, base_version, enabled}` | 同上；子树的有效启用状态随之变化 |
+| `rule_sets.reorder` | `{siblings:[{key,base_version}]}`，完整同父同 kind 用户集列表，数组即最终顺序；根级仅包含该 kind 的活跃用户根集 | 同上；全部版本检查与写入原子完成 |
+| `rule_sets.delete` | `{key, base_version}` | 同上；仅可删除无子级的用户集，保留历史 |
+| `rule_sets.revert` | `{key, base_version, version}`，version 为历史来源 | 同上；生成新的当前修订 |
 
 tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树返回的该值用作历史 scope.privacy_version。三个读取操作允许 UI、CLI，均按 200 KiB 页和不透明游标返回；`versions` 覆盖注册表全部修订、启停、排序与元数据输入。tree 按同级顺序、key 的前序遍历，versions 按版本降序，own 按文件顺序，effective 先按生效顺序列有效规则，再按树与文件顺序列被停用或覆盖的条目。entries 包含 `entry_kind`（`rule | override | disable`）、`content`（格式文档对应条目的字段）、`provenance`（定义与覆盖的 key/version/id 链）和 `state`（`effective | disabled | overridden | target_missing`）；告警使用稳定代码 `target_deleted | upstream_changed | conflict` 与目标规则引用。单条目编码超过 128 KiB 时校验报 `E-RULE-VALUE`，不产生无法分页的修订。
 
-写入仅允许 UI。`base_version = 0` 仅用于 edit/import 创建不存在或已删除的 key；恢复已删除 key 时沿用历史身份，版本从最后修订继续递增。其余写入必须使用当前非零版本。text 中 `[set].key` 必须等于请求 key；保留 key 的类型和父级身份校验先于隐私预览回执校验。版本检查先于写入；过期返回 `rule_set_stale`，客户端读取确认结果，保留草稿，不用新基础版本自动重放。用户 privacy-kind 规则集的 edit、import、set_enabled、reorder、delete 和 revert 均适用第 6.3.2 节回执要求，包括禁用节点和生效内容未变化的修订；排序按目标节点的 kind 判断。分类和提取规则集写入不要求回执。
+写入仅允许 UI。`base_version = 0` 仅用于 edit/import 创建不存在或已删除的 key；恢复已删除 key 时沿用历史身份，版本从最后修订继续递增。其余写入必须使用当前非零版本。text 中 `[set].key` 必须等于请求 key。版本检查先于写入；过期返回 `rule_set_stale`，客户端读取确认结果，保留草稿，不用新基础版本自动重放。
 
 内置 key 的编辑、启停、排序、删除和回退统一返回 `rule_set_read_only {key}`，在内容和基础版本检查前拒绝。text 的 key 与请求 key 不同返回 `bad_request`；已有 key 的 kind 或 parent 不同返回 `rule_set_identity`，field 为对应身份字段。创建或沿用历史身份恢复时，parent 的语法无效、缺失、已删除或父链成环返回 `rule_validation_failed`，诊断为定位到 `set.parent` 的 `E-RULE-PARENT`。排序列表为空、重复、不完整或混入其他父级或 kind 的节点返回 `bad_request`；无重复列表按 key 顺序检查基础版本，首个冲突使用 `rule_set_stale`。根级排序覆盖该 kind 的全部活跃用户根集，省略内置根集；内置根集固定排在所有用户根集之前，用户根集的 sibling_order 从 1 开始，子级排序从 0 开始。删除有子级的用户集返回 `rule_set_has_children`。
 
@@ -338,20 +335,18 @@ tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树�
 {"code":"rule_set_stale","key":"user.local.classification","current_version":3}
 ```
 
-### 6.3.2 预览、期限与回执
+### 6.3.2 预览与期限
 
-两个预览端点仅为 privacy-kind 修改签发保存回执；分类和提取预览省略回执与到期时刻。身份、基础版本、内容和树校验先于回执校验。启动时安装内置规则修订沿用内置升级流程，不要求用户回执。
+`rules.preview`（UI）和 `rules_text.preview`（UI、CLI）共用请求 `{mutation, start_date, end_date, expected_versions, deadline_ms?, sample_limit?, cursor?}`。日期为 1–7 个逻辑日，界面默认截至所选日的 7 日；`expected_versions` 取同范围 `query.range` 的摘要。`mutation = {op, body}` 为拟提交写操作的完整内容；rules.preview 接受 rule_sets 写操作，rules_text.preview 接受 rules_text.import。预览在临时规则快照上求值，不保存草稿。
 
-`rules.preview`（UI）和 `rules_text.preview`（UI、CLI）共用请求 `{mutation, start_date, end_date, expected_versions, deadline_ms?, sample_limit?, cursor?}`。日期为 1–7 个逻辑日，界面默认截至所选日的 7 日；`expected_versions` 取同范围 `query.range` 的摘要。`mutation = {op, body}` 为拟提交写操作的完整内容，省略 `preview_receipt`；rules.preview 接受 rule_sets 写操作，rules_text.preview 接受 rules_text.import。预览在临时规则快照上求值，不保存草稿。
-
-- `deadline_ms` 为核心接纳请求起的相对期限，默认 30,000，范围 1–120,000；同样用于 `data.delete.preview`。这些请求的客户端等待上限为 deadline_ms + 500 ms，连接发现仍限 2 秒。每个分页请求重新计时；超时、取消不返回部分成功或有效回执。
+- `deadline_ms` 为核心接纳请求起的相对期限，默认 30,000，范围 1–120,000；同样用于 `data.delete.preview`。这些请求的客户端等待上限为 deadline_ms + 500 ms，连接发现仍限 2 秒。每个分页请求重新计时；超时、取消不返回部分成功。
 - `requests.cancel {request_id}` 取消本连接的在途只读请求，返回 `{accepted:true}`；目标已结束或不存在也成功，在途只读目标以 `cancelled` 结束；`rules_text.validate`、`settings.get`、`categories.list` 按只读请求处理，其内部使用写入队列不改变取消语义；指向在途写操作返回 `bad_request`。断开连接取消其只读工作，草稿变更主动取消旧代次。计算至少每 5,000 个片段检查取消与期限并让出给采集写入；单个长任务也必须检查期限。已接纳的删除任务按第 6.3.4 节继续执行。
 - 初次请求的输入摘要变化返回 `stale_inputs`；翻页变化返回 `stale_cursor`。请求字段、草稿、范围和版本均进入游标；预览与正常页面共用提取、分类、活动和标注口径。
-- 响应为 `{rules, totals?, further_hidden?, samples, versions, next_cursor, preview_receipt?, expires_utc_ms?}`；全局 further_hidden 与 totals 的 active_ms 只在第一页返回，分组可续页。rules 每项含规则引用、`condition_match:{segments,duration_ms}`、`effective_contribution:{segments,active_ms}`；前者累计条件成立的保留事实切片（包括 idle、被其他规则遮蔽的切片），后者对分类规则只累计最终提供分类且未被标注覆盖的活跃切片；提取规则累计被选中提取结果的活跃切片；隐私规则累计其动作参与最终进一步降级的活跃采集窗口切片（`active` 或 `active_override`），同一切片可有多条隐私来源。`totals:{before,after}` 各含 `active_ms`、`categories:[{category,active_ms}]`、`applications`、`documents`，使用与 query.day 相同的排行行形状，按各自排序完整分页。after 使用草稿快照的最终结果，等于同输入与规则快照的今天页/排行口径，包含人工标注与离线活动。
+- 响应为 `{rules, totals?, further_hidden?, samples, versions, next_cursor}`；全局 further_hidden 与 totals 的 active_ms 只在第一页返回，分组可续页。rules 每项含规则引用、`condition_match:{segments,duration_ms}`、`effective_contribution:{segments,active_ms}`；前者累计条件成立的保留事实切片（包括 idle、被其他规则遮蔽的切片），后者对分类规则只累计最终提供分类且未被标注覆盖的活跃切片；提取规则累计被选中提取结果的活跃切片；隐私规则累计其动作参与最终进一步降级的活跃采集窗口切片（`active` 或 `active_override`），同一切片可有多条隐私来源。`totals:{before,after}` 各含 `active_ms`、`categories:[{category,active_ms}]`、`applications`、`documents`，使用与 query.day 相同的排行行形状，按各自排序完整分页。after 使用草稿快照的最终结果，等于同输入与规则快照的今天页/排行口径，包含人工标注与离线活动。
 - 提取预览的 samples 附 `before` / `after` 提取输出；隐私预览另返全局及逐规则 `further_hidden:{segments,fields,duration_ms}`，只计现存事实中将进一步降级的范围，包含非活跃事实。segments 是去重后的受影响切片数，fields 按 app/window_title/web 字段动作计数；时长按切片累计一次。
-- `sample_limit` 默认且最多 50，可为 0。样本为 `{start_utc_ms,end_utc_ms,clock_segment_id,rule,before,after}`，before/after 只含该 kind 的允许字段；先按 UTC、时钟段、事实主键、规则引用选取前 N 项，再分页，翻页不补选更多；单页含规则统计和样本的总编码不超过 200 KiB。只展示当前与草稿都允许显示的字段，隐私预览不借样本暴露将隐藏的原文。全部统计完成后才签发回执，第一页返回回执与到期时刻。
+- `sample_limit` 默认且最多 50，可为 0。样本为 `{start_utc_ms,end_utc_ms,clock_segment_id,rule,before,after}`，before/after 只含该 kind 的允许字段；先按 UTC、时钟段、事实主键、规则引用选取前 N 项，再分页，翻页不补选更多；单页含规则统计和样本的总编码不超过 200 KiB。只展示当前与草稿都允许显示的字段，隐私预览不借样本暴露将隐藏的原文。
 
-核心声明 `requests.cancel.v1` 和 `rules.preview.v1`；后者覆盖两个预览端点和隐私保存回执校验。
+核心声明 `requests.cancel.v1` 和 `rules.preview.v1`；后者覆盖两个预览端点。
 
 `expected_versions` 使用同日期范围、`bucket="day"` 的 `query.range` 摘要，dimensions 不影响该摘要。受理后先在只读事务中检查输入摘要与游标，再通过实际写入的决策路径编译草稿。游标绑定预览操作、完整 mutation 的 SHA-256 摘要、日期、expected_versions、期限、样本数量和输入版本；正文按原始字符串字节参与摘要。任何规则集新修订均使游标过期，包括生效内容未变化的修订。两个快照共享一次数据库只读事务，各逻辑日使用相同事实、活动与标注边界，批次最多 256 行或片段，批次间由现有数据库循环优先处理采集写入。分页编码与跳过续页项也按最多 256 项一批执行，文档引用仅对当页候选项生成。
 
@@ -359,20 +354,11 @@ rules 列出草稿中该类型的生效规则，保留零命中项。规则预�
 
 样本 before/after 按类型分别为 `{category}`、`{extraction}` 或 `{app,window_title,web}`；隐私样本中的三项为保留动作。提取输出同时受事实已保存的保留级别、当前隐私规则和草稿隐私规则约束，任一方隐藏应用或标题时，两侧提取输出全部置空；任一方隐藏应用时，两侧分类样本返回未分类。样本不携带窗口标题原文。排序键中的事实主键由核心内部保留，响应不增加该字段。全局统计与前 N 项样本选择完成后才开始分页，续页不增加样本。
 
-隐私保存回执由操作系统随机源生成，不含草稿或输入数据，只在核心内存保存。有效期 5 分钟，以单调时钟判断到期；`expires_utc_ms` 供客户端显示，不作为核心校验时钟。每连接最多保留 8 份，超出逐出最旧项，断开或核心重启即失效。
-
-回执绑定角色与连接、确切 mutation（包括原始文本字节或编辑内容、目标 key、操作与 base_version）、父链版本、三类规则输入、元数据、事实/标注版本和日期范围。确切 mutation 按操作及各类型化字段直接计算带域标记、长度前缀的 SHA-256，不包含 preview_receipt；操作名独立参与摘要，edit 与 import 不能互用，原文保留原始 UTF-8 字节。输入摘要覆盖三类生效规则、所有规则集当前修订（包含完整父链及生效内容未变的修订）、元数据、统计策略、时区、日起点、范围内各来源的事实和标注版本，以及文档样本引用依赖的日期范围。
-
-角色权限在受理时检查，身份、基础版本、内容与树校验先于收据校验。收据错误的优先顺序固定为：角色权限 `forbidden` → 缺失回执 `preview_required` → 无法识别、已消费、断开或到期 `preview_expired` → 修改不一致 `preview_mismatch {reason:"mutation"}` → 统计范围或文档引用范围的 UTC 边界变化 `preview_mismatch {reason:"range"}` → 其他输入变化 `preview_mismatch {reason:"inputs"}`。保存请求沿用回执记录的逻辑日期范围；时区或日起点变化导致任一范围边界变化或无法表示时，按 range 处理。事务内还会在实际写入前复核单调到期时间。不匹配不消费回执，重新预览可取得新回执。
-
-
-生成中的回执不占用八份已交付回执的容量；取消、到期或发送队列受理失败不逐出已有回执。发送端先预留队列容量，再安装回执并逐出最旧项，最后使包含令牌的响应进入发送队列。保存时只在内存校验及消费期间持有连接收据锁，SQLite 写入事务使用校验通过的不可变收据副本，原子重读并校验输入；事务提交成功后消费回执。连接在事务期间断开或回执被逐出时，已提交的修改仍按成功处理；提交后只消费仍与该副本相同的回执，不重新插入。成功响应丢失后先读取当前版本，不能凭旧回执新增版本。CLI 预览可用于诊断，但没有保存权限。
-
 ```jsonc
 // rules_text.preview body；expected_versions 从同范围 query.range 取得
 {"mutation":{"op":"rules_text.import","body":{"key":"user.local.privacy","base_version":2,"text":"format = \"quartz-rules/1\"\n[set]\nkey = \"user.local.privacy\"\nkind = \"privacy\"\nname = \"本地隐私\"\nparent = \"builtin.privacy\"\n[[rule]]\nid = \"bank\"\npreset = \"title_hidden\"\nmatch = \"all\"\nwhen = [{ field = \"title.raw\", op = \"contains\", value = \"网银\" }]\n"}},"start_date":"2026-11-16","end_date":"2026-11-23","expected_versions":"opaque","deadline_ms":30000,"sample_limit":50}
-// 确认后提交 rules_text.import，文本与预览完全一致
-{"key":"user.local.privacy","base_version":2,"text":"format = \"quartz-rules/1\"\n[set]\nkey = \"user.local.privacy\"\nkind = \"privacy\"\nname = \"本地隐私\"\nparent = \"builtin.privacy\"\n[[rule]]\nid = \"bank\"\npreset = \"title_hidden\"\nmatch = \"all\"\nwhen = [{ field = \"title.raw\", op = \"contains\", value = \"网银\" }]\n","preview_receipt":"receipt:opaque"}
+// 确认后提交 rules_text.import
+{"key":"user.local.privacy","base_version":2,"text":"format = \"quartz-rules/1\"\n[set]\nkey = \"user.local.privacy\"\nkind = \"privacy\"\nname = \"本地隐私\"\nparent = \"builtin.privacy\"\n[[rule]]\nid = \"bank\"\npreset = \"title_hidden\"\nmatch = \"all\"\nwhen = [{ field = \"title.raw\", op = \"contains\", value = \"网银\" }]\n"}
 ```
 
 ### 6.3.3 文本
@@ -380,12 +366,12 @@ rules 列出草稿中该类型的生效规则，保留零命中项。规则预�
 | op | 请求与返回 |
 |---|---|
 | `rules_text.validate` | `{key,base_version,text}` → `{valid,diagnostics,truncated}`；在已安装树与分类引用中校验，不写入；最多 100 个诊断且不超过 200 KiB |
-| `rules_text.import` | `{key,base_version,text,preview_receipt?}` → 与 edit 相同；以 key 匹配，隐私写入要求对应 import 预览回执 |
+| `rules_text.import` | `{key,base_version,text}` → 与 edit 相同；以 key 匹配 |
 | `rules_text.export` | `{key,version?,cursor?}` → `{text,versions,next_cursor}`；按 UTF-8 字符边界分页，按顺序拼接为规范 `quartz-rules/1` 文本，保留条目顺序、override/disable，分类用 UUID |
 
 text 为 UTF-8，单个规则集的规范导出文本与导入输入均最多 192 KiB，并仍受 256 KiB JSON 帧上限约束；超长用 `bad_request`。诊断为 `{code,path,location:{line,column},params}`，行列从 1 开始，无法定位时 location 为 null；code 使用规则格式第 4.2 节的 `E-RULE-*`，不包含翻译后的句子。validate 以 valid=false 返回诊断；其他操作的校验失败使用 `rule_validation_failed`，同样限制 100 项与 200 KiB 并带 `truncated`。
 
-validate 与 edit 共用决策路径和校验顺序：先检查目标权限与 `base_version`，再解析文本、检查文本 key 与请求 key、固定 kind 与父级身份、已安装父链、覆盖目标和分类引用。非文本失败沿用 edit 的操作错误，包括 `bad_request`、`rule_set_read_only`、`rule_set_stale`、`rule_set_identity`、`version_exhausted`；文本内容问题返回 `valid=false`。已安装内置 key 允许只读 validate，使用已记录的内置来源权限接受 `detector`、`languages`、`verified`、`label_key`，并检查基础版本；未安装的 `builtin.*` key 在检查文本大小前返回 `rule_set_read_only`；写入内置 key 仍返回 `rule_set_read_only`。隐私 validate 不要求预览回执。验证丢弃候选写入，不提交事务、不发布规则快照或版本通知。树诊断若指向其他已安装规则集，location 为 null；提交文本内的诊断保留来源行列。
+validate 与 edit 共用决策路径和校验顺序：先检查目标权限与 `base_version`，再解析文本、检查文本 key 与请求 key、固定 kind 与父级身份、已安装父链、覆盖目标和分类引用。非文本失败沿用 edit 的操作错误，包括 `bad_request`、`rule_set_read_only`、`rule_set_stale`、`rule_set_identity`、`version_exhausted`；文本内容问题返回 `valid=false`。已安装内置 key 允许只读 validate，使用已记录的内置来源权限接受 `detector`、`languages`、`verified`、`label_key`，并检查基础版本；未安装的 `builtin.*` key 在检查文本大小前返回 `rule_set_read_only`；写入内置 key 仍返回 `rule_set_read_only`。验证丢弃候选写入，不提交事务、不发布规则快照或版本通知。树诊断若指向其他已安装规则集，location 为 null；提交文本内的诊断保留来源行列。
 
 export 省略 version 时读取当前未删除的 key；已删除 key 只有显式指定历史 version 才能导出。导出保存的集合头部和条目，分类始终写 UUID，内置字段仅在内置条目中保留。游标绑定操作、key、请求 version 选择和全局规则读取 versions 摘要，position 表示规范文本中的 UTF-8 字节偏移；请求参数不匹配或偏移不是字符边界时返回 `bad_request`，任何新修订或其他摘要依赖变化返回 `stale_cursor`，显式历史导出也遵守此规则。200 KiB 页预算计算 JSON 转义后的字节、响应字段和游标，并预留信封空间。规范化文本上限适用于 edit 的创建、编辑、恢复、revert 和对应的 validate。启停、排序、删除保存既有条目，不检查规范文本大小。历史头部的保存方式与旧修订限制见 [03 第 2.6 节](03-data-model.md#26-规则与配置)。
 
@@ -406,7 +392,7 @@ job 为 `{uuid,state,phase,processed,total,backup_ids,failure,updated_utc_ms}`�
 UUID 去重先于回执校验：已存在且确认内容相同则返回原 job（failed 时从失败阶段重新排队），即使回执已消费或核心已重启；不同 scope、范围或备份选择返回 `delete_job_conflict`。未接纳时断线或超时可用同一 UUID 重试；接纳时固定清理动作与规则快照；后续规则变化不扩大本任务范围。任务独立于连接，核心重启从已持久阶段恢复。不存在取消或撤销已接纳任务的操作。completed 只在主库降级、字典与缓存清理、WAL truncate 和所选备份删除全部成功后返回。
 
 ```jsonc
-// data.delete：历史任务使用独立回执，不能用规则保存回执替代
+// data.delete：历史任务使用独立回执
 {"uuid":"00000000-0000-4000-8000-000000000004","scope":{"kind":"privacy_rules","privacy_version":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"start_utc_ms":1794787200000,"end_utc_ms":1795392000000,"backup_ids":[],"preview_receipt":"history:opaque","confirmed":true}
 // data.delete.status 响应示例
 {"job":{"uuid":"00000000-0000-4000-8000-000000000004","state":"running","phase":"facts","processed":2000,"total":4500,"backup_ids":[],"failure":null,"updated_utc_ms":1795392001000}}

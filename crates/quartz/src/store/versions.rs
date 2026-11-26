@@ -294,30 +294,6 @@ impl Store {
     }
 }
 
-impl super::rules::RuleSetTransaction<'_> {
-    pub(crate) fn preview_versions(
-        &mut self,
-        range: QueryRange,
-    ) -> Result<StoredVersions, ReadQueryError> {
-        let connection = self.connection();
-        let settings = Settings::new(connection).query_settings()?;
-        let days = UtcDays::covering(range);
-        let rows = data_day_versions::table
-            .filter(data_day_versions::utc_date.ge(days.start().0))
-            .filter(data_day_versions::utc_date.le(days.end().0))
-            .select(DataDayVersionsRow::as_select())
-            .load::<DataDayVersionsRow>(connection)?;
-        Ok(StoredVersions {
-            settings,
-            days: rows
-                .into_iter()
-                .map(FactVersion::from)
-                .map(|fact| (fact.key, fact.version))
-                .collect(),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

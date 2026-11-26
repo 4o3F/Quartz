@@ -1333,7 +1333,7 @@ mod tests {
                 }
                 if allowed {
                     let mut invalid = body;
-                    invalid["mutation"]["body"]["preview_receipt"] = serde_json::json!("forbidden");
+                    invalid["mutation"]["body"]["unknown_field"] = serde_json::json!("forbidden");
                     assert_eq!(
                         session
                             .receive(request(3, op, invalid), &status.subscribe().borrow().status)

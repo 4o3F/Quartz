@@ -12,25 +12,16 @@ enum CancelState {
 pub(crate) struct QueryControl {
     cancelled: tokio::sync::watch::Sender<CancelState>,
     deadline: Option<Instant>,
-    receipt: std::sync::Arc<std::sync::Mutex<Option<crate::rules::receipts::ReceiptGrant>>>,
 }
 impl Default for QueryControl {
     fn default() -> Self {
         Self {
             cancelled: tokio::sync::watch::channel(CancelState::Live).0,
             deadline: None,
-            receipt: Default::default(),
         }
     }
 }
 impl QueryControl {
-    pub(crate) fn hold_receipt(&self, receipt: crate::rules::receipts::ReceiptGrant) {
-        *self.receipt.lock().expect("query receipt lock") = Some(receipt);
-    }
-    pub(crate) fn take_receipt(&self) -> Option<crate::rules::receipts::ReceiptGrant> {
-        self.receipt.lock().expect("query receipt lock").take()
-    }
-
     #[cfg(test)]
     pub(crate) fn expired() -> Self {
         Self {
@@ -42,7 +33,6 @@ impl QueryControl {
     pub(crate) fn with_deadline(milliseconds: u32) -> Self {
         Self {
             deadline: Some(Instant::now() + Duration::from_millis(u64::from(milliseconds))),
-            receipt: Default::default(),
             ..Self::default()
         }
     }

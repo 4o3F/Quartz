@@ -28,8 +28,7 @@
   "revert": {
     "key": "user.local",
     "base_version": 4,
-    "version": 1,
-    "preview_receipt": "receipt:opaque"
+    "version": 1
   },
   "response": {
     "sets": [

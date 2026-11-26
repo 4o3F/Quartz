@@ -67,27 +67,23 @@ impl From<wire::RulePreviewMutation> for RuleMutation {
                 key: request.key,
                 base_version: request.base_version,
                 text: request.text,
-                preview_receipt: None,
             }),
             wire::RulePreviewMutation::SetEnabled(request) => {
                 Self::SetEnabled(wire::RuleSetsSetEnabledRequest {
                     key: request.key,
                     base_version: request.base_version,
                     enabled: request.enabled,
-                    preview_receipt: None,
                 })
             }
             wire::RulePreviewMutation::Reorder(request) => {
                 Self::Reorder(wire::RuleSetsReorderRequest {
                     siblings: request.siblings,
-                    preview_receipt: None,
                 })
             }
             wire::RulePreviewMutation::Delete(request) => {
                 Self::Delete(wire::RuleSetsDeleteRequest {
                     key: request.key,
                     base_version: request.base_version,
-                    preview_receipt: None,
                 })
             }
             wire::RulePreviewMutation::Revert(request) => {
@@ -95,7 +91,6 @@ impl From<wire::RulePreviewMutation> for RuleMutation {
                     key: request.key,
                     base_version: request.base_version,
                     version: request.version,
-                    preview_receipt: None,
                 })
             }
         }
@@ -108,74 +103,10 @@ impl From<wire::RulesTextPreviewMutation> for RuleMutation {
             key: request.key,
             base_version: request.base_version,
             text: request.text,
-            preview_receipt: None,
         })
     }
 }
 impl RuleMutation {
-    pub(crate) fn digest(&self) -> Result<String, ProtocolError> {
-        use super::digest::{DigestDomain, ReceiptDigest};
-        let mut digest = ReceiptDigest::new(DigestDomain::Mutation);
-        match self {
-            Self::Edit(request) | Self::Import(request) => {
-                digest.text(if matches!(self, Self::Edit(_)) {
-                    "rule_sets.edit"
-                } else {
-                    "rules_text.import"
-                })?;
-                digest.text(&request.key)?;
-                digest.revision(request.base_version);
-                digest.text(&request.text)?;
-            }
-            Self::SetEnabled(request) => {
-                digest.text("rule_sets.set_enabled")?;
-                digest.text(&request.key)?;
-                digest.revision(request.base_version.get());
-                digest.text(if request.enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                })?;
-            }
-            Self::Reorder(request) => {
-                digest.text("rule_sets.reorder")?;
-                for sibling in &request.siblings {
-                    digest.text(&sibling.key)?;
-                    digest.revision(sibling.base_version.get());
-                }
-            }
-            Self::Delete(request) => {
-                digest.text("rule_sets.delete")?;
-                digest.text(&request.key)?;
-                digest.revision(request.base_version.get());
-            }
-            Self::Revert(request) => {
-                digest.text("rule_sets.revert")?;
-                digest.text(&request.key)?;
-                digest.revision(request.base_version.get());
-                digest.revision(request.version.get());
-            }
-        }
-        Ok(digest.finish())
-    }
-    fn authorization(
-        &self,
-        receipts: Option<super::receipts::ReceiptContext>,
-    ) -> Result<super::receipts::ReceiptAuthorization, ProtocolError> {
-        let receipt = match self {
-            Self::Edit(request) | Self::Import(request) => request.preview_receipt.clone(),
-            Self::SetEnabled(request) => request.preview_receipt.clone(),
-            Self::Reorder(request) => request.preview_receipt.clone(),
-            Self::Delete(request) => request.preview_receipt.clone(),
-            Self::Revert(request) => request.preview_receipt.clone(),
-        };
-        Ok(super::receipts::ReceiptAuthorization::new(
-            receipts,
-            receipt,
-            self.digest()?,
-        ))
-    }
-
     pub(crate) fn target_key(&self) -> Result<&str, ProtocolError> {
         match self {
             Self::Edit(request) | Self::Import(request) => Ok(&request.key),
@@ -196,16 +127,6 @@ impl RuleMutation {
         store: &mut Store,
         now: UtcInstant,
     ) -> Result<wire::RuleSetsWriteResponse, ProtocolError> {
-        self.execute_with_receipts(registry, store, now, None)
-    }
-    pub(crate) fn execute_with_receipts(
-        self,
-        registry: &mut RegistryShell,
-        store: &mut Store,
-        now: UtcInstant,
-        receipts: Option<super::receipts::ReceiptContext>,
-    ) -> Result<wire::RuleSetsWriteResponse, ProtocolError> {
-        let authorization = self.authorization(receipts)?;
         let prepared = self.prepare(TargetAccess::Write)?;
         prepared.targets.check_response_budget()?;
         // Read fallible response dependencies before committing.
@@ -213,7 +134,7 @@ impl RuleMutation {
             .rule_read_metadata()
             .map_err(|error| WriteFailure::setting(&error).into_protocol_error())?;
         let result = registry
-            .run_ipc_authorized(store, now, prepared.command, authorization)
+            .run_ipc(store, now, prepared.command)
             .map_err(|error| prepared.targets.targets_error(error))?;
         let snapshot = registry.snapshots().load();
         debug_assert_eq!(result.reply.epoch, snapshot.epoch());
@@ -246,7 +167,6 @@ impl RuleMutation {
             key: request.key,
             base_version: request.base_version,
             text: request.text,
-            preview_receipt: None,
         });
         let result = if builtin {
             let prepared = mutation.prepare(TargetAccess::Validate(registry))?;
@@ -407,8 +327,6 @@ impl MutationTargets {
             .expect("prepared mutation has targets")
             .to_string();
         let kind = match error {
-            RunRegistryCommandError::PreviewRequired => ErrorKind::PreviewRequired,
-            RunRegistryCommandError::Receipt { error } => return error,
             RunRegistryCommandError::TextTooLarge => ErrorKind::BadRequest,
             RunRegistryCommandError::Persist { source } => {
                 return WriteFailure::rule_persist(&source).into_protocol_error();
@@ -602,7 +520,11 @@ mod tests {
         )
         .expect("fixture connection");
         connection.batch_execute("INSERT OR REPLACE INTO settings(key,value) VALUES ('day.start_offset_min','invalid'),('stats_policy_version','invalid');").expect("unrelated invalid settings");
-        let request=wire::RuleSetsEditRequest {key:"user.test".into(),base_version:0,text:"format='quartz-rules/1'\n[set]\nkey='user.test'\nkind='classification'\nname='Test'\n".into(),preview_receipt:None};
+        let request = wire::RuleSetsEditRequest {
+            key: "user.test".into(),
+            base_version: 0,
+            text: "format='quartz-rules/1'\n[set]\nkey='user.test'\nkind='classification'\nname='Test'\n".into(),
+        };
         RuleMutation::Edit(request)
             .execute(&mut registry, &mut store, now)
             .expect("rule edit ignores unrelated settings");
@@ -647,7 +569,6 @@ mod tests {
                 key: key.into(),
                 base_version,
                 text: text.into(),
-                preview_receipt: None,
             })
             .execute(
                 &mut self.registry,
@@ -913,7 +834,6 @@ mod tests {
                     key: key.clone(),
                     base_version: entry.current.version,
                     text,
-                    preview_receipt: None
                 })
                 .execute(
                     &mut fixture.registry,
@@ -1027,7 +947,6 @@ mod tests {
             key: "user.budget".into(),
             base_version: 0,
             text,
-            preview_receipt: None,
         })
         .execute(
             &mut fixture.registry,
@@ -1087,7 +1006,6 @@ mod tests {
             key: key.into(),
             base_version: 1,
             text,
-            preview_receipt: None,
         })
         .execute(&mut fixture.registry, &mut fixture.store, now)
         .expect_err("edited canonical text exceeds budget");
@@ -1096,7 +1014,6 @@ mod tests {
             key: key.into(),
             base_version: std::num::NonZeroU32::new(1).expect("version"),
             version: std::num::NonZeroU32::new(1).expect("version"),
-            preview_receipt: None,
         })
         .execute(&mut fixture.registry, &mut fixture.store, now)
         .expect_err("reverted canonical text exceeds budget");
@@ -1105,7 +1022,6 @@ mod tests {
             key: key.into(),
             base_version: std::num::NonZeroU32::new(1).expect("version"),
             enabled: false,
-            preview_receipt: None,
         })
         .execute(&mut fixture.registry, &mut fixture.store, now)
         .expect("disable oversized legacy set");
@@ -1119,7 +1035,6 @@ mod tests {
                 key: "user.oversized".into(),
                 base_version: std::num::NonZeroU32::new(1).expect("version"),
             }],
-            preview_receipt: None,
         })
         .execute(
             &mut fixture.registry,
@@ -1135,7 +1050,6 @@ mod tests {
         let response = RuleMutation::Delete(wire::RuleSetsDeleteRequest {
             key: "user.oversized".into(),
             base_version: std::num::NonZeroU32::new(1).expect("version"),
-            preview_receipt: None,
         })
         .execute(
             &mut fixture.registry,
@@ -1157,7 +1071,6 @@ mod tests {
                 key: "builtin.unknown".into(),
                 base_version: 0,
                 text: text.clone(),
-                preview_receipt: None,
             })
             .execute(
                 &mut fixture.registry,
@@ -1342,12 +1255,10 @@ mod tests {
         }
     }
     #[test]
-    fn privacy_import_draft_is_allowed_while_saving_still_requires_a_receipt() {
+    fn privacy_import_draft_and_save_succeed_and_take_effect() {
         let mut fixture = ValidationFixture::new();
-        let text =
-            "format='quartz-rules/1'\n[set]\nkey='user.private'\nkind='privacy'\nname='Private'\n";
+        let text = "format='quartz-rules/1'\n[set]\nkey='user.private'\nkind='privacy'\nname='Private'\n[[rule]]\nid='hide'\nlabel='Hide'\npreset='title_hidden'\nwhen=[{field='app.exe_name',op='equals',value='secret.exe'}]\n";
         let mutation: wire::RulesTextPreviewMutation = serde_json::from_value(serde_json::json!({"op":"rules_text.import","body":{"key":"user.private","base_version":0,"text":text}})).expect("import preview");
-        let before = fixture.registry.snapshots().load();
         let draft = RuleMutation::from(mutation.clone())
             .draft(&fixture.registry)
             .expect("privacy draft");
@@ -1357,15 +1268,24 @@ mod tests {
                 .sets
                 .contains_key(&"user.private".parse().expect("key"))
         );
-        let error = RuleMutation::from(mutation)
+        let saved = RuleMutation::from(mutation)
             .execute(
                 &mut fixture.registry,
                 &mut fixture.store,
                 UtcInstant::try_from(0).expect("UTC"),
             )
-            .expect_err("privacy gate");
-        assert_eq!(error.kind, ErrorKind::PreviewRequired);
-        fixture.assert_unchanged(&before);
+            .expect("privacy save succeeds without receipt");
+        assert_eq!(saved.sets[0].version, 1);
+        let mut fields = domain::FieldSnapshot::default();
+        fields.text.insert(
+            domain::Field::ExeName,
+            quartz_domain::text::NfcText::new("secret.exe"),
+        );
+        let snapshot = fixture.registry.snapshots().load();
+        assert_eq!(
+            snapshot.privacy().evaluate(&fields).privacy.window_title,
+            domain::Action::Drop
+        );
     }
     #[test]
     fn identity_draft_matches_query_day_totals_with_inactive_facts() {
