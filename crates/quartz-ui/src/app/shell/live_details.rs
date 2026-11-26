@@ -356,6 +356,7 @@ impl AppShell {
                         ),
                     ),
             )
+            .children(self.render_today_panel_tabs(ui, cx))
             .child(
                 div()
                     .id("details-scroll")

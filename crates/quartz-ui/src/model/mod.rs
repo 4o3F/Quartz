@@ -1,6 +1,7 @@
 //! View models mapped from core responses or preview fixtures. They do not depend on GPUI,
 //! the database, or rule evaluation.
 
+pub(crate) mod annotation_editor;
 mod application;
 mod category;
 mod day;
@@ -19,6 +20,14 @@ mod time;
 mod track;
 pub(crate) mod unclassified;
 
+#[cfg(windows)]
+pub(crate) use annotation_editor::{
+    AnnotationCategoryDisplay, AnnotationDraft, AnnotationEditor, AnnotationEditorEffect,
+    AnnotationEditorMode, AnnotationList, AnnotationWriteNotice, DayTimeContext,
+    DeleteConfirmState, EndpointRole, FoldChoice, SavedAnnotationRow, TodayPanelTab,
+    ValidateAnnotationDraftError, ValidateAnnotationTimeError, format_note_excerpt,
+    resolve_annotation_category,
+};
 pub(crate) use application::{AppId, AppInfo, Glyph};
 pub(crate) use category::{BuiltinCategory, Category, CategoryId, CategoryName, Tendency};
 #[cfg(windows)]

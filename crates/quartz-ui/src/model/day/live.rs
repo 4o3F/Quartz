@@ -509,6 +509,19 @@ impl Day {
             end: live.bounds.start + i64::from(span.end().millis()),
         })
     }
+    /// Returns the live day's date, UTC bounds (from hourly stacks), and time zone.
+    pub(crate) fn live_time_context(
+        &self,
+    ) -> Option<crate::model::annotation_editor::DayTimeContext> {
+        let DaySource::Live(live) = &self.source else {
+            return None;
+        };
+        Some(crate::model::annotation_editor::DayTimeContext {
+            date: self.date,
+            bounds: live.bounds,
+            zone: live.zone.clone(),
+        })
+    }
     pub(crate) fn local_clock(&self, time: TimeOfDay) -> Option<jiff::civil::Time> {
         let DaySource::Live(live) = &self.source else {
             return None;

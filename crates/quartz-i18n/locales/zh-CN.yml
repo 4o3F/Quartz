@@ -928,4 +928,112 @@ rules.unclassified.load_failed.title:
   zh-CN: "暂时无法加载未分类队列"
 rules.unclassified.load_failed.message:
   zh-CN: "请重试以重新读取最近 7 天的未分类项。"
+today.annotations.button:
+  zh-CN: "标注"
+today.annotations.tab.details:
+  zh-CN: "详情"
+today.annotations.tab.annotations:
+  zh-CN: "标注"
+today.annotations.title:
+  zh-CN: "已保存标注"
+today.annotations.action.new:
+  zh-CN: "新建标注"
+today.annotations.empty:
+  zh-CN: "当天暂无已保存标注。"
+today.annotations.truncated:
+  zh-CN: "仅显示前 %{count} 条标注，列表已截断。"
+today.annotations.load_failed.title:
+  zh-CN: "暂时无法加载标注"
+today.annotations.load_failed.message:
+  zh-CN: "请重试以重新读取当天的已保存标注。"
+today.annotations.stale.message:
+  zh-CN: "读取期间标注已变更，请重试刷新。"
+today.annotations.category_missing:
+  zh-CN: "未知分类"
+today.annotations.kind.category_override:
+  zh-CN: "分类覆盖"
+today.annotations.kind.offline_activity:
+  zh-CN: "离线活动"
+today.annotations.kind.active_override:
+  zh-CN: "活跃覆盖"
+today.annotations.kind.dismissed_away:
+  zh-CN: "已忽略离开"
+today.annotations.kind.note:
+  zh-CN: "备注"
+today.annotations.editor.create_title:
+  zh-CN: "新建标注"
+today.annotations.editor.edit_title:
+  zh-CN: "编辑标注"
+today.annotations.editor.kind_label:
+  zh-CN: "标注类型"
+today.annotations.editor.kind_fixed:
+  zh-CN: "创建后固定"
+today.annotations.editor.time_range:
+  zh-CN: "时间范围（HH:MM）"
+today.annotations.editor.start_label:
+  zh-CN: "开始"
+today.annotations.editor.end_label:
+  zh-CN: "结束"
+today.annotations.editor.time_placeholder:
+  zh-CN: "HH:MM"
+today.annotations.editor.category_label:
+  zh-CN: "分类"
+today.annotations.editor.category_none:
+  zh-CN: "无"
+today.annotations.editor.category_loading:
+  zh-CN: "正在加载分类…"
+today.annotations.editor.category_archived_note:
+  zh-CN: "已归档分类（%{count}）不提供选择"
+today.annotations.editor.label_field:
+  zh-CN: "标签"
+today.annotations.editor.label_placeholder:
+  zh-CN: "可选简短标签…"
+today.annotations.editor.note_field:
+  zh-CN: "备注"
+today.annotations.editor.note_placeholder:
+  zh-CN: "可选多行备注…"
+today.annotations.editor.scalar_count:
+  zh-CN: "%{count} / %{value}"
+today.annotations.editor.action.save:
+  zh-CN: "保存"
+today.annotations.editor.action.saving:
+  zh-CN: "正在保存…"
+today.annotations.editor.action.retry_save:
+  zh-CN: "重试保存"
+today.annotations.editor.action.cancel:
+  zh-CN: "取消"
+today.annotations.editor.action.delete:
+  zh-CN: "删除"
+today.annotations.editor.delete_confirm.prompt:
+  zh-CN: "确认删除这条标注？此前被重叠裁剪的其他标注不会被恢复。"
+today.annotations.editor.delete_confirm.confirm:
+  zh-CN: "确认删除"
+today.annotations.validation.invalid_time:
+  zh-CN: "请按 HH:MM 格式输入开始与结束时间。"
+today.annotations.validation.dst_gap:
+  zh-CN: "因夏令时跳变，该本地时间不存在。"
+today.annotations.validation.outside_day:
+  zh-CN: "开始与结束时间必须位于当前显示的逻辑日内。"
+today.annotations.validation.end_before_start:
+  zh-CN: "结束时间必须晚于开始时间。"
+today.annotations.validation.label_too_long:
+  zh-CN: "标签长度不能超过 %{count} 个字符。"
+today.annotations.validation.note_too_long:
+  zh-CN: "备注长度不能超过 %{count} 个字符。"
+today.annotations.validation.category_required:
+  zh-CN: "分类覆盖必须选择一个未归档分类。"
+today.annotations.validation.note_content_required:
+  zh-CN: "备注标注至少需要填写标签或备注。"
+today.annotations.validation.no_day:
+  zh-CN: "请等待当天数据加载完成后再保存。"
+today.annotations.error.bad_request:
+  zh-CN: "标注请求被拒绝，请检查输入字段或刷新后重试。"
+today.annotations.error.invalid_range:
+  zh-CN: "核心拒绝了该时间范围，请检查起止时间后重试。"
+today.annotations.error.stale:
+  zh-CN: "保存前标注已变更，请刷新后重试。"
+today.annotations.error.busy:
+  zh-CN: "核心暂时繁忙，已保留当前输入，可直接重试保存。"
+today.annotations.error.generic:
+  zh-CN: "保存标注变更失败，请重试。"
 

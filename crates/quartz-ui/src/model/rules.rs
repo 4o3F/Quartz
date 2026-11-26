@@ -1448,6 +1448,23 @@ impl RulesPage {
         }
     }
 
+    /// Loads categories if they have never been requested yet or need recovery after stale/error.
+    #[must_use]
+    #[cfg(windows)]
+    pub(crate) fn ensure_categories_loaded(&mut self) -> RulesEffect {
+        let never_loaded = self.categories_generation == RulesGeneration::default();
+        if never_loaded
+            || matches!(
+                self.categories_state,
+                LoadState::Failed(_) | LoadState::Stale
+            )
+        {
+            self.reload_categories()
+        } else {
+            RulesEffect::None
+        }
+    }
+
     /// Applies the result of a `categories.list` load, ignoring stale generations.
     pub(crate) fn apply_categories_loaded(
         &mut self,

@@ -335,6 +335,25 @@ impl AppShell {
                 })),
             )
             .children(
+                matches!(self.day.source(), super::DaySource::Live(_)).then(|| {
+                    let active = self.annotation_editor.is_panel_open()
+                        && self.annotation_editor.active_tab()
+                            == crate::model::TodayPanelTab::Annotations;
+                    let label = ButtonContent::IconLabel(
+                        IconName::FileText,
+                        self.formatter.text(Msg::TodayAnnotationsButton),
+                    );
+                    let button = if active {
+                        ui.accent_button("today-annotations-open", density, label)
+                    } else {
+                        ui.button("today-annotations-open", density, label)
+                    };
+                    button.on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_annotations_panel(window, cx);
+                    }))
+                }),
+            )
+            .children(
                 self.live
                     .as_ref()
                     .filter(|live| live.snapshot.locale.is_none())

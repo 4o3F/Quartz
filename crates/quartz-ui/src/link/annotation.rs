@@ -1,5 +1,12 @@
-//! UI quick annotation mappings mirror the tray's stored annotation semantics.
+//! UI quick annotation mappings and typed annotation queries/writes over the pipe link.
 use super::UtcRange;
+#[cfg(windows)]
+use super::{Link, LoadDataError};
+#[cfg(windows)]
+use quartz_protocol::{
+    AcceptedBody, AnnotationsDeleteRequest, AnnotationsResponse, AnnotationsUpdateRequest,
+    QueryAnnotationsRequest, QueryAnnotationsResponse,
+};
 use quartz_protocol::{
     AnnotationCategory, AnnotationId, AnnotationKind, AnnotationLabelPreset, AnnotationValues,
     AnnotationsCreateRequest, BuiltinCategory, CreateAnnotation,
@@ -41,6 +48,53 @@ impl AwayAction {
         AnnotationsCreateRequest {
             entities: vec![entity],
         }
+    }
+}
+
+#[cfg(windows)]
+impl Link {
+    /// Queries saved annotations intersecting a half-open UTC range.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn query_annotations(
+        &self,
+        request: QueryAnnotationsRequest,
+    ) -> Result<QueryAnnotationsResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Creates one or more annotations atomically with client-supplied UUIDs.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn create_annotations(
+        &self,
+        request: AnnotationsCreateRequest,
+    ) -> Result<AnnotationsResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Replaces the final values of one or more existing annotations atomically.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn update_annotations(
+        &self,
+        request: AnnotationsUpdateRequest,
+    ) -> Result<AnnotationsResponse, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
+    }
+
+    /// Deletes one or more annotations by UUID atomically.
+    ///
+    /// # Errors
+    /// Returns any transport, decoding, or protocol failure.
+    pub(crate) async fn delete_annotations(
+        &self,
+        request: AnnotationsDeleteRequest,
+    ) -> Result<AcceptedBody, LoadDataError> {
+        self.request(request).await.map_err(LoadDataError::from)
     }
 }
 #[cfg(test)]

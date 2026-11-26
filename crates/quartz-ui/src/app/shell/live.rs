@@ -342,6 +342,7 @@ impl AppShell {
             }
         }
         if follow {
+            self.on_live_day_context_changed(None, cx);
             self.on_rules_mutated(cx);
         }
         if recovered && !follow {
@@ -393,7 +394,7 @@ impl AppShell {
         }
         live.timer = None;
         live.indicator = Indicator::Hidden;
-        match result
+        let loaded_context = match result
             .and_then(|data| Day::from_protocol(data).map_err(|_| LoadDataError::InvalidData))
         {
             Ok(day) => {
@@ -401,15 +402,21 @@ impl AppShell {
                     self.range = RangeChoice::Activity;
                 }
                 live.actions.reconcile(&day);
+                let context = day.live_time_context();
                 self.day = day;
                 self.hover = None;
                 live.phase = LoadPhase::Ready;
                 live.failure = None;
+                context
             }
             Err(error) => {
                 live.failure = Some(error);
                 live.phase = LoadPhase::Ready;
+                None
             }
+        };
+        if let Some(context) = loaded_context {
+            self.on_live_day_context_changed(Some(context), cx);
         }
         cx.notify();
     }
@@ -504,6 +511,7 @@ impl AppShell {
         self.day = Day::empty(date);
         self.hover = None;
         self.cancel_details(cx);
+        self.on_live_day_context_changed(None, cx);
         self.range = RangeChoice::FullDay;
         if let Some(mut request) = previous {
             request.date = date;
@@ -1118,7 +1126,11 @@ impl AppShell {
                     live.actions.spans.retain(|write| write.range != range);
                     return;
                 }
+                let succeeded = result.is_ok();
                 live.finish_annotation(&this.day, range, action, result);
+                if succeeded {
+                    this.on_annotations_day_changed(date, cx);
+                }
                 cx.notify();
             });
         })

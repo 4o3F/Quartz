@@ -118,6 +118,7 @@ impl AppShell {
     /// Handles a `day` topic change notification from the core link. When the Unclassified tab is
     /// visible and `date` falls inside the covered 7-day range, schedules a coalesced refresh.
     pub(crate) fn day_changed(&mut self, date: LocalDate, cx: &mut Context<Self>) {
+        self.on_annotations_day_changed(date, cx);
         if self.page == Page::Rules && self.rules.active_tab() == RulesTab::Unclassified {
             let today = self.current_logical_today();
             let effect = self.unclassified.on_day_changed(date, today);
@@ -125,6 +126,9 @@ impl AppShell {
             cx.notify();
         } else {
             self.unclassified.mark_stale();
+            if self.page == Page::Today {
+                cx.notify();
+            }
         }
     }
 

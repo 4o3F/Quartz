@@ -1,5 +1,6 @@
 //! The application shell: title bar, navigation, pages and the right-hand details panel (07 section 2).
 
+mod annotation_editor;
 mod calendar;
 mod charts;
 mod details;
@@ -302,6 +303,12 @@ pub(crate) struct AppShell<Focus = FocusHandle> {
     unclassified_search_input: Option<Entity<gpui_kit::component::input::InputState>>,
     unclassified_search_sync: InputSyncState,
     unclassified_query_task: Option<gpui_kit::Task<()>>,
+    annotation_editor: crate::model::AnnotationEditor,
+    annotation_start_input: Option<Entity<gpui_kit::component::input::InputState>>,
+    annotation_end_input: Option<Entity<gpui_kit::component::input::InputState>>,
+    annotation_label_input: Option<Entity<gpui_kit::component::input::InputState>>,
+    annotation_note_input: Option<Entity<gpui_kit::component::input::EditorState>>,
+    annotation_inputs_sync: InputSyncState,
     pending_leave_page: Option<Page>,
     ranking: RankingKind,
     lanes: LaneMode,
@@ -373,6 +380,12 @@ impl AppShell {
             unclassified_search_input: None,
             unclassified_search_sync: InputSyncState::Synced,
             unclassified_query_task: None,
+            annotation_editor: crate::model::AnnotationEditor::new(),
+            annotation_start_input: None,
+            annotation_end_input: None,
+            annotation_label_input: None,
+            annotation_note_input: None,
+            annotation_inputs_sync: InputSyncState::Synced,
             pending_leave_page: None,
             ranking: RankingKind::default(),
             lanes: LaneMode::Swimlanes,
@@ -407,20 +420,22 @@ impl AppShell {
             })
     }
 
+    /// Whether the right-hand Today side panel (details or annotations) is open.
+    fn has_side_panel(&self) -> bool {
+        self.details.is_some() || self.annotation_editor.is_panel_open()
+    }
+
     /// The layout of a window `window` wide with the current navigation choice and panel.
     fn layout_in(&self, window: &Window) -> ShellLayout {
-        let panel = if self.details.is_some() {
+        let has_panel = self.has_side_panel();
+        let panel = if has_panel {
             PanelState::Open
         } else {
             PanelState::Closed
         };
         ShellLayout::resolve(
             f32::from(window.viewport_size().width),
-            if self.details.is_some() {
-                NavLayout::Rail
-            } else {
-                self.nav
-            },
+            if has_panel { NavLayout::Rail } else { self.nav },
             panel,
             &self.tokens.metrics().shell_sizes(),
         )
@@ -456,6 +471,9 @@ impl AppShell {
         } else {
             self.details = open_details(&self.day, subject);
         }
+        let _ = self
+            .annotation_editor
+            .select_tab(crate::model::TodayPanelTab::Details);
         self.hover = None;
         if self.details.is_some() {
             window.focus(&self.panel_focus, cx);
@@ -465,6 +483,7 @@ impl AppShell {
 
     fn close_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_details(cx);
+        self.annotation_editor.close_panel();
         window.focus(&self.root_focus, cx);
         cx.notify();
     }
@@ -476,8 +495,14 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.key == "escape" && self.details.is_some() {
-            self.close_details(window, cx);
+        if event.keystroke.key == "escape" && self.has_side_panel() {
+            if self.annotation_editor.is_panel_open()
+                && self.annotation_editor.active_tab() == crate::model::TodayPanelTab::Annotations
+            {
+                self.handle_annotations_escape(window, cx);
+            } else {
+                self.close_details(window, cx);
+            }
             cx.stop_propagation();
         }
     }
@@ -519,6 +544,7 @@ impl AppShell {
             self.page = page;
             self.hover = None;
             self.cancel_details(cx);
+            self.annotation_editor.close_panel();
             if page == Page::Rules {
                 self.open_rules_page(cx);
             }
@@ -554,6 +580,7 @@ impl Render for AppShell {
         self.sync_rule_editor_inputs_if_needed(window, cx);
         self.sync_rule_import_input_if_needed(window, cx);
         self.sync_unclassified_search_input_if_needed(window, cx);
+        self.sync_annotation_inputs_if_needed(window, cx);
         let (font_family, mode) = {
             let theme = cx.theme();
             (theme.font_family.clone(), theme.mode)
@@ -581,14 +608,20 @@ impl Render for AppShell {
             (Page::Today, PanelPlacement::Overlay)
             | (Page::Week | Page::Rules | Page::Settings, _) => None,
         };
-        let panel = self.details.as_ref().map(|details| match &details.content {
-            PanelContent::Fixture(content) => {
-                self.render_details(&ui, &measure, content, layout.panel, cx)
-            }
-            PanelContent::Live(panel) => {
-                self.render_live_details(&ui, &measure, panel, layout.panel, cx)
-            }
-        });
+        let panel = if self.annotation_editor.is_panel_open()
+            && self.annotation_editor.active_tab() == crate::model::TodayPanelTab::Annotations
+        {
+            Some(self.render_annotations_panel(&ui, layout.panel, cx))
+        } else {
+            self.details.as_ref().map(|details| match &details.content {
+                PanelContent::Fixture(content) => {
+                    self.render_details(&ui, &measure, content, layout.panel, cx)
+                }
+                PanelContent::Live(panel) => {
+                    self.render_live_details(&ui, &measure, panel, layout.panel, cx)
+                }
+            })
+        };
         let (beside, overlay) = match layout.panel {
             PanelPlacement::Closed => (None, None),
             PanelPlacement::Beside => (panel, None),

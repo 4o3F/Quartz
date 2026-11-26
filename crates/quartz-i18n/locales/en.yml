@@ -928,4 +928,112 @@ rules.unclassified.load_failed.title:
   en: "Couldn’t load unclassified queue"
 rules.unclassified.load_failed.message:
   en: "Retry to load unclassified items from the last 7 days."
+today.annotations.button:
+  en: "Annotations"
+today.annotations.tab.details:
+  en: "Details"
+today.annotations.tab.annotations:
+  en: "Annotations"
+today.annotations.title:
+  en: "Annotations"
+today.annotations.action.new:
+  en: "New annotation"
+today.annotations.empty:
+  en: "No saved annotations for this day."
+today.annotations.truncated:
+  en: "Showing first %{count} annotations; list was truncated."
+today.annotations.load_failed.title:
+  en: "Couldn’t load annotations"
+today.annotations.load_failed.message:
+  en: "Retry to load saved annotations for this day."
+today.annotations.stale.message:
+  en: "Annotations changed while loading. Retry to refresh."
+today.annotations.category_missing:
+  en: "Unknown category"
+today.annotations.kind.category_override:
+  en: "Category override"
+today.annotations.kind.offline_activity:
+  en: "Offline activity"
+today.annotations.kind.active_override:
+  en: "Active override"
+today.annotations.kind.dismissed_away:
+  en: "Ignored away"
+today.annotations.kind.note:
+  en: "Note"
+today.annotations.editor.create_title:
+  en: "New annotation"
+today.annotations.editor.edit_title:
+  en: "Edit annotation"
+today.annotations.editor.kind_label:
+  en: "Kind"
+today.annotations.editor.kind_fixed:
+  en: "Fixed after creation"
+today.annotations.editor.time_range:
+  en: "Time range (HH:MM)"
+today.annotations.editor.start_label:
+  en: "Start"
+today.annotations.editor.end_label:
+  en: "End"
+today.annotations.editor.time_placeholder:
+  en: "HH:MM"
+today.annotations.editor.category_label:
+  en: "Category"
+today.annotations.editor.category_none:
+  en: "None"
+today.annotations.editor.category_loading:
+  en: "Loading categories…"
+today.annotations.editor.category_archived_note:
+  en: "Archived categories (%{count}) cannot be selected"
+today.annotations.editor.label_field:
+  en: "Label"
+today.annotations.editor.label_placeholder:
+  en: "Optional short label…"
+today.annotations.editor.note_field:
+  en: "Note"
+today.annotations.editor.note_placeholder:
+  en: "Optional multi-line note…"
+today.annotations.editor.scalar_count:
+  en: "%{count} / %{value}"
+today.annotations.editor.action.save:
+  en: "Save"
+today.annotations.editor.action.saving:
+  en: "Saving…"
+today.annotations.editor.action.retry_save:
+  en: "Retry save"
+today.annotations.editor.action.cancel:
+  en: "Cancel"
+today.annotations.editor.action.delete:
+  en: "Delete"
+today.annotations.editor.delete_confirm.prompt:
+  en: "Delete this annotation? Previously clipped ranges will not be restored."
+today.annotations.editor.delete_confirm.confirm:
+  en: "Confirm delete"
+today.annotations.validation.invalid_time:
+  en: "Enter start and end times in HH:MM format."
+today.annotations.validation.dst_gap:
+  en: "This local time does not exist due to a daylight saving time shift."
+today.annotations.validation.outside_day:
+  en: "Start and end times must lie within the shown logical day."
+today.annotations.validation.end_before_start:
+  en: "End time must be after start time."
+today.annotations.validation.label_too_long:
+  en: "Label must be %{count} characters or fewer."
+today.annotations.validation.note_too_long:
+  en: "Note must be %{count} characters or fewer."
+today.annotations.validation.category_required:
+  en: "Select an active category for a category override."
+today.annotations.validation.note_content_required:
+  en: "Enter a label or note for a note annotation."
+today.annotations.validation.no_day:
+  en: "Wait for the day to finish loading before saving."
+today.annotations.error.bad_request:
+  en: "Annotation request was rejected. Check the fields or reload and try again."
+today.annotations.error.invalid_range:
+  en: "Time range was rejected by core. Check start and end times and try again."
+today.annotations.error.stale:
+  en: "Annotations changed before saving. Reload and try again."
+today.annotations.error.busy:
+  en: "Quartz core is busy. Your inputs are preserved; retry saving."
+today.annotations.error.generic:
+  en: "Couldn’t save annotation changes. Try again."
 
