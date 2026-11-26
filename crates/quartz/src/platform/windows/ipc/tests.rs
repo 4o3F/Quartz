@@ -916,9 +916,9 @@ fn cli_queries_temporary_database_over_pipe() {
             .expect("cli query.day"),
     )
     .expect("typed day body");
-    assert_eq!(day.metrics.expect("metrics").active_ms, 4000);
+    assert_eq!(day.metrics.active_ms, 4000);
     assert_eq!(day.applications.len(), 4);
-    let start = day.hours.expect("hours")[0].start_utc_ms;
+    let start = day.hours[0].start_utc_ms;
     let timeline: quartz_protocol::QueryTimelineResponse = serde_json::from_value(
         cli.request(
             Op::QueryTimeline,
@@ -931,7 +931,7 @@ fn cli_queries_temporary_database_over_pipe() {
     let pending_body = json!({"local_date":"2025-01-02"});
     for mut client in [fixture.cli(), fixture.ui()] {
         let range: quartz_protocol::QueryRangeResponse = serde_json::from_value(client.request(Op::QueryRange, &json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["category","app","document"]})).expect("range query")).expect("typed range");
-        assert_eq!(range.buckets[0].active_ms, Some(4000));
+        assert_eq!(range.buckets[0].active_ms, 4000);
         assert_eq!(range.buckets[0].groups.len(), 9);
         for body in [
             json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":[]}),
@@ -958,7 +958,8 @@ fn cli_queries_temporary_database_over_pipe() {
         let facts = client
             .facts(&quartz_protocol::QueryFactsRequest {
                 local_date: "2025-01-02".parse().expect("date"),
-                cursor: None,
+                after: None,
+                limit: None,
             })
             .expect("facts query");
         assert_eq!(facts.facts.len(), 6, "run, clock and four foreground rows");
@@ -970,7 +971,6 @@ fn overloaded_database_returns_busy_over_pipe() {
     channel.saturate(crate::query::QueryRequest::Day(
         quartz_protocol::QueryDayRequest {
             local_date: "2025-01-02".parse().expect("date"),
-            cursor: None,
         },
     ));
     let fixture = Fixture::with_query_port(

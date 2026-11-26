@@ -142,7 +142,6 @@ impl QueryFixture {
     pub(crate) fn request_day(&self) -> QueryRequest {
         QueryRequest::Day(QueryDayRequest {
             local_date: FIXTURE_DATE.parse().expect("fixture date"),
-            cursor: None,
         })
     }
     pub(crate) fn request_timeline(&self) -> QueryRequest {
@@ -151,7 +150,6 @@ impl QueryFixture {
             end_utc_ms: self.start + (self.count + 1) * FACT_MS,
             detail: TimelineDetail::Raw,
             ms_per_pixel: MillisecondsPerPixel(std::num::NonZeroU64::MIN),
-            cursor: None,
         })
     }
     pub(crate) fn rules(&mut self) -> std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot> {

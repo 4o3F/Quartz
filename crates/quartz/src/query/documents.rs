@@ -277,9 +277,8 @@ mod tests {
         }
     }
     #[test]
-    fn repeated_identity_is_encoded_once_per_page_and_every_reference_counts_towards_bytes() {
-        use super::super::paging::{PageBudget, PagePosition};
-        const SEGMENT_COUNT: usize = 1000;
+    fn repeated_identity_is_encoded_once_per_response() {
+        const SEGMENT_COUNT: usize = 16;
         let range = ReferenceRange {
             start_utc_ms: 0,
             end_utc_ms: 1000,
@@ -288,23 +287,15 @@ mod tests {
         let mut references = PageDocumentReferences::new(range, &versions);
         let mut segments = vec![segment(); SEGMENT_COUNT];
         segments[1].extraction.as_mut().expect("extraction").dirty = Some(true);
-        let page = PageBudget::new(&())
-            .expect("budget")
-            .page_with(segments, PagePosition::First, |segment| {
-                references.attach(segment)
-            })
-            .expect("page");
-        assert!(page.items.len() > 1);
-        assert!(
-            page.next.is_some(),
-            "repeated reference strings still consume page bytes"
-        );
+        for segment in &mut segments {
+            references.attach(segment).expect("attach reference");
+        }
         assert_eq!(
             references.encodings, 1,
             "one serialization and checksum for this identity"
         );
-        let first = page.items[0].document_ref.as_ref().expect("reference");
-        for segment in &page.items {
+        let first = segments[0].document_ref.as_ref().expect("reference");
+        for segment in &segments {
             assert_eq!(
                 segment
                     .document_ref
@@ -315,23 +306,6 @@ mod tests {
                 first.as_str().as_bytes()
             );
         }
-        let encoded_bytes = serde_json::to_vec(&page.items).expect("page JSON").len();
-        assert!(encoded_bytes < quartz_protocol::QUERY_PAGE_BYTES);
-        let reference_bytes = serde_json::to_vec(first).expect("reference JSON").len();
-        let mut without_references = page.items.clone();
-        for segment in &mut without_references {
-            segment.document_ref = None;
-        }
-        let without_reference_bytes = serde_json::to_vec(&without_references)
-            .expect("null reference JSON")
-            .len();
-        let null_bytes = serde_json::to_vec(&Option::<DocumentRef>::None)
-            .expect("null JSON")
-            .len();
-        assert_eq!(
-            encoded_bytes - without_reference_bytes,
-            page.items.len() * (reference_bytes - null_bytes)
-        );
     }
     #[test]
     fn page_memoization_separates_identities_and_does_not_reuse_other_page_versions() {
@@ -496,45 +470,6 @@ mod tests {
             reference,
             DocumentReference::issue(identity, different_range, versions).expect("range reference")
         );
-    }
-    #[test]
-    fn maximum_escaped_document_detail_cursor_fits_the_named_limit() {
-        use quartz_domain::capture::limits;
-        use quartz_protocol::{CursorQuery, DetailEntity, MAX_CURSOR_BYTES, QueryCursor};
-        /// A SHA-256 query digest uses two hexadecimal digits per byte.
-        const QUERY_DIGEST_HEX_DIGITS: usize = 64;
-        let maximum = "\0".repeat(limits::TITLE_UTF16_UNITS);
-        let identity = DocumentIdentity {
-            app: ApplicationId(i64::MAX),
-            document: maximum.clone(),
-            project: Some(maximum.clone()),
-            profile: Some(maximum),
-        };
-        let versions = QueryVersions("f".repeat(QUERY_DIGEST_HEX_DIGITS));
-        let range = ReferenceRange {
-            start_utc_ms: 0,
-            end_utc_ms: 1,
-        };
-        let reference =
-            DocumentReference::issue(identity, range, versions.clone()).expect("maximum reference");
-        let cursor = QueryCursor::new(
-            versions,
-            CursorQuery::EntityDetail {
-                entity: DetailEntity::Document {
-                    document_ref: reference,
-                },
-                local_date: "2025-01-02".parse().expect("date"),
-                reference_range: Some(range),
-            },
-            usize::MAX,
-        );
-        let encoded = serde_json::to_vec(&cursor).expect("document cursor JSON");
-        assert!(
-            encoded.len() <= MAX_CURSOR_BYTES,
-            "largest escaped document fields fit: {}",
-            encoded.len()
-        );
-        assert!(cursor.decode().is_ok());
     }
     #[test]
     fn document_reference_payload_keeps_range_fields_strict() {

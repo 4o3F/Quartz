@@ -21,10 +21,9 @@ pub(crate) struct TraySummary {
     pub recent: Option<ApplicationRank>,
 }
 impl TraySummary {
-    pub(crate) fn from_day(day: QueryDayResponse) -> Option<Self> {
-        let metrics = day.metrics?;
+    pub(crate) fn from_day(day: QueryDayResponse) -> Self {
         let mut categories: Vec<CategoryDuration> = Vec::new();
-        for hour in day.hours? {
+        for hour in day.hours {
             for entry in hour.categories {
                 if let Some(existing) = categories
                     .iter_mut()
@@ -39,11 +38,11 @@ impl TraySummary {
         categories.retain(|row| row.duration_ms > 0);
         // Stable ordering preserves the query's category ordering when durations tie.
         categories.sort_by_key(|row| std::cmp::Reverse(row.duration_ms));
-        Some(Self {
-            metrics,
+        Self {
+            metrics: day.metrics,
             categories,
             recent: None,
-        })
+        }
     }
     pub(crate) fn today_text(&self, language: Language) -> String {
         MessageKey::new("tray.today").format(

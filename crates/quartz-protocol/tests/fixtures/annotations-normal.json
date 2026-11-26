@@ -17,5 +17,5 @@
     }
   ],
   "versions": "annotation-version",
-  "next_cursor": null
+  "truncated": false
 }

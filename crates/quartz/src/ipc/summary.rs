@@ -122,17 +122,13 @@ impl SummaryTask {
         now_ms: i64,
     ) -> Result<ComputedSummary, ProtocolError> {
         let QueryResponse::Day(day) = queries
-            .call(QueryRequest::Day(QueryDayRequest {
-                local_date: date,
-                cursor: None,
-            }))
+            .call(QueryRequest::Day(QueryDayRequest { local_date: date }))
             .await?
         else {
             return Err(ProtocolError::new(ErrorKind::Internal));
         };
         let versions = day.versions.clone();
-        let mut summary =
-            TraySummary::from_day(day).ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?;
+        let mut summary = TraySummary::from_day(day);
         summary.recent = Self::recent(queries, now_ms).await?;
         Ok(ComputedSummary { summary, versions })
     }
@@ -140,45 +136,29 @@ impl SummaryTask {
         queries: &QueryPort,
         now_ms: i64,
     ) -> Result<Option<ApplicationRank>, ProtocolError> {
-        let mut request = QueryTimelineRequest {
+        let request = QueryTimelineRequest {
             start_utc_ms: now_ms.saturating_sub(RECENT_WINDOW_MS),
             end_utc_ms: now_ms,
             detail: TimelineDetail::App,
             ms_per_pixel: MillisecondsPerPixel(NonZeroU64::MIN),
-            cursor: None,
+        };
+        let QueryResponse::Timeline(response) =
+            queries.call(QueryRequest::Timeline(request)).await?
+        else {
+            return Err(ProtocolError::new(ErrorKind::Internal));
         };
         let mut applications: BTreeMap<quartz_protocol::ApplicationId, ApplicationRank> =
             BTreeMap::new();
-        let mut versions = None;
-        loop {
-            let QueryResponse::Timeline(page) = queries
-                .call(QueryRequest::Timeline(request.clone()))
-                .await?
-            else {
-                return Err(ProtocolError::new(ErrorKind::Internal));
-            };
-            if versions
-                .as_ref()
-                .is_some_and(|version| *version != page.versions)
+        for segment in response.segments {
+            if matches!(
+                segment.activity,
+                Activity::Active | Activity::ActiveOverride { .. }
+            ) && let Some(app) = segment.app
             {
-                return Err(ProtocolError::new(ErrorKind::StaleCursor));
-            }
-            versions = Some(page.versions);
-            for segment in page.segments {
-                if matches!(
-                    segment.activity,
-                    Activity::Active | Activity::ActiveOverride { .. }
-                ) && let Some(app) = segment.app
-                {
-                    let row = applications
-                        .entry(app.id)
-                        .or_insert(ApplicationRank { app, active_ms: 0 });
-                    row.active_ms += segment.duration_ms;
-                }
-            }
-            request.cursor = page.next_cursor;
-            if request.cursor.is_none() {
-                break;
+                let row = applications
+                    .entry(app.id)
+                    .or_insert(ApplicationRank { app, active_ms: 0 });
+                row.active_ms += segment.duration_ms;
             }
         }
         // BTreeMap order gives equal durations a stable application-ID tie break.
@@ -253,12 +233,9 @@ mod tests {
                 }
             }
         };
-        assert_eq!(
-            result.summary.metrics,
-            direct.metrics.expect("direct metrics")
-        );
+        assert_eq!(result.summary.metrics, direct.metrics);
         assert_eq!(result.versions, direct.versions);
-        let hours = direct.hours.expect("direct hours");
+        let hours = direct.hours;
         for category in &result.summary.categories {
             let expected: i64 = hours
                 .iter()

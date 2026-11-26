@@ -912,7 +912,6 @@ fn read_errors_day_offsets_and_missing_readers_keep_internal_protocol_codes() {
     assert_eq!(error.kind(), quartz_protocol::ErrorKind::Internal);
     let request = QueryRequest::Day(QueryDayRequest {
         local_date: "2025-01-02".parse().expect("date"),
-        cursor: None,
     });
     let rules = quartz_domain::rules::registry::RuleRegistry::from_state(Default::default())
         .expect("empty rules")
@@ -1296,7 +1295,6 @@ fn segment_details_keep_all_activity_states_without_display_merging() {
         end_utc_ms: 100,
         app: None,
         window_instance: None,
-        cursor: None,
     };
     let mut projection = details::SegmentDetailProjection::default();
     for segment in &derived.segments {
@@ -1375,9 +1373,9 @@ fn entity_details_use_seven_offset_days_across_dst_and_rank_titles() {
     for segment in &derived.segments {
         accumulator.push(segment, &derived.facts);
     }
-    let response = accumulator.finish(QueryVersions("test".into()), PagePosition::First);
-    let daily = response.daily.expect("first-page daily totals");
-    let titles = response.titles.expect("first-page top titles");
+    let response = accumulator.finish(QueryVersions("test".into()));
+    let daily = response.daily;
+    let titles = response.titles;
     assert_eq!(daily, expected);
     assert_eq!(daily[3].active_ms, 23 * 60 * 60 * 1000);
     assert_eq!(titles.len(), quartz_protocol::ENTITY_DETAIL_TOP_TITLES);
@@ -1430,8 +1428,8 @@ fn entity_daily_duration_matches_day_queries_at_integer_clipping_boundaries() {
     for segment in &derived.segments {
         accumulator.push(segment, &derived.facts);
     }
-    let response = accumulator.finish(QueryVersions("test".into()), PagePosition::First);
-    let daily = response.daily.expect("first-page daily totals");
+    let response = accumulator.finish(QueryVersions("test".into()));
+    let daily = response.daily;
     for daily in &daily {
         let calendar = DayCalendar::in_zone(daily.local_date, offset, zone.clone()).expect("day");
         let segments = derive(rows.clone(), calendar.range);
@@ -1649,7 +1647,6 @@ fn document_app_merge_ignores_dirty_churn_and_preserves_raw_display_and_boundari
         end_utc_ms: 20,
         app: None,
         window_instance: None,
-        cursor: None,
     };
     let mut detail = details::SegmentDetailProjection::default();
     for segment in &derived.segments {
@@ -1914,7 +1911,6 @@ fn unclassified_request(
         end_date: "1970-01-02".parse().expect("date"),
         group_by,
         search: None,
-        cursor: None,
     }
 }
 fn grouped_unclassified(
@@ -2133,8 +2129,8 @@ fn entity_detail_ignores_rounded_zero_duration_titles() {
     for segment in &derived.segments {
         accumulator.push(segment, &derived.facts);
     }
-    let response = accumulator.finish(QueryVersions("test".into()), PagePosition::First);
-    assert!(response.titles.expect("titles").is_empty());
+    let response = accumulator.finish(QueryVersions("test".into()));
+    assert!(response.titles.is_empty());
     assert!(response.rules.is_empty());
     assert!(response.extraction.is_empty());
 }
@@ -2150,7 +2146,6 @@ fn rejected_search_identity_is_normalized_once() {
         end_date: "2025-01-03".parse().expect("end"),
         group_by: quartz_protocol::UnclassifiedGroupBy::App,
         search: Some("does not match".into()),
-        cursor: None,
     };
     let mut accumulator = UnclassifiedAccumulator::new(&request);
     let segment = derived
@@ -2203,7 +2198,6 @@ fn pending_away_builds_no_hour_stacks() {
     let mut fixture = QueryFixture::new(0);
     let request = QueryRequest::PendingAway(quartz_protocol::QueryPendingAwayRequest {
         local_date: FIXTURE_DATE.parse().expect("date"),
-        cursor: None,
     });
     calendar::BUILT_HOURS.set(0);
     let response = fixture.run(request).expect("pending away");
@@ -2212,19 +2206,18 @@ fn pending_away_builds_no_hour_stacks() {
 }
 
 #[test]
-fn range_early_stop_measures_aggregation_and_page_encoding() {
+fn range_completion_measures_aggregation_and_page_encoding() {
     use crate::store::query::test_support::{FIXTURE_DATE, QueryFixture};
-    let mut fixture = QueryFixture::new(900);
+    let mut fixture = QueryFixture::new(200);
     let date: quartz_protocol::LocalDate = FIXTURE_DATE.parse().expect("date");
     let mut job = fixture.start(QueryRequest::Range(quartz_protocol::QueryRangeRequest {
         start_date: date,
-        end_date: date.checked_add(jiff::Span::new().days(10)).expect("end"),
+        end_date: date.checked_add(jiff::Span::new().days(2)).expect("end"),
         bucket: quartz_protocol::RangeBucket::Day,
         dimensions: vec![
             quartz_protocol::RangeDimension::App,
             quartz_protocol::RangeDimension::Document,
         ],
-        cursor: None,
     }));
     loop {
         timing::MEASURED_STAGES.with_borrow_mut(Vec::clear);
@@ -2232,10 +2225,7 @@ fn range_early_stop_measures_aggregation_and_page_encoding() {
             let QueryResponse::Range(page) = response else {
                 panic!("range response")
             };
-            assert!(
-                page.next_cursor.is_some(),
-                "fixture must stop at a full page"
-            );
+            assert!(page.truncated, "fixture exceeds per-dimension cap");
             timing::MEASURED_STAGES.with_borrow(|stages| {
                 assert!(
                     stages.ends_with(&[QueryStage::Aggregate, QueryStage::PageEncode]),
@@ -2404,18 +2394,86 @@ pattern='\A(?P<document>[^|]+)(?:\|(?P<project>[^|]+))?(?:\|(?P<profile>[^|]+))?
             "identity {:?}",
             case.identity
         );
-        let response = accumulator.finish(QueryVersions("test".into()), PagePosition::First);
+        let response = accumulator.finish(QueryVersions("test".into()));
         assert_eq!(
-            response
-                .daily
-                .expect("daily")
-                .iter()
-                .map(|day| day.active_ms)
-                .sum::<i64>(),
+            response.daily.iter().map(|day| day.active_ms).sum::<i64>(),
             expected
                 .iter()
                 .map(|segment| segment.span.duration_ms)
                 .sum::<i64>()
         );
     }
+}
+
+#[test]
+fn frame_fit_helpers_truncate_longest_list_and_set_truncated() {
+    #[derive(serde::Serialize)]
+    struct Single {
+        items: Vec<String>,
+        truncated: bool,
+    }
+    let single = Single {
+        items: (0..20).map(|i| format!("item-{i:04}-payload")).collect(),
+        truncated: false,
+    };
+    let fitted =
+        fit_single_list(single, 120, |r| &mut r.items, |r| r.truncated = true).expect("fit single");
+    assert!(fitted.truncated);
+    assert!(!fitted.items.is_empty() && fitted.items.len() < 20);
+    assert!(serde_json::to_vec(&fitted).expect("json").len() <= 120);
+
+    #[derive(serde::Serialize)]
+    struct Dual {
+        short: Vec<String>,
+        long: Vec<String>,
+        truncated: bool,
+    }
+    let dual = Dual {
+        short: vec!["keep-0".into(), "keep-1".into()],
+        long: (0..20).map(|i| format!("long-{i:04}-payload")).collect(),
+        truncated: false,
+    };
+    let fitted = fit_two_lists(
+        dual,
+        180,
+        |r| &mut r.short,
+        |r| &mut r.long,
+        |r| r.truncated = true,
+    )
+    .expect("fit two");
+    assert!(fitted.truncated);
+    assert_eq!(fitted.short.len(), 2, "shorter list preserved first");
+    assert!(fitted.long.len() < 20);
+    assert!(serde_json::to_vec(&fitted).expect("json").len() <= 180);
+
+    let bucket_date: quartz_protocol::LocalDate = "2025-01-02".parse().expect("date");
+    let range = QueryRangeResponse {
+        time_zone: "UTC".into(),
+        day_start_offset_min: 0,
+        reference_range: None,
+        buckets: vec![quartz_protocol::RangeSummaryBucket {
+            start_date: bucket_date,
+            end_date: bucket_date.tomorrow().expect("end"),
+            active_ms: 10_000,
+            groups: (0..20)
+                .map(|i| quartz_protocol::RangeGroup {
+                    dimension: quartz_protocol::RangeDimension::App,
+                    entity: quartz_protocol::RangeEntity::Work(quartz_protocol::WorkEntity::App {
+                        id: quartz_protocol::ApplicationId(i + 1),
+                        exe_name: Some(format!("app-{i}.exe")),
+                        display_name: format!("Application {i}"),
+                    }),
+                    active_ms: 500,
+                })
+                .collect(),
+        }],
+        versions: QueryVersions("v".into()),
+        truncated: false,
+    };
+    let fitted = fit_range_response(range, 800).expect("fit range");
+    assert!(fitted.truncated);
+    assert_eq!(fitted.buckets.len(), 1);
+    assert_eq!(fitted.buckets[0].active_ms, 10_000);
+    assert!(fitted.buckets[0].groups.len() < 20);
+    assert!(serde_json::to_vec(&fitted).expect("json").len() <= 800);
 }

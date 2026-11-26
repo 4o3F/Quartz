@@ -248,6 +248,15 @@ impl WriteTx<'_> {
         if values.label_preset.is_some() && kind != AnnotationKind::Note {
             return Err(ExecuteAnnotationWritesError::InvalidFields);
         }
+        if values.label.as_ref().is_some_and(|text| {
+            text.chars().count() > quartz_protocol::ANNOTATION_MAX_LABEL_SCALARS
+        }) || values
+            .note
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > quartz_protocol::ANNOTATION_MAX_NOTE_SCALARS)
+        {
+            return Err(ExecuteAnnotationWritesError::InvalidFields);
+        }
         let fields_valid = match kind {
             AnnotationKind::CategoryOverride => values.category.is_some(),
             AnnotationKind::OfflineActivity | AnnotationKind::ActiveOverride => true,

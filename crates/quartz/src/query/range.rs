@@ -4,14 +4,14 @@ use super::{
     RunQueryError,
     classification::QueryCategoryRef,
     documents::{DocumentIdentity, DocumentReference},
-    paging::{PageBudget, PagePosition},
     pipeline::{DerivedSegment, SegmentFacts},
 };
 use jiff::civil::Weekday;
 use quartz_protocol::{
     ApplicationId, CategoryEntity, CategoryId, CategoryRef, FirstDayOfWeekSetting, LocalDate,
-    QueryRangeRequest, QueryRangeResponse, QueryVersions, RangeBucket, RangeDimension, RangeEntity,
-    RangeGroup, RangeSummaryBucket, ReferenceRange, WorkEntity,
+    QueryRangeRequest, QueryRangeResponse, QueryVersions, RANGE_MAX_GROUPS_PER_DIMENSION,
+    RangeBucket, RangeDimension, RangeEntity, RangeGroup, RangeSummaryBucket, ReferenceRange,
+    WorkEntity,
 };
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
@@ -167,12 +167,20 @@ impl GroupIdentity {
         }
     }
 }
+
+#[derive(Debug)]
+struct RangeOutput {
+    response: QueryRangeResponse,
+    range: ReferenceRange,
+    reference_versions: QueryVersions,
+}
+
 #[derive(Debug)]
 pub(super) struct RangeAccumulator {
     dimensions: Vec<RangeDimension>,
     buckets: Vec<Bucket>,
     current: usize,
-    page: Option<RangePage>,
+    output: Option<RangeOutput>,
 }
 impl RangeAccumulator {
     pub(super) fn new(
@@ -214,25 +222,19 @@ impl RangeAccumulator {
             dimensions: request.dimensions.clone(),
             buckets,
             current: 0,
-            page: None,
+            output: None,
         })
     }
-    pub(super) fn start_page(
+    pub(super) fn start_output(
         &mut self,
         response: QueryRangeResponse,
-        budget: PageBudget,
-        position: PagePosition,
         range: ReferenceRange,
         reference_versions: QueryVersions,
     ) {
-        self.page = Some(RangePage {
+        self.output = Some(RangeOutput {
             response,
-            budget,
-            position,
             range,
             reference_versions,
-            total: 0,
-            next: None,
         });
     }
     pub(super) fn next_day(&mut self, date: LocalDate) -> Result<(), RunQueryError> {
@@ -242,70 +244,20 @@ impl RangeAccumulator {
         }
         Ok(())
     }
-    pub(super) fn page_is_full(&self) -> bool {
-        self.page.as_ref().is_some_and(|page| page.next.is_some())
-    }
     pub(super) fn push(&mut self, segment: &DerivedSegment, facts: &SegmentFacts) {
         self.buckets[self.current].push(segment, facts, &self.dimensions);
     }
     fn finish_bucket(&mut self) -> Result<(), RunQueryError> {
         let bucket = &mut self.buckets[self.current];
         let groups = std::mem::take(&mut bucket.groups);
-        self.page
+        let output = self
+            .output
             .as_mut()
-            .expect("range page configured before scanning")
-            .push_bucket(bucket, groups, &self.dimensions)
-    }
-    pub(super) fn finish(mut self) -> Result<RangePageOutput, RunQueryError> {
-        while self.current < self.buckets.len() && !self.page_is_full() {
-            self.finish_bucket()?;
-            self.current += 1;
-        }
-        let page = self.page.expect("range page configured before scanning");
-        if !page.position.is_first() && page.position.index() >= page.total {
-            return Err(RunQueryError::InvalidCursor);
-        }
-        Ok(RangePageOutput {
-            response: page.response,
-            next: page.next,
-        })
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct RangePageOutput {
-    pub(super) response: QueryRangeResponse,
-    pub(super) next: Option<usize>,
-}
-/// Retains one encoded page while completed buckets are counted and released.
-#[derive(Debug)]
-struct RangePage {
-    response: QueryRangeResponse,
-    budget: PageBudget,
-    position: PagePosition,
-    range: ReferenceRange,
-    reference_versions: QueryVersions,
-    total: usize,
-    next: Option<usize>,
-}
-impl RangePage {
-    fn push_bucket(
-        &mut self,
-        bucket: &Bucket,
-        groups: BTreeMap<GroupIdentity, Group>,
-        dimensions: &[RangeDimension],
-    ) -> Result<(), RunQueryError> {
-        let header = self.total;
-        let mut index = header + 1;
-        self.total += 1 + groups.len();
-        let start = self.position.index();
-        if self.next.is_some() || start >= self.total {
-            return Ok(());
-        }
+            .expect("range output configured before scanning");
         let mut groups: Vec<_> = groups.into_values().collect();
         groups.sort_by(|left, right| {
             let dimension_index = |group: &Group| {
-                dimensions
+                self.dimensions
                     .iter()
                     .position(|dimension| *dimension == group.identity.dimension())
                     .expect("requested dimension")
@@ -315,47 +267,45 @@ impl RangePage {
                 .then_with(|| right.active_ms.cmp(&left.active_ms))
                 .then_with(|| left.identity.cmp(&right.identity))
         });
-        let mut wire = RangeSummaryBucket {
-            start_date: bucket.start_date,
-            end_date: bucket.end_date,
-            active_ms: (start <= header).then_some(bucket.active_ms),
-            groups: Vec::new(),
-        };
-        if !self.budget.admit(&wire)? {
-            if self.response.buckets.is_empty() {
-                return Err(RunQueryError::PageTooLarge);
-            }
-            self.next = Some(header);
-            return Ok(());
-        }
+        let mut per_dimension = [0_usize; 3];
+        let mut wire_groups = Vec::new();
         for group in groups {
-            if index < start {
-                index += 1;
+            let dimension = group.identity.dimension();
+            let slot = match dimension {
+                RangeDimension::Category => 0,
+                RangeDimension::App => 1,
+                RangeDimension::Document => 2,
+            };
+            if per_dimension[slot] >= RANGE_MAX_GROUPS_PER_DIMENSION {
+                output.response.truncated = true;
                 continue;
             }
-            let dimension = group.identity.dimension();
-            let group = RangeGroup {
+            per_dimension[slot] += 1;
+            wire_groups.push(RangeGroup {
                 dimension,
                 entity: group
                     .entity
-                    .into_wire(self.range, &self.reference_versions)?,
+                    .into_wire(output.range, &output.reference_versions)?,
                 active_ms: group.active_ms,
-            };
-            if !self.budget.admit(&group)? {
-                if wire.active_ms.is_none()
-                    && wire.groups.is_empty()
-                    && self.response.buckets.is_empty()
-                {
-                    return Err(RunQueryError::PageTooLarge);
-                }
-                self.next = Some(index);
-                break;
-            }
-            wire.groups.push(group);
-            index += 1;
+            });
         }
-        self.response.buckets.push(wire);
+        output.response.buckets.push(RangeSummaryBucket {
+            start_date: bucket.start_date,
+            end_date: bucket.end_date,
+            active_ms: bucket.active_ms,
+            groups: wire_groups,
+        });
         Ok(())
+    }
+    pub(super) fn finish(mut self) -> Result<QueryRangeResponse, RunQueryError> {
+        while self.current < self.buckets.len() {
+            self.finish_bucket()?;
+            self.current += 1;
+        }
+        Ok(self
+            .output
+            .expect("range output configured before scanning")
+            .response)
     }
 }
 
@@ -368,7 +318,6 @@ mod tests {
             end_date: "2026-11-17".parse().expect("Tuesday"),
             bucket: RangeBucket::Week,
             dimensions: vec![RangeDimension::Category],
-            cursor: None,
         }
     }
     #[test]
@@ -394,28 +343,24 @@ mod tests {
             reference_range: None,
             buckets: Vec::new(),
             versions: QueryVersions("test".into()),
-            next_cursor: None,
+            truncated: false,
         };
-        let budget = PageBudget::new(&response).expect("budget");
-        accumulator.start_page(
+        accumulator.start_output(
             response,
-            budget,
-            PagePosition::First,
             ReferenceRange {
                 start_utc_ms: 0,
                 end_utc_ms: 1,
             },
             QueryVersions("test".into()),
         );
-        let output = accumulator.finish().expect("empty page");
-        assert!(output.next.is_none());
-        let response = output.response;
+        let response = accumulator.finish().expect("empty response");
+        assert!(!response.truncated);
         assert_eq!(response.buckets.len(), 3);
         assert!(
             response
                 .buckets
                 .iter()
-                .all(|bucket| bucket.active_ms == Some(0) && bucket.groups.is_empty())
+                .all(|bucket| bucket.active_ms == 0 && bucket.groups.is_empty())
         );
     }
     #[test]
@@ -438,10 +383,10 @@ mod tests {
     }
     #[test]
     fn completed_bucket_identities_are_released_during_a_year_walk() {
-        const DOCUMENTS_PER_BUCKET: usize = 100;
+        const DOCUMENTS_PER_BUCKET: usize = RANGE_MAX_GROUPS_PER_DIMENSION + 5;
         let mut request = request();
         request.start_date = "2025-01-01".parse().expect("start");
-        request.end_date = "2026-01-01".parse().expect("end");
+        request.end_date = "2025-01-10".parse().expect("end");
         request.bucket = RangeBucket::Day;
         request.dimensions = vec![RangeDimension::Document];
         let mut accumulator = RangeAccumulator::new(&request, None).expect("range");
@@ -451,13 +396,10 @@ mod tests {
             reference_range: None,
             buckets: Vec::new(),
             versions: QueryVersions("test".into()),
-            next_cursor: None,
+            truncated: false,
         };
-        let budget = PageBudget::new(&response).expect("budget");
-        accumulator.start_page(
+        accumulator.start_output(
             response,
-            budget,
-            PagePosition::First,
             ReferenceRange {
                 start_utc_ms: 0,
                 end_utc_ms: 1,
@@ -511,13 +453,13 @@ mod tests {
                 );
             }
         }
-        let output = accumulator.finish().expect("page");
-        assert!(output.next.is_some());
+        let response = accumulator.finish().expect("range response");
+        assert!(response.truncated);
         assert!(
-            serde_json::to_vec(&output.response)
-                .expect("page JSON")
-                .len()
-                <= quartz_protocol::QUERY_PAGE_BYTES
+            response
+                .buckets
+                .iter()
+                .all(|bucket| bucket.groups.len() == RANGE_MAX_GROUPS_PER_DIMENSION)
         );
     }
 }

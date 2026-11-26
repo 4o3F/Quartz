@@ -140,31 +140,31 @@ mod tests {
             .expect("runtime");
         runtime.block_on(async {
             let response = database.port.call(QueryRequest::Annotations(quartz_protocol::QueryAnnotationsRequest {
-                start_utc_ms: start, end_utc_ms: start + 4000, cursor: None,
+                start_utc_ms: start, end_utc_ms: start + 4000,
             })).await.expect("annotation dispatcher response");
-            assert!(matches!(response, QueryResponse::Annotations(page) if page.entities.is_empty() && page.next_cursor.is_none()));
+            assert!(matches!(response, QueryResponse::Annotations(page) if page.entities.is_empty() && !page.truncated));
             let response = database.port.call(QueryRequest::Range(quartz_protocol::QueryRangeRequest {
                 start_date: crate::store::query::test_support::FIXTURE_DATE.parse().expect("date"), end_date: "2025-01-03".parse().expect("date"),
-                bucket: quartz_protocol::RangeBucket::Day, dimensions: vec![quartz_protocol::RangeDimension::Category], cursor: None,
+                bucket: quartz_protocol::RangeBucket::Day, dimensions: vec![quartz_protocol::RangeDimension::Category],
             })).await.expect("range dispatcher response");
-            assert!(matches!(response, QueryResponse::Range(page) if page.buckets.len() == 1 && page.buckets[0].active_ms == Some(4000)));
+            assert!(matches!(response, QueryResponse::Range(page) if page.buckets.len() == 1 && page.buckets[0].active_ms == 4000));
             let response = database.port.call(QueryRequest::Unclassified(quartz_protocol::QueryUnclassifiedRequest {
                 start_date: crate::store::query::test_support::FIXTURE_DATE.parse().expect("date"),
                 end_date: "2025-01-03".parse().expect("date"),
                 group_by: quartz_protocol::UnclassifiedGroupBy::App,
-                search: None, cursor: None,
+                search: None,
             })).await.expect("unclassified dispatcher response");
             assert!(matches!(response, QueryResponse::Unclassified(page) if page.items.len() == 4));
             let response = database.port.call(QueryRequest::SegmentDetail(quartz_protocol::QuerySegmentDetailRequest {
-                start_utc_ms: start, end_utc_ms: start + 4000, app: None, window_instance: None, cursor: None,
+                start_utc_ms: start, end_utc_ms: start + 4000, app: None, window_instance: None,
             })).await.expect("segment dispatcher response");
             assert!(matches!(response, QueryResponse::SegmentDetail(page) if page.intervals.len() == 4));
             let response = database.port.call(QueryRequest::EntityDetail(quartz_protocol::QueryEntityDetailRequest {
                 reference_range: None,
                 entity: quartz_protocol::DetailEntity::App { id: quartz_protocol::ApplicationId(1) },
-                local_date: crate::store::query::test_support::FIXTURE_DATE.parse().expect("date"), cursor: None,
+                local_date: crate::store::query::test_support::FIXTURE_DATE.parse().expect("date"),
             })).await.expect("entity dispatcher response");
-            assert!(matches!(response, QueryResponse::EntityDetail(page) if page.daily.as_ref().is_some_and(|daily| daily.len() == quartz_protocol::ENTITY_DETAIL_DAYS)));
+            assert!(matches!(response, QueryResponse::EntityDetail(page) if page.daily.len() == quartz_protocol::ENTITY_DETAIL_DAYS));
         });
     }
     #[test]
@@ -172,7 +172,6 @@ mod tests {
         let channel = QueryChannel::new();
         let request = QueryRequest::Day(quartz_protocol::QueryDayRequest {
             local_date: "2025-01-02".parse().expect("date"),
-            cursor: None,
         });
         channel.saturate(request.clone());
         let runtime = tokio::runtime::Builder::new_current_thread()

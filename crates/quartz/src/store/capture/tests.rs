@@ -1926,7 +1926,6 @@ impl Fixture {
         let response = self.query_utc(crate::query::QueryRequest::Day(
             quartz_protocol::QueryDayRequest {
                 local_date: date.parse().expect("date"),
-                cursor: None,
             },
         ));
         let crate::query::QueryResponse::Day(day) = response else {
@@ -1966,12 +1965,11 @@ fn backward_jump_query_preserves_closed_segments_and_repeated_hour_totals() {
     );
     let day = fixture.query_day_utc("2025-01-02");
     assert_eq!(
-        day.metrics.expect("metrics").active_ms,
+        day.metrics.active_ms,
         i64::try_from(HOUR_MS * 2).expect("duration")
     );
     let repeated = day
         .hours
-        .expect("hours")
         .into_iter()
         .find(|hour| hour.local_start.starts_with("2025-01-02T10:"))
         .expect("repeated hour");
@@ -2046,7 +2044,7 @@ fn suspended_intervening_day_loads_owning_clock_and_counts_offline_wall_time() {
         .expect("offline activity");
     let day = fixture.query_day_utc("2025-01-02");
     assert_eq!(
-        day.metrics.expect("metrics").active_ms,
+        day.metrics.active_ms,
         i64::try_from(HOUR_MS * 2).expect("duration")
     );
     let response = fixture.query_utc(crate::query::QueryRequest::SegmentDetail(
@@ -2061,7 +2059,6 @@ fn suspended_intervening_day_loads_owning_clock_and_counts_offline_wall_time() {
                 .as_millisecond(),
             app: None,
             window_instance: None,
-            cursor: None,
         },
     ));
     let crate::query::QueryResponse::SegmentDetail(detail) = response else {
@@ -2100,7 +2097,7 @@ fn backward_jump_before_old_segment_start_remains_queryable() {
     );
     let day = fixture.query_day_utc("2025-01-02");
     assert_eq!(
-        day.metrics.expect("metrics").active_ms,
+        day.metrics.active_ms,
         i64::try_from(HOUR_MS + HOUR_MS / 2).expect("duration")
     );
     let response = fixture.query_utc(crate::query::QueryRequest::SegmentDetail(
@@ -2112,7 +2109,6 @@ fn backward_jump_before_old_segment_start_remains_queryable() {
                 .as_millisecond(),
             app: None,
             window_instance: None,
-            cursor: None,
         },
     ));
     let crate::query::QueryResponse::SegmentDetail(detail) = response else {
@@ -2175,7 +2171,6 @@ impl LockBeforeSleep {
                 end_utc_ms: shutdown.utc.get().as_millisecond(),
                 app: None,
                 window_instance: None,
-                cursor: None,
             });
         let crate::query::QueryResponse::SegmentDetail(stopped) =
             fixture.query_utc(request.clone())
@@ -2300,11 +2295,10 @@ impl LockBeforeSleep {
             let expected = calendar.range.end.min(shutdown.utc.get().as_millisecond())
                 - calendar.range.start.max(start.utc.get().as_millisecond());
             let day = fixture.query_day_utc(&date.to_string());
-            let metrics = day.metrics.expect("metrics");
+            let metrics = day.metrics;
             assert_eq!(metrics.active_ms, expected, "day {date}");
             assert_eq!(
                 day.hours
-                    .expect("hours")
                     .iter()
                     .flat_map(|hour| &hour.categories)
                     .map(|part| part.duration_ms)

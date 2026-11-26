@@ -1,9 +1,9 @@
 // In-process pipe tests; no application windows or production endpoints.
 use super::*;
 use quartz_protocol::{
-    ApplicationId, ApplicationRank, ApplicationRef, CursorQuery, DayMetrics, HourStack,
-    PendingAway, QueryCursor, QueryDayResponse, QueryPendingAwayResponse, QueryTimelineRequest,
-    QueryTimelineResponse, QueryVersions, TimelineDetail,
+    ApplicationId, ApplicationRank, ApplicationRef, DayMetrics, HourStack, PendingAway,
+    QueryDayResponse, QueryPendingAwayResponse, QueryTimelineRequest, QueryTimelineResponse,
+    QueryVersions, TimelineDetail,
 };
 use std::num::NonZeroU32;
 
@@ -12,14 +12,36 @@ struct DayHarness {
     core: Core,
     date: quartz_protocol::LocalDate,
 }
-#[derive(Clone, Copy)]
-enum Paging {
-    Single,
-    Multiple,
-}
 enum DayVersionScope {
     Day,
     Documents { verified: QueryVersions },
+}
+fn empty_day_body(
+    reference_range: Option<quartz_protocol::ReferenceRange>,
+    versions: &str,
+) -> serde_json::Value {
+    serde_json::to_value(QueryDayResponse {
+        reference_range,
+        documents: Vec::new(),
+        metrics: DayMetrics {
+            active_ms: 0,
+            focus_ratio: 0.0,
+            distract_ratio: 0.0,
+            unclassified_ms: 0,
+            longest_focus_ms: 0,
+            switches_per_hour: 0.0,
+        },
+        hours: vec![HourStack {
+            start_utc_ms: 0,
+            end_utc_ms: 86_400_000,
+            local_start: "1970-01-01T00:00:00+00:00[UTC]".into(),
+            categories: Vec::new(),
+        }],
+        applications: Vec::new(),
+        versions: QueryVersions(versions.into()),
+        truncated: false,
+    })
+    .expect("day JSON")
 }
 impl DayHarness {
     async fn start() -> Self {
@@ -51,10 +73,10 @@ impl DayHarness {
         self.core.subscribe(vec![Topic::Day(self.date)]).await;
         self.core.request(Op::QueryDay).await
     }
-    async fn finish(&mut self, first: Request, paging: Paging) {
-        self.finish_scope(first, paging, DayVersionScope::Day).await;
+    async fn finish(&mut self, first: Request) {
+        self.finish_scope(first, DayVersionScope::Day).await;
     }
-    async fn finish_scope(&mut self, first: Request, paging: Paging, scope: DayVersionScope) {
+    async fn finish_scope(&mut self, first: Request, scope: DayVersionScope) {
         let reference_range = match &scope {
             DayVersionScope::Day => None,
             DayVersionScope::Documents { .. } => Some(quartz_protocol::ReferenceRange {
@@ -70,15 +92,6 @@ impl DayHarness {
             }
             .into(),
         );
-        let cursor = matches!(paging, Paging::Multiple).then(|| {
-            QueryCursor::new(
-                version.clone(),
-                CursorQuery::Day {
-                    local_date: self.date,
-                },
-                1,
-            )
-        });
         let app = |id| ApplicationRank {
             app: ApplicationRef {
                 id: ApplicationId(id),
@@ -94,51 +107,27 @@ impl DayHarness {
                 serde_json::to_value(QueryDayResponse {
                     reference_range,
                     documents: Vec::new(),
-                    metrics: Some(DayMetrics {
+                    metrics: DayMetrics {
                         active_ms: 2000,
                         focus_ratio: 0.,
                         distract_ratio: 0.,
                         unclassified_ms: 2000,
                         longest_focus_ms: 0,
                         switches_per_hour: 0.,
-                    }),
-                    hours: Some(vec![HourStack {
+                    },
+                    hours: vec![HourStack {
                         start_utc_ms: 0,
                         end_utc_ms: 86_400_000,
                         local_start: "1970-01-01T00:00:00+00:00[UTC]".into(),
                         categories: Vec::new(),
-                    }]),
-                    applications: vec![app(1)],
-                    versions: version.clone(),
-                    next_cursor: cursor.clone(),
+                    }],
+                    applications: vec![app(1), app(2)],
+                    versions: version,
+                    truncated: false,
                 })
                 .expect("day JSON"),
             )
             .await;
-        if let Some(cursor) = cursor {
-            let next = self.core.request(Op::QueryDay).await;
-            assert_eq!(
-                serde_json::from_value::<quartz_protocol::QueryDayRequest>(next.body.clone())
-                    .expect("day cursor")
-                    .cursor,
-                Some(cursor)
-            );
-            self.core
-                .ok(
-                    next,
-                    serde_json::to_value(QueryDayResponse {
-                        reference_range: None,
-                        documents: Vec::new(),
-                        metrics: None,
-                        hours: None,
-                        applications: vec![app(2)],
-                        versions: version.clone(),
-                        next_cursor: None,
-                    })
-                    .expect("next day JSON"),
-                )
-                .await;
-        }
         let version = QueryVersions("day-v1".into());
         for detail in [TimelineDetail::Category, TimelineDetail::Raw] {
             let query = self.core.request(Op::QueryTimeline).await;
@@ -146,8 +135,6 @@ impl DayHarness {
                 serde_json::from_value(query.body.clone()).expect("timeline request");
             assert_eq!(parameters.detail, detail);
             assert!(parameters.ms_per_pixel.0.get() > 0);
-            let cursor = matches!(paging, Paging::Multiple)
-                .then(|| QueryCursor::new(version.clone(), CursorQuery::from(&parameters), 1));
             self.core
                 .ok(
                     query,
@@ -155,100 +142,67 @@ impl DayHarness {
                         reference_range: None,
                         segments: Vec::new(),
                         versions: version.clone(),
-                        next_cursor: cursor.clone(),
+                        truncated: false,
                     })
                     .expect("timeline JSON"),
                 )
                 .await;
-            if let Some(cursor) = cursor {
-                let next = self.core.request(Op::QueryTimeline).await;
-                assert_eq!(
-                    serde_json::from_value::<QueryTimelineRequest>(next.body.clone())
-                        .expect("timeline cursor")
-                        .cursor,
-                    Some(cursor)
-                );
-                self.core
-                    .ok(
-                        next,
-                        serde_json::to_value(QueryTimelineResponse {
-                            reference_range: None,
-                            segments: Vec::new(),
-                            versions: version.clone(),
-                            next_cursor: None,
-                        })
-                        .expect("next timeline JSON"),
-                    )
-                    .await;
-            }
         }
         let query = self.core.request(Op::QueryPendingAway).await;
-        let cursor = matches!(paging, Paging::Multiple).then(|| {
-            QueryCursor::new(
-                version.clone(),
-                CursorQuery::PendingAway {
-                    local_date: self.date,
-                },
-                1,
-            )
-        });
         self.core
             .ok(
                 query,
                 serde_json::to_value(QueryPendingAwayResponse {
-                    ranges: vec![PendingAway {
-                        start_utc_ms: 0,
-                        end_utc_ms: 900_000,
-                        duration_ms: 900_000,
-                    }],
-                    versions: version.clone(),
-                    next_cursor: cursor.clone(),
+                    ranges: vec![
+                        PendingAway {
+                            start_utc_ms: 0,
+                            end_utc_ms: 900_000,
+                            duration_ms: 900_000,
+                        },
+                        PendingAway {
+                            start_utc_ms: 1_800_000,
+                            end_utc_ms: 2_700_000,
+                            duration_ms: 900_000,
+                        },
+                    ],
+                    versions: version,
+                    truncated: false,
                 })
                 .expect("away JSON"),
             )
             .await;
-        if let Some(cursor) = cursor {
-            let next = self.core.request(Op::QueryPendingAway).await;
-            assert_eq!(
-                serde_json::from_value::<quartz_protocol::QueryPendingAwayRequest>(
-                    next.body.clone()
-                )
-                .expect("away cursor")
-                .cursor,
-                Some(cursor)
-            );
-            self.core
-                .ok(
-                    next,
-                    serde_json::to_value(QueryPendingAwayResponse {
-                        ranges: vec![PendingAway {
-                            start_utc_ms: 1_800_000,
-                            end_utc_ms: 2_700_000,
-                            duration_ms: 900_000,
-                        }],
-                        versions: version,
-                        next_cursor: None,
-                    })
-                    .expect("next away JSON"),
-                )
-                .await;
-        }
         if let DayVersionScope::Documents { verified } = scope {
             let query = self.core.request(Op::QueryDay).await;
-            let decoded: quartz_protocol::QueryDayRequest =
+            let _: quartz_protocol::QueryDayRequest =
                 serde_json::from_value(query.body.clone()).expect("final version check");
-            assert!(decoded.cursor.is_none());
-            self.core.ok(query, serde_json::json!({"reference_range": reference_range, "applications":[],"documents":[],"versions":verified,"next_cursor":null})).await;
+            self.core
+                .ok(query, empty_day_body(reference_range, &verified.0))
+                .await;
         }
     }
     async fn finish_fresh(&mut self, first: Request) {
-        self.core.ok(first, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"metrics":{"active_ms":7000,"focus_ratio":0.0,"distract_ratio":0.0,"unclassified_ms":7000,"longest_focus_ms":0,"switches_per_hour":0.0},"hours":[{"start_utc_ms":0,"end_utc_ms":86400000,"local_start":"1970-01-01T00:00:00+00:00[UTC]","categories":[]}],"versions":"day-v2","next_cursor":null})).await;
+        self.core
+            .ok(
+                first,
+                serde_json::json!({"reference_range":null,"applications":[],"documents":[],"metrics":{"active_ms":7000,"focus_ratio":0.0,"distract_ratio":0.0,"unclassified_ms":7000,"longest_focus_ms":0,"switches_per_hour":0.0},"hours":[{"start_utc_ms":0,"end_utc_ms":86400000,"local_start":"1970-01-01T00:00:00+00:00[UTC]","categories":[]}],"versions":"day-v2","truncated":false}),
+            )
+            .await;
         for _ in [TimelineDetail::Category, TimelineDetail::Raw] {
             let query = self.core.request(Op::QueryTimeline).await;
-            self.core.ok(query, serde_json::json!({"segments":[],"versions":"range-v2","next_cursor":null})).await;
+            self.core
+                .ok(
+                    query,
+                    serde_json::json!({"segments":[],"versions":"range-v2","truncated":false}),
+                )
+                .await;
         }
         let pending = self.core.request(Op::QueryPendingAway).await;
-        self.core.ok(pending, serde_json::json!({"ranges":[],"versions":"day-v2","next_cursor":null})).await;
+        self.core
+            .ok(
+                pending,
+                serde_json::json!({"ranges":[],"versions":"day-v2","truncated":false}),
+            )
+            .await;
     }
     async fn loaded(&mut self) -> Result<DayData, LoadDataError> {
         loop {
@@ -261,10 +215,10 @@ impl DayHarness {
     }
 }
 #[tokio::test]
-async fn every_query_pages_and_the_raw_projection_is_used_for_lanes() {
+async fn single_response_day_queries_load_and_use_raw_projection_for_lanes() {
     let mut harness = DayHarness::start().await;
     let first = harness.start_load(DayGeneration::default().next()).await;
-    harness.finish(first, Paging::Multiple).await;
+    harness.finish(first).await;
     let day = harness.loaded().await.expect("complete day");
     assert_eq!(day.applications.len(), 2);
     assert_eq!(day.pending.len(), 2);
@@ -279,13 +233,9 @@ async fn stale_restarts_the_entire_query_set_then_succeeds() {
         .reject(first, quartz_protocol::ErrorKind::StaleCursor)
         .await;
     let first = harness.core.request(Op::QueryDay).await;
-    assert!(
-        serde_json::from_value::<quartz_protocol::QueryDayRequest>(first.body.clone())
-            .expect("fresh day")
-            .cursor
-            .is_none()
-    );
-    harness.finish(first, Paging::Single).await;
+    let _: quartz_protocol::QueryDayRequest =
+        serde_json::from_value(first.body.clone()).expect("fresh day");
+    harness.finish(first).await;
     harness.loaded().await.expect("restart succeeded");
     harness.ui.stop().await;
 }
@@ -337,10 +287,10 @@ async fn day_events_coalesce_while_a_query_is_in_flight() {
             )
             .await;
     }
-    harness.finish(first, Paging::Single).await;
+    harness.finish(first).await;
     harness.loaded().await.expect("first day");
     let next = harness.core.request(Op::QueryDay).await;
-    harness.finish(next, Paging::Single).await;
+    harness.finish(next).await;
     harness.loaded().await.expect("one coalesced refresh");
     assert!(
         tokio::time::timeout(Duration::from_millis(25), harness.core.peer.receive())
@@ -382,7 +332,7 @@ async fn date_switch_cancels_a_slow_load_before_its_response_arrives() {
             .local_date,
         request.date
     );
-    harness.finish(query, Paging::Single).await;
+    harness.finish(query).await;
     loop {
         match harness.ui.events.recv().await.expect("new result") {
             LinkEvent::DayLoaded { generation, result } => {
@@ -415,7 +365,7 @@ async fn subscribe_failure_reconciles_the_actual_subscription_on_retry_or_date_s
         let mut harness = DayHarness::start().await;
         let generation = DayGeneration::default().next();
         let first = harness.start_load(generation).await;
-        harness.finish(first, Paging::Single).await;
+        harness.finish(first).await;
         harness.loaded().await.expect("initial day");
         let mut request = harness.request();
         request.date = request.date.yesterday().expect("previous date");
@@ -449,7 +399,7 @@ async fn subscribe_failure_reconciles_the_actual_subscription_on_retry_or_date_s
         // Unsubscribe already succeeded; the next operation must directly subscribe the target.
         harness.core.subscribe(vec![Topic::Day(request.date)]).await;
         let query = harness.core.request(Op::QueryDay).await;
-        harness.finish(query, Paging::Single).await;
+        harness.finish(query).await;
         assert_eq!(
             harness.loaded().await.expect("recovered day").date,
             request.date
@@ -477,7 +427,7 @@ async fn settled_zoom_cancels_the_in_flight_generation_without_changing_subscrip
     tokio::time::advance(super::super::day::ZOOM_SETTLE_DELAY).await;
     tokio::time::resume();
     let query = harness.core.request(Op::QueryDay).await;
-    harness.finish(query, Paging::Single).await;
+    harness.finish(query).await;
     loop {
         if let LinkEvent::DayLoaded {
             generation: received,
@@ -496,7 +446,7 @@ async fn settled_zoom_cancels_the_in_flight_generation_without_changing_subscrip
 async fn zoom_settle_debounce_uses_paused_time() {
     let mut harness = DayHarness::start().await;
     let first = harness.start_load(DayGeneration::default().next()).await;
-    harness.finish(first, Paging::Single).await;
+    harness.finish(first).await;
     harness.loaded().await.expect("initial day");
     tokio::time::pause();
     let request = harness.request();
@@ -528,7 +478,7 @@ async fn zoom_settle_debounce_uses_paused_time() {
     tokio::time::advance(super::super::day::ZOOM_SETTLE_DELAY / 2).await;
     tokio::time::resume();
     let query = harness.core.request(Op::QueryDay).await;
-    harness.finish(query, Paging::Single).await;
+    harness.finish(query).await;
     harness.loaded().await.expect("settled view");
     harness.ui.stop().await;
 }
@@ -540,7 +490,6 @@ async fn seven_day_ranking_scope_loads_with_single_day_timeline_and_pending_vers
     harness
         .finish_scope(
             first,
-            Paging::Multiple,
             DayVersionScope::Documents {
                 verified: QueryVersions("ranking-v1".into()),
             },
@@ -557,7 +506,6 @@ async fn changed_seven_day_inputs_restart_the_whole_day_load() {
     harness
         .finish_scope(
             first,
-            Paging::Single,
             DayVersionScope::Documents {
                 verified: QueryVersions("ranking-v2".into()),
             },
@@ -567,7 +515,6 @@ async fn changed_seven_day_inputs_restart_the_whole_day_load() {
     harness
         .finish_scope(
             retry,
-            Paging::Single,
             DayVersionScope::Documents {
                 verified: QueryVersions("ranking-v1".into()),
             },
@@ -621,7 +568,7 @@ async fn first_geometry_request_is_immediate_even_when_marked_settled() {
     harness.core.subscribe(vec![Topic::Day(harness.date)]).await;
     let query = tokio::time::timeout(Duration::from_millis(1), harness.core.request(Op::QueryDay)).await.expect("first query starts without the 180 ms debounce");
     tokio::time::resume();
-    harness.finish(query, Paging::Single).await;
+    harness.finish(query).await;
     harness.loaded().await.expect("first day");
     harness.ui.stop().await;
 }
@@ -631,31 +578,31 @@ async fn view_refinements_reuse_aggregates_and_day_events_invalidate_them() {
     let mut harness = DayHarness::start().await;
     let generation = DayGeneration::default().next();
     let query = harness.start_load(generation).await;
-    harness.finish(query, Paging::Multiple).await;
+    harness.finish(query).await;
     let initial = harness.loaded().await.expect("initial day");
     let mut request = harness.request();
     request.view = DayView::Range(UtcRange { start: 1000, end: 1_800_000 });
     harness.ui.link.load_day(request, generation.next(), DayLoad::Settled).await.expect("refinement");
     let check = harness.core.request(Op::QueryDay).await;
-    harness.core.ok(check, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"versions":"day-v1","next_cursor":null})).await;
+    harness.core.ok(check, empty_day_body(None, "day-v1")).await;
     for detail in [TimelineDetail::Category, TimelineDetail::Raw] {
         let query = harness.core.request(Op::QueryTimeline).await;
         let parameters: QueryTimelineRequest = serde_json::from_value(query.body.clone()).expect("timeline");
         assert_eq!(parameters.detail, detail);
         assert_eq!(parameters.start_utc_ms, 1000);
-        harness.core.ok(query, serde_json::json!({"segments":[],"versions":"range-v1","next_cursor":null})).await;
+        harness.core.ok(query, serde_json::json!({"segments":[],"versions":"range-v1","truncated":false})).await;
     }
     let check = harness.core.request(Op::QueryDay).await;
-    harness.core.ok(check, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"versions":"day-v1","next_cursor":null})).await;
+    harness.core.ok(check, empty_day_body(None, "day-v1")).await;
     let refined = harness.loaded().await.expect("refined day");
     assert_eq!(refined.metrics, initial.metrics);
     assert_eq!(refined.hours, initial.hours);
     assert_eq!(refined.applications, initial.applications);
     assert_eq!(refined.pending, initial.pending);
-    assert!(tokio::time::timeout(Duration::from_millis(25), harness.core.peer.receive()).await.is_err(), "a refinement uses two timeline requests and two aggregate version checks, without reloading aggregate pages or away ranges");
+    assert!(tokio::time::timeout(Duration::from_millis(25), harness.core.peer.receive()).await.is_err(), "a refinement uses two timeline requests and two aggregate version checks, without reloading away ranges");
     harness.core.event(Topic::Day(harness.date), serde_json::to_value(quartz_protocol::DayChanged { date: harness.date, versions: QueryVersions("day-v2".into()) }).expect("event")).await;
     let query = harness.core.request(Op::QueryDay).await;
-    harness.finish(query, Paging::Single).await;
+    harness.finish(query).await;
     harness.loaded().await.expect("fresh aggregates after invalidation");
     harness.ui.stop().await;
 }
@@ -709,13 +656,13 @@ async fn followup_full_refresh_bypasses_cached_aggregates() {
     let mut harness = DayHarness::start().await;
     let generation = DayGeneration::default().next();
     let query = harness.start_load(generation).await;
-    harness.finish(query, Paging::Single).await;
+    harness.finish(query).await;
     harness.loaded().await.expect("initial");
     let mut request = harness.request();
     request.view = DayView::Range(UtcRange { start: 1000, end: 1_800_000 });
     harness.ui.link.load_day(request, generation.next(), DayLoad::Immediate).await.expect("explicit refresh");
     let query = harness.core.request(Op::QueryDay).await;
-    harness.finish(query, Paging::Single).await;
+    harness.finish(query).await;
     harness.loaded().await.expect("full refresh");
     harness.ui.stop().await;
 }
@@ -724,13 +671,13 @@ async fn followup_refinement_checks_versions_without_waiting_for_a_day_event() {
     let mut harness = DayHarness::start().await;
     let generation = DayGeneration::default().next();
     let query = harness.start_load(generation).await;
-    harness.finish(query, Paging::Multiple).await;
+    harness.finish(query).await;
     harness.loaded().await.expect("initial");
     let mut request = harness.request();
     request.view = DayView::Range(UtcRange { start: 1000, end: 1_800_000 });
     harness.ui.link.load_day(request, generation.next(), DayLoad::Settled).await.expect("refinement");
     let check = harness.core.request(Op::QueryDay).await;
-    harness.core.ok(check, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"versions":"day-v2","next_cursor":null})).await;
+    harness.core.ok(check, empty_day_body(None, "day-v2")).await;
     let fresh = harness.core.request(Op::QueryDay).await;
     harness.finish_fresh(fresh).await;
     harness.loaded().await.expect("changed version triggers complete reload");
@@ -741,13 +688,13 @@ async fn followup_seven_day_rankings_are_not_reused_on_refinement() {
     let mut harness = DayHarness::start().await;
     let generation = DayGeneration::default().next();
     let first = harness.start_load(generation).await;
-    harness.finish_scope(first, Paging::Multiple, DayVersionScope::Documents { verified: QueryVersions("ranking-v1".into()) }).await;
+    harness.finish_scope(first, DayVersionScope::Documents { verified: QueryVersions("ranking-v1".into()) }).await;
     harness.loaded().await.expect("seven-day ranking");
     let mut request = harness.request();
     request.view = DayView::Range(UtcRange { start: 1000, end: 1_800_000 });
     harness.ui.link.load_day(request, generation.next(), DayLoad::Settled).await.expect("refinement");
     let first = harness.core.request(Op::QueryDay).await;
-    harness.finish_scope(first, Paging::Multiple, DayVersionScope::Documents { verified: QueryVersions("ranking-v1".into()) }).await;
+    harness.finish_scope(first, DayVersionScope::Documents { verified: QueryVersions("ranking-v1".into()) }).await;
     harness.loaded().await.expect("full seven-day data");
     harness.ui.stop().await;
 }
@@ -756,7 +703,7 @@ async fn followup_late_load_stays_hidden_until_a_show_control() {
     let mut harness = DayHarness::start().await;
     let generation = DayGeneration::default().next();
     let first = harness.start_load(generation).await;
-    harness.finish(first, Paging::Single).await;
+    harness.finish(first).await;
     harness.loaded().await.expect("initial");
     harness.ui.link.hidden().expect("hide");
     let remove = harness.core.request(Op::Unsubscribe).await;
@@ -770,7 +717,7 @@ async fn followup_late_load_stays_hidden_until_a_show_control() {
     harness.ui.link.load_day(harness.request(), generation.next().next(), DayLoad::Immediate).await.expect("new window intent");
     harness.core.subscribe(vec![Topic::Day(harness.date)]).await;
     let first = harness.core.request(Op::QueryDay).await;
-    harness.finish(first, Paging::Single).await;
+    harness.finish(first).await;
     // A control event is also delivered to the UI receiver.
     loop { if matches!(harness.ui.events.recv().await, Some(LinkEvent::DayLoaded { result: Ok(_), .. })) { break; } }
     harness.ui.stop().await;
@@ -787,7 +734,7 @@ async fn followup_date_switch_retires_old_loader_before_subscribe_answers() {
     harness.core.ok(remove, serde_json::json!({})).await;
     let subscribe = harness.core.request(Op::Subscribe).await;
     harness.core.event(Topic::Day(harness.date), serde_json::json!({"date":harness.date,"versions":"changed"})).await;
-    harness.core.ok(delayed, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"metrics":{"active_ms":0,"focus_ratio":0.0,"distract_ratio":0.0,"unclassified_ms":0,"longest_focus_ms":0,"switches_per_hour":0.0},"hours":[{"start_utc_ms":0,"end_utc_ms":86400000,"local_start":"1970-01-01T00:00:00+00:00[UTC]","categories":[]}],"versions":"day-v1","next_cursor":null})).await;
+    harness.core.ok(delayed, empty_day_body(None, "day-v1")).await;
     assert!(tokio::time::timeout(Duration::from_millis(25), harness.core.peer.receive()).await.is_err(), "old date cannot query while waiting for the new subscription");
     harness.core.reject(subscribe, quartz_protocol::ErrorKind::Busy).await;
     harness.loaded().await.expect_err("subscription busy");
@@ -801,19 +748,19 @@ async fn followup_refinement_rechecks_versions_after_reading_new_timeline_segmen
     let mut harness = DayHarness::start().await;
     let generation = DayGeneration::default().next();
     let first = harness.start_load(generation).await;
-    harness.finish(first, Paging::Single).await;
+    harness.finish(first).await;
     harness.loaded().await.expect("initial");
     let mut request = harness.request();
     request.view = DayView::Range(UtcRange { start: 1000, end: 1_800_000 });
     harness.ui.link.load_day(request, generation.next(), DayLoad::Settled).await.expect("refinement");
     let before = harness.core.request(Op::QueryDay).await;
-    harness.core.ok(before, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"versions":"day-v1","next_cursor":null})).await;
+    harness.core.ok(before, empty_day_body(None, "day-v1")).await;
     for _ in [TimelineDetail::Category, TimelineDetail::Raw] {
         let query = harness.core.request(Op::QueryTimeline).await;
-        harness.core.ok(query, serde_json::json!({"segments":[],"versions":"range-v2","next_cursor":null})).await;
+        harness.core.ok(query, serde_json::json!({"segments":[],"versions":"range-v2","truncated":false})).await;
     }
     let after = harness.core.request(Op::QueryDay).await;
-    harness.core.ok(after, serde_json::json!({"reference_range":null,"applications":[],"documents":[],"versions":"day-v2","next_cursor":null})).await;
+    harness.core.ok(after, empty_day_body(None, "day-v2")).await;
     let first = harness.core.request(Op::QueryDay).await;
     harness.finish_fresh(first).await;
     let day = harness.loaded().await.expect("coherent fresh version");
@@ -826,7 +773,7 @@ async fn followup_successful_local_annotation_refreshes_without_a_day_event() {
     let mut harness = DayHarness::start().await;
     let generation = DayGeneration::default().next();
     let first = harness.start_load(generation).await;
-    harness.finish(first, Paging::Single).await;
+    harness.finish(first).await;
     harness.loaded().await.expect("initial");
     let id = quartz_protocol::AnnotationId("abcdef00-0000-4000-8000-000000000001".parse().expect("UUID"));
     let annotation = AwayAction::Rest.request(UtcRange { start: 0, end: 900_000 }, id);
@@ -840,7 +787,7 @@ async fn followup_successful_local_annotation_refreshes_without_a_day_event() {
     const REFRESH_DEADLINE: Duration = Duration::from_secs(1);
     let first = tokio::time::timeout(REFRESH_DEADLINE, harness.core.request(Op::QueryDay)).await.expect("local mutation invalidates the loader");
     // The latest loaded request is WholeDay, so its full-day timeline versions match the day.
-    harness.finish(first, Paging::Single).await;
+    harness.finish(first).await;
     harness.loaded().await.expect("mutation refresh");
     harness.ui.stop().await;
 }

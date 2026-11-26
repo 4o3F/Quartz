@@ -213,42 +213,26 @@ impl DayCache {
     }
 }
 #[cfg(windows)]
-struct TimelinePages {
-    segments: Vec<TimelineSegment>,
-    versions: QueryVersions,
-}
-#[cfg(windows)]
 impl Link {
     async fn query_day_once(&self, request: DayRequest) -> Result<DayCache, LoadDataError> {
-        let mut query = QueryDayRequest {
-            local_date: request.date,
-            cursor: None,
-        };
-        let first = self.request(query.clone()).await?;
-        let reference_range = first.reference_range;
-        let metrics = first.metrics.ok_or(LoadDataError::InvalidData)?;
-        let hours = first.hours.ok_or(LoadDataError::InvalidData)?;
+        let day = self
+            .request(QueryDayRequest {
+                local_date: request.date,
+            })
+            .await?;
+        let reference_range = day.reference_range;
         let bounds = UtcRange {
-            start: hours
+            start: day
+                .hours
                 .first()
                 .ok_or(LoadDataError::InvalidData)?
                 .start_utc_ms,
-            end: hours.last().ok_or(LoadDataError::InvalidData)?.end_utc_ms,
+            end: day
+                .hours
+                .last()
+                .ok_or(LoadDataError::InvalidData)?
+                .end_utc_ms,
         };
-        let mut applications = first.applications;
-        let version = first.versions;
-        query.cursor = first.next_cursor;
-        while query.cursor.is_some() {
-            let page = self.request(query.clone()).await?;
-            if page.versions != version {
-                return Err(Self::stale_day());
-            }
-            if page.next_cursor == query.cursor {
-                return Err(LoadDataError::InvalidData);
-            }
-            applications.extend(page.applications);
-            query.cursor = page.next_cursor;
-        }
         let visible = match request.view {
             DayView::WholeDay => bounds,
             DayView::Range(range) => range,
@@ -258,69 +242,58 @@ impl Link {
         }
         let resolution = request.ms_per_pixel(visible)?;
         let categories = self
-            .timeline_pages(visible, TimelineDetail::Category, resolution)
+            .request(QueryTimelineRequest {
+                start_utc_ms: visible.start,
+                end_utc_ms: visible.end,
+                detail: TimelineDetail::Category,
+                ms_per_pixel: resolution,
+            })
             .await?;
         let raw = self
-            .timeline_pages(visible, TimelineDetail::Raw, resolution)
+            .request(QueryTimelineRequest {
+                start_utc_ms: visible.start,
+                end_utc_ms: visible.end,
+                detail: TimelineDetail::Raw,
+                ms_per_pixel: resolution,
+            })
             .await?;
         if categories.versions != raw.versions {
             return Err(Self::stale_day());
         }
-        let mut pending = Vec::new();
-        let mut query = QueryPendingAwayRequest {
-            local_date: request.date,
-            cursor: None,
-        };
-        let mut versions = None;
-        loop {
-            let page = self.request(query.clone()).await?;
-            if versions
-                .as_ref()
-                .is_some_and(|version| *version != page.versions)
-            {
-                return Err(Self::stale_day());
-            }
-            if (reference_range.is_none() && page.versions != version)
-                || (visible == bounds && page.versions != categories.versions)
-            {
-                return Err(Self::stale_day());
-            }
-            versions = Some(page.versions);
-            pending.extend(page.ranges);
-            if page.next_cursor.is_none() {
-                break;
-            }
-            if page.next_cursor == query.cursor {
-                return Err(LoadDataError::InvalidData);
-            }
-            query.cursor = page.next_cursor;
+        let pending = self
+            .request(QueryPendingAwayRequest {
+                local_date: request.date,
+            })
+            .await?;
+        if (reference_range.is_none() && pending.versions != day.versions)
+            || (visible == bounds && pending.versions != categories.versions)
+        {
+            return Err(Self::stale_day());
         }
         if reference_range.is_some() {
             let latest = self
                 .request(QueryDayRequest {
                     local_date: request.date,
-                    cursor: None,
                 })
                 .await?;
-            if latest.versions != version {
+            if latest.versions != day.versions {
                 return Err(Self::stale_day());
             }
         }
-        let day_versions = versions.ok_or(LoadDataError::InvalidData)?;
         Ok(DayCache {
-            day_versions,
-            aggregate_versions: version,
+            day_versions: pending.versions,
+            aggregate_versions: day.versions,
             reference_range,
             data: DayData {
                 date: request.date,
                 bounds,
                 visible,
-                metrics,
-                hours,
-                applications,
+                metrics: day.metrics,
+                hours: day.hours,
+                applications: day.applications,
                 categories: categories.segments,
                 raw: raw.segments,
-                pending,
+                pending: pending.ranges,
             },
         })
     }
@@ -331,49 +304,10 @@ impl Link {
             },
         })
     }
-    async fn timeline_pages(
-        &self,
-        range: UtcRange,
-        detail: TimelineDetail,
-        ms_per_pixel: MillisecondsPerPixel,
-    ) -> Result<TimelinePages, LoadDataError> {
-        let mut query = QueryTimelineRequest {
-            start_utc_ms: range.start,
-            end_utc_ms: range.end,
-            detail,
-            ms_per_pixel,
-            cursor: None,
-        };
-        let mut segments = Vec::new();
-        let mut versions = None;
-        loop {
-            let page = self.request(query.clone()).await?;
-            if versions
-                .as_ref()
-                .is_some_and(|version| *version != page.versions)
-            {
-                return Err(Self::stale_day());
-            }
-            versions = Some(page.versions);
-            segments.extend(page.segments);
-            if page.next_cursor.is_none() {
-                break;
-            }
-            if page.next_cursor == query.cursor {
-                return Err(LoadDataError::InvalidData);
-            }
-            query.cursor = page.next_cursor;
-        }
-        Ok(TimelinePages {
-            segments,
-            versions: versions.ok_or(LoadDataError::InvalidData)?,
-        })
-    }
     async fn validate_cached_day(&self, cached: &DayCache) -> Result<(), LoadDataError> {
         let latest = self
             .request(QueryDayRequest {
                 local_date: cached.data.date,
-                cursor: None,
             })
             .await?;
         if latest.reference_range.is_some() || latest.versions != cached.aggregate_versions {
@@ -396,10 +330,20 @@ impl Link {
         }
         let resolution = request.ms_per_pixel(visible)?;
         let categories = self
-            .timeline_pages(visible, TimelineDetail::Category, resolution)
+            .request(QueryTimelineRequest {
+                start_utc_ms: visible.start,
+                end_utc_ms: visible.end,
+                detail: TimelineDetail::Category,
+                ms_per_pixel: resolution,
+            })
             .await?;
         let raw = self
-            .timeline_pages(visible, TimelineDetail::Raw, resolution)
+            .request(QueryTimelineRequest {
+                start_utc_ms: visible.start,
+                end_utc_ms: visible.end,
+                detail: TimelineDetail::Raw,
+                ms_per_pixel: resolution,
+            })
             .await?;
         if categories.versions != raw.versions
             || (visible == cached.data.bounds && categories.versions != cached.day_versions)

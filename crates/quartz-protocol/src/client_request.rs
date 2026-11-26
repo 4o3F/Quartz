@@ -97,7 +97,6 @@ mod tests {
             end_utc_ms: 200,
             app: None,
             window_instance: None,
-            cursor: None,
         };
         assert_eq!(QuerySegmentDetailRequest::OP, Op::QuerySegmentDetail);
         assert_eq!(
@@ -111,7 +110,7 @@ mod tests {
             reference_range: None,
             intervals: Vec::new(),
             versions: QueryVersions("segment".into()),
-            next_cursor: None,
+            truncated: false,
         };
         assert_eq!(
             QuerySegmentDetailRequest::response(
@@ -126,7 +125,6 @@ mod tests {
                 id: crate::ApplicationId(3),
             },
             local_date: "2026-11-21".parse().expect("date"),
-            cursor: None,
         };
         assert_eq!(QueryEntityDetailRequest::OP, Op::QueryEntityDetail);
         assert_eq!(
@@ -138,26 +136,24 @@ mod tests {
         );
         let response = QueryEntityDetailResponse {
             extraction: Vec::new(),
-            daily: Some(
-                (0..crate::ENTITY_DETAIL_DAYS)
-                    .map(|index| crate::EntityDailyDuration {
-                        local_date: entity
-                            .local_date
-                            .checked_sub(
-                                jiff::Span::new().days(
-                                    i64::try_from(crate::ENTITY_DETAIL_DAYS - index - 1)
-                                        .expect("seven day offset"),
-                                ),
-                            )
-                            .expect("daily date"),
-                        active_ms: 0,
-                    })
-                    .collect(),
-            ),
-            titles: Some(Vec::new()),
+            daily: (0..crate::ENTITY_DETAIL_DAYS)
+                .map(|index| crate::EntityDailyDuration {
+                    local_date: entity
+                        .local_date
+                        .checked_sub(
+                            jiff::Span::new().days(
+                                i64::try_from(crate::ENTITY_DETAIL_DAYS - index - 1)
+                                    .expect("seven day offset"),
+                            ),
+                        )
+                        .expect("daily date"),
+                    active_ms: 0,
+                })
+                .collect(),
+            titles: Vec::new(),
             rules: Vec::new(),
             versions: QueryVersions("entity".into()),
-            next_cursor: None,
+            truncated: false,
         };
         assert_eq!(
             QueryEntityDetailRequest::response(
@@ -197,7 +193,7 @@ mod tests {
     #[test]
     fn typed_responses_accept_additive_fields_at_every_nested_object() {
         AdditiveFields::response::<crate::QueryAnnotationsRequest>(include_str!(
-            "../tests/fixtures/annotations-chunked.json"
+            "../tests/fixtures/annotations-normal.json"
         ));
         let mut categories: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/categories.json"))
@@ -231,14 +227,15 @@ mod tests {
     #[test]
     fn cursor_json_is_forwarded_unchanged_including_future_query_shapes() {
         for query in [
-            serde_json::json!({"kind":"day","local_date":"2025-01-02","extra":{"id":18446744073709551615_u64}}),
+            serde_json::json!({"kind":"categories","include_archived":false,"extra":{"id":18446744073709551615_u64}}),
             serde_json::json!({"kind":"future_query","parameters":[null,true,"opaque"]}),
         ] {
             let cursor = serde_json::json!({"versions":"v","query":query,"position":3,"extension":{"nested":[1,2,3]}});
-            let wire = serde_json::json!({"metrics":null,"hours":null,"applications":[],"domains":[],"documents":[],"versions":"v","next_cursor":cursor});
-            let response = QueryDayRequest::response(wire).expect("opaque cursor response");
-            let request = QueryDayRequest {
-                local_date: "2025-01-02".parse().expect("date"),
+            let wire = serde_json::json!({"entities":[],"versions":"v","next_cursor":cursor});
+            let response =
+                crate::CategoriesListRequest::response(wire).expect("opaque cursor response");
+            let request = crate::CategoriesListRequest {
+                include_archived: false,
                 cursor: response.next_cursor,
             };
             assert_eq!(request.body().expect("forward cursor")["cursor"], cursor);

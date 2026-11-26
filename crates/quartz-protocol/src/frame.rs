@@ -3,8 +3,11 @@
 use serde::{Serialize, de::DeserializeOwned};
 use snafu::Snafu;
 
-/// Maximum JSON payload length: 256 KiB, as specified in docs/design/04-ipc.md §2.
-pub const MAX_FRAME_LEN: usize = 256 * 1024;
+/// Maximum JSON payload length: 1 MiB.
+///
+/// The local named pipe connects UI/CLI and core on the same machine; 1 MiB fits
+/// full single-response query payloads while keeping per-connection buffers small.
+pub const MAX_FRAME_LEN: usize = 1024 * 1024;
 
 /// Encodes a JSON payload without its transport header, enforcing the 04 §2 size limit.
 ///

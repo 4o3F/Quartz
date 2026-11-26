@@ -393,20 +393,13 @@ impl<'path> BenchQuery<'path> {
                 ms_per_pixel: MillisecondsPerPixel(
                     std::num::NonZeroU64::new(BENCH_PIXEL_MS).expect("positive pixel duration"),
                 ),
-                cursor: None,
             })
         };
         let queries = [
-            QueryRequest::Day(QueryDayRequest {
-                local_date,
-                cursor: None,
-            }),
+            QueryRequest::Day(QueryDayRequest { local_date }),
             timeline(1),
             timeline(WEEK_DAYS),
-            QueryRequest::PendingAway(QueryPendingAwayRequest {
-                local_date,
-                cursor: None,
-            }),
+            QueryRequest::PendingAway(QueryPendingAwayRequest { local_date }),
         ];
         snafu::ensure!(self.runs > 0, RunsSnafu);
         let mut workloads = Vec::new();
@@ -437,10 +430,7 @@ impl<'path> BenchQuery<'path> {
         let mut days = Vec::new();
         let mut date = local_date;
         for _ in 0..WEEK_DAYS {
-            days.push(QueryRequest::Day(QueryDayRequest {
-                local_date: date,
-                cursor: None,
-            }));
+            days.push(QueryRequest::Day(QueryDayRequest { local_date: date }));
             date = date
                 .tomorrow()
                 .map_err(crate::query::RunQueryError::from)
@@ -509,7 +499,6 @@ impl<'path> BenchQuery<'path> {
                             end_date,
                             bucket: scenario.bucket(),
                             dimensions: scenario.dimensions(),
-                            cursor: None,
                         },
                     )],
                 },
@@ -583,7 +572,6 @@ impl<'path> BenchQuery<'path> {
                                     end_date,
                                     group_by: grouping.value,
                                     search,
-                                    cursor: None,
                                 },
                             )],
                         },
@@ -681,67 +669,56 @@ impl<'path> BenchQuery<'path> {
     }
     fn document_workload(
         &self,
-        mut reader: ReadOnlyStore,
+        reader: ReadOnlyStore,
         local_date: quartz_protocol::LocalDate,
         rules: std::sync::Arc<quartz_domain::rules::registry::RuleSnapshot>,
         output: &mut impl Write,
     ) -> Result<DocumentWorkload, BenchQueryError> {
         use crate::query::{QueryJob, QueryRequest, QueryResponse};
         use quartz_protocol::{DetailEntity, QueryDayRequest, QueryEntityDetailRequest};
-        let mut query = QueryDayRequest {
-            local_date,
-            cursor: None,
+        let mut slot = Some(reader);
+        let completed = QueryJob::start(
+            &mut slot,
+            QueryRequest::Day(QueryDayRequest { local_date }),
+            rules.clone(),
+        )
+        .context(QuerySnafu)?
+        .run_measured()
+        .context(QuerySnafu)?;
+        let reader = completed.reader;
+        let QueryResponse::Day(day) = completed.response else {
+            unreachable!("day workload")
         };
-        let mut reference_range = None;
-        loop {
-            let mut slot = Some(reader);
-            let completed =
-                QueryJob::start(&mut slot, QueryRequest::Day(query.clone()), rules.clone())
-                    .context(QuerySnafu)?
-                    .run_measured()
-                    .context(QuerySnafu)?;
-            reader = completed.reader;
-            let QueryResponse::Day(page) = completed.response else {
-                unreachable!("day workload")
-            };
-            if query.cursor.is_none() {
-                reference_range = page.reference_range;
-            }
-            if let Some(document) = page.documents.into_iter().next() {
-                let request = QueryEntityDetailRequest {
-                    entity: DetailEntity::Document {
-                        document_ref: document.document_ref,
-                    },
-                    reference_range,
-                    local_date,
-                    cursor: None,
-                };
-                let mut slot = Some(reader);
-                let completed = QueryJob::start(
-                    &mut slot,
-                    QueryRequest::EntityDetail(request.clone()),
-                    rules,
-                )
-                .context(QuerySnafu)?
-                .run_measured()
-                .context(QuerySnafu)?;
-                let QueryResponse::EntityDetail(detail) = completed.response else {
-                    unreachable!("document workload")
-                };
-                let active_ms: i64 = detail
-                    .daily
-                    .expect("first-page daily totals")
-                    .iter()
-                    .map(|day| day.active_ms)
-                    .sum();
-                writeln!(output, "document workload: busiest document on local_date={local_date} day_active_ms={} seven_day_active_ms={active_ms}", document.active_ms).context(OutputSnafu)?;
-                return Ok(DocumentWorkload {
-                    reader: completed.reader,
-                    request,
-                });
-            }
-            query.cursor = Some(page.next_cursor.ok_or(BenchQueryError::MissingDocument)?);
-        }
+        let document = day
+            .documents
+            .into_iter()
+            .next()
+            .ok_or(BenchQueryError::MissingDocument)?;
+        let request = QueryEntityDetailRequest {
+            entity: DetailEntity::Document {
+                document_ref: document.document_ref,
+            },
+            reference_range: day.reference_range,
+            local_date,
+        };
+        let mut slot = Some(reader);
+        let completed = QueryJob::start(
+            &mut slot,
+            QueryRequest::EntityDetail(request.clone()),
+            rules,
+        )
+        .context(QuerySnafu)?
+        .run_measured()
+        .context(QuerySnafu)?;
+        let QueryResponse::EntityDetail(detail) = completed.response else {
+            unreachable!("document workload")
+        };
+        let active_ms: i64 = detail.daily.iter().map(|day| day.active_ms).sum();
+        writeln!(output, "document workload: busiest document on local_date={local_date} day_active_ms={} seven_day_active_ms={active_ms}", document.active_ms).context(OutputSnafu)?;
+        Ok(DocumentWorkload {
+            reader: completed.reader,
+            request,
+        })
     }
 }
 #[derive(Debug)]
@@ -923,7 +900,6 @@ mod tests {
             end_utc_ms: extent.to_utc_ms,
             detail: quartz_protocol::TimelineDetail::App,
             ms_per_pixel: quartz_protocol::MillisecondsPerPixel(std::num::NonZeroU64::MIN),
-            cursor: None,
         });
         let completed =
             crate::query::QueryJob::start(&mut reader, request, shell.snapshots().load())

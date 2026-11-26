@@ -1194,8 +1194,16 @@ mod tests {
         assert_eq!(before.metrics, after.metrics);
         assert_eq!(before.hours, after.hours);
         assert_eq!(before.applications, after.applications);
-        assert_eq!(before.documents, after.documents);
-        assert_eq!(after.metrics.expect("metrics").active_ms, 3000);
+        // Document references bind the rule versions, so only the visible ranking must match.
+        let visible = |documents: &[quartz_protocol::DocumentRank]| {
+            documents
+                .iter()
+                .map(|rank| (rank.app, rank.document.clone(), rank.active_ms))
+                .collect::<Vec<_>>()
+        };
+        assert!(!before.documents.is_empty());
+        assert_eq!(visible(&before.documents), visible(&after.documents));
+        assert_eq!(after.metrics.active_ms, 3000);
         assert!(
             !registry
                 .snapshots()

@@ -5,14 +5,13 @@ use super::{
     calendar::{DayCalendar, DayStartOffset},
     documents::DocumentIdentity,
     input::QueryRange,
-    paging::PagePosition,
     pipeline::{DerivedSegment, SegmentFacts, TimelineProjection},
 };
 use quartz_protocol::{
-    ApplicationId, ClassificationRuleId, ENTITY_DETAIL_DAYS, ENTITY_DETAIL_TOP_TITLES,
-    EntityClassificationRule, EntityDailyDuration, EntityTitleDuration, LocalDate,
-    QueryEntityDetailResponse, QuerySegmentDetailRequest, QueryVersions, TimelineDetail,
-    TimelineSegment,
+    ApplicationId, ClassificationRuleId, ENTITY_DETAIL_DAYS, ENTITY_DETAIL_MAX_EXTRACTION,
+    ENTITY_DETAIL_MAX_RULES, ENTITY_DETAIL_TOP_TITLES, EntityClassificationRule,
+    EntityDailyDuration, EntityTitleDuration, LocalDate, QueryEntityDetailResponse,
+    QuerySegmentDetailRequest, QueryVersions, TimelineDetail, TimelineSegment,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -156,11 +155,7 @@ impl EntityDetailAccumulator {
             self.rules.entry(rule.rule.clone()).or_insert(rule);
         }
     }
-    pub(super) fn finish(
-        self,
-        versions: QueryVersions,
-        position: PagePosition,
-    ) -> QueryEntityDetailResponse {
+    pub(super) fn finish(self, versions: QueryVersions) -> QueryEntityDetailResponse {
         let mut titles: Vec<_> = self.titles.into_values().collect();
         titles.sort_by(|left, right| {
             right
@@ -169,19 +164,29 @@ impl EntityDetailAccumulator {
                 .then(left.title.cmp(&right.title))
         });
         titles.truncate(ENTITY_DETAIL_TOP_TITLES);
+        let mut truncated = false;
+        let mut rules: Vec<_> = self.rules.into_values().collect();
+        if rules.len() > ENTITY_DETAIL_MAX_RULES {
+            rules.truncate(ENTITY_DETAIL_MAX_RULES);
+            truncated = true;
+        }
+        let mut extraction: Vec<_> = self.extraction.into_iter().collect();
+        if extraction.len() > ENTITY_DETAIL_MAX_EXTRACTION {
+            extraction.truncate(ENTITY_DETAIL_MAX_EXTRACTION);
+            truncated = true;
+        }
         QueryEntityDetailResponse {
-            daily: position.is_first().then(|| {
-                self.calendar
-                    .days
-                    .into_iter()
-                    .map(|day| day.daily)
-                    .collect()
-            }),
-            titles: position.is_first().then_some(titles),
-            rules: self.rules.into_values().collect(),
-            extraction: self.extraction.into_iter().collect(),
+            daily: self
+                .calendar
+                .days
+                .into_iter()
+                .map(|day| day.daily)
+                .collect(),
+            titles,
+            rules,
+            extraction,
             versions,
-            next_cursor: None,
+            truncated,
         }
     }
 }

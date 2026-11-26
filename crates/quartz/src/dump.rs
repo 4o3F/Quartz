@@ -191,7 +191,8 @@ impl<'date> DumpDay<'date> {
     ) -> Result<(), DumpDayError> {
         let mut request = quartz_protocol::QueryFactsRequest {
             local_date: self.local_date()?,
-            cursor: None,
+            after: None,
+            limit: None,
         };
         let mut buffered = io::BufWriter::new(spool);
         loop {
@@ -199,8 +200,8 @@ impl<'date> DumpDay<'date> {
             for fact in response.facts {
                 self.write_fact(&fact, zone, &mut buffered)?;
             }
-            match response.next_cursor {
-                Some(cursor) => request.cursor = Some(cursor),
+            match response.next_after {
+                Some(cursor) => request.after = Some(cursor),
                 None => break,
             }
         }
@@ -353,7 +354,7 @@ mod tests {
         let mut output = Vec::new();
         DumpDay::new("2025-01-02", DumpFormat::Json).write_pages_to(|_| Ok(quartz_protocol::QueryFactsResponse {
             facts: vec![serde_json::from_value(serde_json::json!({"kind":"clock_segment", "id":1, "start_utc_ms":0, "end_utc_ms":1})).expect("fact")],
-            versions: quartz_protocol::QueryVersions("first".into()), next_cursor: None,
+            next_after: None,
         }), &TimeZone::UTC, &mut output, spool).expect("export");
         assert!(!output.is_empty());
         assert_eq!(writes.load(std::sync::atomic::Ordering::Relaxed), 1);
@@ -368,7 +369,7 @@ mod tests {
         let mut output = Vec::new();
         let error = DumpDay::new("2025-01-02", DumpFormat::Json).write_pages_to(|_| Ok(quartz_protocol::QueryFactsResponse {
             facts: vec![serde_json::from_value(serde_json::json!({"kind":"clock_segment", "id":1, "start_utc_ms":0, "end_utc_ms":1})).expect("fact")],
-            versions: quartz_protocol::QueryVersions("first".into()), next_cursor: None,
+            next_after: None,
         }), &TimeZone::UTC, &mut output, spool).expect_err("failed spool write");
         assert!(
             matches!(error, DumpDayError::Output { source } if source.kind() == io::ErrorKind::PermissionDenied)
@@ -377,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_continuation_publishes_no_partial_export() {
+    fn failed_continuation_publishes_no_partial_export() {
         let dump = DumpDay::new("2025-01-02", DumpFormat::Json);
         let mut output = Vec::new();
         let mut calls = 0;
@@ -389,33 +390,26 @@ mod tests {
             .write_pages(
                 |request| {
                     calls += 1;
-                    if request.cursor.is_some() {
+                    if request.after.is_some() {
                         return Err(CallCoreError::Protocol {
-                            kind: quartz_protocol::ErrorKind::StaleCursor,
+                            kind: quartz_protocol::ErrorKind::Busy,
                         });
                     }
                     Ok(quartz_protocol::QueryFactsResponse {
+                        next_after: Some(fact.cursor()),
                         facts: vec![fact.clone()],
-                        versions: quartz_protocol::QueryVersions("first".into()),
-                        next_cursor: Some(quartz_protocol::QueryCursor::new(
-                            quartz_protocol::QueryVersions("first".into()),
-                            quartz_protocol::CursorQuery::Facts {
-                                local_date: request.local_date,
-                            },
-                            1,
-                        )),
                     })
                 },
                 &TimeZone::UTC,
                 &mut output,
             )
-            .expect_err("stale continuation");
+            .expect_err("failed continuation");
         assert_eq!(calls, 2);
         assert!(matches!(
             error,
             DumpDayError::Core {
                 source: CallCoreError::Protocol {
-                    kind: quartz_protocol::ErrorKind::StaleCursor
+                    kind: quartz_protocol::ErrorKind::Busy
                 }
             }
         ));

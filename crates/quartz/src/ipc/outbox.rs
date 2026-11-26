@@ -18,8 +18,9 @@ use tokio::{
 };
 use tokio_util::codec::FramedWrite;
 
-/// Per-connection encoded-byte budget, including headers and in-flight writes (04 §7).
-pub(crate) const SEND_BUFFER_LIMIT: usize = 1024 * 1024;
+/// Per-connection encoded-byte budget, including headers and in-flight writes (04 §7):
+/// two full frames, so one maximal query response never trips it beside a queued push.
+pub(crate) const SEND_BUFFER_LIMIT: usize = 2 * quartz_protocol::MAX_FRAME_LEN;
 /// Minimum spacing of completed state writes per connection (04 §7).
 pub(crate) const STATE_PUSH_INTERVAL: Duration = Duration::from_millis(250);
 /// Minimum spacing of completed day writes per date (04 §7).

@@ -3,6 +3,15 @@
     "start_utc_ms": 0,
     "end_utc_ms": 604800000
   },
+  "metrics": {
+    "active_ms": 1000,
+    "focus_ratio": 1.0,
+    "distract_ratio": 0.0,
+    "unclassified_ms": 0,
+    "longest_focus_ms": 1000,
+    "switches_per_hour": 0.0
+  },
+  "hours": [],
   "applications": [],
   "documents": [
     {
@@ -15,5 +24,5 @@
     }
   ],
   "versions": "version-token",
-  "next_cursor": null
+  "truncated": false
 }

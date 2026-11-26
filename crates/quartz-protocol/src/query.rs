@@ -1,11 +1,34 @@
-//! Typed day summaries, timelines, and version-bound pagination.
+//! Typed day summaries, timelines, detail views, and remaining cursor types.
 
 use crate::{AnnotationId, LocalDate};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
-/// Maximum encoded response size, including its envelope allowance (04 §6.2).
+/// Maximum encoded response size for rule/category paging (200 KiB; kept for batch 6b).
 pub const QUERY_PAGE_BYTES: usize = 200 * 1024;
+
+/// Maximum applications returned in a single `query.day` response.
+pub const DAY_MAX_APPLICATIONS: usize = 500;
+/// Maximum documents returned in a single `query.day` response.
+pub const DAY_MAX_DOCUMENTS: usize = 500;
+/// Maximum pixel-merged segments returned in a single `query.timeline` response.
+pub const TIMELINE_MAX_SEGMENTS: usize = 4_000;
+/// Maximum unmerged slices returned in a single `query.segment_detail` response.
+pub const SEGMENT_DETAIL_MAX_INTERVALS: usize = 2_000;
+/// Maximum deciding classification rules returned in a single `query.entity_detail` response.
+pub const ENTITY_DETAIL_MAX_RULES: usize = 200;
+/// Maximum extraction provenance entries returned in a single `query.entity_detail` response.
+pub const ENTITY_DETAIL_MAX_EXTRACTION: usize = 200;
+/// Maximum groups per requested dimension inside each `query.range` bucket.
+pub const RANGE_MAX_GROUPS_PER_DIMENSION: usize = 100;
+/// Maximum unclassified groups returned in a single `query.unclassified` response.
+pub const UNCLASSIFIED_MAX_ITEMS: usize = 500;
+/// Maximum pending away ranges returned in a single `query.pending_away` response.
+pub const PENDING_AWAY_MAX_RANGES: usize = 200;
+/// Default row count returned by one `query.facts` page when `limit` is omitted.
+pub const FACTS_DEFAULT_LIMIT: usize = 500;
+/// Maximum explicit row limit accepted by `query.facts`.
+pub const FACTS_MAX_LIMIT: usize = 2_000;
 
 /// Opaque, version-bound document reference issued by the core.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -71,8 +94,7 @@ pub struct TitleExtraction {
     pub status: Option<ExtractionStatus>,
 }
 /// Maximum encoded cursor JSON size, including all nested string escaping.
-/// Document-detail cursors carry a complete document reference, while rule cursors carry
-/// keys with no smaller protocol limit; use the 256 KiB frame ceiling for both.
+/// Rule cursors carry keys with no smaller protocol limit; use the 1 MiB frame ceiling.
 pub const MAX_CURSOR_BYTES: usize = crate::MAX_FRAME_LEN;
 
 /// Counts encoded bytes without allocating a second copy of the cursor JSON.
@@ -104,25 +126,8 @@ impl QueryCursor {
                 versions,
                 query,
                 position,
-                annotation_resume: None,
             })
             .expect("typed cursor fields serialize to JSON"),
-        )
-    }
-    /// Issues an annotation continuation at a stored row and text fragment.
-    pub fn new_annotation(
-        versions: QueryVersions,
-        query: CursorQuery,
-        resume: AnnotationResume,
-    ) -> Self {
-        Self(
-            serde_json::to_value(CursorPosition {
-                versions,
-                query,
-                position: resume.chunk,
-                annotation_resume: Some(resume),
-            })
-            .expect("typed annotation cursor serializes"),
         )
     }
     /// Validates the core's cursor schema when admitting a continuation request.
@@ -139,13 +144,6 @@ impl QueryCursor {
     /// Returns an error for an invalid cursor schema or parameters from another query.
     pub fn validate_query(&self, expected: &CursorQuery) -> Result<(), serde_json::Error> {
         let position = self.decode()?;
-        if position.annotation_resume().is_some()
-            && !matches!(position.query(), CursorQuery::Annotations { .. })
-        {
-            return Err(serde::de::Error::custom(
-                "annotation resume requires an annotation query",
-            ));
-        }
         if position.query() != expected {
             return Err(serde::de::Error::custom(
                 "cursor parameters do not match the request",
@@ -196,24 +194,8 @@ pub struct CursorPosition {
     versions: QueryVersions,
     query: CursorQuery,
     position: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    annotation_resume: Option<AnnotationResume>,
-}
-/// Stored annotation ordering key and next fragment within that row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AnnotationResume {
-    pub start_utc_ms: i64,
-    pub end_utc_ms: i64,
-    pub uuid: crate::AnnotationId,
-    pub chunk: usize,
 }
 impl CursorPosition {
-    /// Returns the annotation row and fragment retained by the core.
-    pub fn annotation_resume(&self) -> Option<&AnnotationResume> {
-        self.annotation_resume.as_ref()
-    }
-
     /// Returns the input versions to compare with the current snapshot.
     pub fn versions(&self) -> &QueryVersions {
         &self.versions
@@ -222,12 +204,12 @@ impl CursorPosition {
     pub fn query(&self) -> &CursorQuery {
         &self.query
     }
-    /// Returns the next list item index, or the fragment index for an annotation row.
+    /// Returns the next list item index or byte offset.
     pub fn position(&self) -> usize {
         self.position
     }
 }
-/// Query parameters retained in a continuation, without recursive cursor fields.
+/// Query parameters retained in a continuation for rule and category reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CursorQuery {
@@ -240,87 +222,8 @@ pub enum CursorQuery {
     },
     /// Canonical text export selection; position is a UTF-8 byte offset.
     RulesTextExport { key: String },
-    /// Saved annotation entities intersecting a bounded UTC range.
-    Annotations { start_utc_ms: i64, end_utc_ms: i64 },
     /// Category hierarchy with the archive filter bound to the continuation.
     Categories { include_archived: bool },
-    /// A calendar date, from local midnight to the next local midnight.
-    Facts { local_date: LocalDate },
-    /// A logical date in the core's current system time zone.
-    Day { local_date: LocalDate },
-    /// Pending idle pieces in a logical day.
-    PendingAway { local_date: LocalDate },
-    /// Unmerged slices within a bounded UTC range and optional lane.
-    SegmentDetail {
-        start_utc_ms: i64,
-        end_utc_ms: i64,
-        app: Option<ApplicationId>,
-        window_instance: Option<WindowInstanceRef>,
-    },
-    /// Seven logical days of an application's activity.
-    EntityDetail {
-        entity: DetailEntity,
-        local_date: LocalDate,
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "ReferenceRange::deserialize_request"
-        )]
-        reference_range: Option<ReferenceRange>,
-    },
-    /// Grouped unclassified work in a logical-date range.
-    Unclassified {
-        start_date: LocalDate,
-        end_date: LocalDate,
-        group_by: UnclassifiedGroupBy,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        search: Option<String>,
-    },
-    /// Bounded daily or weekly independent dimension summaries.
-    Range {
-        start_date: LocalDate,
-        end_date: LocalDate,
-        bucket: RangeBucket,
-        dimensions: Vec<RangeDimension>,
-    },
-    /// A UTC range and its display projection.
-    Timeline {
-        start_utc_ms: i64,
-        end_utc_ms: i64,
-        detail: TimelineDetail,
-        ms_per_pixel: MillisecondsPerPixel,
-    },
-}
-impl From<&QueryDayRequest> for CursorQuery {
-    fn from(request: &QueryDayRequest) -> Self {
-        Self::Day {
-            local_date: request.local_date,
-        }
-    }
-}
-impl From<&QueryTimelineRequest> for CursorQuery {
-    fn from(request: &QueryTimelineRequest) -> Self {
-        Self::Timeline {
-            start_utc_ms: request.start_utc_ms,
-            end_utc_ms: request.end_utc_ms,
-            detail: request.detail,
-            ms_per_pixel: request.ms_per_pixel,
-        }
-    }
-}
-impl From<&QueryPendingAwayRequest> for CursorQuery {
-    fn from(request: &QueryPendingAwayRequest) -> Self {
-        Self::PendingAway {
-            local_date: request.local_date,
-        }
-    }
-}
-impl From<&QueryFactsRequest> for CursorQuery {
-    fn from(request: &QueryFactsRequest) -> Self {
-        Self::Facts {
-            local_date: request.local_date,
-        }
-    }
 }
 /// Maximum logical dates in one grouped query (04 §6.2.1).
 pub const UNCLASSIFIED_MAX_DAYS: usize = 366;
@@ -350,18 +253,6 @@ pub struct QueryRangeRequest {
     pub end_date: LocalDate,
     pub bucket: RangeBucket,
     pub dimensions: Vec<RangeDimension>,
-    #[serde(default)]
-    pub cursor: Option<QueryCursor>,
-}
-impl From<&QueryRangeRequest> for CursorQuery {
-    fn from(request: &QueryRangeRequest) -> Self {
-        Self::Range {
-            start_date: request.start_date,
-            end_date: request.end_date,
-            bucket: request.bucket,
-            dimensions: request.dimensions.clone(),
-        }
-    }
 }
 /// Category or visible work identity within one dimension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,16 +274,15 @@ pub struct RangeGroup {
     pub entity: RangeEntity,
     pub active_ms: i64,
 }
-/// A clipped bucket; its total is omitted when groups continue on another page.
+/// A clipped day or week bucket with its total active duration and capped dimension groups.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RangeSummaryBucket {
     pub start_date: LocalDate,
     pub end_date: LocalDate,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_ms: Option<i64>,
+    pub active_ms: i64,
     pub groups: Vec<RangeGroup>,
 }
-/// One bounded page of range summaries in the core's effective calendar.
+/// Complete single-response range summary in the core's effective calendar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryRangeResponse {
     pub time_zone: String,
@@ -401,7 +291,8 @@ pub struct QueryRangeResponse {
     pub reference_range: Option<ReferenceRange>,
     pub buckets: Vec<RangeSummaryBucket>,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Maximum search length in Unicode scalar values (04 §6.2.1).
@@ -416,7 +307,7 @@ pub enum UnclassifiedGroupBy {
     App,
     Document,
 }
-/// A half-open range of logical dates, with core-side search and pagination.
+/// A half-open range of logical dates, with core-side search.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryUnclassifiedRequest {
@@ -425,18 +316,6 @@ pub struct QueryUnclassifiedRequest {
     pub group_by: UnclassifiedGroupBy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search: Option<String>,
-    #[serde(default)]
-    pub cursor: Option<QueryCursor>,
-}
-impl From<&QueryUnclassifiedRequest> for CursorQuery {
-    fn from(request: &QueryUnclassifiedRequest) -> Self {
-        Self::Unclassified {
-            start_date: request.start_date,
-            end_date: request.end_date,
-            group_by: request.group_by,
-            search: request.search.clone(),
-        }
-    }
 }
 /// Visible application or document identity, shared with range aggregation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,7 +348,7 @@ pub struct UnclassifiedItem {
     pub active_ms: i64,
     pub sample_ranges: Vec<UnclassifiedSampleRange>,
 }
-/// One page of grouped work, using the core's effective logical-day calendar.
+/// Grouped unclassified work, using the core's effective logical-day calendar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryUnclassifiedResponse {
     pub time_zone: String,
@@ -478,18 +357,20 @@ pub struct QueryUnclassifiedResponse {
     pub reference_range: Option<ReferenceRange>,
     pub items: Vec<UnclassifiedItem>,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Maximum detail range: two UTC days accommodate local-day boundaries and DST.
 pub const SEGMENT_DETAIL_MAX_SPAN_MS: i64 = 48 * 60 * 60 * 1000;
 /// Number of logical days included in an entity detail response.
 pub const ENTITY_DETAIL_DAYS: usize = 7;
-/// Five maximum-length escaped titles leave room inside the 200 KiB page budget.
+/// Top retained Full-level titles included in an entity detail response.
 pub const ENTITY_DETAIL_TOP_TITLES: usize = 5;
 
 /// Unmerged raw projection for a clicked timeline range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QuerySegmentDetailRequest {
     pub start_utc_ms: i64,
     pub end_utc_ms: i64,
@@ -497,27 +378,16 @@ pub struct QuerySegmentDetailRequest {
     pub app: Option<ApplicationId>,
     #[serde(default)]
     pub window_instance: Option<WindowInstanceRef>,
-    #[serde(default)]
-    pub cursor: Option<QueryCursor>,
 }
-impl From<&QuerySegmentDetailRequest> for CursorQuery {
-    fn from(request: &QuerySegmentDetailRequest) -> Self {
-        Self::SegmentDetail {
-            start_utc_ms: request.start_utc_ms,
-            end_utc_ms: request.end_utc_ms,
-            app: request.app,
-            window_instance: request.window_instance,
-        }
-    }
-}
-/// One page of clipped slices, preserving the timeline's clock-segment order.
+/// Clipped slices, preserving the timeline's clock-segment order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuerySegmentDetailResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_range: Option<ReferenceRange>,
     pub intervals: Vec<TimelineSegment>,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 /// Entity identities supported by application and document details.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -528,6 +398,7 @@ pub enum DetailEntity {
 }
 /// Seven logical days ending at the requested date, inclusive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryEntityDetailRequest {
     pub entity: DetailEntity,
     #[serde(
@@ -537,17 +408,6 @@ pub struct QueryEntityDetailRequest {
     )]
     pub reference_range: Option<ReferenceRange>,
     pub local_date: LocalDate,
-    #[serde(default)]
-    pub cursor: Option<QueryCursor>,
-}
-impl From<&QueryEntityDetailRequest> for CursorQuery {
-    fn from(request: &QueryEntityDetailRequest) -> Self {
-        Self::EntityDetail {
-            entity: request.entity.clone(),
-            local_date: request.local_date,
-            reference_range: request.reference_range,
-        }
-    }
 }
 /// Active elapsed duration in one logical day.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -575,39 +435,40 @@ pub struct EntityExtractionProvenance {
     pub extractor_rule: Option<String>,
     pub status: ExtractionStatus,
 }
-/// First-page daily totals and top titles; rules and extraction continue with the cursor.
+/// Complete seven-day entity detail with daily totals, top titles, rules, and extraction provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryEntityDetailResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub daily: Option<Vec<EntityDailyDuration>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub titles: Option<Vec<EntityTitleDuration>>,
+    pub daily: Vec<EntityDailyDuration>,
+    pub titles: Vec<EntityTitleDuration>,
     pub rules: Vec<EntityClassificationRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extraction: Vec<EntityExtractionProvenance>,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 /// Raw stored facts intersecting a calendar day in the core's system time zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryFactsRequest {
     pub local_date: LocalDate,
-    #[serde(default)]
-    pub cursor: Option<QueryCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<crate::facts::FactsCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
-/// One chronological page of full stored facts and its input versions.
+/// One chronological page of full stored facts with a plain position cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryFactsResponse {
     pub facts: Vec<crate::facts::FactRecord>,
-    pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<crate::facts::FactsCursor>,
 }
 /// Pending idle query in the core's current system time zone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryPendingAwayRequest {
     pub local_date: LocalDate,
-    #[serde(default)]
-    pub cursor: Option<QueryCursor>,
 }
 /// Uncovered contiguous idle time, with UTC boundaries and elapsed duration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,12 +477,13 @@ pub struct PendingAway {
     pub end_utc_ms: i64,
     pub duration_ms: i64,
 }
-/// One version-bound page of pending idle pieces ordered by start.
+/// Pending idle pieces ordered by start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryPendingAwayResponse {
     pub ranges: Vec<PendingAway>,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 /// Digest of all persisted and semantic query inputs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -797,10 +659,9 @@ pub enum Activity {
 }
 /// Request for a logical day; the start offset comes from core settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryDayRequest {
     pub local_date: LocalDate,
-    #[serde(default)]
-    pub cursor: Option<QueryCursor>,
 }
 /// The six metrics in the Today status row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -842,20 +703,19 @@ pub struct DocumentRank {
     pub profile: Option<String>,
     pub active_ms: i64,
 }
-/// First-page metrics, hours and reference range; each ranking continues separately.
+/// Complete single-response day summary with metrics, hours, and capped rankings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryDayResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_range: Option<ReferenceRange>,
     #[serde(default)]
     pub documents: Vec<DocumentRank>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metrics: Option<DayMetrics>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hours: Option<Vec<HourStack>>,
+    pub metrics: DayMetrics,
+    pub hours: Vec<HourStack>,
     pub applications: Vec<ApplicationRank>,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 /// Fields retained by the timeline projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -871,13 +731,12 @@ pub enum TimelineDetail {
 pub struct MillisecondsPerPixel(pub NonZeroU64);
 /// UTC-range timeline request. Day callers use the range returned by the hour stacks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryTimelineRequest {
     pub start_utc_ms: i64,
     pub end_utc_ms: i64,
     pub detail: TimelineDetail,
     pub ms_per_pixel: MillisecondsPerPixel,
-    #[serde(default)]
-    pub cursor: Option<QueryCursor>,
 }
 /// A projected display segment; durations retain segment-local monotonic time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -902,14 +761,15 @@ pub struct TimelineSegment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
-/// One timeline page with the input version token.
+/// Complete single-response timeline with the input version token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryTimelineResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_range: Option<ReferenceRange>,
     pub segments: Vec<TimelineSegment>,
     pub versions: QueryVersions,
-    pub next_cursor: Option<QueryCursor>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 /// Latest invalidation for a subscribed logical day.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -922,7 +782,7 @@ pub struct DayChanged {
 mod tests {
     use super::*;
     #[test]
-    fn detail_requests_and_cursors_preserve_typed_filters() {
+    fn detail_requests_preserve_typed_filters() {
         let wire =
             serde_json::json!({"start_utc_ms":100,"end_utc_ms":200,"app":3,"window_instance":5});
         let request: QuerySegmentDetailRequest =
@@ -934,30 +794,14 @@ mod tests {
                 crate::facts::WindowInstanceId(5)
             ))
         );
-        let cursor = QueryCursor::new(
-            QueryVersions("detail-version".into()),
-            CursorQuery::from(&request),
-            2,
-        );
-        let encoded = serde_json::to_value(&cursor).expect("cursor");
-        assert_eq!(encoded["query"]["kind"], "segment_detail");
-        assert_eq!(encoded["query"]["app"], 3);
-        assert_eq!(encoded["query"]["window_instance"], 5);
-        assert_eq!(
-            serde_json::from_value::<QueryCursor>(encoded).expect("cursor round trip"),
-            cursor
-        );
         let wire = serde_json::json!({"entity":{"kind":"app","id":3},"local_date":"2026-11-21"});
         let request: QueryEntityDetailRequest =
             serde_json::from_value(wire).expect("entity request");
-        let cursor = QueryCursor::new(
-            QueryVersions("entity-version".into()),
-            CursorQuery::from(&request),
-            1,
-        );
         assert_eq!(
-            serde_json::to_value(cursor).expect("cursor")["query"],
-            serde_json::json!({"kind":"entity_detail","entity":{"kind":"app","id":3},"local_date":"2026-11-21"})
+            request.entity,
+            DetailEntity::App {
+                id: ApplicationId(3)
+            }
         );
         for kind in ["document", "domain"] {
             assert!(
@@ -977,24 +821,26 @@ mod tests {
         );
     }
     #[test]
-    fn facts_request_response_and_cursor_preserve_raw_wire_fields() {
+    fn facts_request_response_and_after_cursor_preserve_raw_wire_fields() {
         let request: QueryFactsRequest =
             serde_json::from_value(serde_json::json!({"local_date":"2025-01-02"}))
                 .expect("facts request");
-        assert!(request.cursor.is_none());
-        let cursor = QueryCursor::new(
-            QueryVersions("facts-version".into()),
-            CursorQuery::from(&request),
-            1,
-        );
-        let cursor_json = serde_json::json!({"versions":"facts-version","query":{"kind":"facts","local_date":"2025-01-02"},"position":1});
+        assert!(request.after.is_none());
+        assert!(request.limit.is_none());
+        let after = crate::facts::FactsCursor {
+            start_utc_ms: 0,
+            kind: crate::facts::FactKind::Run,
+            id: crate::facts::FactRowId(1),
+        };
+        let after_json = serde_json::json!({"start_utc_ms":0,"kind":"run","id":1});
         assert_eq!(
-            serde_json::to_value(&cursor).expect("cursor JSON"),
-            cursor_json
+            serde_json::to_value(after).expect("cursor JSON"),
+            after_json
         );
         assert_eq!(
-            serde_json::from_value::<QueryCursor>(cursor_json).expect("cursor round trip"),
-            cursor
+            serde_json::from_value::<crate::facts::FactsCursor>(after_json)
+                .expect("cursor round trip"),
+            after
         );
         let body = serde_json::json!({
             "facts":[{"kind":"run","id":1,"run_id":1,"segment_id":null,
@@ -1002,14 +848,14 @@ mod tests {
             "start_mono_ms":null,"end_mono_ms":null,"confirmed_mono_ms":null,
             "duration_ms":1000,"end_reason":null,"device_id":"test-device",
             "win_session_id":1,"app_version":"test"}],
-            "versions":"facts-version","next_cursor":cursor
+            "next_after":after
         });
         let page: QueryFactsResponse =
             serde_json::from_value(body.clone()).expect("typed facts response");
         assert_eq!(serde_json::to_value(page).expect("facts round trip"), body);
     }
     #[test]
-    fn unclassified_wire_snapshots_preserve_groups_samples_ranges_and_cursors() {
+    fn unclassified_wire_snapshots_preserve_groups_samples_and_ranges() {
         let request_wire: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/unclassified-request.json"))
                 .expect("request snapshot");
@@ -1026,7 +872,6 @@ mod tests {
         for fixture in [
             include_str!("../tests/fixtures/unclassified-app.json"),
             include_str!("../tests/fixtures/unclassified-document.json"),
-            include_str!("../tests/fixtures/unclassified-continuation.json"),
         ] {
             let wire: serde_json::Value = serde_json::from_str(fixture).expect("response snapshot");
             let response: QueryUnclassifiedResponse =
@@ -1035,13 +880,7 @@ mod tests {
                 serde_json::to_value(&response).expect("response wire"),
                 wire
             );
-            if let Some(cursor) = response.next_cursor {
-                assert_eq!(
-                    cursor.decode().expect("issued cursor").query(),
-                    &CursorQuery::from(&request)
-                );
-                assert_eq!(cursor.decode().expect("issued cursor").position(), 1);
-            }
+            assert!(!response.truncated);
         }
         let mut invalid = request_wire;
         invalid["unused"] = serde_json::json!(true);
@@ -1051,7 +890,7 @@ mod tests {
         }
     }
     #[test]
-    fn range_wire_snapshots_preserve_entities_dimensions_and_bucket_continuations() {
+    fn range_wire_snapshots_preserve_entities_and_dimensions() {
         let wire: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/range-request.json"))
                 .expect("request snapshot");
@@ -1066,39 +905,18 @@ mod tests {
                 RangeDimension::App
             ]
         );
-        for snapshot in [
-            include_str!("../tests/fixtures/range-first.json"),
-            include_str!("../tests/fixtures/range-continuation.json"),
-        ] {
-            let expected: serde_json::Value = serde_json::from_str(snapshot).expect("snapshot");
-            let response: QueryRangeResponse =
-                serde_json::from_value(expected.clone()).expect("response");
-            assert_eq!(serde_json::to_value(&response).expect("encode"), expected);
-            if let Some(cursor) = &response.next_cursor {
-                assert_eq!(
-                    cursor.decode().expect("issued cursor").query(),
-                    &CursorQuery::from(&request)
-                );
-                assert_eq!(cursor.decode().expect("issued cursor").position(), 2);
-                assert_eq!(response.buckets[0].active_ms, Some(1000));
-                assert!(matches!(
-                    response.buckets[0].groups[0].entity,
-                    RangeEntity::Work(WorkEntity::Document { .. })
-                ));
-            } else {
-                assert_eq!(response.buckets[0].active_ms, None);
-                assert!(response.reference_range.is_none());
-                assert!(matches!(
-                    response.buckets[0].groups[0].entity,
-                    RangeEntity::Category(CategoryEntity::Category { .. })
-                ));
-                assert!(matches!(
-                    response.buckets[0].groups[1].entity,
-                    RangeEntity::Work(WorkEntity::App { .. })
-                ));
-            }
-        }
-        for field in ["time_zone", "day_start_offset_min", "unknown"] {
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/range-first.json"))
+                .expect("snapshot");
+        let response: QueryRangeResponse =
+            serde_json::from_value(expected.clone()).expect("response");
+        assert_eq!(serde_json::to_value(&response).expect("encode"), expected);
+        assert_eq!(response.buckets[0].active_ms, 1000);
+        assert!(matches!(
+            response.buckets[0].groups[0].entity,
+            RangeEntity::Work(WorkEntity::Document { .. })
+        ));
+        for field in ["time_zone", "day_start_offset_min", "unknown", "cursor"] {
             let mut invalid = wire.clone();
             invalid[field] = serde_json::json!("unsupported");
             assert!(serde_json::from_value::<QueryRangeRequest>(invalid).is_err());
@@ -1142,15 +960,15 @@ mod tests {
         let response = QueryDayResponse {
             reference_range: None,
             documents: Vec::new(),
-            metrics: Some(DayMetrics {
+            metrics: DayMetrics {
                 active_ms: 1000,
                 focus_ratio: 1.0,
                 distract_ratio: 0.0,
                 unclassified_ms: 0,
                 longest_focus_ms: 1000,
                 switches_per_hour: 0.0,
-            }),
-            hours: Some(vec![HourStack {
+            },
+            hours: vec![HourStack {
                 start_utc_ms: 0,
                 end_utc_ms: 3600000,
                 local_start: "1970-01-01T00:00:00+00:00[UTC]".into(),
@@ -1158,13 +976,13 @@ mod tests {
                     category: golden_category(),
                     duration_ms: 1000,
                 }],
-            }]),
+            }],
             applications: vec![ApplicationRank {
                 app: golden_app(),
                 active_ms: 1000,
             }],
             versions: QueryVersions("version-token".into()),
-            next_cursor: None,
+            truncated: false,
         };
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/day.json"))
@@ -1225,7 +1043,7 @@ mod tests {
                 },
             ],
             versions: QueryVersions("version-token".into()),
-            next_cursor: None,
+            truncated: false,
         };
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/timeline.json"))
@@ -1250,9 +1068,9 @@ mod tests {
             reference_range: timeline.reference_range,
             intervals: timeline.segments.clone(),
             versions: timeline.versions.clone(),
-            next_cursor: None,
+            truncated: false,
         };
-        let expected = serde_json::json!({"reference_range": wire["reference_range"], "intervals": wire["segments"], "versions": wire["versions"], "next_cursor": null});
+        let expected = serde_json::json!({"reference_range": wire["reference_range"], "intervals": wire["segments"], "versions": wire["versions"], "truncated": false});
         assert_eq!(
             serde_json::to_value(&detail).expect("detail JSON"),
             expected
@@ -1322,7 +1140,7 @@ mod tests {
                 },
             ],
             versions: QueryVersions("version-token".into()),
-            next_cursor: None,
+            truncated: false,
         };
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/timeline-annotations.json"))
@@ -1339,7 +1157,7 @@ mod tests {
                 duration_ms: 1_200_000,
             }],
             versions: QueryVersions("version-token".into()),
-            next_cursor: None,
+            truncated: false,
         };
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/pending-away.json"))
@@ -1349,66 +1167,6 @@ mod tests {
             serde_json::from_value::<QueryPendingAwayResponse>(expected).expect("decode"),
             response
         );
-        let request = QueryPendingAwayRequest {
-            local_date: "2025-01-02".parse().expect("date"),
-            cursor: None,
-        };
-        let cursor = QueryCursor::new(
-            QueryVersions("version-token".into()),
-            CursorQuery::from(&request),
-            1,
-        );
-        let value = serde_json::to_value(&cursor).expect("cursor");
-        assert_eq!(
-            value["query"],
-            serde_json::json!({"kind":"pending_away", "local_date":"2025-01-02"})
-        );
-        assert_eq!(
-            serde_json::from_value::<QueryCursor>(value).expect("cursor round trip"),
-            cursor
-        );
-    }
-    #[test]
-    fn cursor_round_trips_as_an_object_with_typed_query_parameters() {
-        let request = QueryDayRequest {
-            local_date: "2025-01-02".parse().expect("date"),
-            cursor: None,
-        };
-        let cursor = QueryCursor::new(
-            QueryVersions("versions".into()),
-            CursorQuery::from(&request),
-            200,
-        );
-        let value = serde_json::to_value(&cursor).expect("cursor object");
-        assert_eq!(
-            value,
-            serde_json::json!({"versions":"versions","query":{"kind":"day","local_date":"2025-01-02"},"position":200})
-        );
-        assert_eq!(
-            serde_json::from_value::<QueryCursor>(value).expect("cursor round trip"),
-            cursor
-        );
-        assert!(serde_json::from_value::<QueryCursor>(serde_json::json!("legacy token")).is_err());
-        let request = QueryTimelineRequest {
-            start_utc_ms: 0,
-            end_utc_ms: 1000,
-            detail: TimelineDetail::App,
-            ms_per_pixel: MillisecondsPerPixel(NonZeroU64::MIN),
-            cursor: None,
-        };
-        let cursor = QueryCursor::new(
-            QueryVersions("versions".into()),
-            CursorQuery::from(&request),
-            10,
-        );
-        let decoded: QueryCursor =
-            serde_json::from_value(serde_json::to_value(&cursor).expect("timeline cursor"))
-                .expect("typed timeline cursor");
-        assert_eq!(
-            decoded.decode().expect("issued cursor").query(),
-            &CursorQuery::from(&request)
-        );
-        assert_eq!(decoded.decode().expect("issued cursor").position(), 10);
     }
     #[test]
     fn category_metadata_and_revision_qualified_sources_round_trip() {
@@ -1447,7 +1205,7 @@ mod tests {
         );
     }
     #[test]
-    fn document_wire_snapshots_preserve_identity_range_provenance_and_continuations() {
+    fn document_wire_snapshots_preserve_identity_range_and_provenance() {
         let wire: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/document-day.json"))
                 .expect("document day snapshot");
@@ -1463,32 +1221,13 @@ mod tests {
             serde_json::from_value(wire.clone()).expect("document request");
         assert!(matches!(request.entity, DetailEntity::Document { .. }));
         assert_eq!(serde_json::to_value(&request).expect("request wire"), wire);
-        let cursor = QueryCursor::new(
-            QueryVersions("version-token".into()),
-            CursorQuery::from(&request),
-            1,
-        );
-        let value = serde_json::to_value(&cursor).expect("cursor wire");
-        assert_eq!(value["query"]["reference_range"], wire["reference_range"]);
-        assert_eq!(value["query"]["entity"], wire["entity"]);
-        assert_eq!(
-            serde_json::from_value::<QueryCursor>(value).expect("cursor"),
-            cursor
-        );
-        for snapshot in [
-            include_str!("../tests/fixtures/document-entity.json"),
-            include_str!("../tests/fixtures/document-entity-continuation.json"),
-        ] {
-            let wire: serde_json::Value =
-                serde_json::from_str(snapshot).expect("document detail snapshot");
-            let detail: QueryEntityDetailResponse =
-                serde_json::from_value(wire.clone()).expect("document detail");
-            assert!(!detail.extraction.is_empty());
-            assert_eq!(serde_json::to_value(detail).expect("detail wire"), wire);
-        }
-        let legacy = serde_json::json!({"applications":[],"versions":"legacy","next_cursor":null});
-        let decoded: QueryDayResponse = serde_json::from_value(legacy).expect("legacy day");
-        assert!(decoded.documents.is_empty() && decoded.reference_range.is_none());
+        let wire: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/document-entity.json"))
+                .expect("document detail snapshot");
+        let detail: QueryEntityDetailResponse =
+            serde_json::from_value(wire.clone()).expect("document detail");
+        assert!(!detail.extraction.is_empty());
+        assert_eq!(serde_json::to_value(detail).expect("detail wire"), wire);
     }
     #[test]
     fn reference_range_is_strict_in_requests_and_extensible_in_responses() {
@@ -1555,41 +1294,5 @@ mod tests {
             oversized_rule.decode().is_err(),
             "admission bounds internally constructed cursors too"
         );
-    }
-    #[test]
-    fn annotation_resume_is_rejected_on_other_query_kinds() {
-        let resume = AnnotationResume {
-            start_utc_ms: 0,
-            end_utc_ms: 1,
-            uuid: crate::AnnotationId(
-                "abcdef00-0000-4000-8000-000000000001"
-                    .parse()
-                    .expect("UUID"),
-            ),
-            chunk: 0,
-        };
-        let date = "2025-01-02".parse().expect("date");
-        for query in [
-            CursorQuery::Day { local_date: date },
-            CursorQuery::Facts { local_date: date },
-            CursorQuery::PendingAway { local_date: date },
-        ] {
-            let cursor = QueryCursor::new_annotation(
-                QueryVersions("v".into()),
-                query.clone(),
-                resume.clone(),
-            );
-            assert!(cursor.validate_query(&query).is_err());
-        }
-        let query = CursorQuery::Annotations {
-            start_utc_ms: 0,
-            end_utc_ms: 1,
-        };
-        QueryCursor::new_annotation(QueryVersions("v".into()), query.clone(), resume)
-            .validate_query(&query)
-            .expect("annotation resume");
-        QueryCursor::new(QueryVersions("older".into()), query.clone(), 1)
-            .validate_query(&query)
-            .expect("old annotation cursor reaches version validation");
     }
 }

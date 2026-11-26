@@ -443,15 +443,15 @@ mod tests {
         let page = wire::QueryDayResponse {
             reference_range: None,
             documents: Vec::new(),
-            metrics: Some(wire::DayMetrics {
+            metrics: wire::DayMetrics {
                 active_ms: 4000,
                 focus_ratio: 0.5,
                 distract_ratio: 0.25,
                 unclassified_ms: 1000,
                 longest_focus_ms: 2000,
                 switches_per_hour: 3.5,
-            }),
-            hours: Some(vec![wire::HourStack {
+            },
+            hours: vec![wire::HourStack {
                 start_utc_ms: 0,
                 end_utc_ms: 86_400_000,
                 local_start: "1970-01-01T00:00:00+00:00[UTC]".into(),
@@ -465,13 +465,13 @@ mod tests {
                         duration_ms: 2000,
                     },
                 ],
-            }]),
+            }],
             applications: vec![wire::ApplicationRank {
                 app: app.clone(),
                 active_ms: 2000,
             }],
             versions: wire::QueryVersions("v1".into()),
-            next_cursor: None,
+            truncated: false,
         };
         let page: wire::QueryDayResponse =
             serde_json::from_value(serde_json::to_value(page).expect("protocol JSON"))
@@ -513,7 +513,7 @@ mod tests {
             reference_range: None,
             segments: vec![first, offline],
             versions: wire::QueryVersions("v1".into()),
-            next_cursor: None,
+            truncated: false,
         };
         let timeline: wire::QueryTimelineResponse =
             serde_json::from_value(serde_json::to_value(timeline).expect("timeline JSON"))
@@ -528,8 +528,8 @@ mod tests {
                 start: 0,
                 end: 86_400_000,
             },
-            metrics: page.metrics.expect("metrics"),
-            hours: page.hours.expect("hours"),
+            metrics: page.metrics,
+            hours: page.hours,
             applications: page.applications,
             categories: timeline.segments.clone(),
             raw: timeline.segments,

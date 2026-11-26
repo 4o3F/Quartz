@@ -1036,51 +1036,6 @@ mod tests {
         fn all() -> Vec<Self> {
             vec![
                 Self {
-                    op: Op::QueryFacts,
-                    body: serde_json::json!({"local_date":"2025-01-02"}),
-                    query: serde_json::json!({"kind":"facts","local_date":"2025-01-02"}),
-                },
-                Self {
-                    op: Op::QueryDay,
-                    body: serde_json::json!({"local_date":"2025-01-02"}),
-                    query: serde_json::json!({"kind":"day","local_date":"2025-01-02"}),
-                },
-                Self {
-                    op: Op::QueryPendingAway,
-                    body: serde_json::json!({"local_date":"2025-01-02"}),
-                    query: serde_json::json!({"kind":"pending_away","local_date":"2025-01-02"}),
-                },
-                Self {
-                    op: Op::QueryAnnotations,
-                    body: serde_json::json!({"start_utc_ms":0,"end_utc_ms":1}),
-                    query: serde_json::json!({"kind":"annotations","start_utc_ms":0,"end_utc_ms":1}),
-                },
-                Self {
-                    op: Op::QueryTimeline,
-                    body: serde_json::json!({"start_utc_ms":0,"end_utc_ms":1,"detail":"raw","ms_per_pixel":1}),
-                    query: serde_json::json!({"kind":"timeline","start_utc_ms":0,"end_utc_ms":1,"detail":"raw","ms_per_pixel":1}),
-                },
-                Self {
-                    op: Op::QueryRange,
-                    body: serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["app"]}),
-                    query: serde_json::json!({"kind":"range","start_date":"2025-01-02","end_date":"2025-01-03","bucket":"day","dimensions":["app"]}),
-                },
-                Self {
-                    op: Op::QueryUnclassified,
-                    body: serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03","group_by":"app"}),
-                    query: serde_json::json!({"kind":"unclassified","start_date":"2025-01-02","end_date":"2025-01-03","group_by":"app"}),
-                },
-                Self {
-                    op: Op::QuerySegmentDetail,
-                    body: serde_json::json!({"start_utc_ms":0,"end_utc_ms":1}),
-                    query: serde_json::json!({"kind":"segment_detail","start_utc_ms":0,"end_utc_ms":1,"app":null,"window_instance":null}),
-                },
-                Self {
-                    op: Op::QueryEntityDetail,
-                    body: serde_json::json!({"entity":{"kind":"app","id":1},"local_date":"2025-01-02"}),
-                    query: serde_json::json!({"kind":"entity_detail","entity":{"kind":"app","id":1},"local_date":"2025-01-02"}),
-                },
-                Self {
                     op: Op::RuleSetsTree,
                     body: serde_json::json!({"kind":"privacy"}),
                     query: serde_json::json!({"kind":"rule_sets_tree","rule_kind":"privacy"}),

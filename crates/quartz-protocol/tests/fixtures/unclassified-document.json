@@ -26,5 +26,5 @@
     }
   ],
   "versions": "version-token",
-  "next_cursor": null
+  "truncated": false
 }

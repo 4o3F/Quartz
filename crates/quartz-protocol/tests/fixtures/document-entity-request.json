@@ -7,6 +7,5 @@
   "reference_range": {
     "start_utc_ms": 0,
     "end_utc_ms": 604800000
-  },
-  "cursor": null
+  }
 }

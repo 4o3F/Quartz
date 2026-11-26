@@ -1,4 +1,4 @@
-//! Snapshot query orchestration around pure slicing, aggregation, and paging.
+//! Snapshot query orchestration around pure slicing, aggregation, and frame-bounded output.
 
 mod annotations;
 pub(crate) mod calendar;
@@ -30,14 +30,16 @@ use calendar::DayCalendar;
 use day_walker::DayWalker;
 use details::{EntityCalendar, EntityDetailAccumulator, EntitySelection, SegmentDetailProjection};
 use input::QueryRange;
-use paging::{PageBudget, PagePosition};
+use paging::JsonBytes;
 use pipeline::{DayAccumulator, DerivedSegment, Pipeline, QUERY_BATCH_ROWS, TimelineProjection};
 use quartz_protocol::{
-    CursorQuery, ErrorKind, QueryCursor, QueryDayRequest, QueryDayResponse,
-    QueryEntityDetailRequest, QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse,
-    QueryPendingAwayRequest, QueryPendingAwayResponse, QuerySegmentDetailRequest,
+    DAY_MAX_APPLICATIONS, DAY_MAX_DOCUMENTS, ErrorKind, FACTS_DEFAULT_LIMIT, FACTS_MAX_LIMIT,
+    PENDING_AWAY_MAX_RANGES, QueryDayRequest, QueryDayResponse, QueryEntityDetailRequest,
+    QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse, QueryPendingAwayRequest,
+    QueryPendingAwayResponse, QueryRangeResponse, QuerySegmentDetailRequest,
     QuerySegmentDetailResponse, QueryTimelineRequest, QueryTimelineResponse, QueryVersions,
-    SEGMENT_DETAIL_MAX_SPAN_MS,
+    SEGMENT_DETAIL_MAX_INTERVALS, SEGMENT_DETAIL_MAX_SPAN_MS, TIMELINE_MAX_SEGMENTS,
+    UNCLASSIFIED_MAX_ITEMS,
 };
 use range::{FirstWeekday, RangeAccumulator};
 use serde::Serialize;
@@ -51,6 +53,11 @@ pub(crate) const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits:
 /// A 366-logical-day reference can include a backward UTC offset change of up to one day.
 const MAX_DOCUMENT_REFERENCE_MS: i64 =
     MAX_QUERY_RANGE_MS + quartz_domain::capture::limits::UTC_DAY_MS;
+/// Reserve space for the enclosing JSON response envelope (`t`, `id`, `ok`, `body`).
+const QUERY_ENVELOPE_RESERVE_BYTES: usize = 256;
+/// Maximum encoded JSON body size for a single-frame query response (1 MiB frame ceiling).
+pub(crate) const QUERY_MAX_RESPONSE_BYTES: usize =
+    quartz_protocol::MAX_FRAME_LEN - QUERY_ENVELOPE_RESERVE_BYTES;
 
 #[derive(Debug, snafu::Snafu)]
 pub(crate) enum RunQueryError {
@@ -66,6 +73,8 @@ pub(crate) enum RunQueryError {
     InvalidUnclassifiedRequest,
     #[snafu(display("invalid range query dates or dimensions"))]
     InvalidRangeRequest,
+    #[snafu(display("invalid facts query row limit"))]
+    InvalidFactsRequest,
     #[snafu(display("could not resolve the effective first weekday"))]
     ReadFirstWeekdayError,
     #[snafu(display("invalid query cursor"))]
@@ -147,7 +156,8 @@ impl RunQueryError {
             | Self::InvalidDetailRange
             | Self::InvalidDocumentRef
             | Self::InvalidUnclassifiedRequest
-            | Self::InvalidRangeRequest => ErrorKind::BadRequest,
+            | Self::InvalidRangeRequest
+            | Self::InvalidFactsRequest => ErrorKind::BadRequest,
             Self::StaleDocumentRef => ErrorKind::StaleDocumentRef,
             Self::StaleCursor => ErrorKind::StaleCursor,
             Self::PageTooLarge => ErrorKind::PageTooLarge,
@@ -184,7 +194,7 @@ impl QueryRequest {
         op: quartz_protocol::Op,
         body: serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
-        let request = match op {
+        match op {
             quartz_protocol::Op::QueryAnnotations => {
                 serde_json::from_value(body).map(Self::Annotations)
             }
@@ -207,37 +217,6 @@ impl QueryRequest {
             _ => Err(<serde_json::Error as serde::de::Error>::custom(
                 "operation has no implemented query decoder",
             )),
-        }?;
-        if let Some(cursor) = request.cursor() {
-            cursor.validate_query(&request.parameters())?;
-        }
-        Ok(request)
-    }
-    fn cursor(&self) -> Option<&quartz_protocol::QueryCursor> {
-        match self {
-            Self::Annotations(request) => request.cursor.as_ref(),
-            Self::Facts(request) => request.cursor.as_ref(),
-            Self::Day(request) => request.cursor.as_ref(),
-            Self::Unclassified(request) => request.cursor.as_ref(),
-            Self::Range(request) => request.cursor.as_ref(),
-            Self::PendingAway(request) => request.cursor.as_ref(),
-            Self::Timeline(request) => request.cursor.as_ref(),
-            Self::SegmentDetail(request) => request.cursor.as_ref(),
-            Self::EntityDetail(request) => request.cursor.as_ref(),
-        }
-    }
-
-    fn parameters(&self) -> CursorQuery {
-        match self {
-            Self::Annotations(request) => CursorQuery::from(request),
-            Self::Facts(facts) => CursorQuery::from(facts),
-            Self::Day(day) => CursorQuery::from(day),
-            Self::Unclassified(request) => CursorQuery::from(request),
-            Self::Range(request) => CursorQuery::from(request),
-            Self::PendingAway(away) => CursorQuery::from(away),
-            Self::Timeline(timeline) => CursorQuery::from(timeline),
-            Self::SegmentDetail(detail) => CursorQuery::from(detail),
-            Self::EntityDetail(detail) => CursorQuery::from(detail),
         }
     }
 }
@@ -249,7 +228,7 @@ pub(crate) enum QueryResponse {
     Facts(QueryFactsResponse),
     Day(QueryDayResponse),
     Unclassified(quartz_protocol::QueryUnclassifiedResponse),
-    Range(quartz_protocol::QueryRangeResponse),
+    Range(QueryRangeResponse),
     PendingAway(QueryPendingAwayResponse),
     Timeline(QueryTimelineResponse),
     SegmentDetail(QuerySegmentDetailResponse),
@@ -257,8 +236,11 @@ pub(crate) enum QueryResponse {
 }
 #[derive(Debug)]
 enum Stage {
-    Annotations(Box<annotations::AnnotationPage>),
-    Facts(facts::OrderedFacts),
+    Annotations(Box<annotations::AnnotationRead>),
+    Facts {
+        ordered: facts::OrderedFacts,
+        limit: usize,
+    },
     FinalizeFacts(Box<facts::FinalizeFacts>),
     Read(Pipeline),
     Sweep(Pipeline),
@@ -279,25 +261,14 @@ enum Aggregation {
     SegmentDetail(SegmentDetailProjection),
     EntityDetail(EntityDetailAccumulator),
 }
-#[cfg(test)]
-#[derive(Debug, Default, PartialEq, Eq)]
-enum RangeTraversal {
-    #[default]
-    Page,
-    EntireRange,
-}
 #[derive(Debug)]
 pub(crate) struct QueryJob {
     snapshot: ReadSnapshot,
-    #[cfg(test)]
-    range_traversal: RangeTraversal,
     request: QueryRequest,
     range: QueryRange,
     reference_range: QueryRange,
     entity: Option<EntitySelection>,
     versions: QueryVersions,
-    parameters: CursorQuery,
-    position: PagePosition,
     calendar: Option<DayCalendar>,
     entity_calendar: Option<EntityCalendar>,
     scan_range: QueryRange,
@@ -340,15 +311,11 @@ impl QueryJob {
         match Self::prepare(&mut snapshot, &request, rules.hashes(), zone) {
             Ok(prepared) => Ok(Self {
                 snapshot,
-                #[cfg(test)]
-                range_traversal: RangeTraversal::Page,
                 range: prepared.range,
                 reference_range: prepared.reference_range,
                 entity: prepared.entity,
                 versions: prepared.versions,
                 range_accumulator: prepared.range_accumulator,
-                parameters: prepared.parameters,
-                position: prepared.position,
                 calendar: prepared.calendar,
                 entity_calendar: prepared.entity_calendar,
                 scan_range: prepared.scan_range,
@@ -359,10 +326,13 @@ impl QueryJob {
                     }
                     _ => None,
                 },
-                stage: if let Some(page) = prepared.annotations {
-                    Stage::Annotations(Box::new(page))
-                } else if matches!(request, QueryRequest::Facts(_)) {
-                    Stage::Facts(facts::OrderedFacts::default())
+                stage: if let Some(read) = prepared.annotations {
+                    Stage::Annotations(Box::new(read))
+                } else if let Some((after, limit)) = prepared.facts {
+                    Stage::Facts {
+                        ordered: facts::OrderedFacts::new(after),
+                        limit,
+                    }
                 } else {
                     Stage::Read(Pipeline::new(
                         prepared.scan_range,
@@ -387,26 +357,32 @@ impl QueryJob {
         rule_hashes: &quartz_domain::rules::registry::SnapshotHashes,
         zone: jiff::tz::TimeZone,
     ) -> Result<PreparedQuery, RunQueryError> {
-        if let Some(cursor) = request.cursor() {
-            cursor
-                .validate_query(&request.parameters())
-                .map_err(|_| RunQueryError::InvalidCursor)?;
-        }
+        let facts = match request {
+            QueryRequest::Facts(facts) => {
+                let limit = match facts.limit {
+                    None => FACTS_DEFAULT_LIMIT,
+                    Some(value) => {
+                        let value = usize::try_from(value)
+                            .map_err(|_| RunQueryError::InvalidFactsRequest)?;
+                        if value == 0 || value > FACTS_MAX_LIMIT {
+                            return Err(RunQueryError::InvalidFactsRequest);
+                        }
+                        value
+                    }
+                };
+                Some((facts.after, limit))
+            }
+            _ => None,
+        };
         snapshot.begin()?;
         let settings = snapshot.settings()?;
         let calendar = match request {
-            QueryRequest::Facts(_) | QueryRequest::Annotations(_) => None,
             QueryRequest::Day(day) => Some(DayCalendar::in_zone(
                 day.local_date,
                 settings.day_start_offset,
                 zone.clone(),
             )?),
-            QueryRequest::PendingAway(_) => None,
-            QueryRequest::Unclassified(_)
-            | QueryRequest::Range(_)
-            | QueryRequest::Timeline(_)
-            | QueryRequest::SegmentDetail(_)
-            | QueryRequest::EntityDetail(_) => None,
+            _ => None,
         };
         let entity_calendar = match request {
             QueryRequest::EntityDetail(detail) => Some(EntityCalendar::in_zone(
@@ -551,21 +527,25 @@ impl QueryJob {
             },
             _ => range,
         };
-        let versions = versions::VersionState {
-            days: snapshot
-                .versions(reference_range)?
-                .into_iter()
-                .map(|fact| (fact.key, fact.version))
-                .collect(),
-            settings,
-            rule_hashes: rule_hashes.clone(),
-            time_zone: zone.clone(),
-        }
-        .digest(reference_range)?;
-        let reference_versions = versions.clone();
-        let versions = match first_weekday {
-            Some(first) => first.bind_versions(&versions),
-            None => versions,
+        let (versions, reference_versions) = if facts.is_some() {
+            (QueryVersions(String::new()), QueryVersions(String::new()))
+        } else {
+            let base = versions::VersionState {
+                days: snapshot
+                    .versions(reference_range)?
+                    .into_iter()
+                    .map(|fact| (fact.key, fact.version))
+                    .collect(),
+                settings,
+                rule_hashes: rule_hashes.clone(),
+                time_zone: zone.clone(),
+            }
+            .digest(reference_range)?;
+            let bound = match first_weekday {
+                Some(first) => first.bind_versions(&base),
+                None => base.clone(),
+            };
+            (bound, base)
         };
         let entity = match request {
             QueryRequest::EntityDetail(detail) => Some(match &detail.entity {
@@ -586,45 +566,29 @@ impl QueryJob {
             }),
             _ => None,
         };
-        let parameters = request.parameters();
-        let cursor = request.cursor();
-        let position = if matches!(request, QueryRequest::Facts(_)) {
-            // Raw run endpoints and timed policies are included after the staged scan.
-            PagePosition::First
-        } else {
-            PagePosition::from_cursor(cursor, &versions, &parameters)?
-        };
         if let Some(accumulator) = &mut range_accumulator {
             let calendar = day_walker.as_ref().expect("range calendar");
             let reference = quartz_protocol::ReferenceRange {
                 start_utc_ms: reference_range.start,
                 end_utc_ms: reference_range.end,
             };
-            let response = quartz_protocol::QueryRangeResponse {
+            let response = QueryRangeResponse {
                 time_zone: calendar.time_zone.clone(),
                 day_start_offset_min: calendar.offset.minutes(),
-                reference_range: position.is_first().then_some(reference),
+                reference_range: Some(reference),
                 buckets: Vec::new(),
                 versions: versions.clone(),
-                next_cursor: None,
+                truncated: false,
             };
-            let budget = PageBudget::new(&response)?.with_cursor(&QueryCursor::new(
-                versions.clone(),
-                parameters.clone(),
-                usize::MAX,
-            ))?;
-            accumulator.start_page(response, budget, position, reference, reference_versions);
+            accumulator.start_output(response, reference, reference_versions);
         }
         let annotations = match request {
-            QueryRequest::Annotations(_) => Some(annotations::AnnotationPage::new(
-                versions.clone(),
-                parameters.clone(),
-                position,
-                request.cursor(),
-            )?),
+            QueryRequest::Annotations(_) => {
+                Some(annotations::AnnotationRead::new(versions.clone())?)
+            }
             _ => None,
         };
-        let categories = if annotations.is_some() {
+        let categories = if annotations.is_some() || facts.is_some() {
             Vec::new()
         } else {
             snapshot.categories()?
@@ -635,6 +599,7 @@ impl QueryJob {
         };
         Ok(PreparedQuery {
             annotations,
+            facts,
             scan_range,
             day_walker,
             range_accumulator,
@@ -643,15 +608,9 @@ impl QueryJob {
             reference_range,
             entity,
             versions,
-            parameters,
-            position,
             calendar,
             entity_calendar,
         })
-    }
-    #[cfg(test)]
-    pub(crate) fn scan_entire_range(&mut self) {
-        self.range_traversal = RangeTraversal::EntireRange;
     }
     /// The shell services capture writes between these bounded read/sweep turns.
     pub(crate) fn advance(&mut self) -> Result<Option<QueryResponse>, RunQueryError> {
@@ -663,34 +622,35 @@ impl QueryJob {
     ) -> Result<Option<QueryResponse>, RunQueryError> {
         let stage = std::mem::replace(&mut self.stage, Stage::Complete);
         match stage {
-            Stage::Annotations(mut page) => {
+            Stage::Annotations(mut read) => {
                 let response = timer.measure(QueryStage::Read, || {
-                    page.advance(&mut self.snapshot, self.range)
+                    read.advance(&mut self.snapshot, self.range)
                 })?;
                 match response {
                     Some(response) => Ok(Some(QueryResponse::Annotations(response))),
                     None => {
-                        self.stage = Stage::Annotations(page);
+                        self.stage = Stage::Annotations(read);
                         Ok(None)
                     }
                 }
             }
-            Stage::Facts(mut facts) => {
+            Stage::Facts { mut ordered, limit } => {
                 match timer.measure(QueryStage::Read, || {
                     self.snapshot.read_fact_batch(self.range)
                 })? {
                     Some(batch) => {
-                        facts.extend(batch);
-                        self.stage = Stage::Facts(facts);
+                        ordered.extend(batch);
+                        self.stage = Stage::Facts { ordered, limit };
                         Ok(None)
                     }
                     None => {
-                        self.stage = Stage::FinalizeFacts(Box::new(facts.finalize(&self.versions)));
+                        let finalizer =
+                            timer.measure(QueryStage::PageEncode, || ordered.finalize(limit))?;
+                        self.stage = Stage::FinalizeFacts(Box::new(finalizer));
                         Ok(None)
                     }
                 }
             }
-
             Stage::FinalizeFacts(mut finalizer) => {
                 if timer.measure(QueryStage::PageEncode, || finalizer.advance())?
                     == facts::FinalizeProgress::More
@@ -698,22 +658,7 @@ impl QueryJob {
                     self.stage = Stage::FinalizeFacts(finalizer);
                     return Ok(None);
                 }
-                let finalized = finalizer.finish();
-                self.versions = finalized.versions;
-                self.position = PagePosition::from_cursor(
-                    self.request.cursor(),
-                    &self.versions,
-                    &self.parameters,
-                )?;
-                timer
-                    .measure(QueryStage::PageEncode, || {
-                        self.page_response(QueryResponse::Facts(QueryFactsResponse {
-                            facts: finalized.records,
-                            versions: self.versions.clone(),
-                            next_cursor: None,
-                        }))
-                    })
-                    .map(Some)
+                Ok(Some(QueryResponse::Facts(finalizer.finish())))
             }
             Stage::Read(mut pipeline) => {
                 match timer.measure(QueryStage::Read, || {
@@ -832,20 +777,6 @@ impl QueryJob {
                         Aggregation::Range(mut groups) => {
                             timer
                                 .measure(QueryStage::Aggregate, || groups.next_day(walker.date))?;
-                            let page_is_full = groups.page_is_full();
-                            #[cfg(test)]
-                            let page_is_full =
-                                page_is_full && self.range_traversal == RangeTraversal::Page;
-                            if page_is_full {
-                                let response = timer.measure(QueryStage::Aggregate, || {
-                                    self.finish_aggregation(Aggregation::Range(groups))
-                                })?;
-                                return timer
-                                    .measure(QueryStage::PageEncode, || {
-                                        self.page_response(response)
-                                    })
-                                    .map(Some);
-                            }
                             self.range_accumulator = Some(groups);
                         }
                         _ => unreachable!("daily scan aggregation"),
@@ -858,7 +789,7 @@ impl QueryJob {
                 let response =
                     timer.measure(QueryStage::Aggregate, || self.finish_aggregation(output))?;
                 timer
-                    .measure(QueryStage::PageEncode, || self.page_response(response))
+                    .measure(QueryStage::PageEncode, || self.fit_response(response))
                     .map(Some)
             }
             Stage::Complete => Ok(None),
@@ -866,177 +797,180 @@ impl QueryJob {
     }
     fn finish_aggregation(&self, output: Aggregation) -> Result<QueryResponse, RunQueryError> {
         Ok(match output {
-            Aggregation::Range(groups) => {
-                let page = groups.finish()?;
-                let mut response = page.response;
-                response.next_cursor = page.next.map(|position| {
-                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
-                });
-                QueryResponse::Range(response)
-            }
+            Aggregation::Range(groups) => QueryResponse::Range(groups.finish()?),
             Aggregation::Unclassified(groups) => {
                 let calendar = self.day_walker.as_ref().expect("fold calendar");
                 let reference_range = quartz_protocol::ReferenceRange {
                     start_utc_ms: self.range.start,
                     end_utc_ms: self.range.end,
                 };
-                let mut response = quartz_protocol::QueryUnclassifiedResponse {
+                let mut groups = groups.finish();
+                let mut truncated = false;
+                if groups.len() > UNCLASSIFIED_MAX_ITEMS {
+                    groups.truncate(UNCLASSIFIED_MAX_ITEMS);
+                    truncated = true;
+                }
+                let items = groups
+                    .into_iter()
+                    .map(|group| group.into_item(reference_range, &self.versions))
+                    .collect::<Result<Vec<_>, _>>()?;
+                QueryResponse::Unclassified(quartz_protocol::QueryUnclassifiedResponse {
                     time_zone: calendar.time_zone.clone(),
                     day_start_offset_min: calendar.offset.minutes(),
-                    reference_range: self.reference_range(),
-                    items: Vec::new(),
+                    reference_range: Some(reference_range),
+                    items,
                     versions: self.versions.clone(),
-                    next_cursor: None,
-                };
-                let page = self.page_budget(&response)?.page_mapped(
-                    groups.finish(),
-                    self.position,
-                    |group| group.into_item(reference_range, &self.versions),
-                )?;
-                response.items = page.items;
-                response.next_cursor = page.next.map(|position| {
-                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
-                });
-                QueryResponse::Unclassified(response)
+                    truncated,
+                })
             }
             Aggregation::Day(day) => {
                 let aggregate = day.finish();
-                let first = self.position.is_first();
-                let mut response = QueryDayResponse {
-                    reference_range: self.reference_range(),
-                    documents: Vec::new(),
-                    metrics: first.then_some(aggregate.metrics),
-                    hours: first.then_some(aggregate.calendar.hours),
-                    applications: Vec::new(),
+                let mut truncated = false;
+                let mut applications = aggregate.ranking;
+                if applications.len() > DAY_MAX_APPLICATIONS {
+                    applications.truncate(DAY_MAX_APPLICATIONS);
+                    truncated = true;
+                }
+                let mut raw_documents = aggregate.documents;
+                if raw_documents.len() > DAY_MAX_DOCUMENTS {
+                    raw_documents.truncate(DAY_MAX_DOCUMENTS);
+                    truncated = true;
+                }
+                let documents = raw_documents
+                    .into_iter()
+                    .map(|entry| entry.into_rank(self.reference_range, &self.versions))
+                    .collect::<Result<Vec<_>, _>>()?;
+                QueryResponse::Day(QueryDayResponse {
+                    reference_range: Some(self.reference_range()),
+                    documents,
+                    metrics: aggregate.metrics,
+                    hours: aggregate.calendar.hours,
+                    applications,
                     versions: self.versions.clone(),
-                    next_cursor: None,
-                };
-                let page = self.page_budget(&response)?.lists_mapped(
-                    aggregate.ranking,
-                    aggregate.documents,
-                    self.position,
-                    |entry| entry.into_rank(self.reference_range, &self.versions),
-                )?;
-                response.applications = page.first;
-                response.documents = page.second;
-                response.next_cursor = page.next.map(|position| {
-                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
-                });
-                QueryResponse::Day(response)
+                    truncated,
+                })
             }
             Aggregation::PendingAway(away) => {
+                let mut ranges = away.finish();
+                let mut truncated = false;
+                if ranges.len() > PENDING_AWAY_MAX_RANGES {
+                    ranges.truncate(PENDING_AWAY_MAX_RANGES);
+                    truncated = true;
+                }
                 QueryResponse::PendingAway(QueryPendingAwayResponse {
-                    ranges: away.finish(),
+                    ranges,
                     versions: self.versions.clone(),
-                    next_cursor: None,
+                    truncated,
                 })
             }
             Aggregation::SegmentDetail(detail) => {
+                let mut intervals = detail.finish();
+                let mut truncated = false;
+                if intervals.len() > SEGMENT_DETAIL_MAX_INTERVALS {
+                    intervals.truncate(SEGMENT_DETAIL_MAX_INTERVALS);
+                    truncated = true;
+                }
+                let mut references = documents::PageDocumentReferences::new(
+                    quartz_protocol::ReferenceRange {
+                        start_utc_ms: self.range.start,
+                        end_utc_ms: self.range.end,
+                    },
+                    &self.versions,
+                );
+                for segment in &mut intervals {
+                    references.attach(segment)?;
+                }
                 QueryResponse::SegmentDetail(QuerySegmentDetailResponse {
-                    reference_range: self.reference_range(),
-                    intervals: detail.finish(),
+                    reference_range: Some(self.reference_range()),
+                    intervals,
                     versions: self.versions.clone(),
-                    next_cursor: None,
+                    truncated,
                 })
             }
             Aggregation::EntityDetail(detail) => {
-                QueryResponse::EntityDetail(detail.finish(self.versions.clone(), self.position))
+                QueryResponse::EntityDetail(detail.finish(self.versions.clone()))
             }
-            Aggregation::Timeline(projection) => QueryResponse::Timeline(QueryTimelineResponse {
-                reference_range: self.reference_range(),
-                segments: projection.into_segments(),
-                versions: self.versions.clone(),
-                next_cursor: None,
-            }),
+            Aggregation::Timeline(projection) => {
+                let mut segments = projection.into_segments();
+                let mut truncated = false;
+                if segments.len() > TIMELINE_MAX_SEGMENTS {
+                    segments.truncate(TIMELINE_MAX_SEGMENTS);
+                    truncated = true;
+                }
+                let mut references = documents::PageDocumentReferences::new(
+                    quartz_protocol::ReferenceRange {
+                        start_utc_ms: self.range.start,
+                        end_utc_ms: self.range.end,
+                    },
+                    &self.versions,
+                );
+                for segment in &mut segments {
+                    references.attach(segment)?;
+                }
+                QueryResponse::Timeline(QueryTimelineResponse {
+                    reference_range: Some(self.reference_range()),
+                    segments,
+                    versions: self.versions.clone(),
+                    truncated,
+                })
+            }
         })
     }
-    fn reference_range(&self) -> Option<quartz_protocol::ReferenceRange> {
-        self.position
-            .is_first()
-            .then_some(quartz_protocol::ReferenceRange {
-                start_utc_ms: self.reference_range.start,
-                end_utc_ms: self.reference_range.end,
-            })
-    }
-    fn page_budget(&self, response: &impl Serialize) -> Result<PageBudget, RunQueryError> {
-        PageBudget::new(response)?.with_cursor(&QueryCursor::new(
-            self.versions.clone(),
-            self.parameters.clone(),
-            usize::MAX,
-        ))
-    }
-    fn page_response(&self, mut response: QueryResponse) -> Result<QueryResponse, RunQueryError> {
-        match &mut response {
-            QueryResponse::Facts(facts) => {
-                let items = std::mem::take(&mut facts.facts);
-                let page = self.page_budget(facts)?.page(items, self.position)?;
-                facts.facts = page.items;
-                facts.next_cursor = page.next.map(|position| {
-                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
-                });
-            }
-
-            QueryResponse::Preview(_)
-            | QueryResponse::Annotations(_)
-            | QueryResponse::Day(_)
-            | QueryResponse::Unclassified(_)
-            | QueryResponse::Range(_) => {}
-            QueryResponse::PendingAway(away) => {
-                let items = std::mem::take(&mut away.ranges);
-                let page = self.page_budget(away)?.page(items, self.position)?;
-                away.ranges = page.items;
-                away.next_cursor = page.next.map(|position| {
-                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
-                });
-            }
-            QueryResponse::SegmentDetail(detail) => {
-                let items = std::mem::take(&mut detail.intervals);
-                let mut references = documents::PageDocumentReferences::new(
-                    quartz_protocol::ReferenceRange {
-                        start_utc_ms: self.range.start,
-                        end_utc_ms: self.range.end,
-                    },
-                    &self.versions,
-                );
-                let page =
-                    self.page_budget(detail)?
-                        .page_with(items, self.position, |segment| references.attach(segment))?;
-                detail.intervals = page.items;
-                detail.next_cursor = page.next.map(|position| {
-                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
-                });
-            }
-            QueryResponse::EntityDetail(detail) => {
-                let items = std::mem::take(&mut detail.rules);
-                let extraction = std::mem::take(&mut detail.extraction);
-                let page = self
-                    .page_budget(detail)?
-                    .lists(items, extraction, self.position)?;
-                detail.rules = page.first;
-                detail.extraction = page.second;
-                detail.next_cursor = page.next.map(|position| {
-                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
-                });
-            }
-            QueryResponse::Timeline(timeline) => {
-                let items = std::mem::take(&mut timeline.segments);
-                let mut references = documents::PageDocumentReferences::new(
-                    quartz_protocol::ReferenceRange {
-                        start_utc_ms: self.range.start,
-                        end_utc_ms: self.range.end,
-                    },
-                    &self.versions,
-                );
-                let page =
-                    self.page_budget(timeline)?
-                        .page_with(items, self.position, |segment| references.attach(segment))?;
-                timeline.segments = page.items;
-                timeline.next_cursor = page.next.map(|position| {
-                    QueryCursor::new(self.versions.clone(), self.parameters.clone(), position)
-                });
-            }
+    fn reference_range(&self) -> quartz_protocol::ReferenceRange {
+        quartz_protocol::ReferenceRange {
+            start_utc_ms: self.reference_range.start,
+            end_utc_ms: self.reference_range.end,
         }
-        Ok(response)
+    }
+    fn fit_response(&self, response: QueryResponse) -> Result<QueryResponse, RunQueryError> {
+        Ok(match response {
+            QueryResponse::Preview(_) | QueryResponse::Annotations(_) | QueryResponse::Facts(_) => {
+                response
+            }
+            QueryResponse::Day(day) => QueryResponse::Day(fit_two_lists(
+                day,
+                QUERY_MAX_RESPONSE_BYTES,
+                |r| &mut r.applications,
+                |r| &mut r.documents,
+                |r| r.truncated = true,
+            )?),
+            QueryResponse::Timeline(timeline) => QueryResponse::Timeline(fit_single_list(
+                timeline,
+                QUERY_MAX_RESPONSE_BYTES,
+                |r| &mut r.segments,
+                |r| r.truncated = true,
+            )?),
+            QueryResponse::SegmentDetail(detail) => QueryResponse::SegmentDetail(fit_single_list(
+                detail,
+                QUERY_MAX_RESPONSE_BYTES,
+                |r| &mut r.intervals,
+                |r| r.truncated = true,
+            )?),
+            QueryResponse::EntityDetail(detail) => QueryResponse::EntityDetail(fit_two_lists(
+                detail,
+                QUERY_MAX_RESPONSE_BYTES,
+                |r| &mut r.rules,
+                |r| &mut r.extraction,
+                |r| r.truncated = true,
+            )?),
+            QueryResponse::Range(range) => {
+                QueryResponse::Range(fit_range_response(range, QUERY_MAX_RESPONSE_BYTES)?)
+            }
+            QueryResponse::Unclassified(unclassified) => {
+                QueryResponse::Unclassified(fit_single_list(
+                    unclassified,
+                    QUERY_MAX_RESPONSE_BYTES,
+                    |r| &mut r.items,
+                    |r| r.truncated = true,
+                )?)
+            }
+            QueryResponse::PendingAway(away) => QueryResponse::PendingAway(fit_single_list(
+                away,
+                QUERY_MAX_RESPONSE_BYTES,
+                |r| &mut r.ranges,
+                |r| r.truncated = true,
+            )?),
+        })
     }
     pub(crate) fn finish(self) -> Result<ReadOnlyStore, RunQueryError> {
         Ok(self.snapshot.finish()?)
@@ -1056,6 +990,161 @@ impl QueryJob {
         }
     }
 }
+
+fn fit_single_list<R, T>(
+    mut response: R,
+    max_bytes: usize,
+    list: impl Fn(&mut R) -> &mut Vec<T>,
+    set_truncated: impl Fn(&mut R),
+) -> Result<R, RunQueryError>
+where
+    R: Serialize,
+    T: Serialize,
+{
+    if JsonBytes::measure(&response)? <= max_bytes {
+        return Ok(response);
+    }
+    let items = std::mem::take(list(&mut response));
+    set_truncated(&mut response);
+    let mut used = JsonBytes::measure(&response)?;
+    if used <= max_bytes {
+        let mut kept = Vec::new();
+        for item in items {
+            let item_bytes = JsonBytes::measure(&item)? + 1;
+            if used.saturating_add(item_bytes) > max_bytes {
+                break;
+            }
+            used += item_bytes;
+            kept.push(item);
+        }
+        *list(&mut response) = kept;
+    }
+    Ok(response)
+}
+
+fn fit_two_lists<R, A, B>(
+    mut response: R,
+    max_bytes: usize,
+    first: impl Fn(&mut R) -> &mut Vec<A>,
+    second: impl Fn(&mut R) -> &mut Vec<B>,
+    set_truncated: impl Fn(&mut R),
+) -> Result<R, RunQueryError>
+where
+    R: Serialize,
+    A: Serialize,
+    B: Serialize,
+{
+    if JsonBytes::measure(&response)? <= max_bytes {
+        return Ok(response);
+    }
+    set_truncated(&mut response);
+    loop {
+        if JsonBytes::measure(&response)? <= max_bytes {
+            return Ok(response);
+        }
+        let first_len = first(&mut response).len();
+        let second_len = second(&mut response).len();
+        if first_len == 0 && second_len == 0 {
+            return Ok(response);
+        }
+        if first_len >= second_len {
+            let target = if first_len > second_len {
+                second_len
+            } else {
+                first_len / 2
+            };
+            let removed = first(&mut response).split_off(target);
+            let mut used = JsonBytes::measure(&response)?;
+            if used <= max_bytes {
+                let mut extra = Vec::new();
+                for item in removed {
+                    let item_bytes = JsonBytes::measure(&item)? + 1;
+                    if used.saturating_add(item_bytes) > max_bytes {
+                        break;
+                    }
+                    used += item_bytes;
+                    extra.push(item);
+                }
+                first(&mut response).extend(extra);
+                while JsonBytes::measure(&response)? > max_bytes {
+                    if first(&mut response).pop().is_none() {
+                        break;
+                    }
+                }
+                return Ok(response);
+            }
+        } else {
+            let target = first_len;
+            let removed = second(&mut response).split_off(target);
+            let mut used = JsonBytes::measure(&response)?;
+            if used <= max_bytes {
+                let mut extra = Vec::new();
+                for item in removed {
+                    let item_bytes = JsonBytes::measure(&item)? + 1;
+                    if used.saturating_add(item_bytes) > max_bytes {
+                        break;
+                    }
+                    used += item_bytes;
+                    extra.push(item);
+                }
+                second(&mut response).extend(extra);
+                while JsonBytes::measure(&response)? > max_bytes {
+                    if second(&mut response).pop().is_none() {
+                        break;
+                    }
+                }
+                return Ok(response);
+            }
+        }
+    }
+}
+
+fn fit_range_response(
+    mut response: QueryRangeResponse,
+    max_bytes: usize,
+) -> Result<QueryRangeResponse, RunQueryError> {
+    if JsonBytes::measure(&response)? <= max_bytes {
+        return Ok(response);
+    }
+    response.truncated = true;
+    let mut max_len = response
+        .buckets
+        .iter()
+        .map(|bucket| bucket.groups.len())
+        .max()
+        .unwrap_or(0);
+    while max_len > 0 {
+        let next_cap = max_len / 2;
+        let mut saved = Vec::new();
+        for (index, bucket) in response.buckets.iter_mut().enumerate() {
+            if bucket.groups.len() > next_cap {
+                saved.push((index, bucket.groups.split_off(next_cap)));
+            }
+        }
+        let mut used = JsonBytes::measure(&response)?;
+        if used <= max_bytes {
+            'restore: for (index, groups) in saved {
+                for group in groups {
+                    let bytes = JsonBytes::measure(&group)? + 1;
+                    if used.saturating_add(bytes) > max_bytes {
+                        break 'restore;
+                    }
+                    used += bytes;
+                    response.buckets[index].groups.push(group);
+                }
+            }
+            return Ok(response);
+        }
+        max_len = next_cap;
+    }
+    fit_single_list(
+        response,
+        max_bytes,
+        |r| &mut r.buckets,
+        |r| r.truncated = true,
+    )
+}
+
 #[derive(Debug)]
 pub(crate) struct CompletedQuery {
     pub response: QueryResponse,
@@ -1065,7 +1154,8 @@ pub(crate) struct CompletedQuery {
 
 #[derive(Debug)]
 struct PreparedQuery {
-    annotations: Option<annotations::AnnotationPage>,
+    annotations: Option<annotations::AnnotationRead>,
+    facts: Option<(Option<quartz_protocol::facts::FactsCursor>, usize)>,
     scan_range: QueryRange,
     day_walker: Option<DayWalker>,
     range_accumulator: Option<RangeAccumulator>,
@@ -1074,8 +1164,6 @@ struct PreparedQuery {
     reference_range: QueryRange,
     entity: Option<EntitySelection>,
     versions: QueryVersions,
-    parameters: CursorQuery,
-    position: PagePosition,
     calendar: Option<DayCalendar>,
     entity_calendar: Option<EntityCalendar>,
 }

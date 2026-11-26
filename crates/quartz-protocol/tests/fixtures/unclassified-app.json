@@ -24,15 +24,5 @@
     }
   ],
   "versions": "version-token",
-  "next_cursor": {
-    "versions": "version-token",
-    "query": {
-      "kind": "unclassified",
-      "start_date": "2025-01-02",
-      "end_date": "2025-01-03",
-      "group_by": "app",
-      "search": "Ｅｄｉｔｏｒ"
-    },
-    "position": 1
-  }
+  "truncated": false
 }

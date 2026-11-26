@@ -87,7 +87,7 @@ impl Fixture {
     fn day_category_totals(day: &wire::QueryDayResponse) -> Vec<wire::PreviewCategoryRank> {
         let mut by_id: BTreeMap<Option<wire::CategoryId>, wire::PreviewCategoryRank> =
             BTreeMap::new();
-        for hour in day.hours.as_ref().expect("day hours") {
+        for hour in &day.hours {
             for bucket in &hour.categories {
                 if bucket.duration_ms > 0 {
                     by_id
@@ -141,16 +141,9 @@ fn production_and_draft_totals_equal_query_day() {
     let response = fixture.run(body).expect("preview");
     assert_eq!(
         response.totals.before.active_ms,
-        before_day
-            .metrics
-            .as_ref()
-            .expect("before metrics")
-            .active_ms
+        before_day.metrics.active_ms
     );
-    assert_eq!(
-        response.totals.after.active_ms,
-        after_day.metrics.as_ref().expect("after metrics").active_ms
-    );
+    assert_eq!(response.totals.after.active_ms, after_day.metrics.active_ms);
     assert_eq!(
         response.totals.before.categories,
         Fixture::day_category_totals(&before_day)

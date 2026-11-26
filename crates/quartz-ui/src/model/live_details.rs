@@ -1,4 +1,4 @@
-//! Typed sidebar content; protocol pages are consumed during mapping.
+//! Typed sidebar content mapped from single-response detail queries.
 use super::{BuiltinCategory, CategoryColor, CategoryName, PaletteSlot};
 use crate::link::{DetailData, DetailRequest, UtcRange};
 use quartz_protocol::{self as wire, ClassificationRuleId};
@@ -276,25 +276,23 @@ mod tests {
             let rule: ClassificationRuleId = "user.classification/editor@2".parse().expect("rule");
             let first = wire::QueryEntityDetailResponse {
                 extraction: Vec::new(),
-                daily: Some(
-                    (0..wire::ENTITY_DETAIL_DAYS)
-                        .map(|index| wire::EntityDailyDuration {
-                            local_date: date
-                                .checked_sub(
-                                    jiff::Span::new().days(
-                                        i64::try_from(wire::ENTITY_DETAIL_DAYS - index - 1)
-                                            .expect("seven days"),
-                                    ),
-                                )
-                                .expect("daily date"),
-                            active_ms: 1000,
-                        })
-                        .collect(),
-                ),
-                titles: Some(vec![wire::EntityTitleDuration {
+                daily: (0..wire::ENTITY_DETAIL_DAYS)
+                    .map(|index| wire::EntityDailyDuration {
+                        local_date: date
+                            .checked_sub(
+                                jiff::Span::new().days(
+                                    i64::try_from(wire::ENTITY_DETAIL_DAYS - index - 1)
+                                        .expect("seven days"),
+                                ),
+                            )
+                            .expect("daily date"),
+                        active_ms: 1000,
+                    })
+                    .collect(),
+                titles: vec![wire::EntityTitleDuration {
                     title: "retained Full title".into(),
                     duration_ms: 600,
-                }]),
+                }],
                 rules: vec![wire::EntityClassificationRule {
                     rule: rule.clone(),
                     label: Some("Chosen rule".into()),
@@ -302,7 +300,7 @@ mod tests {
                     category: wire::CategoryRef::Unclassified,
                 }],
                 versions: wire::QueryVersions("entity".into()),
-                next_cursor: None,
+                truncated: false,
             };
             let first: wire::QueryEntityDetailResponse =
                 serde_json::from_value(serde_json::to_value(first).expect("entity JSON"))
@@ -329,7 +327,7 @@ mod tests {
                     title: Some("retained Full title".into()),
                 }],
                 versions: wire::QueryVersions("range".into()),
-                next_cursor: None,
+                truncated: false,
             };
             let segments: wire::QuerySegmentDetailResponse =
                 serde_json::from_value(serde_json::to_value(segments).expect("segment JSON"))
@@ -349,8 +347,8 @@ mod tests {
                 intervals: segments.intervals,
                 entities: vec![EntityData {
                     app: wire::ApplicationId(3),
-                    daily: first.daily.expect("first-page daily"),
-                    titles: first.titles.expect("first-page titles"),
+                    daily: first.daily,
+                    titles: first.titles,
                     rules: first.rules,
                 }],
             }

@@ -6,10 +6,10 @@ use crate::{
 };
 use quartz_i18n::Language;
 use quartz_protocol::{
-    self as wire, ApplicationId, ApplicationRef, CategoryRef, CategorySource, CursorQuery,
-    DetailEntity, EntityClassificationRule, EntityDailyDuration, QueryCursor,
-    QueryEntityDetailRequest, QueryEntityDetailResponse, QuerySegmentDetailRequest,
-    QuerySegmentDetailResponse, QueryVersions, TimelineSegment,
+    self as wire, ApplicationId, ApplicationRef, CategoryRef, CategorySource, DetailEntity,
+    EntityClassificationRule, EntityDailyDuration, QueryEntityDetailRequest,
+    QueryEntityDetailResponse, QuerySegmentDetailRequest, QuerySegmentDetailResponse,
+    QueryVersions, TimelineSegment,
 };
 
 const QUIET_PERIOD: Duration = Duration::from_millis(25);
@@ -17,11 +17,6 @@ struct DetailHarness {
     ui: Harness,
     core: Core,
     date: wire::LocalDate,
-}
-#[derive(Clone, Copy)]
-enum Paging {
-    Single,
-    Multiple,
 }
 impl DetailHarness {
     async fn start() -> Self {
@@ -96,11 +91,10 @@ impl DetailHarness {
             title: Some("retained title".into()),
         }
     }
-    async fn entity(&mut self, first: Request, paging: Paging) {
+    async fn entity(&mut self, request: Request) {
         let query: QueryEntityDetailRequest =
-            serde_json::from_value(first.body.clone()).expect("entity parameters");
+            serde_json::from_value(request.body.clone()).expect("entity parameters");
         assert_eq!(query.local_date, self.date);
-        let version = QueryVersions("entity-v1".into());
         let daily = (0..wire::ENTITY_DETAIL_DAYS)
             .map(|index| EntityDailyDuration {
                 local_date: self
@@ -112,51 +106,26 @@ impl DetailHarness {
                 active_ms: 1000,
             })
             .collect();
-        let cursor = matches!(paging, Paging::Multiple)
-            .then(|| QueryCursor::new(version.clone(), CursorQuery::from(&query), 1));
+        let mut second_rule = Self::rule();
+        second_rule.rule = "builtin.classification/learning@2"
+            .parse()
+            .expect("another rule");
+        second_rule.label = None;
+        second_rule.label_key = Some("category.builtin.learning".into());
         self.core
             .ok(
-                first,
+                request,
                 serde_json::to_value(QueryEntityDetailResponse {
                     extraction: Vec::new(),
-                    daily: Some(daily),
-                    titles: Some(Vec::new()),
-                    rules: vec![Self::rule()],
-                    versions: version.clone(),
-                    next_cursor: cursor.clone(),
+                    daily,
+                    titles: Vec::new(),
+                    rules: vec![Self::rule(), second_rule],
+                    versions: QueryVersions("entity-v1".into()),
+                    truncated: false,
                 })
-                .expect("first entity JSON"),
+                .expect("entity JSON"),
             )
             .await;
-        if let Some(cursor) = cursor {
-            let next = self.core.request(Op::QueryEntityDetail).await;
-            assert_eq!(
-                serde_json::from_value::<QueryEntityDetailRequest>(next.body.clone())
-                    .expect("entity cursor")
-                    .cursor,
-                Some(cursor)
-            );
-            let mut rule = Self::rule();
-            rule.rule = "builtin.classification/learning@2"
-                .parse()
-                .expect("another rule");
-            rule.label = None;
-            rule.label_key = Some("category.builtin.learning".into());
-            self.core
-                .ok(
-                    next,
-                    serde_json::to_value(QueryEntityDetailResponse {
-                        extraction: Vec::new(),
-                        daily: None,
-                        titles: None,
-                        rules: vec![rule],
-                        versions: version,
-                        next_cursor: None,
-                    })
-                    .expect("continuation entity JSON"),
-                )
-                .await;
-        }
     }
     async fn loaded(&mut self, expected: DetailGeneration) -> Result<DetailData, LoadDataError> {
         loop {
@@ -173,7 +142,7 @@ impl DetailHarness {
     }
 }
 #[tokio::test]
-async fn paged_intervals_and_entity_rules_map_labels_and_absent_titles() {
+async fn single_response_intervals_and_entity_rules_map_labels_and_absent_titles() {
     let mut harness = DetailHarness::start().await;
     let generation = DetailGeneration::default().next();
     let instance = wire::WindowInstanceRef::from_stored_id(wire::facts::WindowInstanceId(33));
@@ -192,33 +161,6 @@ async fn paged_intervals_and_entity_rules_map_labels_and_absent_titles() {
         serde_json::from_value(query.body.clone()).expect("segment parameters");
     assert_eq!(parameters.app, Some(ApplicationId(3)));
     assert_eq!(parameters.window_instance, Some(instance));
-    let version = QueryVersions("segments-v1".into());
-    let cursor = QueryCursor::new(version.clone(), CursorQuery::from(&parameters), 1);
-    harness
-        .core
-        .ok(
-            query,
-            serde_json::to_value(QuerySegmentDetailResponse {
-                reference_range: None,
-                intervals: vec![DetailHarness::interval(
-                    CategorySource::Rule {
-                        rule: DetailHarness::rule().rule,
-                    },
-                    0,
-                )],
-                versions: version.clone(),
-                next_cursor: Some(cursor.clone()),
-            })
-            .expect("segment first page"),
-        )
-        .await;
-    let next = harness.core.request(Op::QuerySegmentDetail).await;
-    assert_eq!(
-        serde_json::from_value::<QuerySegmentDetailRequest>(next.body.clone())
-            .expect("segment cursor")
-            .cursor,
-        Some(cursor)
-    );
     let annotation = wire::AnnotationId(
         "abcdef00-0000-4000-8000-000000000001"
             .parse()
@@ -232,18 +174,27 @@ async fn paged_intervals_and_entity_rules_map_labels_and_absent_titles() {
     harness
         .core
         .ok(
-            next,
+            query,
             serde_json::to_value(QuerySegmentDetailResponse {
                 reference_range: None,
-                intervals: vec![manual, unclassified],
-                versions: version,
-                next_cursor: None,
+                intervals: vec![
+                    DetailHarness::interval(
+                        CategorySource::Rule {
+                            rule: DetailHarness::rule().rule,
+                        },
+                        0,
+                    ),
+                    manual,
+                    unclassified,
+                ],
+                versions: QueryVersions("segments-v1".into()),
+                truncated: false,
             })
-            .expect("segment continuation"),
+            .expect("segment response"),
         )
         .await;
     let entity = harness.core.request(Op::QueryEntityDetail).await;
-    harness.entity(entity, Paging::Multiple).await;
+    harness.entity(entity).await;
     let mapped =
         LiveDetails::from_protocol(harness.loaded(generation).await.expect("loaded detail"))
             .expect("mapped detail");
@@ -267,7 +218,7 @@ async fn paged_intervals_and_entity_rules_map_labels_and_absent_titles() {
     assert!(entity.titles.is_empty());
     assert_eq!(entity.rules.len(), 2);
     assert_eq!(
-        formatter.rule_label(&entity.rules.last().expect("continued rule").label),
+        formatter.rule_label(&entity.rules.last().expect("second rule").label),
         "学习"
     );
     harness.ui.stop().await;
@@ -298,7 +249,7 @@ async fn ranking_selection_requests_only_entity_detail_and_cancels_the_older_loa
             id: ApplicationId(4)
         }
     );
-    harness.entity(query, Paging::Single).await;
+    harness.entity(query).await;
     assert_eq!(
         harness
             .loaded(current)
@@ -316,47 +267,6 @@ async fn ranking_selection_requests_only_entity_detail_and_cancels_the_older_loa
         "cancelled selection has no completion"
     );
     harness.ui.stop().await;
-}
-#[tokio::test]
-async fn stale_detail_cursor_restarts_the_whole_selection_and_exhaustion_is_typed() {
-    enum Outcome {
-        Success,
-        Exhaustion,
-    }
-    for outcome in [Outcome::Success, Outcome::Exhaustion] {
-        let mut harness = DetailHarness::start().await;
-        let generation = DetailGeneration::default().next();
-        harness
-            .select(DetailTarget::App(ApplicationId(3)), generation)
-            .await;
-        let attempts = match outcome {
-            Outcome::Success => 1,
-            Outcome::Exhaustion => super::super::day::MAX_STALE_RESTARTS + 1,
-        };
-        for _ in 0..attempts {
-            let query = harness.core.request(Op::QueryEntityDetail).await;
-            harness
-                .core
-                .reject(query, wire::ErrorKind::StaleCursor)
-                .await;
-        }
-        match outcome {
-            Outcome::Success => {
-                let query = harness.core.request(Op::QueryEntityDetail).await;
-                harness.entity(query, Paging::Single).await;
-                harness.loaded(generation).await.expect("restart succeeds");
-            }
-            Outcome::Exhaustion => assert_eq!(
-                harness
-                    .loaded(generation)
-                    .await
-                    .expect_err("bounded failure")
-                    .code(),
-                LoadDataErrorCode::Local(LocalFailureCode::StaleExhausted)
-            ),
-        }
-        harness.ui.stop().await;
-    }
 }
 #[tokio::test]
 async fn day_events_refresh_the_open_panel_once_while_a_load_is_in_flight() {
@@ -388,10 +298,10 @@ async fn day_events_refresh_the_open_panel_once_while_a_load_is_in_flight() {
             )
             .await;
     }
-    harness.entity(first, Paging::Single).await;
+    harness.entity(first).await;
     harness.loaded(generation).await.expect("first detail");
     let next = harness.core.request(Op::QueryEntityDetail).await;
-    harness.entity(next, Paging::Single).await;
+    harness.entity(next).await;
     harness.loaded(generation).await.expect("coalesced refresh");
     assert!(
         tokio::time::timeout(QUIET_PERIOD, harness.core.peer.receive())
@@ -408,7 +318,7 @@ async fn day_events_refresh_the_open_panel_once_while_a_load_is_in_flight() {
     harness.ui.stop().await;
 }
 #[tokio::test]
-async fn changed_segment_page_version_restarts_and_an_empty_range_stays_empty() {
+async fn empty_segment_range_stays_empty_without_entity_queries() {
     let mut harness = DetailHarness::start().await;
     let generation = DetailGeneration::default().next();
     harness
@@ -426,53 +336,17 @@ async fn changed_segment_page_version_restarts_and_an_empty_range_stays_empty() 
         serde_json::from_value(first.body.clone()).expect("segment request");
     assert!(query.app.is_none());
     assert!(query.window_instance.is_none());
-    let version = QueryVersions("old".into());
-    let cursor = QueryCursor::new(version.clone(), CursorQuery::from(&query), 1);
     harness
         .core
         .ok(
             first,
             serde_json::to_value(QuerySegmentDetailResponse {
                 reference_range: None,
-                intervals: vec![DetailHarness::interval(CategorySource::Unclassified, 0)],
-                versions: version,
-                next_cursor: Some(cursor),
-            })
-            .expect("old partial data"),
-        )
-        .await;
-    let next = harness.core.request(Op::QuerySegmentDetail).await;
-    harness
-        .core
-        .ok(
-            next,
-            serde_json::to_value(QuerySegmentDetailResponse {
-                reference_range: None,
                 intervals: Vec::new(),
                 versions: QueryVersions("new".into()),
-                next_cursor: None,
+                truncated: false,
             })
-            .expect("changed page"),
-        )
-        .await;
-    let restart = harness.core.request(Op::QuerySegmentDetail).await;
-    assert!(
-        serde_json::from_value::<QuerySegmentDetailRequest>(restart.body.clone())
-            .expect("restart query")
-            .cursor
-            .is_none()
-    );
-    harness
-        .core
-        .ok(
-            restart,
-            serde_json::to_value(QuerySegmentDetailResponse {
-                reference_range: None,
-                intervals: Vec::new(),
-                versions: QueryVersions("new".into()),
-                next_cursor: None,
-            })
-            .expect("empty restarted range"),
+            .expect("empty segment range"),
         )
         .await;
     let data = harness.loaded(generation).await.expect("fresh detail");
@@ -485,7 +359,7 @@ async fn changed_segment_page_version_restarts_and_an_empty_range_stays_empty() 
         tokio::time::timeout(QUIET_PERIOD, harness.core.peer.receive())
             .await
             .is_err(),
-        "discarded app rows do not trigger entity queries"
+        "empty range does not trigger entity queries"
     );
     harness.ui.stop().await;
 }
@@ -574,7 +448,7 @@ async fn busy_detail_is_a_typed_failure_until_an_explicit_retry() {
         .select(DetailTarget::App(ApplicationId(3)), generation.next())
         .await;
     let retry = harness.core.request(Op::QueryEntityDetail).await;
-    harness.entity(retry, Paging::Single).await;
+    harness.entity(retry).await;
     harness
         .loaded(generation.next())
         .await

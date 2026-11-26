@@ -10,12 +10,11 @@ use diesel::{
     OptionalExtension, QueryDsl, RunQueryDsl, SelectableHelper,
 };
 use quartz_domain::facts::QueryRange;
-use quartz_protocol::{AnnotationCategory, AnnotationId, AnnotationText, SavedAnnotation};
+use quartz_protocol::{AnnotationCategory, AnnotationId, SavedAnnotation};
 
 #[derive(Debug, Default)]
 pub(crate) struct AnnotationScan {
     after: Option<AnnotationOrder>,
-    resume: Option<quartz_protocol::AnnotationResume>,
 }
 
 #[derive(Debug)]
@@ -25,14 +24,6 @@ struct AnnotationOrder {
     uuid: String,
 }
 
-impl AnnotationScan {
-    pub(crate) fn resume(resume: Option<quartz_protocol::AnnotationResume>) -> Self {
-        Self {
-            after: None,
-            resume,
-        }
-    }
-}
 #[derive(diesel::Queryable)]
 struct SavedAnnotationRow {
     annotation: AnnotationsRow,
@@ -50,12 +41,6 @@ impl ReadSnapshot {
             .filter(annotations::start_utc_ms.lt(range.end))
             .filter(annotations::end_utc_ms.gt(range.start))
             .into_boxed();
-        if let Some(resume) = scan.resume.take() {
-            query = query
-                .filter(annotations::uuid.eq(resume.uuid.0.to_string()))
-                .filter(annotations::start_utc_ms.eq(resume.start_utc_ms))
-                .filter(annotations::end_utc_ms.eq(resume.end_utc_ms));
-        }
         if let Some(after) = &scan.after {
             query = query.filter(
                 annotations::start_utc_ms
@@ -111,8 +96,8 @@ impl ReadSnapshot {
             end_utc_ms: row.end_utc_ms,
             category,
             label_preset: row.label_preset.map(Into::into),
-            label: row.label.map(AnnotationText::Complete),
-            note: row.note.map(AnnotationText::Complete),
+            label: row.label,
+            note: row.note,
             created_utc_ms: row.created_utc_ms,
             updated_utc_ms: row.updated_utc_ms,
         }))

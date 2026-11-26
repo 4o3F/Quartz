@@ -65,69 +65,38 @@ impl Link {
         app: ApplicationId,
         date: LocalDate,
     ) -> Result<EntityData, LoadDataError> {
-        let mut query = QueryEntityDetailRequest {
-            reference_range: None,
-            entity: DetailEntity::App { id: app },
-            local_date: date,
-            cursor: None,
-        };
-        let first = self.request(query.clone()).await?;
-        let mut data = EntityData {
+        let response = self
+            .request(QueryEntityDetailRequest {
+                reference_range: None,
+                entity: DetailEntity::App { id: app },
+                local_date: date,
+            })
+            .await?;
+        Ok(EntityData {
             app,
-            daily: first.daily.ok_or(LoadDataError::InvalidData)?,
-            titles: first.titles.ok_or(LoadDataError::InvalidData)?,
-            rules: first.rules,
-        };
-        let versions = first.versions;
-        query.cursor = first.next_cursor;
-        while query.cursor.is_some() {
-            let page = self.request(query.clone()).await?;
-            if page.versions != versions {
-                return Err(Self::stale_day());
-            }
-            if page.next_cursor == query.cursor || page.daily.is_some() || page.titles.is_some() {
-                return Err(LoadDataError::InvalidData);
-            }
-            data.rules.extend(page.rules);
-            query.cursor = page.next_cursor;
-        }
-        Ok(data)
+            daily: response.daily,
+            titles: response.titles,
+            rules: response.rules,
+        })
     }
-    async fn details_once(&self, request: DetailRequest) -> Result<DetailData, LoadDataError> {
-        let mut intervals = Vec::new();
-        if let DetailTarget::Segment {
-            range,
-            app,
-            window_instance,
-        } = request.target
-        {
-            let mut query = QuerySegmentDetailRequest {
-                start_utc_ms: range.start,
-                end_utc_ms: range.end,
+    async fn query_details(&self, request: DetailRequest) -> Result<DetailData, LoadDataError> {
+        let intervals = match request.target {
+            DetailTarget::Segment {
+                range,
                 app,
                 window_instance,
-                cursor: None,
-            };
-            let mut versions = None;
-            loop {
-                let page = self.request(query.clone()).await?;
-                if versions
-                    .as_ref()
-                    .is_some_and(|version| *version != page.versions)
-                {
-                    return Err(Self::stale_day());
-                }
-                versions = Some(page.versions);
-                intervals.extend(page.intervals);
-                if page.next_cursor.is_none() {
-                    break;
-                }
-                if page.next_cursor == query.cursor {
-                    return Err(LoadDataError::InvalidData);
-                }
-                query.cursor = page.next_cursor;
+            } => {
+                self.request(QuerySegmentDetailRequest {
+                    start_utc_ms: range.start,
+                    end_utc_ms: range.end,
+                    app,
+                    window_instance,
+                })
+                .await?
+                .intervals
             }
-        }
+            DetailTarget::App(_) => Vec::new(),
+        };
         let mut apps = BTreeSet::new();
         if let Some(app) = request.app() {
             apps.insert(app);
@@ -148,18 +117,6 @@ impl Link {
             intervals,
             entities,
         })
-    }
-    async fn query_details(&self, request: DetailRequest) -> Result<DetailData, LoadDataError> {
-        for attempt in 0..=super::day::MAX_STALE_RESTARTS {
-            match self.details_once(request).await {
-                Err(error) if error.is_stale() && attempt < super::day::MAX_STALE_RESTARTS => {
-                    continue;
-                }
-                Err(error) if error.is_stale() => return Err(LoadDataError::StaleExhausted),
-                result => return result,
-            }
-        }
-        Err(LoadDataError::StaleExhausted)
     }
 }
 #[derive(Debug, Clone, Copy, Default)]

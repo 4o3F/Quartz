@@ -70,29 +70,34 @@ pub use status::{
 };
 
 pub use query::{
-    Activity, AnnotationResume, ApplicationId, ApplicationRank, ApplicationRef, BuiltinCategory,
-    Category, CategoryDuration, CategoryEntity, CategoryId, CategoryRef, CategorySource,
-    CategoryTendency, CategoryUuid, ClassificationRuleId, ClockSegmentId, CursorPosition,
-    CursorQuery, DayChanged, DayMetrics, DetailEntity, DocumentRank, DocumentRef,
-    ENTITY_DETAIL_DAYS, ENTITY_DETAIL_TOP_TITLES, EntityClassificationRule, EntityDailyDuration,
-    EntityExtractionProvenance, EntityTitleDuration, ExtractionStatus, HourStack, MAX_CURSOR_BYTES,
-    MillisecondsPerPixel, ParseClassificationRuleIdError, ParseQueryCursorError, PendingAway,
-    QUERY_PAGE_BYTES, QueryCursor, QueryDayRequest, QueryDayResponse, QueryEntityDetailRequest,
+    Activity, ApplicationId, ApplicationRank, ApplicationRef, BuiltinCategory, Category,
+    CategoryDuration, CategoryEntity, CategoryId, CategoryRef, CategorySource, CategoryTendency,
+    CategoryUuid, ClassificationRuleId, ClockSegmentId, CursorPosition, CursorQuery,
+    DAY_MAX_APPLICATIONS, DAY_MAX_DOCUMENTS, DayChanged, DayMetrics, DetailEntity, DocumentRank,
+    DocumentRef, ENTITY_DETAIL_DAYS, ENTITY_DETAIL_MAX_EXTRACTION, ENTITY_DETAIL_MAX_RULES,
+    ENTITY_DETAIL_TOP_TITLES, EntityClassificationRule, EntityDailyDuration,
+    EntityExtractionProvenance, EntityTitleDuration, ExtractionStatus, FACTS_DEFAULT_LIMIT,
+    FACTS_MAX_LIMIT, HourStack, MAX_CURSOR_BYTES, MillisecondsPerPixel, PENDING_AWAY_MAX_RANGES,
+    ParseClassificationRuleIdError, ParseQueryCursorError, PendingAway, QUERY_PAGE_BYTES,
+    QueryCursor, QueryDayRequest, QueryDayResponse, QueryEntityDetailRequest,
     QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse, QueryGapReason,
     QueryPendingAwayRequest, QueryPendingAwayResponse, QueryRangeRequest, QueryRangeResponse,
     QuerySegmentDetailRequest, QuerySegmentDetailResponse, QueryStopReason, QueryTimelineRequest,
     QueryTimelineResponse, QueryUnclassifiedRequest, QueryUnclassifiedResponse, QueryVersions,
-    RANGE_MAX_DAYS, RangeBucket, RangeDimension, RangeEntity, RangeGroup, RangeSummaryBucket,
-    ReferenceRange, SEGMENT_DETAIL_MAX_SPAN_MS, TimelineDetail, TimelineSegment, TitleExtraction,
-    UNCLASSIFIED_MAX_DAYS, UNCLASSIFIED_MAX_SAMPLES, UNCLASSIFIED_MAX_SEARCH_SCALARS,
-    UnclassifiedGroupBy, UnclassifiedItem, UnclassifiedSampleRange, WindowInstanceRef, WorkEntity,
+    RANGE_MAX_DAYS, RANGE_MAX_GROUPS_PER_DIMENSION, RangeBucket, RangeDimension, RangeEntity,
+    RangeGroup, RangeSummaryBucket, ReferenceRange, SEGMENT_DETAIL_MAX_INTERVALS,
+    SEGMENT_DETAIL_MAX_SPAN_MS, TIMELINE_MAX_SEGMENTS, TimelineDetail, TimelineSegment,
+    TitleExtraction, UNCLASSIFIED_MAX_DAYS, UNCLASSIFIED_MAX_ITEMS, UNCLASSIFIED_MAX_SAMPLES,
+    UNCLASSIFIED_MAX_SEARCH_SCALARS, UnclassifiedGroupBy, UnclassifiedItem,
+    UnclassifiedSampleRange, WindowInstanceRef, WorkEntity,
 };
 
 pub use annotations::{
+    ANNOTATION_MAX_LABEL_SCALARS, ANNOTATION_MAX_NOTE_SCALARS, ANNOTATIONS_MAX_ENTITIES,
     Annotation, AnnotationCategory, AnnotationId, AnnotationKind, AnnotationLabelPreset,
-    AnnotationText, AnnotationTextChunk, AnnotationValues, AnnotationsCreateRequest,
-    AnnotationsDeleteRequest, AnnotationsResponse, AnnotationsUpdateRequest, CreateAnnotation,
-    QueryAnnotationsRequest, QueryAnnotationsResponse, SavedAnnotation, UpdateAnnotation,
+    AnnotationValues, AnnotationsCreateRequest, AnnotationsDeleteRequest, AnnotationsResponse,
+    AnnotationsUpdateRequest, CreateAnnotation, QueryAnnotationsRequest, QueryAnnotationsResponse,
+    SavedAnnotation, UpdateAnnotation,
 };
 
 pub use settings::{

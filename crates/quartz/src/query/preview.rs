@@ -24,7 +24,7 @@ use std::{
 
 /// Reserve space for the enclosing JSON response envelope (`t`, `id`, `ok`, `body`).
 const PREVIEW_ENVELOPE_RESERVE_BYTES: usize = 256;
-/// Maximum encoded JSON size of `RulesPreviewResponse` within the 256 KiB frame limit.
+/// Maximum encoded JSON size of `RulesPreviewResponse` within the 1 MiB frame limit.
 const PREVIEW_MAX_RESPONSE_BYTES: usize = wire::MAX_FRAME_LEN - PREVIEW_ENVELOPE_RESERVE_BYTES;
 
 pub(crate) struct PreviewRequest {

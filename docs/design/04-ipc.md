@@ -25,7 +25,7 @@
 u32 小端，JSON 字节长度 | UTF-8 JSON
 ```
 
-- 单帧最大 256 KiB。读到长度后先检查上限，再分配缓冲区。超过上限就回一个错误帧并断开连接。
+- 单帧最大 1 MiB。读到长度后先检查上限，再分配缓冲区。超过上限就回一个错误帧并断开连接。
 - 处理短读和半帧。连接断开时丢弃半帧。
 - 这和 Native Messaging 的格式相同（Windows 上也是小端），所以 host 可以直接转发帧，只需校验长度和 JSON 结构。
 
@@ -49,7 +49,7 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 - 请求帧写入并刷新完成后，等待响应超时、取消等待或事件积压溢出会结束该请求并移除其在途编号，连接继续可用。客户端以已分配编号范围和在途编号集合识别已结束请求，丢弃其迟到或重复响应并仅记录编号的 debug 日志。发送的写入与刷新共用 2 秒期限；发送失败、到期或在完成前被取消时，客户端标记连接失效，后续发送和接收返回类型化错误，调用方丢弃连接。传输或分帧边界损坏也会结束连接。
 - 分类和标注创建由客户端提供 `uuid`，用数据库唯一约束去重，重试返回已有实体。批量创建时每个实体独立带 UUID；删除不存在的标注也返回成功。更新按 UUID 设置最终值。规则集以 `key` 标识并按 `base_version` 并发校验（第 6.3.1 节）；历史清理以任务 UUID 去重（第 6.3.4 节）。
 - 错误码是稳定的字符串枚举，定义在 `quartz-protocol`。核心只发送代码与结构化字段，`quartz-ui` 按代码本地化并呈现；host 与 UI 均不得按错误文本分支。信封中的 `msg` 若存在，仅为日志诊断文字。
-- 响应、推送和信封忽略未知字段，以便向前兼容；请求体拒绝未知字段并返回 `bad_request`，操作明确规定忽略未知字段时按该操作执行，例如 `settings.set`。已知字段仍须满足必填、类型、枚举与范围校验。客户端将游标作为不透明 JSON 对象完整保存和原样传回；核心在解码请求时校验游标结构与请求参数匹配，随后才受理数据库或扫描工作。输入版本比较保留在查询快照中，变化时返回 `stale_cursor`。
+- 响应、推送和信封忽略未知字段，以便向前兼容；请求体拒绝未知字段并返回 `bad_request`，操作明确规定忽略未知字段时按该操作执行，例如 `settings.set`。已知字段仍须满足必填、类型、枚举与范围校验。查询一次返回完整结果，列表有固定上限，超出时截断并返回 truncated；单帧上限 1 MiB。query.facts 用简单位置游标分页。仍使用游标分页的规则集与分类读取将游标作为不透明 JSON 对象原样传回，版本变化时返回 `stale_cursor`。
 - `id: null` 只用于无法取得请求 ID 的连接级错误：帧超限返回 `frame_too_large`，JSON 无法解码返回 `bad_request`。成功响应和已知请求 ID 的错误响应必须带原请求 ID。客户端保留空编号错误的类型化错误码并结束连接；UI 工作线程通过断开事件通知界面退出。
 - 客户端将无法识别的错误码解码为 `Unknown`。核心不发送 `Unknown`。
 
@@ -58,11 +58,11 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 | `bad_request` | 信封或操作参数不符合格式 | 无 |
 | `unknown_op` | 不认识请求操作名 | 无 |
 | `handshake_required` | 连接首帧不是 `hello` | 无 |
-| `frame_too_large` | 帧的 JSON 字节长度超过 256 KiB | 无 |
+| `frame_too_large` | 帧的 JSON 字节长度超过 1 MiB | 无 |
 | `proto_mismatch` | 客户端与核心支持的协议版本没有交集 | `supported: {min, max}`，核心支持的协议范围；`core_version` 必填，为核心发布版本 |
 | `forbidden` | 当前角色没有该操作的权限 | 无 |
 | `invalid_range` | 请求的日期或时间范围无效 | 无 |
-| `stale_cursor` | 查询输入版本变化，须重新分页 | 无 |
+| `stale_cursor` | 分页读取的输入版本变化，须重新分页（规则集、分类与文本导出） | 无 |
 | `rule_set_stale` | 提交的规则集基础版本已过期 | `key`、`current_version`（u32）；不存在或已删除时为 0 |
 | `stale_document_ref` | 文档引用依赖已变化 | 无；重新查询产生引用的范围 |
 | `rule_set_not_found` | 规则集不存在 | `key` |
@@ -71,7 +71,7 @@ I/O 线程维护 8 个连接槽位，每个槽位持续持有一个管道实例�
 | `rule_set_identity` | 已有 key 的固定身份不一致 | `key`、`field`（`kind` 或 `parent`） |
 | `rule_validation_failed` | 规则文本或编辑内容未通过校验 | `diagnostics`、`truncated`，第 6.3.3 节的有界诊断列表 |
 | `version_exhausted` | 版本计数无法继续递增 | 无；事务未写入 |
-| `page_too_large` | 所有分页读取中，单个结果项或固定字段超过 200 KiB 页预算；包括 query.*、规则集读取和文本导出 | 无 |
+| `page_too_large` | 分页读取中，单个结果项或固定字段超过 200 KiB 页预算（规则集读取、分类列表与文本导出） | 无 |
 | `delete_scope_unsupported` | 当前里程碑不支持此删除范围 | `scope`，请求的 kind |
 | `delete_job_not_found` | 清理任务不存在 | `uuid` |
 | `delete_job_conflict` | 已有任务 UUID 对应另一份确认内容 | `uuid` |
@@ -157,69 +157,65 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 
 ### 6.2 查询
 
+查询一次返回完整结果，列表有固定上限，超出时截断并返回 `truncated`；单帧上限 1 MiB。`query.facts` 用简单位置游标分页。
+
 | op | 参数 | 返回 |
 |---|---|---|
-| `query.facts` | `local_date`、可选 `cursor`（本地日历日午夜至次日午夜） | 原始事实 `facts`、`versions`、`next_cursor`，按开始 UTC 毫秒、类型和主键排序 |
-| `query.day` | `local_date`、可选 `cursor`（日起点偏移取自设置，见 03 第 1 节） | 状态行指标、每小时分类堆叠、排行（应用、域名、文档，完整列表分页）、未分类时长 |
-| `query.timeline` | UTC 毫秒范围 `start_utc_ms` / `end_utc_ms`、`detail`（`category` / `app` / `raw`）、正整数 `ms_per_pixel`、可选 `cursor` | 时间轴片段；小于一个像素对应时长的相邻片段由核心合并，界面传入"每像素毫秒数" |
-| `query.range` | `start_date`、`end_date`（不含）、`bucket`、`dimensions`、可选 `cursor` | 按天或按周的完整分组聚合，见第 6.2.1 节 |
-| `query.segment_detail` | `start_utc_ms`、`end_utc_ms`，可选 `app`（ApplicationId）、`window_instance`、`cursor` | 裁剪后的未合并区间 `intervals`、`versions`、`next_cursor` |
-| `query.entity_detail` | `entity: {kind:"app", id: ApplicationId}` 或 `{kind:"document", document_ref}`、`local_date`；document 另附 `reference_range`，可选 `cursor` | `daily`、`titles`、`rules`、document 的 `extraction`、`versions`、`next_cursor` |
-| `query.unclassified` | `start_date`、`end_date`（不含）、`group_by`、可选 `search`、`cursor` | 未分类活跃时长、样本范围与实体引用，见第 6.2.1 节 |
-| `query.annotations` | `start_utc_ms`、`end_utc_ms`、可选 `cursor` | 已保存标注的完整编辑值，见第 6.2.1 节 |
-| `query.pending_away` | `local_date`、可选 `cursor`，与 `query.day` 使用相同的时区和日起点设置 | 未标注且至少 15 分钟的连续 idle 片段 |
+| `query.facts` | `local_date`、可选 `after`（位置游标 `{start_utc_ms, kind, id}`）、可选 `limit`（默认 500，上限 2,000） | 原始事实 `facts`、`next_after`，按开始 UTC 毫秒、类型和主键排序 |
+| `query.day` | `local_date`（日起点偏移取自设置，见 03 第 1 节） | 状态行指标 `metrics`、每小时分类堆叠 `hours`、排行（`applications`、`documents`，各上限 500）、`reference_range`、`versions`、`truncated` |
+| `query.timeline` | UTC 毫秒范围 `start_utc_ms` / `end_utc_ms`、`detail`（`category` / `app` / `raw`）、正整数 `ms_per_pixel` | 时间轴片段 `segments`（上限 4,000）、`reference_range`、`versions`、`truncated`；小于一个像素对应时长的相邻片段由核心合并，界面传入"每像素毫秒数" |
+| `query.range` | `start_date`、`end_date`（不含）、`bucket`、`dimensions` | 按天或按周的分组聚合（每桶每维度上限 100 项）、`reference_range`、`versions`、`truncated`，见第 6.2.1 节 |
+| `query.segment_detail` | `start_utc_ms`、`end_utc_ms`，可选 `app`（ApplicationId）、`window_instance` | 裁剪后的未合并区间 `intervals`（上限 2,000）、`reference_range`、`versions`、`truncated` |
+| `query.entity_detail` | `entity: {kind:"app", id: ApplicationId}` 或 `{kind:"document", document_ref}`、`local_date`；document 另附 `reference_range` | `daily`、`titles`、`rules`（上限 200）、document 的 `extraction`（上限 200）、`versions`、`truncated` |
+| `query.unclassified` | `start_date`、`end_date`（不含）、`group_by`、可选 `search` | 未分类活跃时长、样本范围与实体引用 `items`（上限 500）、`reference_range`、`versions`、`truncated`，见第 6.2.1 节 |
+| `query.annotations` | `start_utc_ms`、`end_utc_ms` | 已保存标注的完整编辑值 `entities`（上限 2,000）、`versions`、`truncated`，见第 6.2.1 节 |
+| `query.pending_away` | `local_date`，与 `query.day` 使用相同的时区和日起点设置 | 未标注且至少 15 分钟的连续 idle 片段 `ranges`（上限 200）、`versions`、`truncated` |
 
-`query.facts` 在数据库线程的查询快照中读取与 `dump_range` 相同的运行、时钟段、前台与无前台事实、可用状态、采集缺口及限时策略，保留完整存储端点及行采集等级下已存储的标题，沿用 200 KiB 版本化分页并将原始事实内容加入版本摘要。
+`query.facts` 在数据库线程的查询快照中读取与 `dump_range` 相同的运行、时钟段、前台与无前台事实、可用状态、采集缺口及限时策略，保留完整存储端点及行采集等级下已存储的标题。请求带可选 `after`（上一响应返回的 `next_after` 位置键）与可选 `limit`（1–2,000，默认 500），不绑定版本摘要；编码遇到单帧 1 MiB 上限时停止继续追加行并返回当前页最后一条的 `next_after`。
 
-查询使用核心执行时的当前系统时区。
+查询使用核心执行时的当前系统时区。数据库线程用只读连接持有 WAL 快照分批计算，批间让出给写连接。所有非 `query.facts` 查询单帧返回完整响应：各列表先按显式条目上限裁剪，若整帧编码后仍超出 1 MiB 上限，核心截断最长列表并置 `truncated: true`，不返回错误。
 
-查询结果按页返回，每页不超过 200 KiB。分页用不透明游标，响应和游标都绑定事实、规则、元数据与查询语义的输入版本。数据库线程用只读连接持有 WAL 快照分批计算；版本变化返回 `stale_cursor`，客户端丢弃旧分页并重查（03 第 4.1 节）。
+`query.day` 返回 `metrics`（`active_ms`、`focus_ratio`、`distract_ratio`、`unclassified_ms`、`longest_focus_ms`、`switches_per_hour`）、`hours`、`applications`、`documents`、`reference_range`、`versions` 和 `truncated`。应用排行按活跃时长降序、同值按应用 ID 排序，上限 `DAY_MAX_APPLICATIONS`（500），列表截断不影响 `metrics` 与 `hours` 的完整汇总。专注与分心占比按分类倾向时长除以活跃时长计算，最长连续专注段按同一时钟段内首尾相接的专注活跃片段累计（03 第 5.3 节）；每小时切换次数为连续活跃片段之间的应用切换次数除以活跃小时数，活跃时长为 0 时返回 0。有效活动覆盖与离线活动同样计入活跃时长、分类堆叠和上述指标；应用排行只累计采集到的应用，离线活动不列入应用排行。计算切换次数时，每个离线活动 UUID 作为一个应用身份，同一注解的连续切片不产生切换。
 
-`query.day` 返回 `metrics`（`active_ms`、`focus_ratio`、`distract_ratio`、`unclassified_ms`、`longest_focus_ms`、`switches_per_hour`）、`hours`、`applications`、`versions` 和 `next_cursor`。`metrics` 和 `hours` 仅出现在第一页，应用排行按活跃时长降序、同值按应用 ID 排序，完整列表可继续分页。专注与分心占比按分类倾向时长除以活跃时长计算，最长连续专注段按同一时钟段内首尾相接的专注活跃片段累计（03 第 5.3 节）；每小时切换次数为连续活跃片段之间的应用切换次数除以活跃小时数，活跃时长为 0 时返回 0。有效活动覆盖与离线活动同样计入活跃时长、分类堆叠和上述指标；应用排行只累计采集到的应用，离线活动不列入应用排行。计算切换次数时，每个离线活动 UUID 作为一个应用身份，同一注解的连续切片不产生切换。
+`query.segment_detail` 读取点击块的半开 UTC 范围 `[start_utc_ms, end_utc_ms)`，要求正时长且不超过 `SEGMENT_DETAIL_MAX_SPAN_MS`（48 小时）。固定上限为跨 UTC 日期、夏令时和日起点偏移下的完整逻辑日留出空间；超限、逆序、空范围或无效时间戳返回 `bad_request`。它复用时间轴的原始投影、可用状态掩码和标注切片，保留每条前台事实及状态边界，不做像素合并，按时间轴的时钟段和边界顺序输出，上限 `SEGMENT_DETAIL_MAX_INTERVALS`（2,000）。每项为 `{start_utc_ms, end_utc_ms, duration_ms, clock_segment_id, activity, app?, window_instance?, title?, category, category_source}`，端点裁剪到请求范围，时长沿用单调时间裁剪。`app` 与 `window_instance` 都按隐私投影后可见的字段精确过滤，同时提供时取交集；与泳道无关的状态可通过省略过滤器查询。排除区间省略应用、窗口实例和标题，标题仅来自 Full 采集事实。M4 为可见前台区间添加 `extraction` 与 `document_ref`（第 6.2.1 节），M5 接入网页上下文。
 
-`query.segment_detail` 读取点击块的半开 UTC 范围 `[start_utc_ms, end_utc_ms)`，要求正时长且不超过 `SEGMENT_DETAIL_MAX_SPAN_MS`（48 小时）。固定上限为跨 UTC 日期、夏令时和日起点偏移下的完整逻辑日留出空间；超限、逆序、空范围或无效时间戳返回 `bad_request`。它复用时间轴的原始投影、可用状态掩码和标注切片，保留每条前台事实及状态边界，不做像素合并，按时间轴的时钟段和边界顺序输出。每项为 `{start_utc_ms, end_utc_ms, duration_ms, clock_segment_id, activity, app?, window_instance?, title?, category, category_source}`，端点裁剪到请求范围，时长沿用单调时间裁剪。`app` 与 `window_instance` 都按隐私投影后可见的字段精确过滤，同时提供时取交集；与泳道无关的状态可通过省略过滤器查询。排除区间省略应用、窗口实例和标题，标题仅来自 Full 采集事实。一天内大量事实或长标题可以超过 200 KiB，因此区间列表沿用版本化游标分页。M4 为可见前台区间添加 `extraction` 与 `document_ref`（第 6.2.1 节），M5 接入网页上下文。
+`query.entity_detail` 的实体枚举在 M3 仅含 `app`；`document` 在 M4、`domain` 在 M5 加入。它读取截至 `local_date` 当天的 7 个逻辑日（`ENTITY_DETAIL_DAYS`），各日都按当前系统时区和 `day.start_offset_min` 分别转换 UTC 边界，保留夏令时导致的日长度变化。`daily: [{local_date, active_ms}]` 按日期升序返回 7 项，应用活跃时长与 `query.day` 应用排行一致，包含有效活动覆盖。未知应用返回 7 个零时长日、空标题和空规则。
 
-`query.entity_detail` 的实体枚举在 M3 仅含 `app`；`document` 在 M4、`domain` 在 M5 加入。它读取截至 `local_date` 当天的 7 个逻辑日（`ENTITY_DETAIL_DAYS`），各日都按当前系统时区和 `day.start_offset_min` 分别转换 UTC 边界，保留夏令时导致的日长度变化。第一页的 `daily: [{local_date, active_ms}]` 按日期升序返回 7 项，应用活跃时长与 `query.day` 应用排行一致，包含有效活动覆盖。未知应用的第一页返回 7 个零时长日、空标题和空规则。
+`titles: [{title, duration_ms}]` 只累计这些活跃切片中 Full 级别的可见标题，按时长降序、同值按标题文本升序取前 `ENTITY_DETAIL_TOP_TITLES`（5）项；只有较低采集级别的事实时为空。`rules: [{rule, label, label_key, category}]` 仅包含实际为该应用活跃时间提供最终分类的规则，按修订限定规则 ID 升序去重，上限 `ENTITY_DETAIL_MAX_RULES`（200）；`rule` 为 `<规则集>/<规则>@<版本>`，`label`、`label_key` 为当前规则快照的显示字段，可为 null，`category` 使用下述分类引用。分类标注覆盖掉的规则不进入列表。零时长切片不进入实体详情的标题、规则和提取来源列表。两种详情操作允许 UI 和 CLI，使用同一个数据库读事务中的事实、应用和分类元数据及持有的规则快照，标题不写入日志。
 
-`titles: [{title, duration_ms}]` 只累计这些活跃切片中 Full 级别的可见标题，按时长降序、同值按标题文本升序取前 `ENTITY_DETAIL_TOP_TITLES`（5）项；只有较低采集级别的事实时为空。五个长度上限为 4,096 个 UTF-16 单元的标题即使需要 JSON 转义，也为第一页的日统计和规则留有空间。`rules: [{rule, label, label_key, category}]` 仅包含实际为该应用活跃时间提供最终分类的规则，按修订限定规则 ID 升序去重；`rule` 为 `<规则集>/<规则>@<版本>`，`label`、`label_key` 为当前规则快照的显示字段，可为 null，`category` 使用下述分类引用。分类标注覆盖掉的规则不进入列表。规则数量没有固定上限，因此规则列表分页，`daily` 和 `titles` 仅出现在第一页，后续页省略这两个字段，客户端保留第一页的数据并拼接各页 `rules`。零时长切片不进入实体详情的标题、规则和提取来源列表。两种详情操作允许 UI 和 CLI，使用同一个数据库读事务中的事实、应用和分类元数据及持有的规则快照，标题不写入日志。
+`query.pending_away` 只读取 idle 可用状态范围，锁屏、睡眠、断开和暂停范围不纳入；`offline_activity`、`active_override`、`note`、`dismissed_away` 覆盖的部分视为已标注，`category_override` 不计。部分覆盖时先扣除覆盖范围，再返回剩余连续片段中至少 15 分钟的部分。响应为 `{ranges: [{start_utc_ms, end_utc_ms, duration_ms}], versions, truncated}`，按开始时间排序，上限 `PENDING_AWAY_MAX_RANGES`（200），时长为 UTC 端点差。
 
-`query.pending_away` 只读取 idle 可用状态范围，锁屏、睡眠、断开和暂停范围不纳入；`offline_activity`、`active_override`、`note`、`dismissed_away` 覆盖的部分视为已标注，`category_override` 不计。部分覆盖时先扣除覆盖范围，再返回剩余连续片段中至少 15 分钟的部分。响应为 `{ranges: [{start_utc_ms, end_utc_ms, duration_ms}], versions, next_cursor}`，按开始时间排序，时长为 UTC 端点差，分页沿用版本化游标。
+逻辑日按 `day.start_offset_min`（默认 0 分钟）加到本地日期后交给 jiff 转换，小时桶由 jiff 逐小时推进，携带 UTC 起止、本地时间标签和 `categories: [{category, duration_ms}]` 分类堆叠。`query.timeline` 使用 UTC 范围，最长 366 天；返回 `segments`（上限 `TIMELINE_MAX_SEGMENTS` = 4,000）、`reference_range`、`versions`、`truncated`。每个片段携带 UTC 起止、按单调时间计算的 `duration_ms`、时钟段 ID、活动状态、分类及来源；`app` / `raw` 细节附应用 ID、exe 名、显示名和 AUMID，以及不透明的持久窗口实例引用 `window_instance`；客户端仅比较和回传该引用，不解释其序列化整数。`category` 细节、已排除区间和非前台活动状态省略 `window_instance`。`raw` 仅在 Full 采集级别附标题。M3 的应用泳道使用 `raw` 细节显示窗口实例和可用的原始标题。
 
-逻辑日按 `day.start_offset_min`（默认 0 分钟）加到本地日期后交给 jiff 转换，小时桶由 jiff 逐小时推进，携带 UTC 起止、本地时间标签和 `categories: [{category, duration_ms}]` 分类堆叠。`query.timeline` 使用 UTC 范围，最长 366 天；返回 `segments`、`versions`、`next_cursor`。每个片段携带 UTC 起止、按单调时间计算的 `duration_ms`、时钟段 ID、活动状态、分类及来源；`app` / `raw` 细节附应用 ID、exe 名、显示名和 AUMID，以及不透明的持久窗口实例引用 `window_instance`；客户端仅比较和回传该引用，不解释其序列化整数。`category` 细节、已排除区间和非前台活动状态省略 `window_instance`。`raw` 仅在 Full 采集级别附标题。M3 的应用泳道使用 `raw` 细节显示窗口实例和可用的原始标题。
+分类引用为 `{kind:"unclassified"}` 或 `{kind:"classified", id, uuid, builtin_key, name, color, tendency}`。`builtin_key` 是稳定内置键，`name` 为用户输入或 null；名称为 null 时由界面翻译 `category.builtin.<key>`。规则来源为 `{kind:"rule", rule:"<规则集>/<规则>@<版本>"}`，注解来源为 `{kind:"annotation", annotation:"<UUID>"}`，未分类来源为 `{kind:"unclassified"}`。活动状态新增 `{kind:"active_override", annotation:"<UUID>"}` 和 `{kind:"offline_activity", annotation:"<UUID>"}`。分类元数据从查询的数据库快照读取，求值使用生成响应版本摘要的同一规则快照。
 
-分类引用为 `{kind:"unclassified"}` 或 `{kind:"classified", id, uuid, builtin_key, name, color, tendency}`。`builtin_key` 是稳定内置键，`name` 为用户输入或 null；名称为 null 时由界面翻译 `category.builtin.<key>`。规则来源为 `{kind:"rule", rule:"<规则集>/<规则>@<版本>"}`，注解来源为 `{kind:"annotation", annotation:"<UUID>"}`，未分类来源为 `{kind:"unclassified"}`。活动状态新增 `{kind:"active_override", annotation:"<UUID>"}` 和 `{kind:"offline_activity", annotation:"<UUID>"}`。分类元数据从查询的数据库快照读取，求值使用生成游标规则哈希的同一规则快照。
+时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。M4 的 `app` 细节对同窗口实例、同非空文档身份的连续片段先合并，保留分类与来源边界；无身份时要求原始标题相同；合并不跨时钟段或活动状态边界。dirty 等可变提取显示字段不阻止 app 合并，合并后采用最后切片的提取显示值。`raw` 保留原始标题与提取输出边界。其余像素合并规则为：相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`app` 与 `raw` 均要求文档身份相同（含两者皆空），`raw` 还要求标题与提取输出相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。M4 查询语义版本为 11，版本 11 在标注编辑值中加入 `label_preset`。
 
-时间轴按时钟段开始时间和 ID 排列，保留各段内的边界顺序。M4 的 `app` 细节对同窗口实例、同非空文档身份的连续片段先合并，保留分类与来源边界；无身份时要求原始标题相同；合并不跨时钟段或活动状态边界。dirty 等可变提取显示字段不阻止 app 合并，合并后采用最后切片的提取显示值。`raw` 保留原始标题与提取输出边界。其余像素合并规则为：相邻片段仅在 UTC 首尾连续、时钟段相同、活动状态和当前细节级别的可见字段完全相同，且合并后的 UTC 长度严格小于 `ms_per_pixel` 时合并；`category` 细节只比较分类和活动状态，允许不同规则来源合并，注解来源与其他来源、不同注解 UUID 之间保留边界；规则来源不同时返回 `{kind:"mixed"}`；`app` 与 `raw` 保留来源边界，并要求窗口实例引用相同；`app` 与 `raw` 均要求文档身份相同（含两者皆空），`raw` 还要求标题与提取输出相同。同一窗口实例的不同前台事实满足这些条件时可合并。合并保留单调时长之和。M4 查询语义版本为 11，版本 11 在标注编辑值中加入 `label_preset`；版本摘要包含该版本，因此此前语义生成的游标返回 `stale_cursor`。
+原始事实读取按有序键收集数据，收尾每个数据库循环轮次最多转换 32 条；每条转换后释放存储表示，仅保留其协议记录。
 
-原始事实读取按有序键收集数据，收尾每个数据库循环轮次最多转换并哈希 32 条；每条转换后释放存储表示，仅保留其协议记录。页面字节数与版本摘要直接通过写入器计算，不保留整页 JSON 缓冲区。范围查询在完成确定下一页位置的桶后停止后续日期扫描，版本仍绑定完整请求范围。
-
-游标是 `quartz-protocol::QueryCursor` 的不透明 JSON 对象，客户端原样保存和回传。核心当前结构包含 `versions`、类型化的 `query` 参数和下一项 `position`，按请求参数严格校验。标注续页另带 `annotation_resume`：保存目标行的开始与结束 UTC 毫秒、UUID 和下一片段序号，`position` 为该行内片段序号；其他查询的游标不允许携带 `annotation_resume`。核心直接定位该行并跳过此前片段的文本边界，不再读取和序列化已返回的行。游标编码后的 JSON 上限为 `MAX_CURSOR_BYTES`（256 KiB），与帧上限相同；文档详情游标携带完整文档引用，规则集游标携带未另设长度上限的 key，因此使用帧上限容纳现有最大游标。客户端解码和核心受理均检查该上限，按引用解析 JSON，已知字段之外的附加内容不复制到核心类型中。
-
-版本摘要覆盖相交 UTC 日期的全部 `data_day_versions` 来源、`settings.metadata_version`、规则注册表快照中的分类、提取与隐私哈希、系统时区身份、日起点偏移、每周首日（周桶）、`stats_policy_version`、查询 UTC 边界和 `QUERY_SEMANTICS_VERSION`；缺失的元数据版本从 0 开始。响应分页计算绑定同一个完整输入摘要；query.range 按日折叠聚合，避免物化全年时间轴；游标参数不匹配或位置超出列表返回 `bad_request`，输入版本变化返回 `stale_cursor`。I/O 到数据库的查询通道容量为 `QUERY_CHANNEL_CAPACITY`（8），满时返回 `busy`。 M3 今天页客户端遇到 `stale_cursor` 时丢弃整组分页结果，最多重启 2 次；耗尽后显示行内错误。`busy` 与其他查询错误直接显示错误码和“重试”，不自动轮询。
+版本摘要覆盖相交 UTC 日期的全部 `data_day_versions` 来源、`settings.metadata_version`、规则注册表快照中的分类、提取与隐私哈希、系统时区身份、日起点偏移、每周首日（周桶）、`stats_policy_version`、查询 UTC 边界和 `QUERY_SEMANTICS_VERSION`；缺失的元数据版本从 0 开始。`query.range` 按日折叠聚合，避免物化全年时间轴。I/O 到数据库的查询通道容量为 `QUERY_CHANNEL_CAPACITY`（8），满时返回 `busy`；`busy` 与其他查询错误直接显示错误码和“重试”，不自动轮询。
 
 日期订阅的日历边界和摘要共用一次读取的系统时区；摘要中的时区按 Jiff Temporal 稳定文本编码，历史事实版本按来源及覆盖 UTC 日期做有界查找。候选订阅全部投影成功后安装，提交后的投影失败保留重试状态，在下一次发布时重试。系统时区读取失败返回 `internal`。
 
 ### 6.2.1 M4 查询补充
 
-新增列表沿用 `{versions, next_cursor}` 和 200 KiB 页上限。日期范围为 `[start_date, end_date)` 的 1–366 个逻辑日，按核心当前系统时区及日起点分别换算 UTC；响应带 `time_zone` 和 `day_start_offset_min`。M4 不接受客户端指定另一时区。
+所有新增查询沿用单帧完整响应、`{versions, truncated}` 和 1 MiB 帧上限。日期范围为 `[start_date, end_date)` 的 1–366 个逻辑日，按核心当前系统时区及日起点分别换算 UTC；响应带 `time_zone` 和 `day_start_offset_min`。M4 不接受客户端指定另一时区。
 
-- `query.day` 增加分页 `documents: [{document_ref, app, document, project, profile, active_ms}]`，应用与文档列表分别完整分页，共用 `next_cursor`：先返回应用页，再返回文档页，每页只填充其中一个列表，另一个为空数组；第一页还带 `reference_range:{start_utc_ms,end_utc_ms}`（覆盖截至所选日的 7 个逻辑日），分页摘要也覆盖此引用范围。文档按 `active_ms` 降序，同值按 03 第 5.2 节身份分量排序（null 在空串之前，文本按 Unicode 标量序）；没有身份的事实不进入文档排行。
-- 时间轴的 `app` / `raw` 与原始详情增加 `extraction: {document, project, profile, dirty, normalized_title, extractor_rule, status}` 和可空的 `document_ref`。隐藏字段为 null，`extractor_rule` 在回退时为 null。`query.timeline` 和 `query.segment_detail` 的引用覆盖本次 UTC 范围，并在第一页返回该 `reference_range`。
+- `query.day` 返回 `documents: [{document_ref, app, document, project, profile, active_ms}]`（上限 `DAY_MAX_DOCUMENTS` = 500）与 `reference_range:{start_utc_ms,end_utc_ms}`（覆盖截至所选日的 7 个逻辑日），版本摘要也覆盖此引用范围。文档按 `active_ms` 降序，同值按 03 第 5.2 节身份分量排序（null 在空串之前，文本按 Unicode 标量序）；没有身份的事实不进入文档排行。
+- 时间轴的 `app` / `raw` 与原始详情增加 `extraction: {document, project, profile, dirty, normalized_title, extractor_rule, status}` 和可空的 `document_ref`。隐藏字段为 null，`extractor_rule` 在回退时为 null。`query.timeline` 和 `query.segment_detail` 的引用覆盖本次 UTC 范围，并返回该 `reference_range`。
 - B3 的引用编码为 `quartz.document.v1:<sha256>:<JSON>`，JSON 仅含可见身份、引用 UTC 范围和输入版本摘要。校验和为 SHA-256（固定前缀与原样 JSON 字节），用于检测传输或存储损坏；读取引用仍须校验当前范围与输入版本，并按当前隐私投影重算身份。编码无密钥、无服务端引用表，同范围、同版本和同身份产生相同字符串；引用内容不承担访问授权。
-- `document_ref` 为不透明字符串，绑定身份及 `reference_range` 内全部查询输入版本；客户端只保存、比较和回传。`query.entity_detail` 的 document 请求附原样 `reference_range`，该范围必须包含详情所需的 7 日；核心校验引用覆盖范围与版本后按身份重算各日，`daily` 与文档排行一致，标题和最终分类规则沿用 app 详情。document 详情增加 `extraction: [{extractor_rule,status}]`，完整列出该身份在这 7 日活跃事实中实际观察到的提取规则与状态组合，回退规则为 null；按规则引用（null 在前、文本按 Unicode 标量序）、状态（extracted、fallback、empty、unknown）排序去重。共用 `next_cursor` 先返回 `rules` 页，再返回 `extraction` 页，另一列表为空；`daily` 和 `titles` 仅在第一页返回。`extraction` 为空时省略该字段。document 请求缺少范围、引用覆盖范围不足或格式无效返回 `bad_request`；引用范围为正时长且最多 367 × 24 小时，以容纳 366 个逻辑日跨 UTC 偏移回退后的范围。app 请求不得附加该范围，违反时返回 `bad_request`，依赖变化返回 `stale_document_ref`。相同 reference_range 和输入版本内，相同身份使用相同引用。document 详情的游标保留原样 `reference_range`，分页版本摘要覆盖整个引用范围；`query.day` 的版本摘要与日期订阅同样覆盖其 7 日引用范围。客户端加载今天页时，时间轴与待补记按各自范围校验分页版本，全部读取后再查询 `query.day` 首页并比较七日摘要，以检查跨查询期间的输入变化。
-- `query.range` 的 `bucket` 为 `day | week`；`dimensions` 为非空且无重复的 `category | app | document` 数组。响应 `buckets: [{start_date, end_date, active_ms, groups: [{dimension, entity, active_ms}]}]`；每个 dimension 独立聚合，分母为同一活跃时长。按桶日期、请求维度顺序、时长降序和实体身份排序。周桶按有效每周首日切分，首尾桶裁剪到请求范围；每周首日来自 `ui.first_day_of_week`，`auto` 解析为 Windows 区域设置，无法解析时返回 `internal`。完整桶总时长 `active_ms` 仅在该桶首次出现时返回，续页省略该字段，分组可续页；空桶返回 `active_ms: 0` 和空分组。category entity 为 `{kind:"category",category}`（沿用分类引用），app entity 为 `{kind:"app",id,exe_name,display_name}`；document entity 为 `{kind:"document", document_ref, app, document, project, profile}`，其中 app 为 ApplicationId，引用覆盖整个请求范围，响应第一页返回其 UTC `reference_range`。周桶响应摘要在查询输入摘要上附加有效每周首日；文档引用使用不含分桶设置的输入摘要，供详情查询验证。非法日期范围、空维度、重复维度或未知请求字段返回 `bad_request`。年度三维请求的实测耗时超过 `quartz-pipe` 的 2 秒响应期限，客户端可能超时。
-- `query.unclassified` 的 `group_by` 为 `app | document`。只累计最终分类为空的活跃切片（人工覆盖已应用），返回 `items: [{entity, active_ms, sample_ranges}]`，entity 沿用 query.range 的 app/document 形状；每组按时序取最多 5 个 `{start_utc_ms,end_utc_ms,clock_segment_id}`，供片段归类。缺少所选实体的事实不成组，因此分组总计可以小于全日未分类时长。排序同排行；`search` 最多 256 个 Unicode 标量，对可见名称、文档、项目、profile 做 NFKC 与大小写折叠后包含匹配，过滤和分页均在核心完成。document 引用覆盖请求范围，第一页返回其 UTC `reference_range`。
-- `query.annotations` 的 UTC 范围为正时长且最多 366 天，按开始 UTC、结束 UTC、UUID 排序返回相交的 `entities`；每项包含写入响应的全部字段及创建、更新时间，保留存储端点，不裁剪。包括重叠 note 和 `dismissed_away`，不按最终活动片段过滤；归档分类仍返回 UUID 引用。UI、CLI 均可读，写入权限保持 UI-only。`label_preset` 返回 `"rest"` 或 null，始终为枚举元数据，不参与文本分块。单实体文本超过页预算时，label/note 改用 `{text,offset_utf8,complete}` 分块值，同 UUID 可跨页重复，其他字段保持一致；客户端按字段的 UTF-8 字节偏移拼接，收齐后再显示完整编辑值，字符串与 null 仍为普通完整值。分块时能放入单字段文本预算的短字段仍为字符串；较短的分块字段传完后，若另一字段尚未传完，继续返回偏移等于该字段总字节数、text 为空、complete 为 true 的块。空范围、逆序、超过 366 × 24 小时或无效 UTC 端点返回 `invalid_range`，未知请求字段和无效游标参数或位置返回 `bad_request`。
+- `document_ref` 为不透明字符串，绑定身份及 `reference_range` 内全部查询输入版本；客户端只保存、比较和回传。`query.entity_detail` 的 document 请求附原样 `reference_range`，该范围必须包含详情所需的 7 日；核心校验引用覆盖范围与版本后按身份重算各日，`daily` 与文档排行一致，标题和最终分类规则沿用 app 详情。document 详情增加 `extraction: [{extractor_rule,status}]`（上限 `ENTITY_DETAIL_MAX_EXTRACTION` = 200），列出该身份在这 7 日活跃事实中实际观察到的提取规则与状态组合，回退规则为 null；按规则引用（null 在前、文本按 Unicode 标量序）、状态（extracted、fallback、empty、unknown）排序去重。`extraction` 为空时省略该字段。document 请求缺少范围、引用覆盖范围不足或格式无效返回 `bad_request`；引用范围为正时长且最多 367 × 24 小时，以容纳 366 个逻辑日跨 UTC 偏移回退后的范围。app 请求不得附加该范围，违反时返回 `bad_request`，依赖变化返回 `stale_document_ref`。相同 reference_range 和输入版本内，相同身份使用相同引用。`query.day` 的版本摘要与日期订阅同样覆盖其 7 日引用范围。客户端加载今天页时，依次读取 `query.day`、`query.timeline`、`query.pending_away`，结束后再次查询 `query.day` 并比较七日摘要，以检查跨查询期间的输入变化。
+- `query.range` 的 `bucket` 为 `day | week`；`dimensions` 为非空且无重复的 `category | app | document` 数组。响应 `buckets: [{start_date, end_date, active_ms, groups: [{dimension, entity, active_ms}]}]`；每个 dimension 独立聚合，分母为同一活跃时长，每桶每维度上限 `RANGE_MAX_GROUPS_PER_DIMENSION`（100），超出时截断分组并置 `truncated: true`（各桶总时长 `active_ms` 保持完整）。按桶日期、请求维度顺序、时长降序和实体身份排序。周桶按有效每周首日切分，首尾桶裁剪到请求范围；每周首日来自 `ui.first_day_of_week`，`auto` 解析为 Windows 区域设置，无法解析时返回 `internal`。空桶返回 `active_ms: 0` 和空分组。category entity 为 `{kind:"category",category}`（沿用分类引用），app entity 为 `{kind:"app",id,exe_name,display_name}`；document entity 为 `{kind:"document", document_ref, app, document, project, profile}`，其中 app 为 ApplicationId，引用覆盖整个请求范围，响应返回其 UTC `reference_range`。周桶响应摘要在查询输入摘要上附加有效每周首日；文档引用使用不含分桶设置的输入摘要，供详情查询验证。非法日期范围、空维度、重复维度或未知请求字段返回 `bad_request`。年度三维请求的实测耗时超过 `quartz-pipe` 的 2 秒响应期限，客户端可能超时。
+- `query.unclassified` 的 `group_by` 为 `app | document`。只累计最终分类为空的活跃切片（人工覆盖已应用），返回 `items: [{entity, active_ms, sample_ranges}]`（上限 `UNCLASSIFIED_MAX_ITEMS` = 500），entity 沿用 query.range 的 app/document 形状；每组按时序取最多 5 个 `{start_utc_ms,end_utc_ms,clock_segment_id}`，供片段归类。缺少所选实体的事实不成组，因此分组总计可以小于全日未分类时长。排序同排行；`search` 最多 256 个 Unicode 标量，对可见名称、文档、项目、profile 做 NFKC 与大小写折叠后包含匹配，过滤在上限截断之前完成。document 引用覆盖请求范围，响应返回其 UTC `reference_range`。
+- `query.annotations` 的 UTC 范围为正时长且最多 366 天，按开始 UTC、结束 UTC、UUID 排序返回相交的 `entities`（上限 `ANNOTATIONS_MAX_ENTITIES` = 2,000，超出条目或 1 MiB 帧上限时截断并置 `truncated: true`）；每项包含写入响应的全部字段及创建、更新时间，保留存储端点，不裁剪。`label` 和 `note` 均为完整字符串或 null（不做分块；写入端约束 `label` 最多 256 个 Unicode 标量、`note` 最多 4,096 个 Unicode 标量）。包括重叠 note 和 `dismissed_away`，不按最终活动片段过滤；归档分类仍返回 UUID 引用。UI、CLI 均可读，写入权限保持 UI-only。`label_preset` 返回 `"rest"` 或 null。空范围、逆序、超过 366 × 24 小时或无效 UTC 端点返回 `invalid_range`，未知请求字段返回 `bad_request`。
 
 ```jsonc
-// query.day 第一页的引用范围摘录；versions 和引用均按不透明值处理
-{"reference_range":{"start_utc_ms":1794816000000,"end_utc_ms":1795420800000},"documents":[],"versions":"opaque"}
-// query.day 文档页摘录
-{"applications":[],"documents":[{"document_ref":"doc:opaque","app":7,"document":"main.rs","project":"Quartz","profile":null,"active_ms":60000}],"versions":"opaque","next_cursor":null}
+// query.day 摘录；versions 和引用均按不透明值处理
+{"reference_range":{"start_utc_ms":1794816000000,"end_utc_ms":1795420800000},"applications":[],"documents":[{"document_ref":"doc:opaque","app":7,"document":"main.rs","project":"Quartz","profile":null,"active_ms":60000}],"versions":"opaque","truncated":false}
 // document 详情请求
 {"entity":{"kind":"document","document_ref":"doc:opaque"},"local_date":"2026-11-22","reference_range":{"start_utc_ms":1794816000000,"end_utc_ms":1795420800000}}
-// query.annotations 长备注实体的文本字段摘录，续页 offset_utf8 接前一块末尾
-{"uuid":"00000000-0000-4000-8000-000000000001","label":null,"note":{"text":"第一部分","offset_utf8":0,"complete":false}}
+// query.annotations 实体摘录
+{"uuid":"00000000-0000-4000-8000-000000000001","label":null,"note":"完整备注文本"}
 ```
 
 ### 6.3 规则、标注与设置
@@ -278,7 +274,7 @@ UI 在握手中登记当前状态；主线程取得类型化连接标识、经�
 - `annotations.delete` 使用 `{ "uuids": ["..."] }`，成功返回 `{ "accepted": true }`；不存在的 UUID 也成功，删除不恢复此前裁剪的范围。
 - 每个请求中的 UUID 必须是规范 UUID 文本，接受大写并统一为小写。同一创建或更新请求重复提交同一 UUID 返回 `bad_request`。空数组成功且不改变数据库。
 - 创建和更新的每个提交范围必须使用有效 UTC 端点，满足 `end_utc_ms > start_utc_ms`，时长最多 366 × 24 小时，与 `query.annotations` 共用范围上限。一个请求中，各提交范围所覆盖的 UTC 日期数量之和最多 367；每个范围单独计数，即使日期重叠也累计。超限在打开写事务前返回 `invalid_range`。删除请求最多包含 367 个 UUID。包含旧行、新行和裁剪剩余片段的日版本递增工作量，每个请求最多 4,096 次；修改任何行之前计算并检查，超限返回 `invalid_range`。同一请求中同一裁剪类型的最终范围不得重叠，违反时返回 `invalid_range`。创建重试的最终范围取已有实体。note 允许重叠，不同类型允许重叠。整个请求及其对其他行的裁剪在一个事务中完成，任一项失败全部回滚。
-- `category_override` 必须有分类；`offline_activity`、`active_override` 的分类可选；`dismissed_away` 不允许分类、标签或备注；`label_preset` 只允许用于 `note`；`note` 至少有一个预设，或标签、备注中至少一个包含非空白文本。分类不存在或已归档、字段不符合类型要求时返回 `bad_request`。当前 `bad_request` 是无附加结构字段的错误类型。
+- `category_override` 必须有分类；`offline_activity`、`active_override` 的分类可选；`dismissed_away` 不允许分类、标签或备注；`label_preset` 只允许用于 `note`；`note` 至少有一个预设，或标签、备注中至少一个包含非空白文本；`label` 最多 256 个 Unicode 标量，`note` 最多 4,096 个 Unicode 标量。分类不存在或已归档、字段不符合类型或长度要求时返回 `bad_request`。当前 `bad_request` 是无附加结构字段的错误类型。
 - 写通道已满时返回 `busy`。数据库循环先提交待写采集事实，再处理标注事务；提交后发布受影响 UTC 日的版本，随后回复，`day:` 订阅据此推送变化。
 
 ### 6.3.1 规则集读取与写入
@@ -312,7 +308,7 @@ tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树�
 
 `rules.preview`（仅 `ui`）接受 `{mutation, start_date, end_date}`，日期为 1–7 个逻辑日，`mutation = {op, body}` 支持 `rule_sets.edit`、`rule_sets.set_enabled`、`rule_sets.delete` 与 `rules_text.import`。预览在只读数据库快照与临时草稿规则快照上通过与 `query.*` 相同的查询管线求值，不保存草稿并在批次间让出采集写入。
 
-响应为单个有界帧 `{rules, totals, document_change_count, further_hidden_count, samples, samples_truncated}`，无游标分页：`rules` 列出草稿生效规则的 `{rule, matched_count, matched_ms, effective_ms}`（区分条件命中与受遮蔽/标注后的有效活跃时长）；`totals: {before, after}` 返回与 `query.day` 一致的 `active_ms` 与分类统计；`document_change_count` 为活跃切片中提取文档身份发生变化的计数；`further_hidden_count` 为隐私草稿下现存保留字段将被进一步隐藏的事实切片总数；`samples` 最多返回 50 条按当前与草稿较严隐私口径脱敏的样本。若整帧超出 256 KiB 上限，核心优先截断 `samples` 并置 `samples_truncated: true`，不返回错误。
+响应为单个有界帧 `{rules, totals, document_change_count, further_hidden_count, samples, samples_truncated}`，无游标分页：`rules` 列出草稿生效规则的 `{rule, matched_count, matched_ms, effective_ms}`（区分条件命中与受遮蔽/标注后的有效活跃时长）；`totals: {before, after}` 返回与 `query.day` 一致的 `active_ms` 与分类统计；`document_change_count` 为活跃切片中提取文档身份发生变化的计数；`further_hidden_count` 为隐私草稿下现存保留字段将被进一步隐藏的事实切片总数；`samples` 最多返回 50 条按当前与草稿较严隐私口径脱敏的样本。若整帧超出 1 MiB 上限，核心优先截断 `samples` 并置 `samples_truncated: true`，不返回错误。
 
 ### 6.3.3 文本
 
@@ -322,7 +318,7 @@ tree 的 effective_version 为所选 kind 的生效规则 SHA-256，privacy 树�
 | `rules_text.import` | `{key,base_version,text}` → 与 edit 相同；以 key 匹配 |
 | `rules_text.export` | `{key,cursor?}` → `{text,versions,next_cursor}`；按 UTF-8 字符边界分页，按顺序拼接为规范 `quartz-rules/1` 文本，保留条目顺序、override/disable，分类用 UUID |
 
-text 为 UTF-8，单个规则集的规范导出文本与导入输入均最多 192 KiB，并仍受 256 KiB JSON 帧上限约束；超长用 `bad_request`。诊断为 `{code,path,location:{line,column},params}`，行列从 1 开始，无法定位时 location 为 null；code 使用规则格式第 4.2 节的 `E-RULE-*`，不包含翻译后的句子。validate 以 valid=false 返回诊断；其他操作的校验失败使用 `rule_validation_failed`，同样限制 100 项与 200 KiB 并带 `truncated`。
+text 为 UTF-8，单个规则集的规范导出文本与导入输入均最多 192 KiB，并仍受 1 MiB JSON 帧上限约束；超长用 `bad_request`。诊断为 `{code,path,location:{line,column},params}`，行列从 1 开始，无法定位时 location 为 null；code 使用规则格式第 4.2 节的 `E-RULE-*`，不包含翻译后的句子。validate 以 valid=false 返回诊断；其他操作的校验失败使用 `rule_validation_failed`，同样限制 100 项与 200 KiB 并带 `truncated`。
 
 validate 与 edit 共用决策路径和校验顺序：先检查目标权限与 `base_version`，再解析文本、检查文本 key 与请求 key、固定 kind 与父级身份、已安装父链、覆盖目标和分类引用。非文本失败沿用 edit 的操作错误，包括 `bad_request`、`rule_set_read_only`、`rule_set_stale`、`rule_set_identity`、`version_exhausted`；文本内容问题返回 `valid=false`。已安装内置 key 允许只读 validate，使用已记录的内置来源权限接受 `detector`、`languages`、`verified`、`label_key`，并检查基础版本；未安装的 `builtin.*` key 在检查文本大小前返回 `rule_set_read_only`；写入内置 key 仍返回 `rule_set_read_only`。验证丢弃候选写入，不提交事务、不发布规则快照或版本通知。树诊断若指向其他已安装规则集，location 为 null；提交文本内的诊断保留来源行列。
 
@@ -422,5 +418,5 @@ M5/M6 的操作在实现时再加入。
 
 - 分帧编解码：边界长度、超限、短读、半帧、非 UTF-8、深层嵌套 JSON。
 - 权限：用一个非 Quartz exe、其他用户或其他会话连接应被拒绝；未登记扩展 ID 被拒绝；`host` 调用 `data.delete` 应返回 `forbidden`。Edge 直接启动与 `cmd.exe` 中转分别验收。
-- 创建已提交但响应丢失后，重启核心并以同一 UUID 重试，实体不重复；分页中修改事实或元数据，旧游标返回 `stale_cursor`。
+- 创建已提交但响应丢失后，重启核心并以同一 UUID 重试，实体不重复；规则集与分类分页中修改规则或元数据，旧游标返回 `stale_cursor`。
 - 慢客户端：一个连接停止读取 10 分钟，核心的采集和写入延迟不受影响，发送预算不超过 1 MiB。自动测试将此场景缩短为数秒，检查发布耗时、其他连接的状态响应延迟、预算峰值和响应洪泛后的隔离关闭；实际 10 分钟运行纳入 M2-F 验收。

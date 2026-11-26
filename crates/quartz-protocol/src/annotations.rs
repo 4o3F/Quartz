@@ -1,7 +1,22 @@
-//! Annotation writes and saved editing values with paged UTF-8 text.
+//! Annotation writes and saved editing values.
 
 use crate::{BuiltinCategory, Uuid};
 use serde::{Deserialize, Serialize};
+
+/// Maximum length of an annotation label in Unicode scalar values.
+///
+/// Bounded on write so a single annotation stays well under the 1 MiB frame limit
+/// even under worst-case JSON escaping.
+pub const ANNOTATION_MAX_LABEL_SCALARS: usize = 256;
+
+/// Maximum length of an annotation note in Unicode scalar values.
+///
+/// Bounded on write (~24 KiB worst-case escaped JSON) so full annotations always
+/// fit in a single response without text chunking.
+pub const ANNOTATION_MAX_NOTE_SCALARS: usize = 4_096;
+
+/// Maximum saved annotation entities returned by a single `query.annotations` call.
+pub const ANNOTATIONS_MAX_ENTITIES: usize = 2_000;
 
 /// Client-supplied durable identity of an annotation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -167,35 +182,9 @@ pub struct AnnotationsResponse {
 pub struct QueryAnnotationsRequest {
     pub start_utc_ms: i64,
     pub end_utc_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<crate::QueryCursor>,
-}
-impl From<&QueryAnnotationsRequest> for crate::CursorQuery {
-    fn from(request: &QueryAnnotationsRequest) -> Self {
-        Self::Annotations {
-            start_utc_ms: request.start_utc_ms,
-            end_utc_ms: request.end_utc_ms,
-        }
-    }
 }
 
-/// A complete text value or one fragment positioned by its UTF-8 byte offset.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum AnnotationText {
-    Complete(String),
-    Chunk(AnnotationTextChunk),
-}
-
-/// Text fragment; `complete` marks the end of this field's stored value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnnotationTextChunk {
-    pub text: String,
-    pub offset_utf8: usize,
-    pub complete: bool,
-}
-
-/// Stored endpoints and final editing values, repeated unchanged around text fragments.
+/// Stored endpoints and final editing values returned by `query.annotations`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedAnnotation {
     pub uuid: AnnotationId,
@@ -205,8 +194,8 @@ pub struct SavedAnnotation {
     pub category: Option<AnnotationCategory>,
     #[serde(default)]
     pub label_preset: Option<AnnotationLabelPreset>,
-    pub label: Option<AnnotationText>,
-    pub note: Option<AnnotationText>,
+    pub label: Option<String>,
+    pub note: Option<String>,
     pub created_utc_ms: i64,
     pub updated_utc_ms: i64,
 }
@@ -216,7 +205,8 @@ pub struct SavedAnnotation {
 pub struct QueryAnnotationsResponse {
     pub entities: Vec<SavedAnnotation>,
     pub versions: crate::QueryVersions,
-    pub next_cursor: Option<crate::QueryCursor>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[cfg(test)]
@@ -316,8 +306,8 @@ mod tests {
     }
 
     #[test]
-    fn saved_annotation_wire_snapshots_and_continuations_round_trip() {
-        use crate::{CoreRequest, CursorQuery, Op};
+    fn saved_annotation_wire_snapshots_round_trip() {
+        use crate::{CoreRequest, Op};
         let request_wire: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/annotations-request.json"))
                 .expect("request snapshot");
@@ -325,47 +315,33 @@ mod tests {
             serde_json::from_value(request_wire.clone()).expect("request");
         assert_eq!(request.body().expect("request body"), request_wire);
         assert_eq!(QueryAnnotationsRequest::OP, Op::QueryAnnotations);
-        for fixture in [
-            include_str!("../tests/fixtures/annotations-normal.json"),
-            include_str!("../tests/fixtures/annotations-chunked.json"),
-            include_str!("../tests/fixtures/annotations-continuation.json"),
-        ] {
-            let wire: serde_json::Value = serde_json::from_str(fixture).expect("snapshot");
-            let response = QueryAnnotationsRequest::response(wire.clone()).expect("typed page");
-            assert_eq!(serde_json::to_value(&response).expect("encode page"), wire);
-            if let Some(cursor) = &response.next_cursor {
-                assert_eq!(
-                    cursor.decode().expect("issued cursor").query(),
-                    &CursorQuery::from(&request)
-                );
-            }
-        }
+        let wire: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/annotations-normal.json"))
+                .expect("snapshot");
+        let response = QueryAnnotationsRequest::response(wire.clone()).expect("typed response");
+        assert_eq!(
+            serde_json::to_value(&response).expect("encode response"),
+            wire
+        );
+        assert!(!response.truncated);
     }
 
     #[test]
     fn saved_annotation_schemas_ignore_additive_fields_and_reject_malformed_values() {
         for invalid in [
             serde_json::json!({"start_utc_ms":0,"end_utc_ms":1,"unexpected":true}),
+            serde_json::json!({"start_utc_ms":0,"end_utc_ms":1,"cursor":null}),
             serde_json::json!({"start_utc_ms":0}),
             serde_json::json!({"start_utc_ms":0.5,"end_utc_ms":1}),
         ] {
             assert!(serde_json::from_value::<QueryAnnotationsRequest>(invalid).is_err());
         }
-        for invalid in [
-            serde_json::json!({"text":"x","offset_utf8":-1,"complete":true}),
-            serde_json::json!({"text":"x","offset_utf8":0.5,"complete":true}),
-            serde_json::json!({"text":"x","offset_utf8":0}),
-            serde_json::json!({"text":"x","offset_utf8":0,"complete":"true"}),
-            serde_json::json!(17),
-        ] {
-            assert!(serde_json::from_value::<AnnotationText>(invalid).is_err());
-        }
         let normal: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/annotations-normal.json"))
-                .expect("normal page");
-        let mut unknown_page = normal.clone();
-        unknown_page["unknown"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<QueryAnnotationsResponse>(unknown_page).is_ok());
+                .expect("normal response");
+        let mut unknown_response = normal.clone();
+        unknown_response["unknown"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<QueryAnnotationsResponse>(unknown_response).is_ok());
         let mut unknown_entity = normal.clone();
         unknown_entity["entities"][0]["unknown"] = serde_json::json!(true);
         assert!(serde_json::from_value::<QueryAnnotationsResponse>(unknown_entity).is_ok());
@@ -373,9 +349,9 @@ mod tests {
         unknown_category["entities"][0]["category"]["unknown"] = serde_json::json!(true);
         assert!(serde_json::from_value::<QueryAnnotationsResponse>(unknown_category).is_ok());
         for invalid in ["unknown", "NOTE"] {
-            let mut page = normal.clone();
-            page["entities"][0]["kind"] = serde_json::json!(invalid);
-            assert!(serde_json::from_value::<QueryAnnotationsResponse>(page).is_err());
+            let mut response = normal.clone();
+            response["entities"][0]["kind"] = serde_json::json!(invalid);
+            assert!(serde_json::from_value::<QueryAnnotationsResponse>(response).is_err());
         }
     }
 

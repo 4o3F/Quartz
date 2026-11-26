@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Database primary key within one fact kind.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FactRowId(pub i64);
 /// Stored identity of the device that produced a capture run.
@@ -163,18 +163,56 @@ pub enum FactFields {
         application_id: Option<crate::ApplicationId>,
     },
 }
-impl FactFields {
-    /// Stable row label used for chronological tie ordering and text output.
-    pub fn label(&self) -> &'static str {
+/// Stable row kind label matching `FactFields::label`, ordered lexicographically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactKind {
+    Availability,
+    CaptureGap,
+    ClockSegment,
+    Foreground,
+    NoForeground,
+    Run,
+    TimedPolicy,
+}
+impl FactKind {
+    /// Stable dump label matching `FactFields::label` and chronological tie ordering.
+    pub const fn label(self) -> &'static str {
         match self {
-            Self::Run { .. } => "run",
+            Self::Availability => "availability",
+            Self::CaptureGap => "capture_gap",
             Self::ClockSegment => "clock_segment",
-            Self::Foreground { .. } => "foreground",
-            Self::NoForeground { .. } => "no_foreground",
-            Self::Availability { .. } => "availability",
-            Self::CaptureGap { .. } => "capture_gap",
-            Self::TimedPolicy { .. } => "timed_policy",
+            Self::Foreground => "foreground",
+            Self::NoForeground => "no_foreground",
+            Self::Run => "run",
+            Self::TimedPolicy => "timed_policy",
         }
+    }
+}
+/// Plain ordering key of the last returned fact for `query.facts` continuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FactsCursor {
+    pub start_utc_ms: i64,
+    pub kind: FactKind,
+    pub id: FactRowId,
+}
+impl FactFields {
+    /// Stable row kind used for chronological tie ordering.
+    pub const fn kind(&self) -> FactKind {
+        match self {
+            Self::Run { .. } => FactKind::Run,
+            Self::ClockSegment => FactKind::ClockSegment,
+            Self::Foreground { .. } => FactKind::Foreground,
+            Self::NoForeground { .. } => FactKind::NoForeground,
+            Self::Availability { .. } => FactKind::Availability,
+            Self::CaptureGap { .. } => FactKind::CaptureGap,
+            Self::TimedPolicy { .. } => FactKind::TimedPolicy,
+        }
+    }
+    /// Stable row label used for chronological tie ordering and text output.
+    pub const fn label(&self) -> &'static str {
+        self.kind().label()
     }
 }
 /// Stored foreground fields, including nullable dictionary values.
@@ -221,5 +259,35 @@ impl FactRecord {
     /// Authoritative stored endpoint for a closed or confirmed open row.
     pub fn endpoint(&self) -> Option<i64> {
         self.end_utc_ms.or(self.confirmed_utc_ms)
+    }
+    /// Ordering key of this record for `query.facts` continuation.
+    pub fn cursor(&self) -> FactsCursor {
+        FactsCursor {
+            start_utc_ms: self.start_utc_ms,
+            kind: self.fields.kind(),
+            id: self.id,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fact_kind_order_matches_lexicographic_label_order() {
+        let kinds = [
+            FactKind::Availability,
+            FactKind::CaptureGap,
+            FactKind::ClockSegment,
+            FactKind::Foreground,
+            FactKind::NoForeground,
+            FactKind::Run,
+            FactKind::TimedPolicy,
+        ];
+        for pair in kinds.windows(2) {
+            assert!(pair[0] < pair[1]);
+            assert!(pair[0].label() < pair[1].label());
+        }
     }
 }

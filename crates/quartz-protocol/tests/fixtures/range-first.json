@@ -27,19 +27,5 @@
     }
   ],
   "versions": "version-token",
-  "next_cursor": {
-    "versions": "version-token",
-    "query": {
-      "kind": "range",
-      "start_date": "2025-01-02",
-      "end_date": "2025-01-09",
-      "bucket": "week",
-      "dimensions": [
-        "document",
-        "category",
-        "app"
-      ]
-    },
-    "position": 2
-  }
+  "truncated": false
 }
