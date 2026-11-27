@@ -313,6 +313,7 @@ impl AppShell {
 
         let text_control = match &self.rule_import_text_input {
             Some(editor_state) => Editor::new(editor_state)
+                .ramp(ui, Ramp::Body)
                 .h(px(EDITOR_TEXTAREA_HEIGHT))
                 .font(ui.mono_font())
                 .disabled(busy)

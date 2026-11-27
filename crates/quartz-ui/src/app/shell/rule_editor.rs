@@ -968,6 +968,7 @@ impl AppShell {
 
         let text_control = match &self.rule_editor_text_input {
             Some(editor_state) => Editor::new(editor_state)
+                .ramp(ui, Ramp::Body)
                 .h(px(EDITOR_TEXTAREA_HEIGHT))
                 .font(ui.mono_font())
                 .disabled(busy)
@@ -1060,7 +1061,9 @@ impl AppShell {
         );
 
         let key_control = match (&self.rule_editor_key_input, busy) {
-            (Some(input_state), false) => Input::new(input_state).into_any_element(),
+            (Some(input_state), false) => Input::new(input_state)
+                .ramp(ui, Ramp::Body)
+                .into_any_element(),
             _ => div()
                 .w_full()
                 .min_h(ui.metrics.density(Density::Standard).control_height)

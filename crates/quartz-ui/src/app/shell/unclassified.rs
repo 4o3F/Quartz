@@ -252,7 +252,7 @@ impl AppShell {
             Some(input_state) => div()
                 .flex_1()
                 .min_w(px(UNCLASSIFIED_SEARCH_MIN_WIDTH))
-                .child(Input::new(input_state))
+                .child(Input::new(input_state).ramp(ui, Ramp::Body))
                 .into_any_element(),
             None => div()
                 .flex_1()

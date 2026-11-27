@@ -6,7 +6,7 @@ use gpui_kit::{
     AnyElement, AppContext as _, Context, Div, InteractiveElement as _, IntoElement, KeyDownEvent,
     ParentElement as _, Stateful, StatefulInteractiveElement as _, Styled as _, Window,
     assets::IconName,
-    component::input::{Editor, EditorState, Input, InputEvent, InputState},
+    component::input::{Input, InputEvent, InputState, Textarea, TextareaState},
     div,
     prelude::FluentBuilder as _,
     px,
@@ -192,7 +192,7 @@ impl AppShell {
             });
             return;
         }
-        let editor = cx.new(|cx| EditorState::new(window, cx).placeholder(placeholder));
+        let editor = cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder));
         editor.update(cx, |state, cx| {
             state.set_value(initial.to_owned(), window, cx);
         });
@@ -1721,7 +1721,8 @@ impl AppShell {
             ],
         );
         let control = match &self.annotation_note_input {
-            Some(editor_state) => Editor::new(editor_state)
+            Some(editor_state) => Textarea::new(editor_state)
+                .ramp(ui, Ramp::Body)
                 .h(px(ANNOTATION_NOTE_HEIGHT))
                 .disabled(busy)
                 .into_any_element(),
@@ -1996,7 +1997,9 @@ fn render_single_line_input(
     let space = &ui.metrics.space;
     let palette = ui.palette;
     match (input, busy) {
-        (Some(input_state), false) => Input::new(input_state).into_any_element(),
+        (Some(input_state), false) => Input::new(input_state)
+            .ramp(ui, Ramp::Body)
+            .into_any_element(),
         _ => div()
             .w_full()
             .min_h(ui.metrics.density(Density::Standard).control_height)

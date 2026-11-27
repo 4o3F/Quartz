@@ -308,7 +308,7 @@ pub(crate) struct AppShell<Focus = FocusHandle> {
     annotation_start_input: Option<Entity<gpui_kit::component::input::InputState>>,
     annotation_end_input: Option<Entity<gpui_kit::component::input::InputState>>,
     annotation_label_input: Option<Entity<gpui_kit::component::input::InputState>>,
-    annotation_note_input: Option<Entity<gpui_kit::component::input::EditorState>>,
+    annotation_note_input: Option<Entity<gpui_kit::component::input::TextareaState>>,
     annotation_inputs_sync: InputSyncState,
     pending_leave_page: Option<Page>,
     ranking: RankingKind,

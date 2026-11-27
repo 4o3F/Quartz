@@ -2600,7 +2600,9 @@ impl AppShell {
         });
 
         let name_control = match (&self.category_name_input, busy) {
-            (Some(input_state), false) => Input::new(input_state).into_any_element(),
+            (Some(input_state), false) => Input::new(input_state)
+                .ramp(ui, Ramp::Body)
+                .into_any_element(),
             _ => div()
                 .w_full()
                 .min_h(ui.metrics.density(Density::Standard).control_height)
