@@ -1160,6 +1160,8 @@ settings.group.recording:
   en: "Recording"
 settings.group.data:
   en: "Data"
+settings.group.browser:
+  en: "Browsers"
 settings.group.about:
   en: "About"
 settings.action.cancel:
@@ -1254,6 +1256,38 @@ settings.data.delete.error.bad_request:
   en: "Invalid date range. Only finished logical days can be deleted."
 settings.data.delete.error.generic:
   en: "Could not delete records. Try again."
+settings.browser.name.chrome:
+  en: "Chrome"
+settings.browser.name.edge:
+  en: "Edge"
+settings.browser.name.firefox:
+  en: "Firefox"
+settings.browser.status.not_registered:
+  en: "Not registered"
+settings.browser.status.registered:
+  en: "Registered, not connected"
+settings.browser.status.connected:
+  en: "Connected"
+settings.browser.status.needs_reenable:
+  en: "Needs re-enable"
+settings.browser.action.enable:
+  en: "Enable"
+settings.browser.action.disable:
+  en: "Disable"
+settings.browser.action.reenable:
+  en: "Re-enable"
+settings.browser.action.working:
+  en: "Working…"
+settings.browser.hint:
+  en: "Install the Quartz browser extension first (see installation guide)"
+settings.browser.load_failed.title:
+  en: "Could not load browser status"
+settings.browser.load_failed.message:
+  en: "Retry to check browser native host registration status."
+settings.browser.error.host_missing:
+  en: "Could not find quartz-host.exe next to Quartz. Check that the installation is complete."
+settings.browser.error.generic:
+  en: "Could not update browser host registration. Try again."
 settings.about.version.label:
   en: "Version"
 settings.about.version.ui:

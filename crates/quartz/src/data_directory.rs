@@ -63,6 +63,9 @@ impl DataDirectory {
     pub(crate) fn backups(&self) -> PathBuf {
         self.0.join("backups")
     }
+    pub(crate) fn native_hosts(&self) -> PathBuf {
+        self.0.join("native-hosts")
+    }
     #[cfg(any(windows, test))]
     pub(crate) fn lock_file(&self) -> PathBuf {
         self.0.join("quartz.lock")
@@ -137,6 +140,10 @@ mod tests {
         assert_eq!(directory.database(), directory.as_path().join("quartz.db"));
         assert_eq!(directory.logs(), directory.as_path().join("logs"));
         assert_eq!(directory.backups(), directory.as_path().join("backups"));
+        assert_eq!(
+            directory.native_hosts(),
+            directory.as_path().join("native-hosts")
+        );
         assert_eq!(
             directory.lock_file(),
             directory.as_path().join("quartz.lock")

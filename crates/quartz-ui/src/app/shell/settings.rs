@@ -1,5 +1,5 @@
 //! Settings page: left-aligned single column of group cards in order General, Recording, Data,
-//! and About (07 section 7, 03 section 6).
+//! Browser, and About (07 section 7, 03 section 6, 05 section 2.1).
 
 use std::path::Path;
 
@@ -37,10 +37,11 @@ use crate::{
     layout::WindowClass,
     link::{LoadDataError, LoadDataErrorCode, RequestCoreError},
     model::{
+        BrowserHostAction, BrowserHostDisplayStatus, BrowserHostMutation, BrowserHostsLoadState,
         CompactNotice, CoreStatusLoadState, DataInfoLoadState, DataInfoView, DataOperation,
         DeleteNotice, DeleteRangeConfirm, GeneralSettingChange, MAX_DELETE_RANGE_DAYS,
         RetentionConfirm, RowVisibility, SaveActivity, SettingsEffect, SettingsLoadState,
-        SettingsValues, ValidateDeleteRangeError, max_deletable_date,
+        SettingsValues, ValidateDeleteRangeError, browser_host_presentation, max_deletable_date,
     },
 };
 
@@ -60,6 +61,8 @@ const STATUS_DOT_SIZE: f32 = 6.;
 const SKELETON_ROW_COUNT: usize = 5;
 /// Number of placeholder rows shown while initial `data.info` is in flight.
 const DATA_SKELETON_ROW_COUNT: usize = 4;
+/// Number of placeholder rows shown while initial `browser_hosts.status` is in flight.
+const BROWSER_SKELETON_ROW_COUNT: usize = 3;
 /// Static loading skeleton dimensions in logical pixels.
 const SKELETON_LABEL_WIDTH: f32 = 140.;
 const SKELETON_DESC_WIDTH: f32 = 240.;
@@ -235,15 +238,50 @@ fn option_index<V: PartialEq>(options: &[SelectOption<V>], value: &V) -> Option<
         .map(|row| IndexPath::default().row(row))
 }
 
+const fn browser_name_msg(browser: wire::BrowserKind) -> Msg {
+    match browser {
+        wire::BrowserKind::Chrome => Msg::SettingsBrowserNameChrome,
+        wire::BrowserKind::Edge => Msg::SettingsBrowserNameEdge,
+        wire::BrowserKind::Firefox => Msg::SettingsBrowserNameFirefox,
+    }
+}
+
+const fn browser_status_msg(status: BrowserHostDisplayStatus) -> Msg {
+    match status {
+        BrowserHostDisplayStatus::NotRegistered => Msg::SettingsBrowserStatusNotRegistered,
+        BrowserHostDisplayStatus::RegisteredDisconnected => Msg::SettingsBrowserStatusRegistered,
+        BrowserHostDisplayStatus::Connected => Msg::SettingsBrowserStatusConnected,
+        BrowserHostDisplayStatus::NeedsReenable => Msg::SettingsBrowserStatusNeedsReenable,
+    }
+}
+
+const fn browser_action_msg(action: BrowserHostAction) -> Msg {
+    match action {
+        BrowserHostAction::Enable => Msg::SettingsBrowserActionEnable,
+        BrowserHostAction::Disable => Msg::SettingsBrowserActionDisable,
+        BrowserHostAction::Reenable => Msg::SettingsBrowserActionReenable,
+    }
+}
+
+const fn browser_button_id(browser: wire::BrowserKind) -> &'static str {
+    match browser {
+        wire::BrowserKind::Chrome => "settings-browser-chrome",
+        wire::BrowserKind::Edge => "settings-browser-edge",
+        wire::BrowserKind::Firefox => "settings-browser-firefox",
+    }
+}
+
 impl AppShell {
-    /// Loads settings, data info, and core status whenever the Settings page opens.
+    /// Loads settings, data info, browser host status, and core status whenever the Settings page opens.
     pub(super) fn open_settings_page(&mut self, cx: &mut Context<Self>) {
         self.settings_calendar = None;
         let settings_effect = self.settings.open();
         let data_effect = self.settings.load_data_info();
+        let browser_effect = self.settings.load_browser_hosts();
         let status_effect = self.settings.load_core_status();
         self.run_settings_effect(settings_effect, cx);
         self.run_settings_effect(data_effect, cx);
+        self.run_settings_effect(browser_effect, cx);
         self.run_settings_effect(status_effect, cx);
     }
 
@@ -261,6 +299,18 @@ impl AppShell {
 
     fn retry_core_status(&mut self, cx: &mut Context<Self>) {
         let effect = self.settings.load_core_status();
+        self.run_settings_effect(effect, cx);
+        cx.notify();
+    }
+
+    fn retry_browser_hosts(&mut self, cx: &mut Context<Self>) {
+        let effect = self.settings.load_browser_hosts();
+        self.run_settings_effect(effect, cx);
+        cx.notify();
+    }
+
+    fn trigger_browser_host_action(&mut self, browser: wire::BrowserKind, cx: &mut Context<Self>) {
+        let effect = self.settings.trigger_browser_host_action(browser);
         self.run_settings_effect(effect, cx);
         cx.notify();
     }
@@ -531,6 +581,65 @@ impl AppShell {
                 })
                 .detach();
             }
+            SettingsEffect::LoadBrowserHosts { generation } => {
+                let Some(link) = self.live.as_ref().map(|live| live.link.clone()) else {
+                    self.settings.apply_browser_hosts_loaded(
+                        generation,
+                        Err(LoadDataError::from(RequestCoreError::Disconnected)),
+                    );
+                    return;
+                };
+                cx.spawn(async move |this, cx| {
+                    let result = link.get_browser_hosts().await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.settings.apply_browser_hosts_loaded(generation, result);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            SettingsEffect::EnableBrowserHost {
+                browser,
+                generation,
+            } => {
+                let Some(link) = self.live.as_ref().map(|live| live.link.clone()) else {
+                    self.settings.apply_browser_host_action_finished(
+                        generation,
+                        Err(LoadDataError::from(RequestCoreError::Disconnected)),
+                    );
+                    return;
+                };
+                cx.spawn(async move |this, cx| {
+                    let result = link.enable_browser_host(browser).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.settings
+                            .apply_browser_host_action_finished(generation, result);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            SettingsEffect::DisableBrowserHost {
+                browser,
+                generation,
+            } => {
+                let Some(link) = self.live.as_ref().map(|live| live.link.clone()) else {
+                    self.settings.apply_browser_host_action_finished(
+                        generation,
+                        Err(LoadDataError::from(RequestCoreError::Disconnected)),
+                    );
+                    return;
+                };
+                cx.spawn(async move |this, cx| {
+                    let result = link.disable_browser_host(browser).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.settings
+                            .apply_browser_host_action_finished(generation, result);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
         }
     }
 
@@ -684,7 +793,7 @@ impl AppShell {
     }
 
     /// Renders the Settings page as a left-aligned single column of group cards in order:
-    /// General, Recording, Data, About.
+    /// General, Recording, Data, Browser, About.
     pub(super) fn render_settings(
         &self,
         ui: &Widgets<'_>,
@@ -711,11 +820,17 @@ impl AppShell {
         };
 
         let data_card = self.render_data_card(ui, cx);
+        let browser_card = self.render_browser_card(ui, cx);
         let about_card = self.render_about_card(ui, cx);
 
         #[cfg(feature = "preview")]
         let cards: Vec<AnyElement> = match self.preview.as_ref().map(|p| p.settings_section) {
-            Some(super::preview::SettingsPreviewSection::Data) => vec![data_card, about_card],
+            Some(super::preview::SettingsPreviewSection::Data) => {
+                vec![data_card, browser_card, about_card]
+            }
+            Some(super::preview::SettingsPreviewSection::Browser) => {
+                vec![browser_card, about_card]
+            }
             Some(super::preview::SettingsPreviewSection::About) => vec![about_card],
             Some(super::preview::SettingsPreviewSection::All) | None => {
                 let mut all = vec![general_card];
@@ -723,6 +838,7 @@ impl AppShell {
                     all.push(recording);
                 }
                 all.push(data_card);
+                all.push(browser_card);
                 all.push(about_card);
                 all
             }
@@ -735,6 +851,7 @@ impl AppShell {
                 all.push(recording);
             }
             all.push(data_card);
+            all.push(browser_card);
             all.push(about_card);
             all
         };
@@ -1846,6 +1963,220 @@ impl AppShell {
                     .child(spec.label),
             )
             .child(div().relative().child(button).children(popover))
+    }
+
+    fn render_browser_card(&self, ui: &Widgets<'_>, cx: &Context<Self>) -> AnyElement {
+        match self.settings.browser_hosts() {
+            BrowserHostsLoadState::Loading => self.render_settings_loading_card(
+                ui,
+                Msg::SettingsGroupBrowser,
+                BROWSER_SKELETON_ROW_COUNT,
+            ),
+            BrowserHostsLoadState::Failed(error) => self.render_browser_failed_card(ui, error, cx),
+            BrowserHostsLoadState::Ready(hosts) => self.render_browser_ready_card(ui, hosts, cx),
+        }
+    }
+
+    fn render_browser_failed_card(
+        &self,
+        ui: &Widgets<'_>,
+        error: &LoadDataError,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let space = &ui.metrics.space;
+        let palette = ui.palette;
+        ui.card()
+            .flex()
+            .flex_col()
+            .w_full()
+            .p(space.l)
+            .gap(space.m)
+            .child(
+                div()
+                    .ramp(ui, Ramp::Subtitle)
+                    .text_color(palette.text_primary)
+                    .child(self.formatter.text(Msg::SettingsGroupBrowser)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(space.m)
+                    .child(ui.icon(
+                        IconName::TriangleAlert,
+                        Density::Standard,
+                        palette.status_caution,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(space.xxs)
+                            .child(
+                                div()
+                                    .ramp(ui, Ramp::BodyStrong)
+                                    .text_color(palette.text_primary)
+                                    .child(
+                                        self.formatter.text(Msg::SettingsBrowserLoadFailedTitle),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .ramp(ui, Ramp::Body)
+                                    .text_color(palette.text_secondary)
+                                    .child(
+                                        self.formatter.text(Msg::SettingsBrowserLoadFailedMessage),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .ramp(ui, Ramp::Caption)
+                                    .font(ui.mono_font())
+                                    .text_color(palette.text_tertiary)
+                                    .child(error.code().to_string()),
+                            ),
+                    )
+                    .child(
+                        ui.button(
+                            "retry-browser-hosts",
+                            Density::Standard,
+                            ButtonContent::Label(self.formatter.text(Msg::SettingsRetry)),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_browser_hosts(cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_browser_ready_card(
+        &self,
+        ui: &Widgets<'_>,
+        hosts: &[wire::BrowserHostEntry],
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let space = &ui.metrics.space;
+        let palette = ui.palette;
+        let mutation = self.settings.browser_host_mutation();
+
+        let inline_error = self.settings.browser_hosts_error().map(|error| {
+            let msg = if error.code()
+                == LoadDataErrorCode::Protocol(wire::ErrorKind::HostExecutableMissing)
+            {
+                Msg::SettingsBrowserErrorHostMissing
+            } else {
+                Msg::SettingsBrowserErrorGeneric
+            };
+            self.render_inline_error(ui, msg, error)
+        });
+
+        let rows = hosts.iter().enumerate().map(|(index, &entry)| {
+            let presentation = browser_host_presentation(entry);
+            let browser = presentation.browser;
+            let dot_color = match presentation.status {
+                BrowserHostDisplayStatus::Connected => palette.status_success,
+                BrowserHostDisplayStatus::NeedsReenable => palette.status_caution,
+                BrowserHostDisplayStatus::NotRegistered
+                | BrowserHostDisplayStatus::RegisteredDisconnected => palette.status_neutral,
+            };
+            let status_text = self.formatter.text(browser_status_msg(presentation.status));
+            let action_label = self.formatter.text(browser_action_msg(presentation.action));
+            let id = browser_button_id(browser);
+            let control: AnyElement = match mutation {
+                BrowserHostMutation::Updating(active) if active == browser => self
+                    .busy_button(
+                        ui,
+                        id,
+                        Density::Standard,
+                        self.formatter.text(Msg::SettingsBrowserActionWorking),
+                    )
+                    .into_any_element(),
+                BrowserHostMutation::Updating(_) => ui
+                    .disabled_button(id, Density::Standard, ButtonContent::Label(action_label))
+                    .into_any_element(),
+                BrowserHostMutation::Idle => ui
+                    .button(id, Density::Standard, ButtonContent::Label(action_label))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.trigger_browser_host_action(browser, cx);
+                    }))
+                    .into_any_element(),
+            };
+
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_x(space.l)
+                .gap_y(space.xs)
+                .py(space.m);
+            if index > 0 {
+                row = row.border_t_1().border_color(palette.stroke_divider);
+            }
+            row.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap(space.xxs)
+                    .child(
+                        div()
+                            .ramp(ui, Ramp::Body)
+                            .text_color(palette.text_primary)
+                            .child(self.formatter.text(browser_name_msg(browser))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(space.s)
+                            .child(
+                                div()
+                                    .size(px(STATUS_DOT_SIZE))
+                                    .rounded_full()
+                                    .flex_shrink_0()
+                                    .bg(dot_color),
+                            )
+                            .child(
+                                div()
+                                    .ramp(ui, Ramp::Caption)
+                                    .text_color(palette.text_secondary)
+                                    .child(status_text),
+                            ),
+                    ),
+            )
+            .child(div().flex_shrink_0().child(control))
+        });
+
+        let hint = div()
+            .pt(space.m)
+            .border_t_1()
+            .border_color(palette.stroke_divider)
+            .ramp(ui, Ramp::Caption)
+            .text_color(palette.text_secondary)
+            .child(self.formatter.text(Msg::SettingsBrowserHint));
+
+        ui.card()
+            .flex()
+            .flex_col()
+            .w_full()
+            .p(space.l)
+            .gap(space.s)
+            .child(
+                div()
+                    .ramp(ui, Ramp::Subtitle)
+                    .text_color(palette.text_primary)
+                    .child(self.formatter.text(Msg::SettingsGroupBrowser)),
+            )
+            .children(inline_error)
+            .child(div().flex().flex_col().w_full().children(rows).child(hint))
+            .into_any_element()
     }
 
     fn render_about_card(&self, ui: &Widgets<'_>, cx: &Context<Self>) -> AnyElement {

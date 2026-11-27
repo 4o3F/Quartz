@@ -54,6 +54,7 @@ pub(crate) struct PlatformPorts {
     pub language: quartz_i18n::Language,
     pub locale: Option<LocaleSettings>,
     pub autostart: Arc<dyn crate::core::autostart::AutostartPort>,
+    pub browser_hosts: Arc<dyn crate::core::browser_hosts::BrowserHostsPort>,
 }
 
 #[derive(Debug, snafu::Snafu)]
@@ -245,6 +246,7 @@ impl CoreRuntime {
                 status: status.subscribe(),
                 browser_streams,
                 browser,
+                browser_hosts: ports.browser_hosts,
                 ui: Arc::clone(&ui_port),
                 timed: timed.clone(),
             },

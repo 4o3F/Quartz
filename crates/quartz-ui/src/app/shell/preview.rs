@@ -72,6 +72,7 @@ pub(super) enum SettingsPreviewSection {
     #[default]
     All,
     Data,
+    Browser,
     About,
 }
 
@@ -203,6 +204,10 @@ impl AppShell {
                 self.settings.set_delete_end(delete_end, today);
                 self.settings.request_delete_range(today);
                 settings_section = SettingsPreviewSection::Data;
+            }
+            PreviewState::SettingsBrowser => {
+                self.configure_settings_preview(wire::ResidentEnabled::Enabled, first_day_of_week);
+                settings_section = SettingsPreviewSection::Browser;
             }
             PreviewState::SettingsAbout => {
                 self.configure_settings_preview(wire::ResidentEnabled::Enabled, first_day_of_week);
@@ -579,6 +584,14 @@ impl AppShell {
         };
         self.settings
             .apply_core_status_loaded(status_gen, Ok(fixture_core_status_response()));
+        let crate::model::SettingsEffect::LoadBrowserHosts {
+            generation: browser_gen,
+        } = self.settings.load_browser_hosts()
+        else {
+            unreachable!("load_browser_hosts emits LoadBrowserHosts");
+        };
+        self.settings
+            .apply_browser_hosts_loaded(browser_gen, Ok(fixture_browser_hosts_response()));
         self.settings_selects_sync = InputSyncState::NeedsSync;
     }
 
@@ -709,6 +722,28 @@ fn fixture_core_status_response() -> wire::CoreStatusResponse {
         browser_streams: Vec::new(),
         instance_id: wire::InstanceId("preview-core-instance".to_owned()),
         core_version: wire::CoreVersion(env!("CARGO_PKG_VERSION").to_owned()),
+    }
+}
+
+fn fixture_browser_hosts_response() -> wire::BrowserHostsStatusResponse {
+    wire::BrowserHostsStatusResponse {
+        hosts: vec![
+            wire::BrowserHostEntry {
+                browser: wire::BrowserKind::Chrome,
+                registration: wire::BrowserHostRegistration::Registered,
+                connected: wire::BrowserHostConnection::Connected,
+            },
+            wire::BrowserHostEntry {
+                browser: wire::BrowserKind::Edge,
+                registration: wire::BrowserHostRegistration::NeedsReenable,
+                connected: wire::BrowserHostConnection::Disconnected,
+            },
+            wire::BrowserHostEntry {
+                browser: wire::BrowserKind::Firefox,
+                registration: wire::BrowserHostRegistration::NotRegistered,
+                connected: wire::BrowserHostConnection::Disconnected,
+            },
+        ],
     }
 }
 
@@ -2262,5 +2297,22 @@ mod tests {
         };
         assert!(status.recording);
         assert_eq!(status.core_version.0, env!("CARGO_PKG_VERSION"));
+
+        let SettingsEffect::LoadBrowserHosts { generation } = page.load_browser_hosts() else {
+            panic!("load_browser_hosts emits LoadBrowserHosts");
+        };
+        page.apply_browser_hosts_loaded(generation, Ok(fixture_browser_hosts_response()));
+        let crate::model::BrowserHostsLoadState::Ready(hosts) = page.browser_hosts() else {
+            panic!("fixture browser hosts ready");
+        };
+        let browsers: Vec<_> = hosts.iter().map(|host| host.browser).collect();
+        assert_eq!(
+            browsers,
+            [
+                wire::BrowserKind::Chrome,
+                wire::BrowserKind::Edge,
+                wire::BrowserKind::Firefox
+            ]
+        );
     }
 }

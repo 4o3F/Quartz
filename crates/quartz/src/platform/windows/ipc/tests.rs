@@ -56,6 +56,7 @@ impl Fixture {
                 status: status.subscribe(),
                 browser_streams: status.browser_streams(),
                 browser: crate::ipc::browser::BrowserCapturePort::noop(),
+                browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
                 ui: port,
             },
         })
@@ -327,6 +328,7 @@ fn first_instance_refuses_an_occupied_name() {
             status: fixture.status.subscribe(),
             browser_streams: fixture.status.browser_streams(),
             browser: crate::ipc::browser::BrowserCapturePort::noop(),
+            browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
             ui: port,
         },
     });
@@ -595,6 +597,7 @@ impl SlowClientRun {
                 status: status.subscribe(),
                 browser_streams: status.browser_streams(),
                 browser: crate::ipc::browser::BrowserCapturePort::noop(),
+                browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
                 ui: Arc::new(|_| Ok(())),
             },
         })
@@ -1026,6 +1029,7 @@ fn core_runtime_with_fake_ports_flushes_shutdown_over_test_pipe() {
                 r"C:\Quartz\quartz.exe",
             )
             .0,
+            browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
         },
     )
     .expect("start runtime with isolated named pipe");

@@ -355,6 +355,8 @@ impl AppShell {
         }
         let recording = snapshot.recording;
         let stop_reason = snapshot.stop_reason;
+        self.settings
+            .sync_browser_streams(&snapshot.browser_streams);
         if let Some(live) = &mut self.live {
             live.snapshot = snapshot;
             live.observe_recording();

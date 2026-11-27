@@ -1109,6 +1109,8 @@ mod tests {
                     status: publisher.subscribe(),
                     browser_streams: publisher.browser_streams(),
                     browser: crate::ipc::browser::BrowserCapturePort::noop(),
+                    browser_hosts:
+                        crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
                     ui: Arc::new(|_| Ok(())),
                 },
                 listener: Arc::new(PipeListener {

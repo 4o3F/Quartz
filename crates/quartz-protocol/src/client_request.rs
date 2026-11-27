@@ -91,6 +91,9 @@ requests! {
     crate::DataCompactRequest => DataCompact => crate::DataCompactResponse,
     crate::DataDeleteRangeRequest => DataDeleteRange => crate::DataDeleteRangeResponse,
     crate::BrowserStateRequest => BrowserState => AcceptedBody,
+    crate::BrowserHostsStatusRequest => BrowserHostsStatus => crate::BrowserHostsStatusResponse,
+    crate::BrowserHostsEnableRequest => BrowserHostsEnable => crate::BrowserHostsStatusResponse,
+    crate::BrowserHostsDisableRequest => BrowserHostsDisable => crate::BrowserHostsStatusResponse,
 }
 
 #[cfg(test)]
@@ -245,6 +248,22 @@ mod tests {
         assert!(crate::DataCompactRequest::response(data["compact_response"].clone()).is_ok());
         assert!(
             crate::DataDeleteRangeRequest::response(data["delete_range_response"].clone()).is_ok()
+        );
+        let mut browser_hosts: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/browser_hosts.json"))
+                .expect("browser_hosts");
+        AdditiveFields::insert(&mut browser_hosts);
+        assert!(
+            crate::BrowserHostsStatusRequest::response(browser_hosts["status_response"].clone())
+                .is_ok()
+        );
+        assert!(
+            crate::BrowserHostsEnableRequest::response(browser_hosts["status_response"].clone())
+                .is_ok()
+        );
+        assert!(
+            crate::BrowserHostsDisableRequest::response(browser_hosts["status_response"].clone())
+                .is_ok()
         );
     }
 }

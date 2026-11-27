@@ -1,0 +1,28 @@
+{
+  "status_request": {},
+  "enable_request": {
+    "browser": "chrome"
+  },
+  "disable_request": {
+    "browser": "firefox"
+  },
+  "status_response": {
+    "hosts": [
+      {
+        "browser": "chrome",
+        "registration": "registered",
+        "connected": true
+      },
+      {
+        "browser": "edge",
+        "registration": "needs_reenable",
+        "connected": false
+      },
+      {
+        "browser": "firefox",
+        "registration": "not_registered",
+        "connected": false
+      }
+    ]
+  }
+}

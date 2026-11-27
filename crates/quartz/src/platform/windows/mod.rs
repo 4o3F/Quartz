@@ -1,6 +1,7 @@
 //! Windows core lifecycle and main-thread platform integration.
 
 mod autostart;
+mod browser_hosts;
 pub(crate) mod foreground;
 mod handle;
 mod instance;
@@ -276,7 +277,7 @@ impl CoreProcess {
         )
         .context(CreateTraySnafu)?;
         let wake = ports::MainWake::new(tray.raw_window())?;
-        let ports = PlatformPorts::windows(system_language, &wake)?;
+        let ports = PlatformPorts::windows(system_language, &wake, &data_directory)?;
         let mut runtime = CoreRuntime::start(&data_directory, ports).context(StartRuntimeSnafu)?;
         if let Err(error) = tray.set_language(runtime.status.ui_settings().ui_language) {
             tracing::error!(%error, "could not apply initial tray language");

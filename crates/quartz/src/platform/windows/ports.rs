@@ -112,6 +112,7 @@ impl PlatformPorts {
     pub(super) fn windows(
         system_language: quartz_i18n::Language,
         wake: &MainWake,
+        data_directory: &crate::data_directory::DataDirectory,
     ) -> Result<Self, RunCoreError> {
         let proposed_device_id = windows::core::GUID::new().context(CreateDeviceIdSnafu)?;
         let session_id = sources::SystemMessage::session_id().context(ReadSessionIdSnafu)?;
@@ -143,6 +144,7 @@ impl PlatformPorts {
                 }
             },
             autostart: super::autostart::autostart_port(),
+            browser_hosts: super::browser_hosts::browser_hosts_port(data_directory.native_hosts()),
         })
     }
 }

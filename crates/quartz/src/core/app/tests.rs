@@ -579,6 +579,7 @@ impl RuntimePortsFixture {
                 r"C:\Quartz\quartz.exe",
             )
             .0,
+            browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
         };
         Self { ports, log, clock }
     }
@@ -726,6 +727,7 @@ fn io_write_replies_publish_committed_versions_and_rollback_keeps_versions() {
         status: status.subscribe(),
         browser_streams: status.browser_streams(),
         browser: crate::ipc::browser::BrowserCapturePort::noop(),
+        browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
         ui: Arc::new(|_| Ok(())),
     };
     let mut versions = runtime.workers.versions.clone();
@@ -913,6 +915,7 @@ fn categories_ipc_retries_and_day_subscription_emit_only_real_changes() {
         status: status.subscribe(),
         browser_streams: status.browser_streams(),
         browser: crate::ipc::browser::BrowserCapturePort::noop(),
+        browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
         ui: Arc::new(|_| Ok(())),
     };
     let io = tokio::runtime::Builder::new_current_thread()
@@ -983,6 +986,7 @@ fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
         status: status.subscribe(),
         browser_streams: status.browser_streams(),
         browser: crate::ipc::browser::BrowserCapturePort::noop(),
+        browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
         ui: Arc::new(|_| Ok(())),
     };
     let io = tokio::runtime::Builder::new_current_thread()
@@ -1223,6 +1227,7 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
         status: status.subscribe(),
         browser_streams: status.browser_streams(),
         browser: crate::ipc::browser::BrowserCapturePort::noop(),
+        browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
         ui: Arc::clone(&channel.port),
     };
     let io = tokio::runtime::Builder::new_current_thread()
@@ -1346,6 +1351,7 @@ fn timed_ipc_admits_typed_capture_events_and_reports_busy_and_invalid_deadlines(
         status: status.subscribe(),
         browser_streams: status.browser_streams(),
         browser: crate::ipc::browser::BrowserCapturePort::noop(),
+        browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
         ui: Arc::new(|_| Ok(())),
     };
     let io = tokio::runtime::Builder::new_current_thread()
@@ -1797,6 +1803,7 @@ fn changing_title_retention_setting_triggers_immediate_purge_and_publishes_versi
         status: status.subscribe(),
         browser_streams: status.browser_streams(),
         browser: crate::ipc::browser::BrowserCapturePort::noop(),
+        browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
         ui: Arc::clone(&channel.port),
     };
 
@@ -2057,6 +2064,7 @@ fn browser_hello_persists_stream_lists_in_status_forwards_state_and_disconnect_e
         status: status.subscribe(),
         browser_streams: status.browser_streams(),
         browser: capture_sender.browser_port(runtime.clock.clone()),
+        browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
         ui: Arc::new(|_| Ok(())),
     };
     let profile: Uuid = "a286737e-3855-43cb-98ee-c366344372d0"
@@ -2268,6 +2276,7 @@ fn browser_second_connection_for_same_profile_replaces_and_closes_first() {
         status: status.subscribe(),
         browser_streams: status.browser_streams(),
         browser: capture_sender.browser_port(runtime.clock.clone()),
+        browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
         ui: Arc::new(|_| Ok(())),
     };
     let profile: Uuid = "b286737e-3855-43cb-98ee-c366344372d1"

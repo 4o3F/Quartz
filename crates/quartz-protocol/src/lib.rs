@@ -8,6 +8,11 @@ pub use browser::{
     BrowserWindowState, INTERNAL_BROWSER_DOMAIN, LOCAL_FILE_BROWSER_DOMAIN,
     ValidateBrowserStateError, validate_browser_domain, validate_browser_title,
 };
+mod browser_hosts;
+pub use browser_hosts::{
+    BrowserHostConnection, BrowserHostEntry, BrowserHostRegistration, BrowserHostsDisableRequest,
+    BrowserHostsEnableRequest, BrowserHostsStatusRequest, BrowserHostsStatusResponse,
+};
 mod categories;
 pub use categories::{
     CATEGORIES_MAX_ENTITIES, CategoriesArchiveRequest, CategoriesCreateRequest,

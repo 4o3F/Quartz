@@ -67,6 +67,8 @@ pub enum ErrorKind {
     Busy,
     /// The manual backup target file already exists.
     BackupExists,
+    /// The Native Messaging host executable (`quartz-host.exe`) is missing beside the core executable.
+    HostExecutableMissing,
     /// An unrecognized future code; additional fields are ignored by this client.
     #[serde(other, skip_serializing)]
     Unknown,
@@ -95,6 +97,7 @@ impl ErrorKind {
             Self::Internal => "internal",
             Self::Busy => "busy",
             Self::BackupExists => "backup_exists",
+            Self::HostExecutableMissing => "host_executable_missing",
             Self::VersionExhausted => "version_exhausted",
             Self::Unknown => "unknown",
         }
@@ -148,6 +151,7 @@ mod tests {
             "version_exhausted",
             "busy",
             "backup_exists",
+            "host_executable_missing",
         ] {
             let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "key": "user.local", "core_version": "test-core", "field":"parent", "diagnostics":[], "truncated":false});
             let kind: ErrorKind = serde_json::from_value(wire).expect("known error kind");

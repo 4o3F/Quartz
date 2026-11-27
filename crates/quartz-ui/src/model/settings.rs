@@ -1,4 +1,4 @@
-//! Settings page view model: General, Recording, Data, and About groups (07 section 7, 03 section 6).
+//! Settings page view model: General, Recording, Data, Browser, and About groups (07 section 7, 03 section 6, 05 section 2.1).
 
 use quartz_protocol as wire;
 
@@ -283,6 +283,77 @@ pub(crate) enum CoreStatusLoadState {
     Failed(LoadDataError),
 }
 
+/// Load state of `browser_hosts.status`.
+#[derive(Debug)]
+pub(crate) enum BrowserHostsLoadState {
+    Loading,
+    Ready(Vec<wire::BrowserHostEntry>),
+    Failed(LoadDataError),
+}
+
+/// User-facing status label category for a browser Native Messaging host row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrowserHostDisplayStatus {
+    NotRegistered,
+    RegisteredDisconnected,
+    Connected,
+    NeedsReenable,
+}
+
+/// Single action button shown for a browser Native Messaging host row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrowserHostAction {
+    Enable,
+    Disable,
+    Reenable,
+}
+
+/// Derived UI status and action for one browser host row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BrowserHostPresentation {
+    pub(crate) browser: wire::BrowserKind,
+    pub(crate) status: BrowserHostDisplayStatus,
+    pub(crate) action: BrowserHostAction,
+}
+
+/// Maps a wire [`wire::BrowserHostEntry`] to its displayed status and button action.
+#[must_use]
+pub(crate) const fn browser_host_presentation(
+    entry: wire::BrowserHostEntry,
+) -> BrowserHostPresentation {
+    let (status, action) = match (entry.registration, entry.connected) {
+        (wire::BrowserHostRegistration::NotRegistered, _) => (
+            BrowserHostDisplayStatus::NotRegistered,
+            BrowserHostAction::Enable,
+        ),
+        (wire::BrowserHostRegistration::Registered, wire::BrowserHostConnection::Connected) => (
+            BrowserHostDisplayStatus::Connected,
+            BrowserHostAction::Disable,
+        ),
+        (wire::BrowserHostRegistration::Registered, wire::BrowserHostConnection::Disconnected) => (
+            BrowserHostDisplayStatus::RegisteredDisconnected,
+            BrowserHostAction::Disable,
+        ),
+        (wire::BrowserHostRegistration::NeedsReenable, _) => (
+            BrowserHostDisplayStatus::NeedsReenable,
+            BrowserHostAction::Reenable,
+        ),
+    };
+    BrowserHostPresentation {
+        browser: entry.browser,
+        status,
+        action,
+    }
+}
+
+/// Whether an enable or disable request is currently in flight for a browser host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum BrowserHostMutation {
+    #[default]
+    Idle,
+    Updating(wire::BrowserKind),
+}
+
 /// Currently running long-lived data maintenance operation, blocking concurrent submissions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum DataOperation {
@@ -429,6 +500,17 @@ pub(crate) enum SettingsEffect {
         request: wire::DataDeleteRangeRequest,
         generation: SettingsGeneration,
     },
+    LoadBrowserHosts {
+        generation: SettingsGeneration,
+    },
+    EnableBrowserHost {
+        browser: wire::BrowserKind,
+        generation: SettingsGeneration,
+    },
+    DisableBrowserHost {
+        browser: wire::BrowserKind,
+        generation: SettingsGeneration,
+    },
 }
 
 /// Pure state machine for the Settings page (07 section 7).
@@ -453,6 +535,11 @@ pub(crate) struct SettingsPage {
     delete_end: Option<wire::LocalDate>,
     delete_confirm: DeleteRangeConfirm,
     delete_notice: DeleteNotice,
+    browser_hosts: BrowserHostsLoadState,
+    browser_hosts_generation: SettingsGeneration,
+    browser_host_mutation: BrowserHostMutation,
+    browser_host_mutation_generation: SettingsGeneration,
+    browser_hosts_error: Option<LoadDataError>,
 }
 
 impl Default for SettingsPage {
@@ -485,6 +572,11 @@ impl SettingsPage {
             delete_end: None,
             delete_confirm: DeleteRangeConfirm::None,
             delete_notice: DeleteNotice::None,
+            browser_hosts: BrowserHostsLoadState::Loading,
+            browser_hosts_generation: SettingsGeneration::default(),
+            browser_host_mutation: BrowserHostMutation::Idle,
+            browser_host_mutation_generation: SettingsGeneration::default(),
+            browser_hosts_error: None,
         }
     }
 
@@ -596,6 +688,24 @@ impl SettingsPage {
         &self.delete_notice
     }
 
+    /// Current load state of `browser_hosts.status`.
+    #[must_use]
+    pub(crate) const fn browser_hosts(&self) -> &BrowserHostsLoadState {
+        &self.browser_hosts
+    }
+
+    /// Whether a browser host enable/disable mutation is currently in flight.
+    #[must_use]
+    pub(crate) const fn browser_host_mutation(&self) -> BrowserHostMutation {
+        self.browser_host_mutation
+    }
+
+    /// Inline error shown inside the Browser card after a failed refresh or enable/disable action.
+    #[must_use]
+    pub(crate) const fn browser_hosts_error(&self) -> Option<&LoadDataError> {
+        self.browser_hosts_error.as_ref()
+    }
+
     /// Validates the currently picked start and end dates against `logical_today`.
     ///
     /// # Errors
@@ -647,6 +757,19 @@ impl SettingsPage {
         }
         SettingsEffect::LoadCoreStatus {
             generation: self.core_status_generation,
+        }
+    }
+
+    /// Requests fresh `browser_hosts.status` metadata for the Browser card.
+    #[must_use]
+    pub(crate) fn load_browser_hosts(&mut self) -> SettingsEffect {
+        self.browser_hosts_generation = self.browser_hosts_generation.next();
+        if !matches!(self.browser_hosts, BrowserHostsLoadState::Ready(_)) {
+            self.browser_hosts = BrowserHostsLoadState::Loading;
+        }
+        self.browser_hosts_error = None;
+        SettingsEffect::LoadBrowserHosts {
+            generation: self.browser_hosts_generation,
         }
     }
 
@@ -730,6 +853,104 @@ impl SettingsPage {
         if let CoreStatusLoadState::Ready(status) = &mut self.core_status {
             status.recording = recording;
             status.stop_reason = stop_reason;
+        }
+    }
+
+    /// Applies the reply from `browser_hosts.status`, dropping stale generations and preserving
+    /// any active enable/disable mutation in flight.
+    pub(crate) fn apply_browser_hosts_loaded(
+        &mut self,
+        generation: SettingsGeneration,
+        result: Result<wire::BrowserHostsStatusResponse, LoadDataError>,
+    ) {
+        if !self.browser_hosts_generation.accepts(generation) {
+            return;
+        }
+        if self.browser_host_mutation != BrowserHostMutation::Idle {
+            return;
+        }
+        match result {
+            Ok(response) => {
+                self.browser_hosts = BrowserHostsLoadState::Ready(response.hosts);
+                self.browser_hosts_error = None;
+            }
+            Err(error) => {
+                if matches!(self.browser_hosts, BrowserHostsLoadState::Ready(_)) {
+                    self.browser_hosts_error = Some(error);
+                } else {
+                    self.browser_hosts = BrowserHostsLoadState::Failed(error);
+                }
+            }
+        }
+    }
+
+    /// Triggers `browser_hosts.enable` or `browser_hosts.disable` for `browser` according to its
+    /// current registration state, unless another browser host mutation is already in flight.
+    #[must_use]
+    pub(crate) fn trigger_browser_host_action(
+        &mut self,
+        browser: wire::BrowserKind,
+    ) -> SettingsEffect {
+        if self.browser_host_mutation != BrowserHostMutation::Idle {
+            return SettingsEffect::None;
+        }
+        let BrowserHostsLoadState::Ready(hosts) = &self.browser_hosts else {
+            return SettingsEffect::None;
+        };
+        let Some(entry) = hosts.iter().copied().find(|host| host.browser == browser) else {
+            return SettingsEffect::None;
+        };
+        let presentation = browser_host_presentation(entry);
+        self.browser_hosts_error = None;
+        self.browser_host_mutation = BrowserHostMutation::Updating(browser);
+        self.browser_host_mutation_generation = self.browser_host_mutation_generation.next();
+        match presentation.action {
+            BrowserHostAction::Enable | BrowserHostAction::Reenable => {
+                SettingsEffect::EnableBrowserHost {
+                    browser,
+                    generation: self.browser_host_mutation_generation,
+                }
+            }
+            BrowserHostAction::Disable => SettingsEffect::DisableBrowserHost {
+                browser,
+                generation: self.browser_host_mutation_generation,
+            },
+        }
+    }
+
+    /// Applies the reply from `browser_hosts.enable` or `browser_hosts.disable`.
+    pub(crate) fn apply_browser_host_action_finished(
+        &mut self,
+        generation: SettingsGeneration,
+        result: Result<wire::BrowserHostsStatusResponse, LoadDataError>,
+    ) {
+        if self.browser_host_mutation == BrowserHostMutation::Idle
+            || !self.browser_host_mutation_generation.accepts(generation)
+        {
+            return;
+        }
+        self.browser_host_mutation = BrowserHostMutation::Idle;
+        match result {
+            Ok(response) => {
+                self.browser_hosts = BrowserHostsLoadState::Ready(response.hosts);
+                self.browser_hosts_error = None;
+            }
+            Err(error) => {
+                self.browser_hosts_error = Some(error);
+            }
+        }
+    }
+
+    /// Keeps per-browser live connection flags synchronized with `StateSnapshot` pushes.
+    pub(crate) fn sync_browser_streams(&mut self, streams: &[wire::BrowserStream]) {
+        if let BrowserHostsLoadState::Ready(hosts) = &mut self.browser_hosts {
+            for host in hosts {
+                host.connected = if streams.iter().any(|stream| stream.browser == host.browser) {
+                    wire::BrowserHostConnection::Connected
+                } else {
+                    wire::BrowserHostConnection::Disconnected
+                };
+            }
         }
     }
 
@@ -1557,5 +1778,185 @@ mod tests {
         ));
         page.on_logical_date_changed(date(2026, 11, 26));
         assert_eq!(page.delete_confirm(), DeleteRangeConfirm::None);
+    }
+
+    #[test]
+    fn browser_host_presentation_maps_status_and_button_for_every_state() {
+        assert_eq!(
+            browser_host_presentation(wire::BrowserHostEntry {
+                browser: wire::BrowserKind::Firefox,
+                registration: wire::BrowserHostRegistration::NotRegistered,
+                connected: wire::BrowserHostConnection::Disconnected,
+            }),
+            BrowserHostPresentation {
+                browser: wire::BrowserKind::Firefox,
+                status: BrowserHostDisplayStatus::NotRegistered,
+                action: BrowserHostAction::Enable,
+            }
+        );
+        assert_eq!(
+            browser_host_presentation(wire::BrowserHostEntry {
+                browser: wire::BrowserKind::Edge,
+                registration: wire::BrowserHostRegistration::Registered,
+                connected: wire::BrowserHostConnection::Disconnected,
+            }),
+            BrowserHostPresentation {
+                browser: wire::BrowserKind::Edge,
+                status: BrowserHostDisplayStatus::RegisteredDisconnected,
+                action: BrowserHostAction::Disable,
+            }
+        );
+        assert_eq!(
+            browser_host_presentation(wire::BrowserHostEntry {
+                browser: wire::BrowserKind::Chrome,
+                registration: wire::BrowserHostRegistration::Registered,
+                connected: wire::BrowserHostConnection::Connected,
+            }),
+            BrowserHostPresentation {
+                browser: wire::BrowserKind::Chrome,
+                status: BrowserHostDisplayStatus::Connected,
+                action: BrowserHostAction::Disable,
+            }
+        );
+        assert_eq!(
+            browser_host_presentation(wire::BrowserHostEntry {
+                browser: wire::BrowserKind::Edge,
+                registration: wire::BrowserHostRegistration::NeedsReenable,
+                connected: wire::BrowserHostConnection::Disconnected,
+            }),
+            BrowserHostPresentation {
+                browser: wire::BrowserKind::Edge,
+                status: BrowserHostDisplayStatus::NeedsReenable,
+                action: BrowserHostAction::Reenable,
+            }
+        );
+    }
+
+    #[test]
+    fn browser_hosts_actions_dispatch_enable_disable_reenable_and_sync_live_streams() {
+        let mut page = ready_page();
+        assert!(matches!(
+            page.browser_hosts(),
+            BrowserHostsLoadState::Loading
+        ));
+
+        let SettingsEffect::LoadBrowserHosts { generation } = page.load_browser_hosts() else {
+            panic!("load_browser_hosts emits LoadBrowserHosts");
+        };
+        let initial = wire::BrowserHostsStatusResponse {
+            hosts: vec![
+                wire::BrowserHostEntry {
+                    browser: wire::BrowserKind::Chrome,
+                    registration: wire::BrowserHostRegistration::Registered,
+                    connected: wire::BrowserHostConnection::Connected,
+                },
+                wire::BrowserHostEntry {
+                    browser: wire::BrowserKind::Edge,
+                    registration: wire::BrowserHostRegistration::NeedsReenable,
+                    connected: wire::BrowserHostConnection::Disconnected,
+                },
+                wire::BrowserHostEntry {
+                    browser: wire::BrowserKind::Firefox,
+                    registration: wire::BrowserHostRegistration::NotRegistered,
+                    connected: wire::BrowserHostConnection::Disconnected,
+                },
+            ],
+        };
+        page.apply_browser_hosts_loaded(generation, Ok(initial.clone()));
+
+        // NotRegistered -> EnableBrowserHost; concurrent action is blocked while updating.
+        let SettingsEffect::EnableBrowserHost {
+            browser: wire::BrowserKind::Firefox,
+            generation: enable_gen,
+        } = page.trigger_browser_host_action(wire::BrowserKind::Firefox)
+        else {
+            panic!("not-registered browser emits EnableBrowserHost");
+        };
+        assert_eq!(
+            page.browser_host_mutation(),
+            BrowserHostMutation::Updating(wire::BrowserKind::Firefox)
+        );
+        assert_eq!(
+            page.trigger_browser_host_action(wire::BrowserKind::Chrome),
+            SettingsEffect::None
+        );
+
+        // Failure clears mutation state and records inline error.
+        page.apply_browser_host_action_finished(
+            enable_gen,
+            Err(LoadDataError::from(RequestCoreError::Call {
+                source: quartz_pipe::CallCoreError::Protocol {
+                    kind: wire::ErrorKind::HostExecutableMissing,
+                },
+            })),
+        );
+        assert_eq!(page.browser_host_mutation(), BrowserHostMutation::Idle);
+        assert_eq!(
+            page.browser_hosts_error().map(LoadDataError::code),
+            Some(crate::link::LoadDataErrorCode::Protocol(
+                wire::ErrorKind::HostExecutableMissing
+            ))
+        );
+
+        // NeedsReenable -> EnableBrowserHost.
+        let SettingsEffect::EnableBrowserHost {
+            browser: wire::BrowserKind::Edge,
+            generation: reenable_gen,
+        } = page.trigger_browser_host_action(wire::BrowserKind::Edge)
+        else {
+            panic!("needs-reenable browser emits EnableBrowserHost");
+        };
+        let mut after_reenable = initial;
+        after_reenable
+            .hosts
+            .get_mut(1)
+            .expect("fixture lists edge second")
+            .registration = wire::BrowserHostRegistration::Registered;
+        page.apply_browser_host_action_finished(reenable_gen, Ok(after_reenable));
+        assert!(page.browser_hosts_error().is_none());
+
+        // Registered -> DisableBrowserHost.
+        let SettingsEffect::DisableBrowserHost {
+            browser: wire::BrowserKind::Chrome,
+            generation: disable_gen,
+        } = page.trigger_browser_host_action(wire::BrowserKind::Chrome)
+        else {
+            panic!("registered browser emits DisableBrowserHost");
+        };
+        page.apply_browser_host_action_finished(
+            disable_gen,
+            Ok(wire::BrowserHostsStatusResponse {
+                hosts: vec![
+                    wire::BrowserHostEntry {
+                        browser: wire::BrowserKind::Chrome,
+                        registration: wire::BrowserHostRegistration::NotRegistered,
+                        connected: wire::BrowserHostConnection::Disconnected,
+                    },
+                    wire::BrowserHostEntry {
+                        browser: wire::BrowserKind::Edge,
+                        registration: wire::BrowserHostRegistration::Registered,
+                        connected: wire::BrowserHostConnection::Disconnected,
+                    },
+                    wire::BrowserHostEntry {
+                        browser: wire::BrowserKind::Firefox,
+                        registration: wire::BrowserHostRegistration::NotRegistered,
+                        connected: wire::BrowserHostConnection::Disconnected,
+                    },
+                ],
+            }),
+        );
+
+        // Live browser stream updates flip Edge from RegisteredDisconnected to Connected.
+        page.sync_browser_streams(&[wire::BrowserStream {
+            browser_stream: wire::BrowserStreamId("edge-profile-1".into()),
+            browser: wire::BrowserKind::Edge,
+        }]);
+        let BrowserHostsLoadState::Ready(hosts) = page.browser_hosts() else {
+            panic!("browser hosts ready");
+        };
+        assert_eq!(
+            browser_host_presentation(*hosts.get(1).expect("edge listed second")).status,
+            BrowserHostDisplayStatus::Connected
+        );
     }
 }

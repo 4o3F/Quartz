@@ -36,6 +36,7 @@ pub(crate) struct Services {
     pub status: tokio::sync::watch::Receiver<PublishedStatus>,
     pub browser_streams: BrowserStreamsHandle,
     pub browser: browser::BrowserCapturePort,
+    pub browser_hosts: Arc<dyn crate::core::browser_hosts::BrowserHostsPort>,
     pub ui: UiPort,
     pub timed: TimedPolicyPort,
 }

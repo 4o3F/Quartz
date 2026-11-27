@@ -775,6 +775,8 @@ mod tests {
                     status: status.subscribe(),
                     browser_streams: status.browser_streams(),
                     browser: crate::ipc::browser::BrowserCapturePort::noop(),
+                    browser_hosts:
+                        crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
                     ui: std::sync::Arc::new(|_| Ok(())),
                     timed: crate::ipc::TimedPolicyPort::unavailable(),
                 },

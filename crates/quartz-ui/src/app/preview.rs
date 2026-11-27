@@ -96,6 +96,8 @@ pub enum PreviewState {
     SettingsData,
     /// Settings page Data group with the date-range deletion confirmation block visible.
     SettingsDeleteConfirm,
+    /// Settings page Browser group showing connected, needs-reenable, and not-registered hosts.
+    SettingsBrowser,
     /// Settings page About group with versions, core status, and logs directory.
     SettingsAbout,
     /// The shared failure/connecting screen, without a core or pipe.
@@ -235,6 +237,7 @@ impl FromStr for PreviewState {
             "settings-resident-off" => Ok(Self::SettingsResidentOff),
             "settings-data" => Ok(Self::SettingsData),
             "settings-delete-confirm" => Ok(Self::SettingsDeleteConfirm),
+            "settings-browser" => Ok(Self::SettingsBrowser),
             "settings-about" => Ok(Self::SettingsAbout),
             "connecting" => Ok(Self::Error(ErrorPreviewState::Connecting)),
             "core-not-running" => Ok(Self::Error(ErrorPreviewState::CoreNotRunning)),
@@ -437,6 +440,7 @@ impl PreviewState {
             | Self::SettingsResidentOff
             | Self::SettingsData
             | Self::SettingsDeleteConfirm
+            | Self::SettingsBrowser
             | Self::SettingsAbout => Page::Settings,
             Self::Rules
             | Self::RulesCategories
@@ -474,6 +478,7 @@ impl PreviewState {
             | Self::SettingsResidentOff
             | Self::SettingsData
             | Self::SettingsDeleteConfirm
+            | Self::SettingsBrowser
             | Self::SettingsAbout
             | Self::Rules
             | Self::RulesCategories
@@ -502,6 +507,7 @@ impl PreviewState {
             | Self::SettingsResidentOff
             | Self::SettingsData
             | Self::SettingsDeleteConfirm
+            | Self::SettingsBrowser
             | Self::SettingsAbout
             | Self::Rules
             | Self::RulesCategories
@@ -969,6 +975,11 @@ mod tests {
             (
                 "settings-delete-confirm",
                 PreviewState::SettingsDeleteConfirm,
+                Page::Settings,
+            ),
+            (
+                "settings-browser",
+                PreviewState::SettingsBrowser,
                 Page::Settings,
             ),
             (

@@ -48,6 +48,7 @@ export const scenarios = [
   "settings-resident-off",
   "settings-data",
   "settings-delete-confirm",
+  "settings-browser",
   "settings-about",
 ] as const;
 export const narrowScenarios = [

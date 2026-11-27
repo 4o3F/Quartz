@@ -4,7 +4,7 @@ use super::{
     browser::BrowserStreamKey,
     outbox::OutboxTask,
     registry::{BrowserPeer, RegistryHandle},
-    session::Action,
+    session::{Action, BrowserHostsRequest},
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use quartz_protocol::{
@@ -433,6 +433,39 @@ impl Connection {
                         },
                     )
                 }
+                Action::BrowserHosts { id, request } => {
+                    let streams = self.services.status.borrow().status.browser_streams.clone();
+                    let result = match request {
+                        BrowserHostsRequest::Status => self.services.browser_hosts.status(&streams),
+                        BrowserHostsRequest::Enable(browser) => {
+                            self.services.browser_hosts.enable(browser, &streams)
+                        }
+                        BrowserHostsRequest::Disable(browser) => {
+                            self.services.browser_hosts.disable(browser, &streams)
+                        }
+                    };
+                    Some(match result {
+                        Ok(response) => Action::success_response(id, response),
+                        Err(
+                            crate::core::browser_hosts::ManageBrowserHostsError::MissingHostExecutable {
+                                path,
+                            },
+                        ) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                "could not enable browser host because quartz-host.exe is missing"
+                            );
+                            Action::error_response(
+                                Some(id),
+                                ProtocolError::new(ErrorKind::HostExecutableMissing),
+                            )
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "could not handle browser_hosts request");
+                            Action::error_response(Some(id), ProtocolError::new(ErrorKind::Internal))
+                        }
+                    })
+                }
             };
             if let Some(response) = response {
                 outbox.response(response).map_err(io::Error::other)?;
@@ -572,6 +605,7 @@ pub(crate) mod tests {
                 status: status.subscribe(),
                 browser_streams: status.browser_streams(),
                 browser: crate::ipc::browser::BrowserCapturePort::noop(),
+                browser_hosts: crate::core::browser_hosts::test_support::in_memory_browser_hosts(),
                 ui: Arc::new(|_| Ok(())),
             },
             registry: RegistryHandle::start(

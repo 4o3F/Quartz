@@ -41,7 +41,8 @@ impl Role {
                 | OpFamily::Settings
                 | OpFamily::Tracking
                 | OpFamily::PrivacyMode
-                | OpFamily::Data => true,
+                | OpFamily::Data
+                | OpFamily::BrowserHosts => true,
             },
             Self::Cli => match op.family() {
                 OpFamily::Hello | OpFamily::Query | OpFamily::Core | OpFamily::Settings => true,
@@ -55,6 +56,7 @@ impl Role {
                 | OpFamily::PrivacyMode
                 | OpFamily::Data
                 | OpFamily::Browser
+                | OpFamily::BrowserHosts
                 | OpFamily::Unknown => false,
             },
             Self::Browser => matches!(op.family(), OpFamily::Hello | OpFamily::Browser),
@@ -114,6 +116,9 @@ impl Op {
             | Self::DataCompact
             | Self::DataDeleteRange
             | Self::BrowserState
+            | Self::BrowserHostsStatus
+            | Self::BrowserHostsEnable
+            | Self::BrowserHostsDisable
             | Self::Unknown => false,
         }
     }
@@ -137,7 +142,7 @@ mod tests {
     #[test]
     fn every_role_and_operation_matches_the_independent_permission_table() {
         // Written as wire-name lists, independently of the production family helper.
-        let ui = "hello subscribe unsubscribe core.status ui.open ui.first_frame ui.hidden query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away query.annotations rule_sets.tree rule_sets.get rule_sets.set_enabled rule_sets.delete rule_sets.edit rules.preview rules_text.validate rules_text.import rules_text.export categories.list categories.create categories.update categories.archive categories.reorder annotations.create annotations.update annotations.delete settings.get settings.set tracking.pause tracking.resume tracking.keep_alive privacy_mode.set data.info data.backup data.compact data.delete_range";
+        let ui = "hello subscribe unsubscribe core.status ui.open ui.first_frame ui.hidden query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away query.annotations rule_sets.tree rule_sets.get rule_sets.set_enabled rule_sets.delete rule_sets.edit rules.preview rules_text.validate rules_text.import rules_text.export categories.list categories.create categories.update categories.archive categories.reorder annotations.create annotations.update annotations.delete settings.get settings.set tracking.pause tracking.resume tracking.keep_alive privacy_mode.set data.info data.backup data.compact data.delete_range browser_hosts.status browser_hosts.enable browser_hosts.disable";
         let cli = "hello settings.get settings.set ui.open query.facts query.day query.timeline query.range query.segment_detail query.entity_detail query.unclassified query.pending_away query.annotations core.status rules_text.validate rules_text.export rule_sets.tree rule_sets.get";
         let browser = "hello browser.state";
         for role in [Role::Ui, Role::Cli, Role::Browser] {

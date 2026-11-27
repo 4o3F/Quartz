@@ -1160,6 +1160,8 @@ settings.group.recording:
   zh-CN: "记录"
 settings.group.data:
   zh-CN: "数据"
+settings.group.browser:
+  zh-CN: "浏览器"
 settings.group.about:
   zh-CN: "关于"
 settings.action.cancel:
@@ -1254,6 +1256,38 @@ settings.data.delete.error.bad_request:
   zh-CN: "日期范围无效，仅可删除已结束的完整逻辑日。"
 settings.data.delete.error.generic:
   zh-CN: "删除记录失败，请重试。"
+settings.browser.name.chrome:
+  zh-CN: "Chrome"
+settings.browser.name.edge:
+  zh-CN: "Edge"
+settings.browser.name.firefox:
+  zh-CN: "Firefox"
+settings.browser.status.not_registered:
+  zh-CN: "未注册"
+settings.browser.status.registered:
+  zh-CN: "已注册，未连接"
+settings.browser.status.connected:
+  zh-CN: "已连接"
+settings.browser.status.needs_reenable:
+  zh-CN: "需要重新启用"
+settings.browser.action.enable:
+  zh-CN: "启用"
+settings.browser.action.disable:
+  zh-CN: "停用"
+settings.browser.action.reenable:
+  zh-CN: "重新启用"
+settings.browser.action.working:
+  zh-CN: "正在处理…"
+settings.browser.hint:
+  zh-CN: "需要先在浏览器中安装 Quartz 扩展（见安装说明）"
+settings.browser.load_failed.title:
+  zh-CN: "暂时无法读取浏览器状态"
+settings.browser.load_failed.message:
+  zh-CN: "请重试以检查浏览器扩展宿主注册状态。"
+settings.browser.error.host_missing:
+  zh-CN: "未在程序目录中找到 quartz-host.exe，请检查安装文件是否完整。"
+settings.browser.error.generic:
+  zh-CN: "无法更新浏览器宿主注册状态，请重试。"
 settings.about.version.label:
   zh-CN: "版本"
 settings.about.version.ui:

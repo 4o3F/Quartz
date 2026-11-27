@@ -35,6 +35,8 @@ pub enum OpFamily {
     Data,
     /// The `browser` operation family.
     Browser,
+    /// The `browser_hosts` operation family.
+    BrowserHosts,
     /// An unrecognized operation; no role may authorize it.
     Unknown,
 }
@@ -177,6 +179,15 @@ pub enum Op {
     /// The `browser.state` request.
     #[serde(rename = "browser.state")]
     BrowserState,
+    /// The `browser_hosts.status` request.
+    #[serde(rename = "browser_hosts.status")]
+    BrowserHostsStatus,
+    /// The `browser_hosts.enable` request.
+    #[serde(rename = "browser_hosts.enable")]
+    BrowserHostsEnable,
+    /// The `browser_hosts.disable` request.
+    #[serde(rename = "browser_hosts.disable")]
+    BrowserHostsDisable,
     /// A future or invalid request name; respond with `unknown_op`.
     #[serde(other, skip_serializing)]
     Unknown,
@@ -226,6 +237,9 @@ impl Op {
                 OpFamily::Data
             }
             Self::BrowserState => OpFamily::Browser,
+            Self::BrowserHostsStatus | Self::BrowserHostsEnable | Self::BrowserHostsDisable => {
+                OpFamily::BrowserHosts
+            }
             Self::Unknown => OpFamily::Unknown,
         }
     }

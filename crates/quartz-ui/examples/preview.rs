@@ -7,6 +7,8 @@
 //! - M4 editing flows: `rules`, `rules-categories`, `rule-editor`, `rule-editor-preview`,
 //!   `rule-import`, `unclassified`, `progress`, `today-annotations`, `annotation-editor`,
 //!   `timeline-select`, `classify-menu`.
+//! - Week & Settings views: `week`, `week-loading`, `settings`, `settings-resident-off`,
+//!   `settings-data`, `settings-delete-confirm`, `settings-browser`, `settings-about`.
 //! - Error states (shared error component with sample diagnostics): `connecting`,
 //!   `core-not-running`, `core-not-running-starting`, `core-start-failed`, `connect-failed`,
 //!   `migration-failed`, `newer-database`, `version-mismatch`, `other-session`,

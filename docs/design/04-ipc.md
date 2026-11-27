@@ -59,6 +59,7 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 | `version_exhausted` | 持久版本计数达到上限，事务回滚 | 无 |
 | `busy` | 核心队列满或暂时过载，稍后重试 | 无 |
 | `backup_exists` | 手动备份目标文件已存在，拒绝覆盖 | 无 |
+| `host_executable_missing` | `browser_hosts.enable` 时 `quartz.exe` 同目录没有 `quartz-host.exe` | 无 |
 | `internal` | 核心内部错误 | 无 |
 
 管道建立前的核心启动致命错误通过 `quartz.exe ui --core-error <code> [--backup-path <路径>...]` 传递给 UI，代码定义在 `crates/quartz-protocol/src/startup_error.rs`（`newer_database`、`migration_failed`、`other_session`、`core_start_failed`）。
@@ -85,7 +86,7 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 
 | 角色 | 允许的操作 |
 |---|---|
-| `ui` | 全部已实现操作：`hello`、`subscribe`/`unsubscribe`、`core.*`、`ui.*`、`query.*`、`rule_sets.*`、`rules.*`、`rules_text.*`、`categories.*`、`annotations.*`、`settings.*`、`tracking.*`、`privacy_mode.*`、`data.*` |
+| `ui` | 全部已实现操作：`hello`、`subscribe`/`unsubscribe`、`core.*`、`ui.*`、`query.*`、`rule_sets.*`、`rules.*`、`rules_text.*`、`categories.*`、`annotations.*`、`settings.*`、`tracking.*`、`privacy_mode.*`、`data.*`、`browser_hosts.*` |
 | `cli` | `hello`、`core.status`、`ui.open`、`query.*`、`settings.get`、`settings.set`、`rule_sets.tree`、`rule_sets.get`、`rules_text.validate`、`rules_text.export` |
 | `browser` | `hello`、`browser.state` |
 
@@ -160,6 +161,7 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 | `data.backup` | 以 `VACUUM INTO` 写出不覆盖的 `backups\manual-<UTC yyyymmddThhmmssZ>.db` 并返回该备份条目（仅 UI） |
 | `data.compact` | 在写连接执行 `VACUUM` 与 `PRAGMA wal_checkpoint(TRUNCATE)`，返回整理前后字节数（仅 UI） |
 | `data.delete_range` | 按半开逻辑日期范围 `[start_date, end_date)` 原子删除并裁剪事实、清理无引用字典与截断 WAL，返回已删前台时长与更新后版本摘要（仅 UI） |
+| `browser_hosts.status` / `.enable` / `.disable` | 读取或写入 Chrome、Edge、Firefox 的 Native Messaging 注册（manifest + HKCU 键），返回三个浏览器的注册状态与连接状态（仅 UI，见 05 第 2.1 节） |
 
 **规则文本上限与校验**：单规则集导入/导出文本上限 192 KiB（`MAX_RULE_TEXT_BYTES`），保证 JSON 编码后稳妥落入 1 MiB 帧上限；校验诊断最多 100 条且 ≤200 KiB，超限时置 `truncated: true`。
 

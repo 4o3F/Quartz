@@ -6,7 +6,8 @@ use super::{
 };
 
 use quartz_protocol::{
-    BROWSER_MAX_FRAME_LEN, BrowserHello, BrowserStateRequest, CoreStatusRequest,
+    BROWSER_MAX_FRAME_LEN, BrowserHello, BrowserHostsDisableRequest, BrowserHostsEnableRequest,
+    BrowserHostsStatusRequest, BrowserKind, BrowserStateRequest, CoreStatusRequest,
     CoreStatusResponse, Envelope, ErrorKind, Hello, HelloResponse, HelloRole, MAX_FRAME_LEN, Op,
     PROTOCOL_VERSION, ProtoRange, ProtocolError, RequestId, Response, ResponseOutcome, Role,
     Subscribe, UiFirstFrameRequest, UiHiddenRequest, UiOpenRequest, UiState,
@@ -89,6 +90,13 @@ pub(crate) struct ConnectionSession {
     state: State,
     allowed: AllowedRoles,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrowserHostsRequest {
+    Status,
+    Enable(BrowserKind),
+    Disable(BrowserKind),
+}
+
 #[derive(Debug)]
 pub(crate) enum Action {
     Reply(Response),
@@ -138,6 +146,10 @@ pub(crate) enum Action {
     BrowserState {
         id: RequestId,
         state: BrowserStateRequest,
+    },
+    BrowserHosts {
+        id: RequestId,
+        request: BrowserHostsRequest,
     },
 }
 impl Action {
@@ -385,6 +397,39 @@ impl ConnectionSession {
                         };
                         Action::BrowserState { id, state }
                     }
+                    Op::BrowserHostsStatus => {
+                        if serde_json::from_value::<BrowserHostsStatusRequest>(request.body)
+                            .is_err()
+                        {
+                            return Action::error(Some(id), ErrorKind::BadRequest);
+                        }
+                        Action::BrowserHosts {
+                            id,
+                            request: BrowserHostsRequest::Status,
+                        }
+                    }
+                    Op::BrowserHostsEnable => {
+                        let Ok(enable) =
+                            serde_json::from_value::<BrowserHostsEnableRequest>(request.body)
+                        else {
+                            return Action::error(Some(id), ErrorKind::BadRequest);
+                        };
+                        Action::BrowserHosts {
+                            id,
+                            request: BrowserHostsRequest::Enable(enable.browser),
+                        }
+                    }
+                    Op::BrowserHostsDisable => {
+                        let Ok(disable) =
+                            serde_json::from_value::<BrowserHostsDisableRequest>(request.body)
+                        else {
+                            return Action::error(Some(id), ErrorKind::BadRequest);
+                        };
+                        Action::BrowserHosts {
+                            id,
+                            request: BrowserHostsRequest::Disable(disable.browser),
+                        }
+                    }
                     Op::Hello => Action::error(Some(id), ErrorKind::BadRequest),
                     Op::Unknown => Action::error(Some(id), ErrorKind::UnknownOp),
                 }
@@ -462,6 +507,15 @@ mod tests {
             (
                 Op::DataDeleteRange,
                 serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03"}),
+            ),
+            (Op::BrowserHostsStatus, serde_json::json!({})),
+            (
+                Op::BrowserHostsEnable,
+                serde_json::json!({"browser":"chrome"}),
+            ),
+            (
+                Op::BrowserHostsDisable,
+                serde_json::json!({"browser":"firefox"}),
             ),
         ];
         for (op, body) in ui_only {
