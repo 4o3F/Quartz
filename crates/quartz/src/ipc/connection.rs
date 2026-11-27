@@ -1,10 +1,16 @@
 //! Framed protocol sessions over arbitrary asynchronous transport halves.
 use super::{
-    ConnectionSession, ProcessId, Services, outbox::OutboxTask, registry::RegistryHandle,
+    ConnectionSession, ProcessId, Services,
+    browser::BrowserStreamKey,
+    outbox::OutboxTask,
+    registry::{BrowserPeer, RegistryHandle},
     session::Action,
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use quartz_protocol::{Envelope, ErrorKind, ProtocolError, decode_json, frame_codec};
+use quartz_protocol::{
+    BROWSER_MAX_FRAME_LEN, Envelope, ErrorKind, ProtocolError, decode_json,
+    frame_codec_with_max_len,
+};
 use std::{future::Future, io, pin::Pin, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
@@ -186,9 +192,10 @@ impl Connection {
         hello_deadline: tokio::time::Instant,
         progress_clock: &ProgressClockConfig,
     ) -> io::Result<()> {
-        let mut reader = FramedRead::new(read, frame_codec());
+        let mut reader = FramedRead::new(read, frame_codec_with_max_len(session.max_frame_len()));
         let outbox = writer.handle.clone();
         let mut registration = None;
+        let mut browser_stream: Option<BrowserPeer> = None;
         let mut requests = PendingReplies::new();
         let tracker = PendingTracker::default();
         loop {
@@ -339,6 +346,93 @@ impl Connection {
                             .map_err(|_| ProtocolError::new(ErrorKind::Internal))
                     })
                 }
+                Action::BrowserHello {
+                    id,
+                    hello,
+                    response,
+                } => {
+                    reader
+                        .decoder_mut()
+                        .set_max_frame_length(BROWSER_MAX_FRAME_LEN);
+                    let submitted = self.services.writes.submit(
+                        crate::persistence::dispatch::WriteRequest::RegisterBrowserStream(
+                            hello.clone(),
+                        ),
+                    );
+                    let stream_id = match submitted {
+                        Ok(reply) => {
+                            let persisted = tokio::select! {
+                                () = outbox.closed() => return Ok(()),
+                                received = reply => received,
+                            };
+                            match persisted
+                                .map_err(|_| ProtocolError::new(ErrorKind::Internal))
+                                .and_then(|result| result)
+                            {
+                                Ok(
+                                    crate::persistence::dispatch::WriteResponse::BrowserStreamRegistered(
+                                        stream_id,
+                                    ),
+                                ) => Ok(stream_id),
+                                Ok(_) => Err(ProtocolError::new(ErrorKind::Internal)),
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match stream_id {
+                        Ok(stream_id) => {
+                            let peer = BrowserPeer {
+                                stream_id,
+                                key: BrowserStreamKey {
+                                    browser: hello.browser,
+                                    profile_instance_id: hello.profile_instance_id,
+                                },
+                            };
+                            let registered = tokio::select! {
+                                () = outbox.closed() => return Ok(()),
+                                result = self.registry.register_browser(peer.clone(), outbox.clone()) => result,
+                            };
+                            match registered {
+                                Ok(reg) => {
+                                    registration = Some(reg);
+                                    browser_stream = Some(peer);
+                                    Some(Action::success_response(id, response))
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "could not register browser stream");
+                                    session.close();
+                                    Some(Action::error_response(
+                                        Some(id),
+                                        ProtocolError::new(ErrorKind::Internal),
+                                    ))
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            session.close();
+                            Some(Action::error_response(Some(id), error))
+                        }
+                    }
+                }
+                Action::BrowserState { id, state } => {
+                    if outbox.is_closed() {
+                        return Ok(());
+                    }
+                    let peer = browser_stream
+                        .as_ref()
+                        .expect("browser state follows browser hello");
+                    Some(
+                        match self.services.browser.send_state(
+                            peer.stream_id,
+                            peer.key.clone(),
+                            state,
+                        ) {
+                            Ok(()) => Action::success_response(id, quartz_protocol::AcceptedBody),
+                            Err(error) => Action::error_response(Some(id), error),
+                        },
+                    )
+                }
             };
             if let Some(response) = response {
                 outbox.response(response).map_err(io::Error::other)?;
@@ -452,7 +546,7 @@ pub(crate) mod tests {
         query::dispatch::test_support::TestDatabase,
     };
     use futures_util::SinkExt;
-    use quartz_protocol::{HelloRole, PROTOCOL_VERSION, RequestId, ResponseOutcome};
+    use quartz_protocol::{HelloRole, PROTOCOL_VERSION, RequestId, ResponseOutcome, frame_codec};
     use std::sync::Arc;
     use tokio::io::split;
     use tokio_util::codec::Framed;
@@ -476,12 +570,16 @@ pub(crate) mod tests {
                 writes: crate::ipc::WriteChannel::new().port,
                 versions: database.versions.clone(),
                 status: status.subscribe(),
+                browser_streams: status.browser_streams(),
+                browser: crate::ipc::browser::BrowserCapturePort::noop(),
                 ui: Arc::new(|_| Ok(())),
             },
             registry: RegistryHandle::start(
                 status.subscribe(),
                 database.versions.clone(),
                 Arc::new(|_| Ok(())),
+                status.browser_streams(),
+                crate::ipc::browser::BrowserCapturePort::noop(),
             ),
             peer_pid: ProcessId::new(std::process::id()),
             timeouts: ConnectionTimeouts {

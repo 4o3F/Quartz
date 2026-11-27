@@ -11,5 +11,13 @@ publish.workspace = true
 name = "quartz-host"
 path = "src/main.rs"
 
+[dependencies]
+quartz-pipe.workspace = true
+quartz-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+tokio.workspace = true
+
 [lints]
 workspace = true

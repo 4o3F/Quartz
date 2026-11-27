@@ -9,13 +9,27 @@ use snafu::Snafu;
 /// full single-response query payloads while keeping per-connection buffers small.
 pub const MAX_FRAME_LEN: usize = 1024 * 1024;
 
+/// Maximum JSON payload length for browser-role connections: 256 KiB (05 §2.2).
+pub const BROWSER_MAX_FRAME_LEN: usize = 256 * 1024;
+
 /// Encodes a JSON payload without its transport header, enforcing the 04 §2 size limit.
 ///
 /// # Errors
 /// Returns the serialization source or the encoded length when the payload is too large.
 pub fn encode_json<T: Serialize>(value: &T) -> Result<Vec<u8>, EncodeFrameError> {
+    encode_json_with_limit(value, MAX_FRAME_LEN)
+}
+
+/// Encodes a JSON payload without its transport header, enforcing an explicit byte ceiling.
+///
+/// # Errors
+/// Returns the serialization source or the encoded length when the payload exceeds `max_len`.
+pub fn encode_json_with_limit<T: Serialize>(
+    value: &T,
+    max_len: usize,
+) -> Result<Vec<u8>, EncodeFrameError> {
     let payload = serde_json::to_vec(value).map_err(|source| EncodeFrameError::Json { source })?;
-    if payload.len() > MAX_FRAME_LEN {
+    if payload.len() > max_len {
         return Err(EncodeFrameError::TooLarge {
             payload_len: payload.len(),
         });
@@ -36,6 +50,20 @@ pub fn decode_json<T: DeserializeOwned>(payload: &[u8]) -> Result<T, DecodeJsonE
 #[cfg(feature = "codec")]
 #[must_use]
 pub fn frame_codec() -> tokio_util::codec::LengthDelimitedCodec {
+    frame_codec_with_max_len(MAX_FRAME_LEN)
+}
+
+/// Constructs the shared 04 §2 codec with the 256 KiB ceiling for browser-role connections (05 §2.2).
+#[cfg(feature = "codec")]
+#[must_use]
+pub fn browser_frame_codec() -> tokio_util::codec::LengthDelimitedCodec {
+    frame_codec_with_max_len(BROWSER_MAX_FRAME_LEN)
+}
+
+/// Constructs the shared 04 §2 length-delimited codec with an explicit maximum frame length.
+#[cfg(feature = "codec")]
+#[must_use]
+pub fn frame_codec_with_max_len(max_frame_len: usize) -> tokio_util::codec::LengthDelimitedCodec {
     /// The 04 §2 length field is a little-endian u32 and excludes the header itself.
     const HEADER_LEN: usize = size_of::<u32>();
     tokio_util::codec::LengthDelimitedCodec::builder()
@@ -43,7 +71,7 @@ pub fn frame_codec() -> tokio_util::codec::LengthDelimitedCodec {
         .little_endian()
         .length_adjustment(0)
         .num_skip(HEADER_LEN)
-        .max_frame_length(MAX_FRAME_LEN)
+        .max_frame_length(max_frame_len)
         .new_codec()
 }
 
@@ -232,6 +260,33 @@ mod tests {
             assert_eq!(wire(b"{}").as_ref(), b"\x02\x00\x00\x00{}");
             let payload = vec![0; 256];
             assert_eq!(&wire(&payload)[..4], &[0, 1, 0, 0]);
+        }
+        #[test]
+        fn browser_frame_codec_enforces_256_kib_ceiling() {
+            let exact = vec![b' '; BROWSER_MAX_FRAME_LEN];
+            let mut buffer = BytesMut::new();
+            browser_frame_codec()
+                .encode(exact.as_slice(), &mut buffer)
+                .expect("exact 256 KiB frame");
+            assert_eq!(
+                browser_frame_codec()
+                    .decode(&mut buffer)
+                    .expect("decode 256 KiB")
+                    .expect("complete frame")
+                    .len(),
+                BROWSER_MAX_FRAME_LEN
+            );
+            let declared = u32::try_from(BROWSER_MAX_FRAME_LEN + 1).expect("length fits u32");
+            let mut oversize = BytesMut::from(declared.to_le_bytes().as_slice());
+            let error = browser_frame_codec()
+                .decode(&mut oversize)
+                .expect_err("reject frame over 256 KiB");
+            assert!(
+                error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<LengthDelimitedCodecError>())
+                    .is_some()
+            );
         }
     }
 }

@@ -1,9 +1,11 @@
 //! Connection registry actor; fan-out never awaits a client writer.
 
 use super::{
-    ProcessId, PublishedStatus, UiCommand, UiPort,
+    BrowserStreamsHandle, ProcessId, PublishedStatus, UiCommand, UiPort,
+    browser::{BrowserCapturePort, BrowserStreamKey},
     outbox::{OutboxHandle, QueueFrameError},
 };
+use crate::store::browser::BrowserStreamRowId;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use quartz_protocol::{ControlBody, ControlOp, Response, Role, Subscribe, Topic};
 use std::{
@@ -51,12 +53,25 @@ impl ConnectionPeer {
     }
 }
 
+/// Registered browser stream metadata paired with its persisted `browser_streams.id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BrowserPeer {
+    pub stream_id: BrowserStreamRowId,
+    pub key: BrowserStreamKey,
+}
+
 enum RegistryMessage {
     Register {
         id: ConnectionId,
         peer: ConnectionPeer,
         outbox: OutboxHandle,
         registered_at: std::time::Instant,
+    },
+    RegisterBrowser {
+        id: ConnectionId,
+        peer: BrowserPeer,
+        outbox: OutboxHandle,
+        reply: oneshot::Sender<()>,
     },
     Unregister {
         id: ConnectionId,
@@ -96,6 +111,8 @@ impl RegistryHandle {
         status: watch::Receiver<PublishedStatus>,
         versions: crate::query::versions::VersionPort,
         ui: UiPort,
+        browser_streams: BrowserStreamsHandle,
+        browser: BrowserCapturePort,
     ) -> Self {
         let (mailbox, receiver) = mpsc::channel(REGISTRY_MAILBOX_CAPACITY);
         let handle = Self {
@@ -108,6 +125,8 @@ impl RegistryHandle {
                 ui,
                 status,
                 versions,
+                browser_streams,
+                browser,
                 connections: BTreeMap::new(),
                 pending: VecDeque::new(),
                 versions_in_flight: FuturesUnordered::new(),
@@ -116,6 +135,16 @@ impl RegistryHandle {
             .run(),
         );
         handle
+    }
+    fn allocate_id(&self) -> ConnectionId {
+        ConnectionId(
+            self.next_id
+                .update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    value
+                        .checked_add(1)
+                        .expect("u64 counter cannot overflow in practice")
+                }),
+        )
     }
     fn send(&self, message: RegistryMessage) -> Result<(), QueueRegistryError> {
         self.mailbox.try_send(message).map_err(|error| {
@@ -128,14 +157,7 @@ impl RegistryHandle {
         peer: ConnectionPeer,
         outbox: OutboxHandle,
     ) -> Result<Registration, QueueRegistryError> {
-        let id = ConnectionId(
-            self.next_id
-                .update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    value
-                        .checked_add(1)
-                        .expect("u64 counter cannot overflow in practice")
-                }),
-        );
+        let id = self.allocate_id();
         self.send(RegistryMessage::Register {
             id,
             peer,
@@ -146,6 +168,26 @@ impl RegistryHandle {
             id,
             registry: self.clone(),
         })
+    }
+    pub(crate) async fn register_browser(
+        &self,
+        peer: BrowserPeer,
+        outbox: OutboxHandle,
+    ) -> Result<Registration, QueueRegistryError> {
+        let id = self.allocate_id();
+        let (reply, received) = oneshot::channel();
+        self.send(RegistryMessage::RegisterBrowser {
+            id,
+            peer,
+            outbox,
+            reply,
+        })?;
+        let registration = Registration {
+            id,
+            registry: self.clone(),
+        };
+        received.await.map_err(|_| QueueRegistryError)?;
+        Ok(registration)
     }
     pub(crate) fn submit_unsubscribe(
         &self,
@@ -234,6 +276,7 @@ struct Connection {
     role: Role,
     state: StateSubscription,
     days: BTreeMap<quartz_protocol::LocalDate, quartz_protocol::DayChanged>,
+    browser: Option<BrowserPeer>,
     outbox: OutboxHandle,
 }
 impl Connection {
@@ -253,6 +296,8 @@ struct ConnectionRegistry {
     receiver: mpsc::Receiver<RegistryMessage>,
     status: watch::Receiver<PublishedStatus>,
     versions: crate::query::versions::VersionPort,
+    browser_streams: BrowserStreamsHandle,
+    browser: BrowserCapturePort,
     connections: BTreeMap<ConnectionId, Connection>,
     pending: VecDeque<SubscriptionChange>,
     versions_in_flight: FuturesUnordered<VersionFlight>,
@@ -293,6 +338,7 @@ impl ConnectionRegistry {
         let mut publisher = VersionPublisher::Active;
         loop {
             let mut removed_days = std::collections::BTreeSet::new();
+            let mut removed_browsers = Vec::new();
             self.connections.retain(|id, connection| {
                 if connection.outbox.is_closed() {
                     if connection.role == Role::Ui
@@ -300,12 +346,21 @@ impl ConnectionRegistry {
                     {
                         tracing::warn!(%error, "could not report UI disconnection");
                     }
+                    if let Some(peer) = connection.browser.take() {
+                        removed_browsers.push(peer);
+                    }
                     removed_days.extend(connection.days.keys().copied());
                     false
                 } else {
                     true
                 }
             });
+            if !removed_browsers.is_empty() {
+                for peer in removed_browsers {
+                    self.browser.send_closed(peer.stream_id, peer.key);
+                }
+                self.publish_browser_streams();
+            }
             self.prune_days(removed_days);
             self.advance_subscriptions();
             let reconciliation = self.reconciliation;
@@ -378,9 +433,48 @@ impl ConnectionRegistry {
                         role: peer.role(),
                         state: StateSubscription::Absent,
                         days: BTreeMap::new(),
+                        browser: None,
                         outbox,
                     },
                 );
+            }
+            RegistryMessage::RegisterBrowser {
+                id,
+                peer,
+                outbox,
+                reply,
+            } => {
+                let replaced: Vec<ConnectionId> = self
+                    .connections
+                    .iter()
+                    .filter_map(|(&existing_id, connection)| {
+                        connection
+                            .browser
+                            .as_ref()
+                            .filter(|existing| existing.key == peer.key)
+                            .map(|_| existing_id)
+                    })
+                    .collect();
+                for existing_id in replaced {
+                    if let Some(old) = self.connections.remove(&existing_id) {
+                        old.outbox.close();
+                        if let Some(old_peer) = old.browser {
+                            self.browser.send_closed(old_peer.stream_id, old_peer.key);
+                        }
+                    }
+                }
+                self.connections.insert(
+                    id,
+                    Connection {
+                        role: Role::Browser,
+                        state: StateSubscription::Absent,
+                        days: BTreeMap::new(),
+                        browser: Some(peer),
+                        outbox,
+                    },
+                );
+                self.publish_browser_streams();
+                let _ = reply.send(());
             }
             RegistryMessage::Unregister { id } => {
                 if let Some(connection) = self.connections.remove(&id) {
@@ -388,6 +482,10 @@ impl ConnectionRegistry {
                         && let Err(error) = (self.ui)(UiCommand::Unregistered { connection: id })
                     {
                         tracing::warn!(%error, "could not report UI disconnection");
+                    }
+                    if let Some(peer) = connection.browser {
+                        self.browser.send_closed(peer.stream_id, peer.key);
+                        self.publish_browser_streams();
                     }
                     self.prune_days(connection.days.into_keys().collect());
                 }
@@ -680,6 +778,20 @@ impl ConnectionRegistry {
             self.reconciliation = ReconcileVersions::Required;
         }
     }
+    fn publish_browser_streams(&self) {
+        let mut streams: Vec<_> = self
+            .connections
+            .values()
+            .filter_map(|connection| {
+                connection
+                    .browser
+                    .as_ref()
+                    .map(|peer| peer.key.to_protocol_stream())
+            })
+            .collect();
+        streams.sort();
+        self.browser_streams.update(streams);
+    }
     fn publish_state(&self) {
         let mut snapshot = None;
         for connection in self
@@ -710,8 +822,13 @@ mod tests {
                 .snapshots();
         let channel = crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
             .expect("versions");
-        let registry =
-            RegistryHandle::start(status.subscribe(), channel.port, Arc::new(|_| Ok(())));
+        let registry = RegistryHandle::start(
+            status.subscribe(),
+            channel.port,
+            Arc::new(|_| Ok(())),
+            status.browser_streams(),
+            BrowserCapturePort::noop(),
+        );
         let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
         let registration = registry
             .register(ConnectionPeer::Cli, writer.handle.clone())
@@ -763,6 +880,8 @@ mod tests {
                 }
                 _ => Ok(()),
             }),
+            status.browser_streams(),
+            BrowserCapturePort::noop(),
         );
         let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
         let registration = registry
@@ -797,8 +916,13 @@ mod tests {
             let channel =
                 crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
                     .expect("versions");
-            let registry =
-                RegistryHandle::start(status.subscribe(), channel.port, Arc::new(|_| Ok(())));
+            let registry = RegistryHandle::start(
+                status.subscribe(),
+                channel.port,
+                Arc::new(|_| Ok(())),
+                status.browser_streams(),
+                BrowserCapturePort::noop(),
+            );
             let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
             let cli = registry
                 .register(ConnectionPeer::Cli, writer.handle.clone())
@@ -866,6 +990,8 @@ mod tests {
                 ui: Arc::new(|_| Ok(())),
                 status: status.subscribe(),
                 versions: channel.port,
+                browser_streams: status.browser_streams(),
+                browser: BrowserCapturePort::noop(),
                 connections: BTreeMap::new(),
                 pending: VecDeque::new(),
                 versions_in_flight: FuturesUnordered::new(),
@@ -878,6 +1004,7 @@ mod tests {
                         role: Role::Ui,
                         state: StateSubscription::Absent,
                         days: BTreeMap::from([(date, day.clone())]),
+                        browser: None,
                         outbox: writer.handle.clone(),
                     },
                 );
@@ -918,6 +1045,8 @@ mod tests {
             status.subscribe(),
             database.versions.clone(),
             Arc::new(|_| Ok(())),
+            status.browser_streams(),
+            BrowserCapturePort::noop(),
         );
         let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
         let registration = registry
@@ -968,8 +1097,13 @@ mod tests {
                 crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("registry".into()));
             let database = crate::query::dispatch::test_support::TestDatabase::start();
             let versions = database.versions.clone();
-            let registry =
-                RegistryHandle::start(publisher.subscribe(), versions, Arc::new(|_| Ok(())));
+            let registry = RegistryHandle::start(
+                publisher.subscribe(),
+                versions,
+                Arc::new(|_| Ok(())),
+                publisher.browser_streams(),
+                BrowserCapturePort::noop(),
+            );
             let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
             let registration = registry
                 .register(
@@ -998,8 +1132,13 @@ mod tests {
             crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
                 .expect("versions");
         let updates = channel.port.updates.clone();
-        let registry =
-            RegistryHandle::start(status.subscribe(), channel.port, Arc::new(|_| Ok(())));
+        let registry = RegistryHandle::start(
+            status.subscribe(),
+            channel.port,
+            Arc::new(|_| Ok(())),
+            status.browser_streams(),
+            BrowserCapturePort::noop(),
+        );
         let writer = super::super::outbox::OutboxTask::spawn(tokio::io::sink());
         let registration = registry
             .register(ConnectionPeer::Cli, writer.handle.clone())
@@ -1051,8 +1190,13 @@ mod tests {
         let mut channel =
             crate::query::versions::VersionPublisher::open(&mut fixture.store, snapshots)
                 .expect("versions");
-        let registry =
-            RegistryHandle::start(status.subscribe(), channel.port, Arc::new(|_| Ok(())));
+        let registry = RegistryHandle::start(
+            status.subscribe(),
+            channel.port,
+            Arc::new(|_| Ok(())),
+            status.browser_streams(),
+            BrowserCapturePort::noop(),
+        );
         let (write, read) = tokio::io::duplex(8192);
         let writer = super::super::outbox::OutboxTask::spawn(write);
         let mut reader = tokio_util::codec::FramedRead::new(read, quartz_protocol::frame_codec());

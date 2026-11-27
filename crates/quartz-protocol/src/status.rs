@@ -87,16 +87,18 @@ pub enum DatabaseState {
     PersistenceFailed,
 }
 
-/// Identity of a connected browser stream; populated by M5.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Identity of a connected browser stream (profile instance UUID).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BrowserStreamId(pub String);
 
-/// Browser connection entry; M5 supplies connected entries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Connected browser stream entry visible in `core.status` and `state` snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BrowserStream {
     /// Registered stream identity.
     pub browser_stream: BrowserStreamId,
+    /// Browser family for this stream.
+    pub browser: crate::BrowserKind,
 }
 
 /// Immutable status published by the main thread, without a database read.

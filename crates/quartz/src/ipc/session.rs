@@ -6,8 +6,9 @@ use super::{
 };
 
 use quartz_protocol::{
-    CoreStatusRequest, CoreStatusResponse, Envelope, ErrorKind, Hello, HelloResponse, HelloRole,
-    Op, PROTOCOL_VERSION, ProtoRange, ProtocolError, RequestId, Response, ResponseOutcome, Role,
+    BROWSER_MAX_FRAME_LEN, BrowserHello, BrowserStateRequest, CoreStatusRequest,
+    CoreStatusResponse, Envelope, ErrorKind, Hello, HelloResponse, HelloRole, MAX_FRAME_LEN, Op,
+    PROTOCOL_VERSION, ProtoRange, ProtocolError, RequestId, Response, ResponseOutcome, Role,
     Subscribe, UiFirstFrameRequest, UiHiddenRequest, UiOpenRequest, UiState,
 };
 
@@ -19,7 +20,10 @@ pub(crate) enum AllowedRoles {
 }
 impl AllowedRoles {
     pub(crate) fn permits(self, role: Role) -> bool {
-        matches!((self, role), (Self::Quartz, Role::Ui | Role::Cli))
+        matches!(
+            (self, role),
+            (Self::Quartz, Role::Ui | Role::Cli) | (Self::Host, Role::Browser)
+        )
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,22 +46,26 @@ pub(crate) enum UiCommand {
     },
     SettingsChanged(quartz_protocol::EffectiveUiSettings),
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum ReadyRole {
     Ui { state: UiState },
     Cli,
+    Browser,
 }
 impl ReadyRole {
-    fn role(self) -> Role {
+    fn role(&self) -> Role {
         match self {
             Self::Ui { .. } => Role::Ui,
             Self::Cli => Role::Cli,
+            Self::Browser => Role::Browser,
         }
     }
-    fn peer(self, pid: ProcessId) -> ConnectionPeer {
+    fn peer(&self, pid: ProcessId) -> Option<ConnectionPeer> {
         match self {
-            Self::Ui { state } => ConnectionPeer::Ui(UiPeer { pid, state }),
-            Self::Cli => ConnectionPeer::Cli,
+            Self::Ui { state } => Some(ConnectionPeer::Ui(UiPeer { pid, state: *state })),
+            Self::Cli => Some(ConnectionPeer::Cli),
+            // Browser connections register explicitly after upserting `browser_streams`.
+            Self::Browser => None,
         }
     }
 }
@@ -66,6 +74,7 @@ impl From<HelloRole> for ReadyRole {
         match role {
             HelloRole::Ui { ui } => Self::Ui { state: ui.state },
             HelloRole::Cli => Self::Cli,
+            HelloRole::Browser { .. } => Self::Browser,
         }
     }
 }
@@ -121,6 +130,15 @@ pub(crate) enum Action {
         id: RequestId,
         request: crate::query::QueryRequest,
     },
+    BrowserHello {
+        id: RequestId,
+        hello: BrowserHello,
+        response: HelloResponse,
+    },
+    BrowserState {
+        id: RequestId,
+        state: BrowserStateRequest,
+    },
 }
 impl Action {
     fn from_query(
@@ -169,19 +187,29 @@ impl ConnectionSession {
         matches!(self.state, State::HelloPending)
     }
     pub(crate) fn peer(&self, pid: ProcessId) -> Option<ConnectionPeer> {
-        match self.state {
-            State::Ready(role) => Some(role.peer(pid)),
+        match &self.state {
+            State::Ready(role) => role.peer(pid),
             State::HelloPending | State::Closing => None,
         }
     }
     pub(crate) fn role(&self) -> Option<Role> {
-        match self.state {
+        match &self.state {
             State::Ready(role) => Some(role.role()),
             State::HelloPending | State::Closing => None,
         }
     }
+    pub(crate) fn max_frame_len(&self) -> usize {
+        if self.allowed == AllowedRoles::Host || self.role() == Some(Role::Browser) {
+            BROWSER_MAX_FRAME_LEN
+        } else {
+            MAX_FRAME_LEN
+        }
+    }
     pub(crate) fn closing(&self) -> bool {
         matches!(self.state, State::Closing)
+    }
+    pub(crate) fn close(&mut self) {
+        self.state = State::Closing;
     }
     pub(crate) fn fail(&mut self, kind: ErrorKind) -> Action {
         self.state = State::Closing;
@@ -192,7 +220,7 @@ impl ConnectionSession {
             return self.fail(ErrorKind::BadRequest);
         };
         let id = request.id;
-        match self.state {
+        match &self.state {
             State::HelloPending => {
                 self.state = State::Closing;
                 if request.op != Op::Hello {
@@ -219,15 +247,25 @@ impl ConnectionSession {
                 if !self.allowed.permits(role) {
                     return Action::error(Some(id), ErrorKind::Forbidden);
                 }
-                self.state = State::Ready(hello.role.into());
-                Action::success(
-                    id,
-                    HelloResponse {
-                        proto,
-                        instance_id: status.instance_id.clone(),
-                        core_version: status.core_version.clone(),
-                    },
-                )
+                let response = HelloResponse {
+                    proto,
+                    instance_id: status.instance_id.clone(),
+                    core_version: status.core_version.clone(),
+                };
+                match hello.role {
+                    HelloRole::Browser { browser } => {
+                        self.state = State::Ready(ReadyRole::Browser);
+                        Action::BrowserHello {
+                            id,
+                            hello: browser,
+                            response,
+                        }
+                    }
+                    other => {
+                        self.state = State::Ready(other.into());
+                        Action::success(id, response)
+                    }
+                }
             }
             State::Ready(role) => {
                 let role = role.role();
@@ -339,6 +377,13 @@ impl ConnectionSession {
                             Ok(request) => Action::Write { id, request },
                             Err(_) => Action::error(Some(id), ErrorKind::BadRequest),
                         }
+                    }
+                    Op::BrowserState => {
+                        let Ok(state) = serde_json::from_value::<BrowserStateRequest>(request.body)
+                        else {
+                            return Action::error(Some(id), ErrorKind::BadRequest);
+                        };
+                        Action::BrowserState { id, state }
                     }
                     Op::Hello => Action::error(Some(id), ErrorKind::BadRequest),
                     Op::Unknown => Action::error(Some(id), ErrorKind::UnknownOp),
@@ -486,7 +531,7 @@ mod tests {
             for (op, body) in &shared {
                 assert!(
                     !matches!(
-                        ready(role).receive(request(2, *op, body.clone()), snapshot),
+                        ready(role.clone()).receive(request(2, *op, body.clone()), snapshot),
                         Action::Reply(_)
                     ),
                     "{op:?} dispatches for {role:?}"
@@ -603,21 +648,78 @@ mod tests {
         assert!(!session.closing());
     }
     #[test]
-    fn host_executable_cannot_authenticate_any_role() {
+    fn host_executable_authenticates_only_browser_role() {
         let publisher =
             crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("host-test".into()));
         let receiver = publisher.subscribe();
-        let mut session = ConnectionSession::new(AllowedRoles::Host);
-        let hello =
+        let status = &receiver.borrow().status;
+        let mut cli_session = ConnectionSession::new(AllowedRoles::Host);
+        let cli_hello =
             serde_json::json!({"proto":{"min":1,"max":1},"client_version":"test","role":"cli"});
-        let decision = session.receive(request(1, Op::Hello, hello), &receiver.borrow().status);
+        let decision = cli_session.receive(request(1, Op::Hello, cli_hello), status);
         assert_eq!(
             decision.reply().outcome,
             ResponseOutcome::Err {
                 error: ProtocolError::new(ErrorKind::Forbidden)
             }
         );
-        assert!(session.closing());
+        assert!(cli_session.closing());
+
+        let mut quartz_session = ConnectionSession::new(AllowedRoles::Quartz);
+        let browser_hello = serde_json::json!({
+            "proto": {"min": 1, "max": 1},
+            "client_version": "test",
+            "role": "browser",
+            "browser": {
+                "browser": "chrome",
+                "profile_instance_id": "a286737e-3855-43cb-98ee-c366344372d0"
+            }
+        });
+        assert_eq!(
+            quartz_session
+                .receive(request(1, Op::Hello, browser_hello.clone()), status)
+                .reply()
+                .outcome,
+            ResponseOutcome::Err {
+                error: ProtocolError::new(ErrorKind::Forbidden)
+            }
+        );
+        assert!(quartz_session.closing());
+
+        let mut host_session = ConnectionSession::new(AllowedRoles::Host);
+        assert_eq!(host_session.max_frame_len(), BROWSER_MAX_FRAME_LEN);
+        assert!(matches!(
+            host_session.receive(request(1, Op::Hello, browser_hello), status),
+            Action::BrowserHello {
+                id: RequestId(1),
+                ..
+            }
+        ));
+        assert!(!host_session.closing());
+        assert_eq!(host_session.role(), Some(Role::Browser));
+        assert_eq!(
+            host_session
+                .receive(request(2, Op::CoreStatus, serde_json::json!({})), status)
+                .reply()
+                .outcome,
+            ResponseOutcome::Err {
+                error: ProtocolError::new(ErrorKind::Forbidden)
+            }
+        );
+        assert!(matches!(
+            host_session.receive(
+                request(
+                    3,
+                    Op::BrowserState,
+                    serde_json::json!({"focused": false, "window": null, "tab": null})
+                ),
+                status
+            ),
+            Action::BrowserState {
+                id: RequestId(3),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -626,6 +728,8 @@ mod tests {
             assert!(AllowedRoles::Quartz.permits(role));
             assert!(!AllowedRoles::Host.permits(role));
         }
+        assert!(!AllowedRoles::Quartz.permits(Role::Browser));
+        assert!(AllowedRoles::Host.permits(Role::Browser));
     }
     #[test]
     fn subscribe_validation_is_atomic_and_role_checked_without_io() {

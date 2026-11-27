@@ -232,6 +232,8 @@ impl CoreRuntime {
         let timed = workers
             .sender
             .timed_port(Arc::clone(&ports.clock), day_offset);
+        let browser = workers.sender.browser_port(Arc::clone(&ports.clock));
+        let browser_streams = status.browser_streams().with_wake(Arc::clone(&ports.wake));
         let summary = crate::ipc::summary::SummaryTask::channel(ports.wake);
         let pipe_ports = PipePorts {
             shutdown_timeout: SHUTDOWN_TIMEOUT,
@@ -241,6 +243,8 @@ impl CoreRuntime {
                 writes: workers.writes.clone(),
                 versions: workers.versions.clone(),
                 status: status.subscribe(),
+                browser_streams,
+                browser,
                 ui: Arc::clone(&ui_port),
                 timed: timed.clone(),
             },

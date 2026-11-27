@@ -87,8 +87,9 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 |---|---|
 | `ui` | 全部已实现操作：`hello`、`subscribe`/`unsubscribe`、`core.*`、`ui.*`、`query.*`、`rule_sets.*`、`rules.*`、`rules_text.*`、`categories.*`、`annotations.*`、`settings.*`、`tracking.*`、`privacy_mode.*`、`data.*` |
 | `cli` | `hello`、`core.status`、`ui.open`、`query.*`、`settings.get`、`settings.set`、`rule_sets.tree`、`rule_sets.get`、`rules_text.validate`、`rules_text.export` |
+| `browser` | `hello`、`browser.state` |
 
-后续模块使用独立前缀与主题（M5 浏览器扩展使用 `host` 角色与 `browser.*`，见 05-browser.md；M7 自控模块使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节）。
+`browser` 角色只接受同目录 `quartz-host.exe` 的连接，帧上限 256 KiB，握手 `hello` 须带 `browser {browser, profile_instance_id}`（见 05-browser.md）。后续模块使用独立前缀与主题（M7 自控模块使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节）。
 
 ## 6. 消息清单
 
@@ -105,6 +106,7 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 | `ui.show` | `control` 推送 | 通知启动/预热/隐藏中的已登记 UI 创建并显示主窗口 |
 | `ui.activate` | `control` 推送 | 通知已可见 UI 还原最小化窗口并请求前台激活 |
 | `ui.shutdown` | `control` 推送 | 退出 Quartz 时广播；预热 TTL 到期或关闭常驻时定向发送 |
+| `browser.state` | 请求（`browser`） | 上报当前浏览器窗口与活动标签状态，经校验入采集队列后返回接受 |
 
 ### 6.2 查询
 

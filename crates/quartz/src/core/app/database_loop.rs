@@ -430,6 +430,7 @@ impl DatabaseLoop {
                     crate::persistence::dispatch::WriteResponse::RuleValidation(_)
                         | crate::persistence::dispatch::WriteResponse::DataInfo(_)
                         | crate::persistence::dispatch::WriteResponse::DataBackup(_)
+                        | crate::persistence::dispatch::WriteResponse::BrowserStreamRegistered(_)
                 )
             )
         {

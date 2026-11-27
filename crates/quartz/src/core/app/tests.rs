@@ -394,6 +394,7 @@ fn resume_notifications_create_only_one_clock_segment() {
     let mut capture = CaptureLoop {
         pending_control: None,
         discard_remaining: 0,
+        browser_states: std::collections::BTreeMap::new(),
         core: started.core,
         run: RunId::new(1),
         at,
@@ -724,6 +725,8 @@ fn io_write_replies_publish_committed_versions_and_rollback_keeps_versions() {
         writes: runtime.workers.writes.clone(),
         versions: runtime.workers.versions.clone(),
         status: status.subscribe(),
+        browser_streams: status.browser_streams(),
+        browser: crate::ipc::browser::BrowserCapturePort::noop(),
         ui: Arc::new(|_| Ok(())),
     };
     let mut versions = runtime.workers.versions.clone();
@@ -909,6 +912,8 @@ fn categories_ipc_retries_and_day_subscription_emit_only_real_changes() {
         writes: runtime.workers.writes.clone(),
         versions: runtime.workers.versions.clone(),
         status: status.subscribe(),
+        browser_streams: status.browser_streams(),
+        browser: crate::ipc::browser::BrowserCapturePort::noop(),
         ui: Arc::new(|_| Ok(())),
     };
     let io = tokio::runtime::Builder::new_current_thread()
@@ -977,6 +982,8 @@ fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
         writes: runtime.workers.writes.clone(),
         versions: runtime.workers.versions.clone(),
         status: status.subscribe(),
+        browser_streams: status.browser_streams(),
+        browser: crate::ipc::browser::BrowserCapturePort::noop(),
         ui: Arc::new(|_| Ok(())),
     };
     let io = tokio::runtime::Builder::new_current_thread()
@@ -1215,6 +1222,8 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
         ),
         versions: runtime.workers.versions.clone(),
         status: status.subscribe(),
+        browser_streams: status.browser_streams(),
+        browser: crate::ipc::browser::BrowserCapturePort::noop(),
         ui: Arc::clone(&channel.port),
     };
     let io = tokio::runtime::Builder::new_current_thread()
@@ -1336,6 +1345,8 @@ fn timed_ipc_admits_typed_capture_events_and_reports_busy_and_invalid_deadlines(
         writes: runtime.workers.writes.clone(),
         versions: runtime.workers.versions.clone(),
         status: status.subscribe(),
+        browser_streams: status.browser_streams(),
+        browser: crate::ipc::browser::BrowserCapturePort::noop(),
         ui: Arc::new(|_| Ok(())),
     };
     let io = tokio::runtime::Builder::new_current_thread()
@@ -1785,6 +1796,8 @@ fn changing_title_retention_setting_triggers_immediate_purge_and_publishes_versi
         ),
         versions: runtime.workers.versions.clone(),
         status: status.subscribe(),
+        browser_streams: status.browser_streams(),
+        browser: crate::ipc::browser::BrowserCapturePort::noop(),
         ui: Arc::clone(&channel.port),
     };
 
@@ -1899,4 +1912,466 @@ fn changing_title_retention_setting_triggers_immediate_purge_and_publishes_versi
         reopened.title_retention().expect("persisted retention"),
         TitleRetention::Days30
     );
+}
+
+/// Framed memory transport authenticating as `quartz-host.exe` (`AllowedRoles::Host`).
+struct BrowserTestClient {
+    frames:
+        tokio_util::codec::Framed<tokio::io::DuplexStream, tokio_util::codec::LengthDelimitedCodec>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl BrowserTestClient {
+    async fn connect(
+        services: crate::ipc::Services,
+        registry: crate::ipc::registry::RegistryHandle,
+        browser: quartz_protocol::BrowserKind,
+        profile_instance_id: quartz_protocol::Uuid,
+    ) -> Self {
+        let connection = crate::ipc::connection::Connection {
+            registry,
+            peer_pid: crate::ipc::ProcessId::new(std::process::id()),
+            services,
+            timeouts: crate::ipc::connection::ConnectionTimeouts::default(),
+        };
+        let (server, client) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            let (read, write) = tokio::io::split(server);
+            connection
+                .run(
+                    read,
+                    write,
+                    &mut crate::ipc::ConnectionSession::new(crate::ipc::AllowedRoles::Host),
+                    tokio::time::Instant::now() + Duration::from_secs(5),
+                )
+                .await
+        });
+        let mut client = Self {
+            frames: tokio_util::codec::Framed::new(client, quartz_protocol::frame_codec()),
+            task,
+        };
+        client
+            .send(
+                1,
+                quartz_protocol::Op::Hello,
+                serde_json::json!({
+                    "proto": {"min": 1, "max": 1},
+                    "role": "browser",
+                    "client_version": "test-host",
+                    "browser": {
+                        "browser": browser,
+                        "profile_instance_id": profile_instance_id
+                    }
+                }),
+            )
+            .await;
+        let body = client.success(1).await;
+        let _: quartz_protocol::HelloResponse =
+            serde_json::from_value(body).expect("typed browser hello response");
+        client
+    }
+
+    async fn send(&mut self, id: u64, op: quartz_protocol::Op, body: serde_json::Value) {
+        use futures_util::SinkExt;
+        let request = quartz_protocol::Envelope::Request(quartz_protocol::Request {
+            id: quartz_protocol::RequestId(id),
+            op,
+            body,
+        });
+        let bytes = quartz_protocol::encode_json(&request).expect("browser request JSON");
+        self.frames
+            .send(bytes.as_slice())
+            .await
+            .expect("send browser request");
+    }
+
+    async fn response(&mut self, id: u64) -> quartz_protocol::ResponseOutcome {
+        use futures_util::StreamExt;
+        let bytes = tokio::time::timeout(Duration::from_secs(5), self.frames.next())
+            .await
+            .expect("browser response deadline")
+            .expect("browser response frame")
+            .expect("browser frame decode");
+        let quartz_protocol::Envelope::Response(response) =
+            quartz_protocol::decode_json(&bytes).expect("browser response envelope")
+        else {
+            panic!("expected browser response envelope")
+        };
+        assert_eq!(response.id, Some(quartz_protocol::RequestId(id)));
+        response.outcome
+    }
+
+    async fn success(&mut self, id: u64) -> serde_json::Value {
+        let quartz_protocol::ResponseOutcome::Ok { body } = self.response(id).await else {
+            panic!("expected browser success response")
+        };
+        body
+    }
+
+    async fn wait_closed(mut self) {
+        use futures_util::StreamExt;
+        let next = tokio::time::timeout(Duration::from_secs(5), self.frames.next())
+            .await
+            .expect("replaced browser connection closes promptly");
+        assert!(next.is_none(), "expected server EOF, got {next:?}");
+        drop(self.frames);
+        self.task
+            .await
+            .expect("browser connection task")
+            .expect("browser connection closed cleanly");
+    }
+
+    async fn close(self) {
+        drop(self.frames);
+        self.task
+            .await
+            .expect("browser connection task")
+            .expect("browser connection closed");
+    }
+}
+
+#[test]
+fn browser_hello_persists_stream_lists_in_status_forwards_state_and_disconnect_enqueues_close() {
+    use crate::core::app::{CaptureSender, MainCommand, Observation};
+    use crate::ipc::browser::{BrowserInput, BrowserStreamKey};
+    use quartz_protocol::{
+        BrowserKind, BrowserStream, BrowserStreamId, CoreStatusResponse, Envelope, ErrorKind, Op,
+        ProtocolError, ResponseOutcome, Role, StateSnapshot, Topic, Uuid,
+    };
+
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let status =
+        crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("browser-integration".into()));
+    let (capture_tx, capture_rx) = crossbeam_channel::bounded(16);
+    let capture_sender = CaptureSender {
+        life: Default::default(),
+        sender: capture_tx,
+        overloaded: Arc::new(AtomicBool::new(false)),
+    };
+    let services = crate::ipc::Services {
+        summary: None,
+        timed: crate::ipc::TimedPolicyPort::unavailable(),
+        queries: runtime.workers.queries.clone(),
+        writes: runtime.workers.writes.clone(),
+        versions: runtime.workers.versions.clone(),
+        status: status.subscribe(),
+        browser_streams: status.browser_streams(),
+        browser: capture_sender.browser_port(runtime.clock.clone()),
+        ui: Arc::new(|_| Ok(())),
+    };
+    let profile: Uuid = "a286737e-3855-43cb-98ee-c366344372d0"
+        .parse()
+        .expect("profile uuid");
+    let expected_key = BrowserStreamKey {
+        browser: BrowserKind::Chrome,
+        profile_instance_id: profile.clone(),
+    };
+    let expected_stream = BrowserStream {
+        browser_stream: BrowserStreamId(profile.to_string()),
+        browser: BrowserKind::Chrome,
+    };
+    let db_path = DataDirectory::new(runtime.directory.path()).database();
+
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("browser I/O runtime");
+    io.block_on(async {
+        let registry = services.start_registry();
+        let mut ui = AnnotationClient::connect(services.clone(), registry.clone(), Role::Ui).await;
+        let mut subscriber =
+            AnnotationClient::connect(services.clone(), registry.clone(), Role::Ui).await;
+        subscriber
+            .send(2, Op::Subscribe, serde_json::json!({"topics": ["state"]}))
+            .await;
+        subscriber.success(2).await;
+        let Envelope::Event(initial_event) = subscriber.receive().await else {
+            panic!("initial state event")
+        };
+        assert_eq!(initial_event.topic, Topic::State);
+        let initial_state: StateSnapshot =
+            serde_json::from_value(initial_event.body).expect("initial state");
+        assert!(initial_state.browser_streams.is_empty());
+
+        let mut browser = BrowserTestClient::connect(
+            services.clone(),
+            registry.clone(),
+            BrowserKind::Chrome,
+            profile.clone(),
+        )
+        .await;
+
+        let mut reader = crate::store::ReadOnlyStore::open(&db_path).expect("reader");
+        let persisted = reader
+            .browser_stream(&profile)
+            .expect("query browser_streams")
+            .expect("browser stream row created");
+        assert_eq!(persisted.browser, "chrome");
+        assert_eq!(
+            persisted.extension_id,
+            crate::store::browser::CHROMIUM_EXTENSION_ID
+        );
+        assert_eq!(persisted.first_seen_utc_ms, persisted.last_seen_utc_ms);
+
+        let Envelope::Event(connected_event) = subscriber.receive().await else {
+            panic!("connected state event")
+        };
+        assert_eq!(connected_event.topic, Topic::State);
+        let connected_state: StateSnapshot =
+            serde_json::from_value(connected_event.body).expect("connected state");
+        assert_eq!(
+            connected_state.browser_streams,
+            vec![expected_stream.clone()]
+        );
+
+        ui.send(2, Op::CoreStatus, serde_json::json!({})).await;
+        let core_status: CoreStatusResponse =
+            serde_json::from_value(ui.success(2).await).expect("core status");
+        assert_eq!(core_status.browser_streams, vec![expected_stream.clone()]);
+
+        browser
+            .send(
+                2,
+                Op::BrowserState,
+                serde_json::json!({
+                    "focused": true,
+                    "window": {"id": 10, "state": "normal"},
+                    "tab": {
+                        "id": 99,
+                        "domain": "docs.rs",
+                        "title": "Quartz Docs",
+                        "title_status": "ok",
+                        "audible": false
+                    }
+                }),
+            )
+            .await;
+        assert_eq!(
+            browser.success(2).await,
+            serde_json::json!({"accepted": true})
+        );
+        let queued = capture_rx.try_recv().expect("queued browser state");
+        assert!(matches!(
+            queued,
+            Observation::Browser(BrowserInput::State {
+                stream_id,
+                ref key,
+                ..
+            }) if stream_id == persisted.id && key == &expected_key
+        ));
+
+        browser
+            .send(
+                3,
+                Op::BrowserState,
+                serde_json::json!({
+                    "focused": true,
+                    "window": null,
+                    "tab": {
+                        "id": 99,
+                        "domain": "https://invalid.example",
+                        "title": "Bad",
+                        "title_status": "ok",
+                        "audible": false
+                    }
+                }),
+            )
+            .await;
+        assert_eq!(
+            browser.response(3).await,
+            ResponseOutcome::Err {
+                error: ProtocolError::new(ErrorKind::BadRequest)
+            }
+        );
+
+        browser.send(4, Op::CoreStatus, serde_json::json!({})).await;
+        assert_eq!(
+            browser.response(4).await,
+            ResponseOutcome::Err {
+                error: ProtocolError::new(ErrorKind::Forbidden)
+            }
+        );
+
+        browser.close().await;
+        registry.outboxes().await.expect("disconnect barrier");
+        let closed = capture_rx.try_recv().expect("queued browser close");
+        assert!(matches!(
+            closed,
+            Observation::Browser(BrowserInput::StreamClosed(ref notice))
+                if notice.stream_id == persisted.id && notice.key == expected_key
+        ));
+
+        let Envelope::Event(disconnected_event) = subscriber.receive().await else {
+            panic!("disconnected state event")
+        };
+        assert_eq!(disconnected_event.topic, Topic::State);
+        let disconnected_state: StateSnapshot =
+            serde_json::from_value(disconnected_event.body).expect("disconnected state");
+        assert!(disconnected_state.browser_streams.is_empty());
+
+        ui.send(3, Op::CoreStatus, serde_json::json!({})).await;
+        let after_disconnect: CoreStatusResponse =
+            serde_json::from_value(ui.success(3).await).expect("status after disconnect");
+        assert!(after_disconnect.browser_streams.is_empty());
+
+        runtime.clock.advance(5_000);
+        let reconnected = BrowserTestClient::connect(
+            services.clone(),
+            registry.clone(),
+            BrowserKind::Chrome,
+            profile.clone(),
+        )
+        .await;
+        let updated = reader
+            .browser_stream(&profile)
+            .expect("query updated browser_streams")
+            .expect("browser stream row preserved");
+        assert_eq!(updated.id, persisted.id);
+        assert_eq!(updated.first_seen_utc_ms, persisted.first_seen_utc_ms);
+        assert!(
+            updated.last_seen_utc_ms > persisted.last_seen_utc_ms,
+            "reconnect must advance last_seen_utc_ms"
+        );
+
+        reconnected.close().await;
+        subscriber.close().await;
+        ui.close().await;
+    });
+    drop(services);
+    runtime.shutdown();
+}
+
+#[test]
+fn browser_second_connection_for_same_profile_replaces_and_closes_first() {
+    use crate::core::app::{CaptureSender, MainCommand, Observation};
+    use crate::ipc::browser::{BrowserInput, BrowserStreamKey};
+    use quartz_protocol::{
+        BrowserKind, BrowserStream, BrowserStreamId, CoreStatusResponse, Op, Role, Uuid,
+    };
+
+    let runtime = RuntimeFixture::recovered();
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+    let status =
+        crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId("browser-replacement".into()));
+    let (capture_tx, capture_rx) = crossbeam_channel::bounded(16);
+    let capture_sender = CaptureSender {
+        life: Default::default(),
+        sender: capture_tx,
+        overloaded: Arc::new(AtomicBool::new(false)),
+    };
+    let services = crate::ipc::Services {
+        summary: None,
+        timed: crate::ipc::TimedPolicyPort::unavailable(),
+        queries: runtime.workers.queries.clone(),
+        writes: runtime.workers.writes.clone(),
+        versions: runtime.workers.versions.clone(),
+        status: status.subscribe(),
+        browser_streams: status.browser_streams(),
+        browser: capture_sender.browser_port(runtime.clock.clone()),
+        ui: Arc::new(|_| Ok(())),
+    };
+    let profile: Uuid = "b286737e-3855-43cb-98ee-c366344372d1"
+        .parse()
+        .expect("profile uuid");
+    let expected_key = BrowserStreamKey {
+        browser: BrowserKind::Firefox,
+        profile_instance_id: profile.clone(),
+    };
+    let db_path = DataDirectory::new(runtime.directory.path()).database();
+
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("browser replacement I/O runtime");
+    io.block_on(async {
+        let registry = services.start_registry();
+        let mut ui = AnnotationClient::connect(services.clone(), registry.clone(), Role::Ui).await;
+
+        let first = BrowserTestClient::connect(
+            services.clone(),
+            registry.clone(),
+            BrowserKind::Firefox,
+            profile.clone(),
+        )
+        .await;
+        let mut reader = crate::store::ReadOnlyStore::open(&db_path).expect("reader");
+        let row = reader
+            .browser_stream(&profile)
+            .expect("query firefox stream")
+            .expect("firefox stream row");
+        assert_eq!(row.browser, "firefox");
+        assert_eq!(
+            row.extension_id,
+            crate::store::browser::FIREFOX_EXTENSION_ID
+        );
+
+        let mut second = BrowserTestClient::connect(
+            services.clone(),
+            registry.clone(),
+            BrowserKind::Firefox,
+            profile.clone(),
+        )
+        .await;
+        first.wait_closed().await;
+        registry.outboxes().await.expect("replacement barrier");
+
+        let replaced_close = capture_rx
+            .try_recv()
+            .expect("replaced stream emits StreamClosed");
+        assert!(matches!(
+            replaced_close,
+            Observation::Browser(BrowserInput::StreamClosed(ref notice))
+                if notice.stream_id == row.id && notice.key == expected_key
+        ));
+        assert!(
+            capture_rx.try_recv().is_err(),
+            "old connection cleanup must not emit a duplicate StreamClosed"
+        );
+
+        ui.send(2, Op::CoreStatus, serde_json::json!({})).await;
+        let status_body: CoreStatusResponse =
+            serde_json::from_value(ui.success(2).await).expect("status after replacement");
+        assert_eq!(
+            status_body.browser_streams,
+            vec![BrowserStream {
+                browser_stream: BrowserStreamId(profile.to_string()),
+                browser: BrowserKind::Firefox,
+            }]
+        );
+
+        second
+            .send(
+                2,
+                Op::BrowserState,
+                serde_json::json!({"focused": false, "window": null, "tab": null}),
+            )
+            .await;
+        assert_eq!(
+            second.success(2).await,
+            serde_json::json!({"accepted": true})
+        );
+        assert!(matches!(
+            capture_rx.try_recv().expect("replacement browser state"),
+            Observation::Browser(BrowserInput::State { stream_id, ref key, .. })
+                if stream_id == row.id && key == &expected_key
+        ));
+
+        second.close().await;
+        registry.outboxes().await.expect("final disconnect barrier");
+        assert!(matches!(
+            capture_rx.try_recv().expect("final stream close"),
+            Observation::Browser(BrowserInput::StreamClosed(ref notice))
+                if notice.stream_id == row.id && notice.key == expected_key
+        ));
+
+        ui.send(3, Op::CoreStatus, serde_json::json!({})).await;
+        let final_status: CoreStatusResponse =
+            serde_json::from_value(ui.success(3).await).expect("status after final close");
+        assert!(final_status.browser_streams.is_empty());
+
+        ui.close().await;
+    });
+    drop(services);
+    runtime.shutdown();
 }

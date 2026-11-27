@@ -772,6 +772,8 @@ mod tests {
                     versions: database.versions.clone(),
                     writes: crate::ipc::WriteChannel::new().port,
                     status: status.subscribe(),
+                    browser_streams: status.browser_streams(),
+                    browser: crate::ipc::browser::BrowserCapturePort::noop(),
                     ui: std::sync::Arc::new(|_| Ok(())),
                     timed: crate::ipc::TimedPolicyPort::unavailable(),
                 },

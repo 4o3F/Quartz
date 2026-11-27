@@ -53,6 +53,7 @@ pub(crate) struct ObservedEvent {
 pub(crate) enum Observation {
     Event(ObservedEvent),
     Foreground(crate::core::foreground::Snapshot),
+    Browser(crate::ipc::browser::BrowserInput),
 }
 impl From<ObservedEvent> for Observation {
     fn from(event: ObservedEvent) -> Self {
@@ -219,6 +220,62 @@ impl CaptureSender {
                     TrySendError::Disconnected(_) => quartz_protocol::ErrorKind::Internal,
                 })
             })
+    }
+    fn admit_browser(
+        &self,
+        input: crate::ipc::browser::BrowserInput,
+    ) -> Result<(), quartz_protocol::ProtocolError> {
+        if self.is_stopped() {
+            return Err(quartz_protocol::ProtocolError::new(
+                quartz_protocol::ErrorKind::Busy,
+            ));
+        }
+        self.sender
+            .try_send(Observation::Browser(input))
+            .map_err(|error| {
+                quartz_protocol::ProtocolError::new(match error {
+                    TrySendError::Full(_) => quartz_protocol::ErrorKind::Busy,
+                    TrySendError::Disconnected(_) => quartz_protocol::ErrorKind::Internal,
+                })
+            })
+    }
+    pub(crate) fn browser_port(
+        &self,
+        clock: Arc<dyn crate::core::sources::ClockReader>,
+    ) -> crate::ipc::browser::BrowserCapturePort {
+        let state_sender = self.clone();
+        let state_clock = Arc::clone(&clock);
+        let close_sender = self.clone();
+        crate::ipc::browser::BrowserCapturePort::new(
+            move |stream_id, key, state| {
+                let at = state_clock.read().map_err(|error| {
+                    tracing::warn!(%error, "could not sample browser state clock");
+                    quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::Internal)
+                })?;
+                state_sender.admit_browser(crate::ipc::browser::BrowserInput::State {
+                    stream_id,
+                    key,
+                    at,
+                    state,
+                })
+            },
+            move |stream_id, key| {
+                let at = match clock.read() {
+                    Ok(at) => at,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not sample browser close clock");
+                        return;
+                    }
+                };
+                if let Err(error) = close_sender.send(Observation::Browser(
+                    crate::ipc::browser::BrowserInput::StreamClosed(
+                        crate::ipc::browser::BrowserStreamClosed { stream_id, key, at },
+                    ),
+                )) {
+                    tracing::debug!(%error, "could not enqueue browser stream close");
+                }
+            },
+        )
     }
     pub(crate) fn mark_overloaded(&self) {
         self.overloaded.store(true, Ordering::Release);

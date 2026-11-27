@@ -1,6 +1,13 @@
 //! Shared IPC data types, framing, permissions, and startup failures.
 
 mod annotations;
+mod browser;
+pub use browser::{
+    BROWSER_TITLE_MAX_UTF16_UNITS, BrowserAudible, BrowserFocus, BrowserHello, BrowserHostHello,
+    BrowserKind, BrowserStateRequest, BrowserTab, BrowserTitleStatus, BrowserWindow,
+    BrowserWindowState, INTERNAL_BROWSER_DOMAIN, LOCAL_FILE_BROWSER_DOMAIN,
+    ValidateBrowserStateError, validate_browser_domain, validate_browser_title,
+};
 mod categories;
 pub use categories::{
     CATEGORIES_MAX_ENTITIES, CategoriesArchiveRequest, CategoriesCreateRequest,
@@ -41,13 +48,16 @@ pub use envelope::{
     Envelope, Event, EventSeq, Progress, Request, RequestId, Response, ResponseOutcome,
 };
 pub use error::{ErrorKind, ProtocolError, RuleSetVersion};
+pub use frame::{
+    BROWSER_MAX_FRAME_LEN, DecodeJsonError, EncodeFrameError, MAX_FRAME_LEN, decode_json,
+    encode_json, encode_json_with_limit,
+};
 #[cfg(feature = "codec")]
-pub use frame::frame_codec;
-pub use frame::{DecodeJsonError, EncodeFrameError, MAX_FRAME_LEN, decode_json, encode_json};
+pub use frame::{browser_frame_codec, frame_codec, frame_codec_with_max_len};
 pub use handshake::{
     ClientVersion, CoreVersion, Hello, HelloResponse, HelloRole, InstanceId, NegotiateProtoError,
-    PROTOCOL_VERSION, ParseProtoRangeError, ParseUuidError, ProtoRange, ProtoVersion, UiHello,
-    UiState, Uuid,
+    PROTOCOL_VERSION, ParseHelloError, ParseProtoRangeError, ParseUuidError, ProtoRange,
+    ProtoVersion, UiHello, UiState, Uuid,
 };
 pub use op::{ControlBody, ControlOp, Op, OpFamily};
 pub use role::{AuthorizeOpError, Role};

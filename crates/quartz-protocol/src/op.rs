@@ -33,6 +33,8 @@ pub enum OpFamily {
     PrivacyMode,
     /// The `data` operation family.
     Data,
+    /// The `browser` operation family.
+    Browser,
     /// An unrecognized operation; no role may authorize it.
     Unknown,
 }
@@ -172,6 +174,9 @@ pub enum Op {
     /// The `data.delete_range` request.
     #[serde(rename = "data.delete_range")]
     DataDeleteRange,
+    /// The `browser.state` request.
+    #[serde(rename = "browser.state")]
+    BrowserState,
     /// A future or invalid request name; respond with `unknown_op`.
     #[serde(other, skip_serializing)]
     Unknown,
@@ -220,6 +225,7 @@ impl Op {
             Self::DataInfo | Self::DataBackup | Self::DataCompact | Self::DataDeleteRange => {
                 OpFamily::Data
             }
+            Self::BrowserState => OpFamily::Browser,
             Self::Unknown => OpFamily::Unknown,
         }
     }

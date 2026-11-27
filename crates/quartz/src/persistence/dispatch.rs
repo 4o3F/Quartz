@@ -21,6 +21,7 @@ pub(crate) enum WriteResponse {
     DataBackup(quartz_protocol::BackupEntry),
     DataCompact(quartz_protocol::DataCompactResponse),
     DataDeleteRange(quartz_protocol::DataDeleteRangeResponse),
+    BrowserStreamRegistered(crate::store::browser::BrowserStreamRowId),
     Accepted(quartz_protocol::AcceptedBody),
 }
 impl WriteRequest {
@@ -116,6 +117,16 @@ impl WriteRequest {
                 return super::data::purge_expired_titles_for_store(store, now)
                     .map(|_| WriteResponse::Accepted(quartz_protocol::AcceptedBody))
                     .map_err(|error| WriteFailure::run_title_purge(&error).into_protocol_error());
+            }
+            Self::RegisterBrowserStream(hello) => {
+                return store
+                    .upsert_browser_stream(hello.browser, &hello.profile_instance_id, now)
+                    .map(WriteResponse::BrowserStreamRegistered)
+                    .map_err(|error| {
+                        let crate::store::browser::UpsertBrowserStreamError::Database { source } =
+                            error;
+                        WriteFailure::database(&source).into_protocol_error()
+                    });
             }
             Self::SettingsGet | Self::SettingsSet(_) => {
                 let ports = settings.ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?;
@@ -223,6 +234,7 @@ pub(crate) enum WriteRequest {
     Annotations(AnnotationWrite),
     Categories(CategoryRequest),
     Data(DataRequest),
+    RegisterBrowserStream(quartz_protocol::BrowserHello),
     PurgeExpiredTitles,
     #[cfg(test)]
     BumpMetadata {

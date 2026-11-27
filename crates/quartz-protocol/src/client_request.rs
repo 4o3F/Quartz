@@ -90,6 +90,7 @@ requests! {
     crate::DataBackupRequest => DataBackup => crate::BackupEntry,
     crate::DataCompactRequest => DataCompact => crate::DataCompactResponse,
     crate::DataDeleteRangeRequest => DataDeleteRange => crate::DataDeleteRangeResponse,
+    crate::BrowserStateRequest => BrowserState => AcceptedBody,
 }
 
 #[cfg(test)]

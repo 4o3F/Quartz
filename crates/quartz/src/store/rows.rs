@@ -8,9 +8,9 @@ use super::{
         RuleSetSource, RunEndReason, TitleStatus,
     },
     schema::{
-        annotations, applications, availability_intervals, capture_gaps, capture_runs, categories,
-        clock_segments, data_day_versions, intervals, rule_set_versions, rule_sets, titles,
-        web_intervals, window_instances,
+        annotations, applications, availability_intervals, browser_streams, capture_gaps,
+        capture_runs, categories, clock_segments, data_day_versions, intervals, rule_set_versions,
+        rule_sets, titles, web_intervals, window_instances,
     },
 };
 use diesel::{
@@ -69,6 +69,19 @@ pub(super) struct AvailabilityIntervalsRow {
     pub threshold_ms: Option<i64>,
     pub exception: Option<IdleException>,
     pub policy_version: i64,
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
+#[diesel(table_name = browser_streams)]
+#[diesel(check_for_backend(Sqlite))]
+pub(super) struct BrowserStreamsRow {
+    pub id: Option<i64>,
+    pub browser: String,
+    pub profile_instance_id: String,
+    pub extension_id: String,
+    pub label: Option<String>,
+    pub first_seen_utc_ms: i64,
+    pub last_seen_utc_ms: i64,
 }
 
 #[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]

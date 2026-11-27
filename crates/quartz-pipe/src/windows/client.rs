@@ -28,6 +28,12 @@ pub enum OpenCorePipeError {
     ServerIdentity { source: CheckPeerError },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerExpectation {
+    SameExecutable,
+    AdjacentQuartz,
+}
+
 #[derive(Debug)]
 /// Authenticated Windows client transport owned by its runtime thread.
 pub struct PipeClient {
@@ -39,14 +45,36 @@ impl PipeClient {
     /// # Errors
     /// Returns absent, busy, transport or server identity failures.
     pub async fn connect() -> Result<Self, OpenCorePipeError> {
-        Self::discover(ProcessIdentity::pipe_name).await
+        Self::discover_as(
+            ProcessIdentity::pipe_name,
+            ServerExpectation::SameExecutable,
+        )
+        .await
     }
+    /// Discovers the current user's core from `quartz-host.exe` and verifies the adjacent `quartz.exe`.
+    ///
+    /// # Errors
+    /// Returns absent, busy, transport or server identity failures.
+    pub async fn connect_host() -> Result<Self, OpenCorePipeError> {
+        Self::discover_as(
+            ProcessIdentity::pipe_name,
+            ServerExpectation::AdjacentQuartz,
+        )
+        .await
+    }
+    #[cfg(test)]
     async fn discover(
         name: impl FnOnce(&ProcessIdentity) -> PipeName,
     ) -> Result<Self, OpenCorePipeError> {
+        Self::discover_as(name, ServerExpectation::SameExecutable).await
+    }
+    async fn discover_as(
+        name: impl FnOnce(&ProcessIdentity) -> PipeName,
+        expectation: ServerExpectation,
+    ) -> Result<Self, OpenCorePipeError> {
         let owner =
             ProcessIdentity::current().context(open_core_pipe_error::ServerIdentitySnafu)?;
-        Self::open_as(&name(&owner), &owner).await
+        Self::open_as(&name(&owner), &owner, expectation).await
     }
     /// Opens a named endpoint with the same authentication and deadlines as discovery.
     ///
@@ -55,9 +83,13 @@ impl PipeClient {
     pub async fn open_named(name: &PipeName) -> Result<Self, OpenCorePipeError> {
         let owner =
             ProcessIdentity::current().context(open_core_pipe_error::ServerIdentitySnafu)?;
-        Self::open_as(name, &owner).await
+        Self::open_as(name, &owner, ServerExpectation::SameExecutable).await
     }
-    async fn open_as(name: &PipeName, owner: &ProcessIdentity) -> Result<Self, OpenCorePipeError> {
+    async fn open_as(
+        name: &PipeName,
+        owner: &ProcessIdentity,
+        expectation: ServerExpectation,
+    ) -> Result<Self, OpenCorePipeError> {
         let pipe = tokio::time::timeout(CONNECT_TIMEOUT, async {
             loop {
                 match ClientOptions::new().open(name) {
@@ -87,9 +119,11 @@ impl PipeClient {
                 },
             },
         )?;
-        owner
-            .check_server(pid)
-            .context(open_core_pipe_error::ServerIdentitySnafu)?;
+        match expectation {
+            ServerExpectation::SameExecutable => owner.check_server(pid),
+            ServerExpectation::AdjacentQuartz => owner.check_server_for_host(pid),
+        }
+        .context(open_core_pipe_error::ServerIdentitySnafu)?;
         Ok(Self { pipe })
     }
     /// Transfers the authenticated pipe to the protocol client.

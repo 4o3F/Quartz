@@ -1097,6 +1097,8 @@ mod tests {
                     publisher.subscribe(),
                     received.clone(),
                     Arc::new(|_| Ok(())),
+                    publisher.browser_streams(),
+                    crate::ipc::browser::BrowserCapturePort::noop(),
                 ),
                 services: Services {
                     summary: None,
@@ -1105,6 +1107,8 @@ mod tests {
                     writes: crate::ipc::WriteChannel::new().port,
                     versions: received,
                     status: publisher.subscribe(),
+                    browser_streams: publisher.browser_streams(),
+                    browser: crate::ipc::browser::BrowserCapturePort::noop(),
                     ui: Arc::new(|_| Ok(())),
                 },
                 listener: Arc::new(PipeListener {

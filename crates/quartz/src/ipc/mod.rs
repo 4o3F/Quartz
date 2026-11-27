@@ -1,5 +1,6 @@
 //! Core IPC sessions, registry and outbox actors, snapshots, and command clients.
 
+pub(crate) mod browser;
 pub(crate) mod client;
 pub(crate) mod connection;
 mod logical_day;
@@ -19,7 +20,9 @@ pub(crate) use crate::persistence::dispatch::WriteChannel;
 
 pub(crate) use crate::process_id::ProcessId;
 pub(crate) use session::{AllowedRoles, ConnectionSession, UiCommand};
-pub(crate) use status::{LogicalDayTransition, PublishedStatus, StatusPublisher};
+pub(crate) use status::{
+    BrowserStreamsHandle, LogicalDayTransition, PublishedStatus, StatusPublisher,
+};
 
 use std::sync::Arc;
 
@@ -31,6 +34,8 @@ pub(crate) struct Services {
     pub queries: crate::query::dispatch::QueryPort,
     pub versions: crate::query::versions::VersionPort,
     pub status: tokio::sync::watch::Receiver<PublishedStatus>,
+    pub browser_streams: BrowserStreamsHandle,
+    pub browser: browser::BrowserCapturePort,
     pub ui: UiPort,
     pub timed: TimedPolicyPort,
 }
@@ -40,7 +45,13 @@ impl Services {
             task.clone()
                 .start(self.queries.clone(), self.versions.clone());
         }
-        registry::RegistryHandle::start(self.status.clone(), self.versions.clone(), self.ui.clone())
+        registry::RegistryHandle::start(
+            self.status.clone(),
+            self.versions.clone(),
+            self.ui.clone(),
+            self.browser_streams.clone(),
+            self.browser.clone(),
+        )
     }
 }
 

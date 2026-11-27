@@ -6,6 +6,7 @@ use quartz_domain::capture::{CaptureState, SessionReadiness, StopReason as Captu
 use quartz_protocol::{CoreStatusResponse, CoreVersion, DatabaseState, InstanceId, StopReason};
 use std::{
     cell::{Cell, RefCell},
+    sync::Arc,
     time::Duration,
 };
 use tokio::sync::watch;
@@ -71,9 +72,43 @@ impl PublishedStatus {
     }
 }
 
+/// Thread-safe handle allowing the IPC registry to publish live connected browser streams.
+#[derive(Clone)]
+pub(crate) struct BrowserStreamsHandle {
+    sender: Arc<watch::Sender<PublishedStatus>>,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+impl std::fmt::Debug for BrowserStreamsHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserStreamsHandle")
+            .finish_non_exhaustive()
+    }
+}
+impl BrowserStreamsHandle {
+    /// Attaches a main-thread wakeup callback invoked whenever connected browser streams change.
+    pub(crate) fn with_wake(mut self, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.wake = Some(wake);
+        self
+    }
+    /// Replaces the published connected browser stream list when it changes.
+    pub(crate) fn update(&self, streams: Vec<quartz_protocol::BrowserStream>) {
+        let changed = self.sender.send_if_modified(|published| {
+            if published.status.browser_streams == streams {
+                return false;
+            }
+            published.status.browser_streams = streams;
+            true
+        });
+        if changed && let Some(wake) = &self.wake {
+            wake();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct StatusPublisher {
-    sender: watch::Sender<PublishedStatus>,
+    sender: Arc<watch::Sender<PublishedStatus>>,
     logical_day: RefCell<LogicalDay>,
     pending_offset: Cell<Option<DayStartOffset>>,
 }
@@ -101,7 +136,7 @@ impl StatusPublisher {
         logical_day: LogicalDay,
     ) -> Self {
         Self {
-            sender: watch::Sender::new(PublishedStatus {
+            sender: Arc::new(watch::Sender::new(PublishedStatus {
                 logical_date: logical_day.date(),
                 foreground: None,
                 timed: quartz_protocol::TimedPolicies::default(),
@@ -113,12 +148,11 @@ impl StatusPublisher {
                     recording: false,
                     stop_reason: Some(StopReason::Starting),
                     database: DatabaseState::Ok,
-                    // TODO(M5): Publish connected browser streams.
                     browser_streams: Vec::new(),
                     instance_id,
                     core_version: CoreVersion(env!("CARGO_PKG_VERSION").into()),
                 },
-            }),
+            })),
             logical_day: RefCell::new(logical_day),
             pending_offset: Cell::new(None),
         }
@@ -271,6 +305,12 @@ impl StatusPublisher {
     }
     pub(crate) fn subscribe(&self) -> watch::Receiver<PublishedStatus> {
         self.sender.subscribe()
+    }
+    pub(crate) fn browser_streams(&self) -> BrowserStreamsHandle {
+        BrowserStreamsHandle {
+            sender: Arc::clone(&self.sender),
+            wake: None,
+        }
     }
     #[cfg(test)]
     pub(crate) fn publish_foreground(&self, foreground: Option<ForegroundView>) {

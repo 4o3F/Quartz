@@ -1,0 +1,84 @@
+{
+  "core_hello": {
+    "proto": {
+      "min": 1,
+      "max": 1
+    },
+    "client_version": "0.1.0",
+    "role": "browser",
+    "browser": {
+      "browser": "chrome",
+      "profile_instance_id": "a286737e-3855-43cb-98ee-c366344372d0"
+    }
+  },
+  "host_hello": {
+    "profile_instance_id": "a286737e-3855-43cb-98ee-c366344372d0",
+    "browser": "firefox",
+    "proto": {
+      "min": 1,
+      "max": 1
+    }
+  },
+  "state_focused": {
+    "focused": true,
+    "window": {
+      "id": 7,
+      "state": "normal"
+    },
+    "tab": {
+      "id": 91,
+      "domain": "github.com",
+      "title": "4o3F/quartz",
+      "title_status": "ok",
+      "audible": false
+    }
+  },
+  "state_unfocused": {
+    "focused": false,
+    "window": null,
+    "tab": null
+  },
+  "state_minimized": {
+    "focused": false,
+    "window": {
+      "id": 7,
+      "state": "minimized"
+    },
+    "tab": null
+  },
+  "state_internal": {
+    "focused": true,
+    "window": {
+      "id": 8,
+      "state": "maximized"
+    },
+    "tab": {
+      "id": 92,
+      "domain": "(internal)",
+      "title": "",
+      "title_status": "empty",
+      "audible": false
+    }
+  },
+  "state_local_file": {
+    "focused": true,
+    "window": {
+      "id": 9,
+      "state": "fullscreen"
+    },
+    "tab": {
+      "id": 93,
+      "domain": "(local-file)",
+      "title": "notes.html",
+      "title_status": "truncated",
+      "audible": true
+    }
+  },
+  "accepted": {
+    "accepted": true
+  },
+  "stream": {
+    "browser_stream": "a286737e-3855-43cb-98ee-c366344372d0",
+    "browser": "edge"
+  }
+}

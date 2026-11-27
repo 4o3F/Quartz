@@ -35,6 +35,10 @@ pub enum PeerExecutable {
 
 /// Maximum extended Windows path length, including its terminator (04 §1).
 const IMAGE_PATH_CAPACITY: usize = 32768;
+/// Expected file name of the adjacent native messaging host executable (04 §1, 05 §2.2).
+const HOST_EXE_NAME: &str = "quartz-host.exe";
+/// Expected file name of the adjacent core executable verified by the host (04 §1).
+const QUARTZ_EXE_NAME: &str = "quartz.exe";
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -209,29 +213,9 @@ impl ProcessIdentity {
     /// # Errors
     /// Rejects a different user, session or image, including identity query failures.
     pub fn check(&self, pid: u32) -> Result<PeerExecutable, CheckPeerError> {
-        let peer = Self::read(pid)?;
-        if peer.sid != self.sid {
-            return Err(CheckPeerError::User);
-        }
-        if peer.session != self.session {
-            return Err(CheckPeerError::Session);
-        }
+        let peer = self.read_same_user_session(pid)?;
         let own = std::env::current_exe().context(check_peer_error::PathSnafu)?;
-        if same_image(&peer.image, &own)? {
-            return Ok(PeerExecutable::Quartz);
-        }
-        let host = own.with_file_name("quartz-host.exe");
-        // A missing host is a normal installation state before M5. Other errors remain failures.
-        match same_image(&peer.image, &host) {
-            Ok(true) => Ok(PeerExecutable::Host),
-            Ok(false) => Err(CheckPeerError::Executable),
-            Err(CheckPeerError::Path { source })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                Err(CheckPeerError::Executable)
-            }
-            Err(error) => Err(error),
-        }
+        classify_peer_image(&peer.image, &own, same_image)
     }
     /// Requires a server with the same user, session and executable as this client.
     ///
@@ -243,6 +227,69 @@ impl ProcessIdentity {
         } else {
             Err(CheckPeerError::Executable)
         }
+    }
+    /// Requires a server with the same user, session, and adjacent `quartz.exe` image for `quartz-host.exe`.
+    ///
+    /// # Errors
+    /// Rejects identity query failures, different user/session, or a server outside the host directory.
+    pub fn check_server_for_host(&self, pid: u32) -> Result<(), CheckPeerError> {
+        let peer = self.read_same_user_session(pid)?;
+        let own = std::env::current_exe().context(check_peer_error::PathSnafu)?;
+        verify_core_image_for_host(&peer.image, &own, same_image)
+    }
+    fn read_same_user_session(&self, pid: u32) -> Result<Self, CheckPeerError> {
+        let peer = Self::read(pid)?;
+        if peer.sid != self.sid {
+            return Err(CheckPeerError::User);
+        }
+        if peer.session != self.session {
+            return Err(CheckPeerError::Session);
+        }
+        Ok(peer)
+    }
+}
+
+/// Classifies a peer executable relative to the running core executable path.
+fn classify_peer_image<F>(
+    peer: &Path,
+    own: &Path,
+    mut matches_image: F,
+) -> Result<PeerExecutable, CheckPeerError>
+where
+    F: FnMut(&Path, &Path) -> Result<bool, CheckPeerError>,
+{
+    if matches_image(peer, own)? {
+        return Ok(PeerExecutable::Quartz);
+    }
+    let host = own.with_file_name(HOST_EXE_NAME);
+    // A missing host is a normal installation state; other path errors remain failures.
+    match matches_image(peer, &host) {
+        Ok(true) => Ok(PeerExecutable::Host),
+        Ok(false) => Err(CheckPeerError::Executable),
+        Err(CheckPeerError::Path { source }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Err(CheckPeerError::Executable)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Verifies that a core server executable is `quartz.exe` in the same directory as `quartz-host.exe`.
+fn verify_core_image_for_host<F>(
+    server: &Path,
+    own: &Path,
+    mut matches_image: F,
+) -> Result<(), CheckPeerError>
+where
+    F: FnMut(&Path, &Path) -> Result<bool, CheckPeerError>,
+{
+    let core = own.with_file_name(QUARTZ_EXE_NAME);
+    match matches_image(server, &core) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(CheckPeerError::Executable),
+        Err(CheckPeerError::Path { source }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Err(CheckPeerError::Executable)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -275,6 +322,74 @@ mod tests {
         );
         let other = tempfile::NamedTempFile::new().expect("different executable path");
         assert!(!same_image(&own, other.path()).expect("different paths"));
+    }
+
+    #[test]
+    fn peer_exe_allow_accepts_same_dir_host_and_rejects_others() {
+        let install_dir = tempfile::tempdir().expect("install dir");
+        let other_dir = tempfile::tempdir().expect("other dir");
+        let solo_dir = tempfile::tempdir().expect("solo dir");
+
+        let quartz = install_dir.path().join(QUARTZ_EXE_NAME);
+        let host = install_dir.path().join(HOST_EXE_NAME);
+        let other_exe = install_dir.path().join("other.exe");
+        let other_dir_host = other_dir.path().join(HOST_EXE_NAME);
+        let other_dir_quartz = other_dir.path().join(QUARTZ_EXE_NAME);
+        let solo_quartz = solo_dir.path().join(QUARTZ_EXE_NAME);
+
+        for path in [
+            &quartz,
+            &host,
+            &other_exe,
+            &other_dir_host,
+            &other_dir_quartz,
+            &solo_quartz,
+        ] {
+            std::fs::write(path, b"").expect("create test image file");
+        }
+
+        assert_eq!(
+            classify_peer_image(&quartz, &quartz, same_image).expect("core self"),
+            PeerExecutable::Quartz
+        );
+        assert_eq!(
+            classify_peer_image(&host, &quartz, same_image).expect("same-dir host"),
+            PeerExecutable::Host
+        );
+        let host_upper = PathBuf::from(host.to_string_lossy().to_uppercase());
+        assert_eq!(
+            classify_peer_image(&host_upper, &quartz, same_image)
+                .expect("case-insensitive same-dir host"),
+            PeerExecutable::Host
+        );
+        let host_dot = install_dir.path().join(".").join(HOST_EXE_NAME);
+        assert_eq!(
+            classify_peer_image(&host_dot, &quartz, same_image).expect("normalized same-dir host"),
+            PeerExecutable::Host
+        );
+
+        assert!(matches!(
+            classify_peer_image(&other_exe, &quartz, same_image),
+            Err(CheckPeerError::Executable)
+        ));
+        assert!(matches!(
+            classify_peer_image(&other_dir_host, &quartz, same_image),
+            Err(CheckPeerError::Executable)
+        ));
+        assert!(matches!(
+            classify_peer_image(&other_dir_host, &solo_quartz, same_image),
+            Err(CheckPeerError::Executable)
+        ));
+
+        verify_core_image_for_host(&quartz, &host, same_image).expect("same-dir core for host");
+        assert!(matches!(
+            verify_core_image_for_host(&other_exe, &host, same_image),
+            Err(CheckPeerError::Executable)
+        ));
+        assert!(matches!(
+            verify_core_image_for_host(&other_dir_quartz, &host, same_image),
+            Err(CheckPeerError::Executable)
+        ));
     }
     #[test]
     fn server_must_have_the_same_user_session_and_executable() {

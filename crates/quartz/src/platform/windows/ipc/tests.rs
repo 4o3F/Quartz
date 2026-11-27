@@ -54,6 +54,8 @@ impl Fixture {
                 writes: crate::ipc::WriteChannel::new().port,
                 versions: database.versions.clone(),
                 status: status.subscribe(),
+                browser_streams: status.browser_streams(),
+                browser: crate::ipc::browser::BrowserCapturePort::noop(),
                 ui: port,
             },
         })
@@ -323,6 +325,8 @@ fn first_instance_refuses_an_occupied_name() {
             writes: crate::ipc::WriteChannel::new().port,
             versions: fixture.database.versions.clone(),
             status: fixture.status.subscribe(),
+            browser_streams: fixture.status.browser_streams(),
+            browser: crate::ipc::browser::BrowserCapturePort::noop(),
             ui: port,
         },
     });
@@ -589,6 +593,8 @@ impl SlowClientRun {
                 writes: workers.writes.clone(),
                 versions: workers.versions.clone(),
                 status: status.subscribe(),
+                browser_streams: status.browser_streams(),
+                browser: crate::ipc::browser::BrowserCapturePort::noop(),
                 ui: Arc::new(|_| Ok(())),
             },
         })

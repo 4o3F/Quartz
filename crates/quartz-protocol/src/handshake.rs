@@ -195,6 +195,11 @@ pub enum HelloRole {
     },
     /// Command-line clients have no role-specific payload.
     Cli,
+    /// Browser host clients must declare their browser family and profile identity.
+    Browser {
+        /// Payload carried in the `browser` object.
+        browser: crate::BrowserHello,
+    },
 }
 
 impl HelloRole {
@@ -204,12 +209,14 @@ impl HelloRole {
         match self {
             Self::Ui { .. } => crate::Role::Ui,
             Self::Cli => crate::Role::Cli,
+            Self::Browser { .. } => crate::Role::Browser,
         }
     }
 }
 
 /// First core request body, with role data at the same level as protocol and version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "HelloWire")]
 pub struct Hello {
     /// Client's supported core protocol range.
     pub proto: ProtoRange,
@@ -218,6 +225,85 @@ pub struct Hello {
     /// Declared role and its associated payload.
     #[serde(flatten)]
     pub role: HelloRole,
+}
+
+#[derive(Debug, Default)]
+enum HelloJsonField {
+    #[default]
+    Missing,
+    Present(serde_json::Value),
+}
+
+impl<'de> serde::Deserialize<'de> for HelloJsonField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde_json::Value::deserialize(deserializer).map(Self::Present)
+    }
+}
+
+#[derive(Deserialize)]
+struct HelloWire {
+    proto: ProtoRange,
+    client_version: ClientVersion,
+    role: crate::Role,
+    #[serde(default)]
+    ui: Option<UiHello>,
+    #[serde(default)]
+    browser: HelloJsonField,
+}
+
+/// A `hello` body does not match its declared role's required fields.
+#[derive(Debug, Snafu)]
+pub enum ParseHelloError {
+    /// `role: "ui"` requires the `ui` payload.
+    #[snafu(display("ui role requires ui hello payload"))]
+    MissingUiPayload,
+    /// `role: "browser"` requires the `browser` payload.
+    #[snafu(display("browser role requires browser hello payload"))]
+    MissingBrowserPayload,
+    /// `browser` payload is only valid for `role: "browser"`.
+    #[snafu(display("browser hello payload is only valid for browser role"))]
+    UnexpectedBrowserPayload,
+    /// `browser` payload failed schema validation.
+    #[snafu(display("invalid browser hello payload: {source}"))]
+    InvalidBrowserPayload {
+        /// Original JSON schema failure.
+        source: serde_json::Error,
+    },
+}
+
+impl TryFrom<HelloWire> for Hello {
+    type Error = ParseHelloError;
+
+    fn try_from(value: HelloWire) -> Result<Self, Self::Error> {
+        let role = match value.role {
+            crate::Role::Ui => {
+                if matches!(value.browser, HelloJsonField::Present(_)) {
+                    return Err(ParseHelloError::UnexpectedBrowserPayload);
+                }
+                let ui = value.ui.ok_or(ParseHelloError::MissingUiPayload)?;
+                HelloRole::Ui { ui }
+            }
+            crate::Role::Cli => {
+                if matches!(value.browser, HelloJsonField::Present(_)) {
+                    return Err(ParseHelloError::UnexpectedBrowserPayload);
+                }
+                HelloRole::Cli
+            }
+            crate::Role::Browser => {
+                let HelloJsonField::Present(raw) = value.browser else {
+                    return Err(ParseHelloError::MissingBrowserPayload);
+                };
+                let browser = serde_json::from_value(raw)
+                    .map_err(|source| ParseHelloError::InvalidBrowserPayload { source })?;
+                HelloRole::Browser { browser }
+            }
+        };
+        Ok(Self {
+            proto: value.proto,
+            client_version: value.client_version,
+            role,
+        })
+    }
 }
 
 /// Successful core handshake body from 04 §4.
@@ -261,6 +347,95 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn browser_hello_is_required_for_browser_role_and_rejected_for_other_roles() {
+        let profile_id = "a286737e-3855-43cb-98ee-c366344372d0";
+        for (wire_browser, expected) in [
+            ("chrome", crate::BrowserKind::Chrome),
+            ("edge", crate::BrowserKind::Edge),
+            ("firefox", crate::BrowserKind::Firefox),
+        ] {
+            let wire = serde_json::json!({
+                "proto": {"min": 1, "max": 1},
+                "client_version": "0.1.0",
+                "role": "browser",
+                "browser": {
+                    "browser": wire_browser,
+                    "profile_instance_id": profile_id
+                }
+            });
+            let hello: Hello = serde_json::from_value(wire.clone()).expect("valid browser hello");
+            assert_eq!(hello.role.role(), crate::Role::Browser);
+            assert_eq!(
+                hello.role,
+                HelloRole::Browser {
+                    browser: crate::BrowserHello {
+                        browser: expected,
+                        profile_instance_id: profile_id.parse().expect("uuid"),
+                    }
+                }
+            );
+            assert_eq!(serde_json::to_value(&hello).expect("encode hello"), wire);
+        }
+
+        for invalid in [
+            serde_json::json!({
+                "proto": {"min": 1, "max": 1},
+                "client_version": "0.1.0",
+                "role": "browser"
+            }),
+            serde_json::json!({
+                "proto": {"min": 1, "max": 1},
+                "client_version": "0.1.0",
+                "role": "browser",
+                "browser": null
+            }),
+            serde_json::json!({
+                "proto": {"min": 1, "max": 1},
+                "client_version": "0.1.0",
+                "role": "browser",
+                "browser": {"browser": "safari", "profile_instance_id": profile_id}
+            }),
+            serde_json::json!({
+                "proto": {"min": 1, "max": 1},
+                "client_version": "0.1.0",
+                "role": "browser",
+                "browser": {"browser": "chrome", "profile_instance_id": "not-a-uuid"}
+            }),
+            serde_json::json!({
+                "proto": {"min": 1, "max": 1},
+                "client_version": "0.1.0",
+                "role": "cli",
+                "browser": {"browser": "chrome", "profile_instance_id": profile_id}
+            }),
+            serde_json::json!({
+                "proto": {"min": 1, "max": 1},
+                "client_version": "0.1.0",
+                "role": "cli",
+                "browser": null
+            }),
+            serde_json::json!({
+                "proto": {"min": 1, "max": 1},
+                "client_version": "0.1.0",
+                "role": "ui",
+                "ui": {"state": "visible"},
+                "browser": {"browser": "chrome", "profile_instance_id": profile_id}
+            }),
+            serde_json::json!({
+                "proto": {"min": 1, "max": 1},
+                "client_version": "0.1.0",
+                "role": "ui",
+                "ui": {"state": "visible"},
+                "browser": null
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<Hello>(invalid.clone()).is_err(),
+                "invalid hello must fail: {invalid}"
+            );
+        }
     }
 
     #[test]
