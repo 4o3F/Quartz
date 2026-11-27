@@ -19,7 +19,7 @@ use crate::{
     model::{
         AnnotationEditorEffect, Day, DetailsSubject, QueryProgress, RuleEditorEffect,
         RuleImportEffect, RulesEffect, RulesTab, SegmentId, TimeOfDay, TimeSpan,
-        UnclassifiedEffect, live_details::LiveDetails,
+        UnclassifiedEffect, WeekEffect, live_details::LiveDetails, weekday_from_protocol,
     },
     timeline_scale::RangeSelectGesture,
 };
@@ -40,6 +40,10 @@ const PREVIEW_USER_SET_KEY: &str = "user.study-sites";
 const PREVIEW_USER_SET_VERSION: u32 = 3;
 const PREVIEW_PROGRESS_DONE: u32 = 120;
 const PREVIEW_PROGRESS_TOTAL: u32 = 365;
+const PREVIEW_WEEK_PROGRESS_DONE: u32 = 4;
+const PREVIEW_WEEK_PROGRESS_TOTAL: u32 = 6;
+/// Offset from week start to today in the Week preview so the 7th day is one empty future day.
+const PREVIEW_WEEK_TODAY_OFFSET: i64 = 5;
 
 const CAT_DEV_UUID: &str = "11111111-1111-4111-8111-111111111111";
 const CAT_LEARN_UUID: &str = "22222222-2222-4222-8222-222222222222";
@@ -81,12 +85,25 @@ impl AppShell {
             PreviewState::TodayData(scenario) => Some(scenario),
             _ => None,
         };
+        let first_day_of_week =
+            if self.formatter.language() == quartz_i18n::Language::SimplifiedChinese {
+                wire::Weekday::Monday
+            } else {
+                wire::Weekday::Sunday
+            };
+        let first_weekday = weekday_from_protocol(first_day_of_week);
         let selected = self.day.date();
         let past = matches!(
             scenario,
             Some(TodayPreviewState::EmptyPast | TodayPreviewState::DatePicker)
         );
-        let today = if past {
+        let today = if matches!(state, PreviewState::Week | PreviewState::WeekLoading) {
+            let week_start = crate::model::week::week_start_for(selected, first_weekday)
+                .expect("preview week start");
+            week_start
+                .checked_add(jiff::ToSpan::days(PREVIEW_WEEK_TODAY_OFFSET))
+                .expect("preview week today")
+        } else if past {
             selected.tomorrow().expect("sample date has a next day")
         } else {
             selected
@@ -151,6 +168,12 @@ impl AppShell {
             PreviewState::ClassifyMenu => {
                 timeline_overlay = Some(self.configure_classify_menu_preview());
             }
+            PreviewState::Week => {
+                self.configure_week_preview(today, first_weekday);
+            }
+            PreviewState::WeekLoading => {
+                self.configure_week_loading_preview(today, first_weekday);
+            }
             PreviewState::Today
             | PreviewState::TodayDetails
             | PreviewState::TodayHover
@@ -178,13 +201,7 @@ impl AppShell {
                 },
                 locale: Some(LocaleSettings {
                     hour_cycle: wire::HourCycle::H24,
-                    first_day_of_week: if self.formatter.language()
-                        == quartz_i18n::Language::SimplifiedChinese
-                    {
-                        wire::Weekday::Monday
-                    } else {
-                        wire::Weekday::Sunday
-                    },
+                    first_day_of_week,
                 }),
             },
             phase: if scenario == Some(TodayPreviewState::Loading) {
@@ -423,6 +440,47 @@ impl AppShell {
             },
         );
         self.unclassified_search_sync = InputSyncState::NeedsSync;
+    }
+
+    fn configure_week_preview(
+        &mut self,
+        today: wire::LocalDate,
+        first_weekday: jiff::civil::Weekday,
+    ) {
+        self.load_fixture_rules_and_categories();
+        let WeekEffect::Query {
+            week_start,
+            generation,
+            ..
+        } = self.week.open(today, first_weekday)
+        else {
+            unreachable!("opening WeekPage emits Query");
+        };
+        let follow_up = self.week.apply_loaded(
+            generation,
+            week_start,
+            today,
+            Ok(fixture_week_range_response(week_start)),
+            self.rules.categories(),
+        );
+        debug_assert_eq!(follow_up, WeekEffect::None);
+    }
+
+    fn configure_week_loading_preview(
+        &mut self,
+        today: wire::LocalDate,
+        first_weekday: jiff::civil::Weekday,
+    ) {
+        let WeekEffect::Query { generation, .. } = self.week.open(today, first_weekday) else {
+            unreachable!("opening WeekPage emits Query");
+        };
+        let _ = self.week.apply_progress(
+            generation,
+            QueryProgress {
+                done: PREVIEW_WEEK_PROGRESS_DONE,
+                total: PREVIEW_WEEK_PROGRESS_TOTAL,
+            },
+        );
     }
 
     fn configure_today_annotations_preview(&mut self, open_create_error: bool) {
@@ -1529,6 +1587,149 @@ fn fixture_selected_segment_details(day: &Day) -> OpenDetails {
     }
 }
 
+fn fixture_week_range_response(week_start: wire::LocalDate) -> wire::QueryRangeResponse {
+    let cat = |id: i64,
+               uuid: &str,
+               builtin_key: Option<wire::BuiltinCategory>,
+               name: Option<&str>,
+               color: &str,
+               tendency: wire::CategoryTendency| wire::CategoryRef::Classified {
+        category: wire::Category {
+            id: wire::CategoryId(id),
+            uuid: wire::CategoryUuid(uuid.to_owned()),
+            builtin_key,
+            name: name.map(str::to_owned),
+            color: color.to_owned(),
+            tendency,
+        }
+        .into(),
+    };
+    let dev = cat(
+        1,
+        CAT_DEV_UUID,
+        Some(wire::BuiltinCategory::Development),
+        None,
+        "cat.8",
+        wire::CategoryTendency::Focus,
+    );
+    let learn = cat(
+        2,
+        CAT_LEARN_UUID,
+        Some(wire::BuiltinCategory::Learning),
+        None,
+        "cat.1",
+        wire::CategoryTendency::Focus,
+    );
+    let comm = cat(
+        3,
+        CAT_COMM_UUID,
+        Some(wire::BuiltinCategory::Communication),
+        None,
+        "cat.3",
+        wire::CategoryTendency::Neutral,
+    );
+    let entertain = cat(
+        4,
+        CAT_ENTERTAIN_UUID,
+        Some(wire::BuiltinCategory::Entertainment),
+        None,
+        "cat.13",
+        wire::CategoryTendency::Distraction,
+    );
+    let system = cat(
+        5,
+        CAT_SYSTEM_UUID,
+        Some(wire::BuiltinCategory::System),
+        None,
+        "cat.10",
+        wire::CategoryTendency::Neutral,
+    );
+
+    let bucket = |offset_days: i64, entries: Vec<(wire::CategoryRef, i64)>| {
+        let start_date = week_start
+            .checked_add(jiff::ToSpan::days(offset_days))
+            .expect("fixture week day");
+        let end_date = start_date.tomorrow().expect("fixture week next day");
+        let active_ms: i64 = entries.iter().map(|(_, ms)| *ms).sum();
+        let groups = entries
+            .into_iter()
+            .map(|(category, ms)| wire::RangeGroup {
+                dimension: wire::RangeDimension::Category,
+                entity: wire::RangeEntity::Category(wire::CategoryEntity::Category { category }),
+                active_ms: ms,
+            })
+            .collect();
+        wire::RangeSummaryBucket {
+            start_date,
+            end_date,
+            active_ms,
+            groups,
+        }
+    };
+
+    // 6 observed days (day 2 has 0 activity) + day 6 omitted as an empty future day.
+    let buckets = vec![
+        bucket(
+            0,
+            vec![
+                (dev.clone(), 4 * HOUR_MS + 30 * MINUTE_MS),
+                (learn.clone(), HOUR_MS + 15 * MINUTE_MS),
+                (comm.clone(), HOUR_MS),
+                (entertain.clone(), 30 * MINUTE_MS),
+            ],
+        ),
+        bucket(
+            1,
+            vec![
+                (dev.clone(), 3 * HOUR_MS + 50 * MINUTE_MS),
+                (learn.clone(), HOUR_MS),
+                (comm.clone(), 50 * MINUTE_MS),
+                (entertain.clone(), 45 * MINUTE_MS),
+                (wire::CategoryRef::Unclassified, 15 * MINUTE_MS),
+            ],
+        ),
+        // Zero-activity day: empty column and no point on the share lines.
+        bucket(2, Vec::new()),
+        bucket(
+            3,
+            vec![
+                (dev.clone(), 5 * HOUR_MS + 30 * MINUTE_MS),
+                (learn.clone(), HOUR_MS + 20 * MINUTE_MS),
+                (comm.clone(), 40 * MINUTE_MS),
+                (system.clone(), 25 * MINUTE_MS),
+                (entertain.clone(), 15 * MINUTE_MS),
+            ],
+        ),
+        bucket(
+            4,
+            vec![
+                (dev.clone(), 2 * HOUR_MS + 10 * MINUTE_MS),
+                (comm, HOUR_MS + 15 * MINUTE_MS),
+                (entertain.clone(), HOUR_MS + 35 * MINUTE_MS),
+                (wire::CategoryRef::Unclassified, 20 * MINUTE_MS),
+            ],
+        ),
+        bucket(
+            5,
+            vec![
+                (dev, 2 * HOUR_MS),
+                (learn, 50 * MINUTE_MS),
+                (entertain, 35 * MINUTE_MS),
+                (system, 20 * MINUTE_MS),
+            ],
+        ),
+    ];
+
+    wire::QueryRangeResponse {
+        time_zone: "Asia/Shanghai".to_owned(),
+        day_start_offset_min: 240,
+        reference_range: None,
+        buckets,
+        versions: wire::QueryVersions("preview-week-v1".to_owned()),
+        truncated: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1809,6 +2010,79 @@ mod tests {
             Some(ValidateAnnotationDraftError::Time {
                 source: ValidateAnnotationTimeError::EndNotAfterStart,
             })
+        );
+    }
+
+    #[test]
+    fn week_preview_fixtures_include_zero_activity_day_future_day_and_loading_progress() {
+        use crate::model::{WEEK_DAY_COUNT, WeekDayKind, WeekLoadState, WeekPage};
+
+        let catalog =
+            CategoryCatalog::from_protocol(fixture_categories_response()).expect("catalog");
+        let week_start =
+            crate::model::week::week_start_for(sample_day_date(), jiff::civil::Weekday::Monday)
+                .expect("week start");
+        let today = week_start
+            .checked_add(jiff::ToSpan::days(PREVIEW_WEEK_TODAY_OFFSET))
+            .expect("preview today");
+
+        let mut week = WeekPage::new();
+        let WeekEffect::Query {
+            week_start: query_start,
+            generation,
+            ..
+        } = week.open(today, jiff::civil::Weekday::Monday)
+        else {
+            panic!("opening week emits query");
+        };
+        assert_eq!(
+            week.apply_loaded(
+                generation,
+                query_start,
+                today,
+                Ok(fixture_week_range_response(query_start)),
+                Some(&catalog),
+            ),
+            WeekEffect::None
+        );
+        let WeekLoadState::Ready(data) = week.state() else {
+            panic!("week fixture ready");
+        };
+        assert_eq!(data.days.len(), WEEK_DAY_COUNT);
+        let zero_day = data.days.get(2).expect("zero-activity day");
+        assert_eq!(zero_day.kind, WeekDayKind::Observed);
+        assert!(zero_day.active.is_zero());
+        assert_eq!(zero_day.focus_share, None);
+        assert_eq!(zero_day.distraction_share, None);
+
+        let future_day = data.days.get(6).expect("future day");
+        assert_eq!(future_day.kind, WeekDayKind::Future);
+        assert!(future_day.active.is_zero());
+        assert_eq!(future_day.focus_share, None);
+
+        let mut loading = WeekPage::new();
+        let WeekEffect::Query { generation, .. } =
+            loading.open(today, jiff::civil::Weekday::Monday)
+        else {
+            panic!("opening loading week emits query");
+        };
+        assert_eq!(
+            loading.apply_progress(
+                generation,
+                QueryProgress {
+                    done: PREVIEW_WEEK_PROGRESS_DONE,
+                    total: PREVIEW_WEEK_PROGRESS_TOTAL,
+                },
+            ),
+            ProgressUpdate::Applied
+        );
+        assert!(matches!(loading.state(), WeekLoadState::Loading));
+        assert_eq!(
+            loading.progress(),
+            LoadProgress::Counting {
+                done: PREVIEW_WEEK_PROGRESS_DONE,
+                total: PREVIEW_WEEK_PROGRESS_TOTAL,
+            }
         );
     }
 }

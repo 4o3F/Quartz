@@ -1048,4 +1048,36 @@ timeline.classify.other:
   en: "Other…"
 query.progress.days:
   en: "Calculating day %{done} of %{total}"
+date.month_day:
+  en: "%{month} %{day}"
+week.range:
+  en: "%{start} – %{end}"
+week.this_week:
+  en: "This week"
+week.total:
+  en: "Total active %{duration}"
+week.columns.title:
+  en: "Daily categories"
+week.shares.title:
+  en: "Daily focus & distraction"
+week.empty_current.title:
+  en: "No activity recorded this week"
+week.empty_current.message:
+  en: "Your recorded activity will appear here by day."
+week.empty_past.title:
+  en: "No activity recorded in this week"
+week.empty_past.message:
+  en: "The core may not have been running, or the records were deleted."
+week.go_this_week:
+  en: "Go to this week"
+week.query_failed.title:
+  en: "Could not load this week"
+week.query_failed.message:
+  en: "Retry to load this week again."
+week.locale_unavailable.title:
+  en: "First day of week is unavailable"
+week.locale_unavailable.message:
+  en: "System regional settings are unavailable, so week boundaries cannot be determined."
+week.truncated:
+  en: "Some days had too many categories; only the top entries are shown."
 

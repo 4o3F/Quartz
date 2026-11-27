@@ -19,6 +19,7 @@ mod stat_grid;
 mod timeline;
 mod today;
 mod unclassified;
+mod week;
 
 use std::{fmt, rc::Rc};
 
@@ -304,6 +305,7 @@ pub(crate) struct AppShell<Focus = FocusHandle> {
     unclassified_search_input: Option<Entity<gpui_kit::component::input::InputState>>,
     unclassified_search_sync: InputSyncState,
     unclassified_query_task: Option<gpui_kit::Task<()>>,
+    week: crate::model::WeekPage,
     annotation_editor: crate::model::AnnotationEditor,
     annotation_start_input: Option<Entity<gpui_kit::component::input::InputState>>,
     annotation_end_input: Option<Entity<gpui_kit::component::input::InputState>>,
@@ -385,6 +387,7 @@ impl AppShell {
             unclassified_search_input: None,
             unclassified_search_sync: InputSyncState::Synced,
             unclassified_query_task: None,
+            week: crate::model::WeekPage::new(),
             annotation_editor: crate::model::AnnotationEditor::new(),
             annotation_start_input: None,
             annotation_end_input: None,
@@ -569,6 +572,9 @@ impl AppShell {
             if page == Page::Rules {
                 self.open_rules_page(cx);
             }
+            if page == Page::Week {
+                self.open_week_page(cx);
+            }
             cx.notify();
         }
     }
@@ -617,10 +623,11 @@ impl Render for AppShell {
         };
         let page = match self.page {
             Page::Today => self.render_today(&ui, &frame, cx).into_any_element(),
+            Page::Week => self.render_week(&ui, &frame, cx).into_any_element(),
             Page::Rules => self.render_rules(&ui, &frame, cx).into_any_element(),
-            page @ (Page::Week | Page::Settings) => {
-                self.render_placeholder(&ui, page).into_any_element()
-            }
+            Page::Settings => self
+                .render_placeholder(&ui, Page::Settings)
+                .into_any_element(),
         };
         let suppress_tooltip = self.segment_menu.is_some()
             || self

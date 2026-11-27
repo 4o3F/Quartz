@@ -83,6 +83,11 @@ pub enum PreviewState {
     TimelineSelect,
     /// Today page with the Classify-as menu open over a selected timeline segment.
     ClassifyMenu,
+    /// Week page with a realistic 7-day breakdown (including one zero-activity day and one empty
+    /// future day).
+    Week,
+    /// Week page in its initial loading state with per-day progress and static skeletons.
+    WeekLoading,
     /// The shared failure/connecting screen, without a core or pipe.
     Error(ErrorPreviewState),
 }
@@ -214,6 +219,8 @@ impl FromStr for PreviewState {
             "annotation-editor" => Ok(Self::AnnotationEditor),
             "timeline-select" => Ok(Self::TimelineSelect),
             "classify-menu" => Ok(Self::ClassifyMenu),
+            "week" => Ok(Self::Week),
+            "week-loading" => Ok(Self::WeekLoading),
             "connecting" => Ok(Self::Error(ErrorPreviewState::Connecting)),
             "core-not-running" => Ok(Self::Error(ErrorPreviewState::CoreNotRunning)),
             "core-not-running-starting" => {
@@ -410,6 +417,7 @@ impl PreviewState {
     /// The top-level page this preview state opens on.
     const fn page(self) -> Page {
         match self {
+            Self::Week | Self::WeekLoading => Page::Week,
             Self::Rules
             | Self::RulesCategories
             | Self::RuleEditor
@@ -440,6 +448,8 @@ impl PreviewState {
             | Self::TodayAppDetails
             | Self::TodayData(_)
             | Self::TodayHover
+            | Self::Week
+            | Self::WeekLoading
             | Self::Rules
             | Self::RulesCategories
             | Self::RuleEditor
@@ -461,6 +471,8 @@ impl PreviewState {
             Self::Today
             | Self::TodayFullDay
             | Self::TodayData(_)
+            | Self::Week
+            | Self::WeekLoading
             | Self::Rules
             | Self::RulesCategories
             | Self::RuleEditor
@@ -915,6 +927,8 @@ mod tests {
             ),
             ("timeline-select", PreviewState::TimelineSelect, Page::Today),
             ("classify-menu", PreviewState::ClassifyMenu, Page::Today),
+            ("week", PreviewState::Week, Page::Week),
+            ("week-loading", PreviewState::WeekLoading, Page::Week),
         ];
         let sample = SampleDay::new();
         for (name, state, page) in cases {

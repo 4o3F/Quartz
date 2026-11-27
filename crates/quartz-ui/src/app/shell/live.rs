@@ -302,6 +302,9 @@ impl AppShell {
         if self.page == super::Page::Rules {
             self.open_rules_page(cx);
         }
+        if self.page == super::Page::Week {
+            self.open_week_page(cx);
+        }
         cx.notify();
     }
     pub(crate) fn state_changed(
@@ -311,6 +314,11 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         self.formatter = formatter;
+        let previous_today = self.current_logical_today();
+        let new_today = snapshot.logical_date;
+        let first_weekday = snapshot
+            .locale
+            .map(|locale| crate::model::weekday_from_protocol(locale.first_day_of_week));
         let follow = self.live.as_ref().is_some_and(|live| {
             (self.day.date() == live.snapshot.logical_date
                 && snapshot.logical_date != live.snapshot.logical_date)
@@ -347,6 +355,7 @@ impl AppShell {
             self.on_live_day_context_changed(None, cx);
             self.on_rules_mutated(cx);
         }
+        self.on_week_snapshot_changed(previous_today, new_today, first_weekday, cx);
         if recovered && !follow {
             self.retry_day(cx);
         }

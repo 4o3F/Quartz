@@ -119,6 +119,7 @@ impl AppShell {
     /// visible and `date` falls inside the covered 7-day range, schedules a coalesced refresh.
     pub(crate) fn day_changed(&mut self, date: LocalDate, cx: &mut Context<Self>) {
         self.on_annotations_day_changed(date, cx);
+        self.on_week_day_changed(date, cx);
         if self.page == Page::Rules && self.rules.active_tab() == RulesTab::Unclassified {
             let today = self.current_logical_today();
             let effect = self.unclassified.on_day_changed(date, today);
@@ -126,7 +127,7 @@ impl AppShell {
             cx.notify();
         } else {
             self.unclassified.mark_stale();
-            if self.page == Page::Today {
+            if matches!(self.page, Page::Today | Page::Week) {
                 cx.notify();
             }
         }
@@ -139,6 +140,7 @@ impl AppShell {
         if self.page == Page::Rules && self.rules.active_tab() == RulesTab::Unclassified {
             self.reload_unclassified(cx);
         }
+        self.on_week_rules_mutated(cx);
     }
 
     fn run_unclassified_effect(&mut self, effect: UnclassifiedEffect, cx: &mut Context<Self>) {

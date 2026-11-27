@@ -1783,6 +1783,7 @@ mod tests {
             unclassified_search_input: None,
             unclassified_search_sync: crate::app::shell::InputSyncState::Synced,
             unclassified_query_task: None,
+            week: crate::model::WeekPage::new(),
             annotation_editor: crate::model::AnnotationEditor::new(),
             annotation_start_input: None,
             annotation_end_input: None,

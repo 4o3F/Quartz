@@ -645,6 +645,31 @@ impl Formatter {
         })
     }
 
+    /// Month and day without weekday, such as `11月16日` or `Nov 16`.
+    #[must_use]
+    pub(crate) fn month_day(self, date: Date) -> String {
+        let month = Msg::month(date.month()).expect("a civil Date always has a month in 1..=12");
+        self.text_with(
+            Msg::DateMonthDay,
+            &[
+                Arg::Month.with(&self.text(month)),
+                Arg::Day.with(&date.day().to_string()),
+            ],
+        )
+    }
+
+    /// Inclusive date range of a week, such as `11月16日 – 11月22日` or `Nov 16 – Nov 22`.
+    #[must_use]
+    pub(crate) fn week_range(self, start: Date, end_inclusive: Date) -> String {
+        self.text_with(
+            Msg::WeekRange,
+            &[
+                Arg::Start.with(&self.month_day(start)),
+                Arg::End.with(&self.month_day(end_inclusive)),
+            ],
+        )
+    }
+
     /// Month and day with weekday, such as `11月16日 周一` or `Mon, Nov 16`.
     #[must_use]
     pub(crate) fn date(self, date: Date) -> String {

@@ -42,6 +42,8 @@ export const scenarios = [
   "annotation-editor",
   "timeline-select",
   "classify-menu",
+  "week",
+  "week-loading",
 ] as const;
 export const narrowScenarios = [
   "today",
@@ -57,6 +59,7 @@ export const narrowScenarios = [
   "annotation-editor",
   "timeline-select",
   "classify-menu",
+  "week",
 ] as const;
 const closeMessage = 0x10;
 const windowDeadlineMs = 30000;

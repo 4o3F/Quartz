@@ -1048,4 +1048,36 @@ timeline.classify.other:
   zh-CN: "其他…"
 query.progress.days:
   zh-CN: "正在计算 %{done}/%{total} 天"
+date.month_day:
+  zh-CN: "%{month}%{day}日"
+week.range:
+  zh-CN: "%{start} – %{end}"
+week.this_week:
+  zh-CN: "本周"
+week.total:
+  zh-CN: "总活跃 %{duration}"
+week.columns.title:
+  zh-CN: "每日分类时长"
+week.shares.title:
+  zh-CN: "每日专注与分心占比"
+week.empty_current.title:
+  zh-CN: "本周还没有活动记录"
+week.empty_current.message:
+  zh-CN: "活动记录会在这里按天汇总显示。"
+week.empty_past.title:
+  zh-CN: "这一周没有活动记录"
+week.empty_past.message:
+  zh-CN: "核心当时可能没有运行，或记录已被删除。"
+week.go_this_week:
+  zh-CN: "回到本周"
+week.query_failed.title:
+  zh-CN: "暂时无法加载这一周"
+week.query_failed.message:
+  zh-CN: "请重试以重新读取这一周的数据。"
+week.locale_unavailable.title:
+  zh-CN: "无法确定每周首日"
+week.locale_unavailable.message:
+  zh-CN: "系统区域设置暂时不可用，无法计算本周的起止日期。"
+week.truncated:
+  zh-CN: "部分日期的分类过多，已仅显示前若干项。"
 

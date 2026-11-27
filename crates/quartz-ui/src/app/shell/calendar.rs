@@ -110,15 +110,7 @@ impl AppShell {
         let month = self.calendar?;
         let snapshot = self.day_snapshot()?;
         let locale = snapshot.locale?;
-        let first = match locale.first_day_of_week {
-            quartz_protocol::Weekday::Monday => Weekday::Monday,
-            quartz_protocol::Weekday::Tuesday => Weekday::Tuesday,
-            quartz_protocol::Weekday::Wednesday => Weekday::Wednesday,
-            quartz_protocol::Weekday::Thursday => Weekday::Thursday,
-            quartz_protocol::Weekday::Friday => Weekday::Friday,
-            quartz_protocol::Weekday::Saturday => Weekday::Saturday,
-            quartz_protocol::Weekday::Sunday => Weekday::Sunday,
-        };
+        let first = crate::model::weekday_from_protocol(locale.first_day_of_week);
         let today = snapshot.logical_date;
         let selected = self.day.date();
         let next = if month.first >= today.first_of_month() {

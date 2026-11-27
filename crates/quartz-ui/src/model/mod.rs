@@ -20,6 +20,7 @@ mod summary;
 mod time;
 mod track;
 pub(crate) mod unclassified;
+pub(crate) mod week;
 
 #[cfg(windows)]
 pub(crate) use annotation_editor::{
@@ -91,6 +92,11 @@ pub(crate) use unclassified::{
     UNCLASSIFIED_DEBOUNCE_DELAY, UnclassifiedEffect, UnclassifiedEntityKind, UnclassifiedList,
     UnclassifiedQueue, UnclassifiedRow, ValidateUnclassifiedSearchError,
     unclassified_last_seven_days,
+};
+#[cfg(windows)]
+pub(crate) use week::{
+    PageVisibility, WEEK_DAY_COUNT, WeekData, WeekDay, WeekDayKind, WeekEffect, WeekLoadState,
+    WeekPage, weekday_from_protocol,
 };
 
 #[cfg(test)]

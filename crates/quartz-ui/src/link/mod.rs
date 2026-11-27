@@ -8,6 +8,8 @@ mod day;
 mod details;
 #[cfg(windows)]
 mod rules;
+#[cfg(windows)]
+mod week;
 use crate::failure::Failure;
 pub(crate) use crate::model::QueryProgress;
 #[cfg(windows)]

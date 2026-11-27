@@ -3,8 +3,9 @@
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyElement, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _, Role,
-    StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _, px, relative,
+    AnyElement, Context, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Role, Stateful, StatefulInteractiveElement as _, Styled as _, div,
+    prelude::FluentBuilder as _, px, relative,
 };
 
 use super::{AppShell, Frame, LayerCx};
@@ -15,7 +16,7 @@ use crate::{
     },
     format::{Arg, Msg},
     layout::{ChartArrangement, ColumnRange},
-    model::{HourlyBar, SECONDS_PER_MINUTE, Share},
+    model::{CategoryColor, HourlyBar, SECONDS_PER_MINUTE, Share},
 };
 
 /// Height of the category share bar on the status card.
@@ -26,7 +27,7 @@ const CHART_HEIGHT: f32 = 120.;
 const CHART_SCALE: Duration = Duration::from_hours(1);
 /// Width of the value axis label column: as wide as its widest label (11 section 5.6), but at
 /// least this much so the plot does not jump between languages.
-const AXIS_COLUMN_RANGE: ColumnRange = ColumnRange::new(24., 72.);
+pub(super) const AXIS_COLUMN_RANGE: ColumnRange = ColumnRange::new(24., 72.);
 /// Space between the hour labels of the bar axis.
 const HOUR_LABEL_GAP: f32 = 4.;
 /// Hours per label the axis tries, finest first; each divides 24 so labels stay evenly spread.
@@ -75,6 +76,109 @@ impl TickLabelBounds {
     }
 }
 
+/// One labeled horizontal gridline of a chart plot, as a fraction of the plot height from the top.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ChartGridline {
+    pub(super) from_top: f32,
+    pub(super) label: String,
+}
+
+/// One stacked category segment in a vertical column chart, sized as a fraction of plot height.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct StackedSegment {
+    pub(super) color: CategoryColor,
+    pub(super) fraction: f32,
+}
+
+/// Renders one horizontal gridline and its left-aligned y-axis tick label.
+pub(super) fn render_gridline(
+    ui: &Widgets<'_>,
+    line: &ChartGridline,
+    chart_height: f32,
+    axis_width: f32,
+) -> [Div; 2] {
+    let top = px(line.from_top * chart_height);
+    let label_height = ui.line_height(Ramp::Caption);
+    [
+        div()
+            .absolute()
+            .left(px(axis_width))
+            .right(px(0.))
+            .top(top)
+            .h(ui.metrics.layout.divider)
+            .bg(ui.palette.stroke_divider),
+        div()
+            .absolute()
+            .left(px(0.))
+            .w(px(axis_width))
+            .ramp(ui, Ramp::Caption)
+            .tabular_figures()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(ui.palette.text_tertiary)
+            .top(top - label_height / 2.)
+            .child(line.label.clone()),
+    ]
+}
+
+/// Renders one stacked category column (bottom to top) inside a chart plot.
+pub(super) fn render_stacked_column(
+    ui: &Widgets<'_>,
+    id: impl Into<ElementId>,
+    accessible_label: Option<String>,
+    segments: impl IntoIterator<Item = StackedSegment>,
+    chart_height: f32,
+    padding_x: Pixels,
+) -> Stateful<Div> {
+    let stack = div()
+        .flex()
+        .flex_col_reverse()
+        .gap(ui.metrics.timeline.block_gap)
+        .w_full()
+        .max_h(px(chart_height))
+        .rounded_t(ui.metrics.timeline.block_radius)
+        .overflow_hidden()
+        .children(segments.into_iter().map(|segment| {
+            ui.category_mark(
+                div()
+                    .w_full()
+                    .h(px(segment.fraction.clamp(0., 1.) * chart_height))
+                    .min_h(px(0.))
+                    .flex_shrink_1(),
+                segment.color,
+            )
+        }));
+    div()
+        .id(id)
+        .when_some(accessible_label, |column, label| {
+            column.role(Role::Meter).aria_label(label)
+        })
+        .flex()
+        .flex_col()
+        .justify_end()
+        .flex_1()
+        .min_w(px(0.))
+        .h_full()
+        .px(padding_x)
+        .child(stack)
+}
+
+/// Renders one category legend item with its theme-aware swatch and text.
+pub(super) fn render_legend_item(ui: &Widgets<'_>, color: CategoryColor, text: String) -> Div {
+    let palette = ui.palette;
+    let swatch_color = palette.category(color);
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(ui.metrics.space.s)
+        .ramp(ui, Ramp::Caption)
+        .text_color(palette.text_secondary)
+        .child(ui.category_mark(ui.swatch(swatch_color), color))
+        .child(text)
+}
+
 /// One labeled gridline of the hourly chart, as a fraction of the plot height from the top.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Gridline {
@@ -98,7 +202,6 @@ fn gridlines() -> [Gridline; 3] {
 impl AppShell {
     /// 100% stacked category bar with legend; sits on the status card.
     pub(super) fn render_share_bar(&self, ui: &Widgets<'_>) -> impl IntoElement {
-        let palette = ui.palette;
         let space = &ui.metrics.space;
         let active = self.day.summary().active;
         let mut bar = div()
@@ -117,7 +220,6 @@ impl AppShell {
             .gap_y(space.xs);
         for entry in self.day.category_totals() {
             let category = self.day.category(entry.category);
-            let color = palette.category(category.color);
             bar = bar.child(
                 ui.category_mark(
                     div()
@@ -126,23 +228,17 @@ impl AppShell {
                     category.color,
                 ),
             );
-            legend = legend.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(space.s)
-                    .ramp(ui, Ramp::Caption)
-                    .text_color(palette.text_secondary)
-                    .child(ui.category_mark(ui.swatch(color), category.color))
-                    .child(self.formatter.text_with(
-                        Msg::LegendItem,
-                        &[
-                            Arg::Name.with(&self.formatter.category_name(&category.name)),
-                            Arg::Duration.with(&self.formatter.duration(entry.total)),
-                        ],
-                    )),
-            );
+            legend = legend.child(render_legend_item(
+                ui,
+                category.color,
+                self.formatter.text_with(
+                    Msg::LegendItem,
+                    &[
+                        Arg::Name.with(&self.formatter.category_name(&category.name)),
+                        Arg::Duration.with(&self.formatter.duration(entry.total)),
+                    ],
+                ),
+            ));
         }
         div()
             .flex()
@@ -160,54 +256,56 @@ impl AppShell {
     ) -> impl IntoElement {
         let bars = self.day.hourly();
         let lines = gridlines();
-        let labels: Vec<String> = lines
-            .iter()
-            .map(|line| self.formatter.whole_minutes(minutes_of(line.value)))
+        let chart_lines: Vec<ChartGridline> = lines
+            .into_iter()
+            .map(|line| ChartGridline {
+                from_top: line.from_top,
+                label: self.formatter.whole_minutes(minutes_of(line.value)),
+            })
             .collect();
-        let axis_width = AXIS_COLUMN_RANGE.select(
-            frame
-                .measure
-                .widths(labels.iter().map(String::as_str), Ramp::Caption),
-        );
-        let plot =
-            ui.plot_area()
-                .flex()
-                .flex_col()
-                .p(ui.metrics.space.s)
-                .child(
-                    div()
-                        .relative()
-                        .h(px(CHART_HEIGHT))
-                        .children(
-                            lines.into_iter().zip(labels).flat_map(|(line, label)| {
-                                self.gridline(ui, line, label, axis_width)
-                            }),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(axis_width))
-                                .right(px(0.))
-                                .top(px(0.))
-                                .h_full()
-                                .flex()
-                                .child(
-                                    div().flex().flex_row().flex_1().h_full().children(
-                                        bars.iter()
-                                            .enumerate()
-                                            .map(|(index, bar)| self.hourly_column(ui, index, bar)),
-                                    ),
+        let axis_width = AXIS_COLUMN_RANGE.select(frame.measure.widths(
+            chart_lines.iter().map(|line| line.label.as_str()),
+            Ramp::Caption,
+        ));
+        let plot = ui
+            .plot_area()
+            .flex()
+            .flex_col()
+            .p(ui.metrics.space.s)
+            .child(
+                div()
+                    .relative()
+                    .h(px(CHART_HEIGHT))
+                    .children(
+                        chart_lines
+                            .iter()
+                            .flat_map(|line| render_gridline(ui, line, CHART_HEIGHT, axis_width)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(axis_width))
+                            .right(px(0.))
+                            .top(px(0.))
+                            .h_full()
+                            .flex()
+                            .child(
+                                div().flex().flex_row().flex_1().h_full().children(
+                                    bars.iter()
+                                        .enumerate()
+                                        .map(|(index, bar)| self.hourly_column(ui, index, bar)),
                                 ),
-                        ),
-                )
-                .child(
-                    div()
-                        .relative()
-                        .ml(px(axis_width))
-                        .mt(ui.metrics.space.xs)
-                        .h(ui.line_height(Ramp::Caption))
-                        .child(self.bounds_layer(cx, |layer| layer.shell.hour_labels(layer))),
-                );
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .ml(px(axis_width))
+                    .mt(ui.metrics.space.xs)
+                    .h(ui.line_height(Ramp::Caption))
+                    .child(self.bounds_layer(cx, |layer| layer.shell.hour_labels(layer))),
+            );
         ui.card()
             .flex()
             .flex_col()
@@ -275,75 +373,22 @@ impl AppShell {
         })
     }
 
-    /// A horizontal gridline with its value `label` centered on it, in a column `axis_width` wide.
-    fn gridline(
-        &self,
-        ui: &Widgets<'_>,
-        line: Gridline,
-        label: String,
-        axis_width: f32,
-    ) -> [Div; 2] {
-        let top = px(line.from_top * CHART_HEIGHT);
-        let label_height = ui.line_height(Ramp::Caption);
-        [
-            div()
-                .absolute()
-                .left(px(axis_width))
-                .right(px(0.))
-                .top(top)
-                .h(ui.metrics.layout.divider)
-                .bg(ui.palette.stroke_divider),
-            div()
-                .absolute()
-                .left(px(0.))
-                .w(px(axis_width))
-                .ramp(ui, Ramp::Caption)
-                .tabular_figures()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .text_color(ui.palette.text_tertiary)
-                .top(top - label_height / 2.)
-                .child(label),
-        ]
-    }
-
     /// One hour's stacked bar, categories bottom to top in category order.
     fn hourly_column(&self, ui: &Widgets<'_>, index: usize, bar: &HourlyBar) -> impl IntoElement {
         let label = self.formatter.hourly_bar(bar, &self.day);
         let scale = bar.chart_scale(CHART_SCALE);
-        let stack = div()
-            .flex()
-            .flex_col_reverse()
-            .gap(ui.metrics.timeline.block_gap)
-            .w_full()
-            .max_h(px(CHART_HEIGHT))
-            .rounded_t(ui.metrics.timeline.block_radius)
-            .overflow_hidden()
-            .children(bar.visible_parts().map(|part| {
-                let category = self.day.category(part.category);
-                ui.category_mark(
-                    div()
-                        .w_full()
-                        .h(px(part.chart_share(scale).fraction() * CHART_HEIGHT))
-                        .min_h(px(0.))
-                        .flex_shrink_1(),
-                    category.color,
-                )
-            }));
-        div()
-            .id(format!("hourly-{index}"))
-            .when_some(label, |column, label| {
-                column.role(Role::Meter).aria_label(label)
-            })
-            .flex()
-            .flex_col()
-            .justify_end()
-            .flex_1()
-            .min_w(px(0.))
-            .h_full()
-            .px(ui.metrics.space.xxs)
-            .child(stack)
+        let segments = bar.visible_parts().map(|part| StackedSegment {
+            color: self.day.category(part.category).color,
+            fraction: part.chart_share(scale).fraction(),
+        });
+        render_stacked_column(
+            ui,
+            format!("hourly-{index}"),
+            label,
+            segments,
+            CHART_HEIGHT,
+            ui.metrics.space.xxs,
+        )
     }
 }
 
