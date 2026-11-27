@@ -76,8 +76,11 @@ impl Store {
             .context(ConfigureSnafu)?;
         ApplyMigrationError::from_result(writer.run_pending_migrations(Migrations))
             .context(LoadMigrationsSnafu)?;
+        let directory =
+            crate::data_directory::DataDirectory::new(path.parent().context(InvalidPathSnafu)?);
         Ok(Self {
             path: path.to_path_buf(),
+            directory,
             writer,
             reader: Some(ReadOnlyStore::connect(path)?),
             pending_effects: TxEffects::default(),

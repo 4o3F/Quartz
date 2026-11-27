@@ -58,6 +58,7 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 | `rule_validation_failed` | 规则文本或树未通过校验 | `diagnostics`、`truncated` |
 | `version_exhausted` | 持久版本计数达到上限，事务回滚 | 无 |
 | `busy` | 核心队列满或暂时过载，稍后重试 | 无 |
+| `backup_exists` | 手动备份目标文件已存在，拒绝覆盖 | 无 |
 | `internal` | 核心内部错误 | 无 |
 
 管道建立前的核心启动致命错误通过 `quartz.exe ui --core-error <code> [--backup-path <路径>...]` 传递给 UI，代码定义在 `crates/quartz-protocol/src/startup_error.rs`（`newer_database`、`migration_failed`、`other_session`、`core_start_failed`）。
@@ -84,14 +85,14 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 
 | 角色 | 允许的操作 |
 |---|---|
-| `ui` | 全部已实现操作：`hello`、`subscribe`/`unsubscribe`、`core.*`、`ui.*`、`query.*`、`rule_sets.*`、`rules.*`、`rules_text.*`、`categories.*`、`annotations.*`、`settings.*`、`tracking.*`、`privacy_mode.*` |
+| `ui` | 全部已实现操作：`hello`、`subscribe`/`unsubscribe`、`core.*`、`ui.*`、`query.*`、`rule_sets.*`、`rules.*`、`rules_text.*`、`categories.*`、`annotations.*`、`settings.*`、`tracking.*`、`privacy_mode.*`、`data.*` |
 | `cli` | `hello`、`core.status`、`ui.open`、`query.*`、`settings.get`、`settings.set`、`rule_sets.tree`、`rule_sets.get`、`rules_text.validate`、`rules_text.export` |
 
 后续模块使用独立前缀与主题（M5 浏览器扩展使用 `host` 角色与 `browser.*`，见 05-browser.md；M7 自控模块使用 `focus.*`、`policy.*` 与 `selfreg` 主题，见 12 第 7 节）。
 
 ## 6. 消息清单
 
-所有请求与响应字段以 `crates/quartz-protocol/src/`（`op.rs`、`query.rs`、`rules.rs`、`categories.rs`、`annotations.rs`、`settings.rs`、`timed.rs`、`status.rs`、`facts.rs`）为准。
+所有请求与响应字段以 `crates/quartz-protocol/src/`（`op.rs`、`query.rs`、`rules.rs`、`categories.rs`、`annotations.rs`、`settings.rs`、`timed.rs`、`data.rs`、`status.rs`、`facts.rs`）为准。
 
 ### 6.1 核心与界面控制
 
@@ -153,10 +154,14 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 | `tracking.resume` | 立即取消暂停 |
 | `tracking.keep_alive` | 设置保持计时并抑制空闲至未来指定 UTC 毫秒 |
 | `privacy_mode.set` | 启停限时全局隐私模式（`private_window` 组合，触发 `policy_changed`） |
+| `data.info` | 返回主库路径、主库与 `-wal` 总字节数、日志/备份目录路径及按最新优先排序的迁移/手动备份列表（仅 UI） |
+| `data.backup` | 以 `VACUUM INTO` 写出不覆盖的 `backups\manual-<UTC yyyymmddThhmmssZ>.db` 并返回该备份条目（仅 UI） |
+| `data.compact` | 在写连接执行 `VACUUM` 与 `PRAGMA wal_checkpoint(TRUNCATE)`，返回整理前后字节数（仅 UI） |
+| `data.delete_range` | 按半开逻辑日期范围 `[start_date, end_date)` 原子删除并裁剪事实、清理无引用字典与截断 WAL，返回已删前台时长与更新后版本摘要（仅 UI） |
 
 **规则文本上限与校验**：单规则集导入/导出文本上限 192 KiB（`MAX_RULE_TEXT_BYTES`），保证 JSON 编码后稳妥落入 1 MiB 帧上限；校验诊断最多 100 条且 ≤200 KiB，超限时置 `truncated: true`。
 
-历史隐私清理与按范围删除推迟到 M6，届时再设计协议。M5 浏览器扩展协议见 [05-browser.md](05-browser.md)。
+**数据维护前提与耗时**：`data.delete_range` 要求 `start_date < end_date <= 当前逻辑日`（仅允许已结束的完整逻辑日，不可删除今天或未来）且跨度 ≤ 366 天（`RANGE_MAX_DAYS`），不满足返回 `bad_request`；`data.*` 在数据库写线程串行执行，`data.compact` 与大范围 `data.delete_range` 在大库上可能阻塞其他写入数秒（采集写入队列会缓冲并按忙重试，不丢数据）。历史隐私清理留待以后；M5 浏览器扩展协议见 [05-browser.md](05-browser.md)。
 
 ## 7. 订阅
 

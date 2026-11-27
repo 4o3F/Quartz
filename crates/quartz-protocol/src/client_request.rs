@@ -86,6 +86,10 @@ requests! {
     AnnotationsCreateRequest => AnnotationsCreate => AnnotationsResponse,
     AnnotationsUpdateRequest => AnnotationsUpdate => AnnotationsResponse,
     AnnotationsDeleteRequest => AnnotationsDelete => AcceptedBody,
+    crate::DataInfoRequest => DataInfo => crate::DataInfoResponse,
+    crate::DataBackupRequest => DataBackup => crate::BackupEntry,
+    crate::DataCompactRequest => DataCompact => crate::DataCompactResponse,
+    crate::DataDeleteRangeRequest => DataDeleteRange => crate::DataDeleteRangeResponse,
 }
 
 #[cfg(test)]
@@ -232,5 +236,14 @@ mod tests {
         AdditiveFields::response::<SettingsSetRequest>(include_str!(
             "../tests/fixtures/settings.json"
         ));
+        let mut data: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/data.json")).expect("data");
+        AdditiveFields::insert(&mut data);
+        assert!(crate::DataInfoRequest::response(data["info_response"].clone()).is_ok());
+        assert!(crate::DataBackupRequest::response(data["backup_response"].clone()).is_ok());
+        assert!(crate::DataCompactRequest::response(data["compact_response"].clone()).is_ok());
+        assert!(
+            crate::DataDeleteRangeRequest::response(data["delete_range_response"].clone()).is_ok()
+        );
     }
 }

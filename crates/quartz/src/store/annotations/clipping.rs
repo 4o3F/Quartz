@@ -6,13 +6,13 @@ use sha2::{Digest, Sha256};
 
 /// Surviving portions of an older range, before and after the writing range.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Remainders {
+pub(in crate::store) struct Remainders {
     pub left: Option<QueryRange>,
     pub right: Option<QueryRange>,
 }
 impl Remainders {
     /// Both input ranges must be nonempty and overlap.
-    pub(super) fn subtract(old: QueryRange, writing: QueryRange) -> Self {
+    pub(in crate::store) fn subtract(old: QueryRange, writing: QueryRange) -> Self {
         Self {
             left: (old.start < writing.start).then_some(QueryRange {
                 start: old.start,
@@ -37,6 +37,24 @@ const VERSION_PAYLOAD: u8 = 0x0f;
 const RFC_VARIANT: u8 = 0x80;
 const VARIANT_PAYLOAD: u8 = 0x3f;
 
+fn format_uuid_v8(hash: &[u8]) -> AnnotationId {
+    let mut bytes = [0; UUID_BYTES];
+    bytes.copy_from_slice(&hash[..UUID_BYTES]);
+    bytes[VERSION_INDEX] = (bytes[VERSION_INDEX] & VERSION_PAYLOAD) | UUID_V8;
+    bytes[VARIANT_INDEX] = (bytes[VARIANT_INDEX] & VARIANT_PAYLOAD) | RFC_VARIANT;
+    let hex = quartz_domain::text::encode_hex(&bytes);
+    let [first, second, third, fourth] = UUID_GROUP_ENDS;
+    let text = format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..first],
+        &hex[first..second],
+        &hex[second..third],
+        &hex[third..fourth],
+        &hex[fourth..]
+    );
+    AnnotationId(text.parse().expect("formatted UUIDv8 is valid"))
+}
+
 #[derive(Debug)]
 pub(super) struct SplitIdentity<'id> {
     pub old: &'id AnnotationId,
@@ -54,22 +72,27 @@ impl SplitIdentity<'_> {
         digest.update(self.old_range.end.to_le_bytes());
         digest.update(self.writing_range.start.to_le_bytes());
         digest.update(self.writing_range.end.to_le_bytes());
-        let hash = digest.finalize();
-        let mut bytes = [0; UUID_BYTES];
-        bytes.copy_from_slice(&hash[..UUID_BYTES]);
-        bytes[VERSION_INDEX] = (bytes[VERSION_INDEX] & VERSION_PAYLOAD) | UUID_V8;
-        bytes[VARIANT_INDEX] = (bytes[VARIANT_INDEX] & VARIANT_PAYLOAD) | RFC_VARIANT;
-        let hex = quartz_domain::text::encode_hex(&bytes);
-        let [first, second, third, fourth] = UUID_GROUP_ENDS;
-        let text = format!(
-            "{}-{}-{}-{}-{}",
-            &hex[..first],
-            &hex[first..second],
-            &hex[second..third],
-            &hex[third..fourth],
-            &hex[fourth..]
-        );
-        AnnotationId(text.parse().expect("formatted UUIDv8 is valid"))
+        format_uuid_v8(&digest.finalize())
+    }
+}
+
+/// Deterministic UUIDv8 for the right remainder when a date-range delete splits an annotation.
+#[derive(Debug)]
+pub(in crate::store) struct DeleteSplitIdentity<'id> {
+    pub old: &'id AnnotationId,
+    pub old_range: QueryRange,
+    pub deleted_range: QueryRange,
+}
+impl DeleteSplitIdentity<'_> {
+    pub(in crate::store) fn derive(&self) -> AnnotationId {
+        let mut digest = Sha256::new();
+        digest.update(b"quartz.annotations.delete_right.v1\0");
+        digest.update(self.old.0.to_string().as_bytes());
+        digest.update(self.old_range.start.to_le_bytes());
+        digest.update(self.old_range.end.to_le_bytes());
+        digest.update(self.deleted_range.start.to_le_bytes());
+        digest.update(self.deleted_range.end.to_le_bytes());
+        format_uuid_v8(&digest.finalize())
     }
 }
 
@@ -175,6 +198,31 @@ mod tests {
                 left: Some(QueryRange { start: 10, end: 20 }),
                 right: Some(QueryRange { start: 40, end: 50 })
             }
+        );
+    }
+
+    #[test]
+    fn delete_split_identity_is_deterministic_uuidv8_and_distinct_from_original() {
+        let old = AnnotationId(
+            "00000000-0000-4000-8000-000000000001"
+                .parse()
+                .expect("old UUID"),
+        );
+        let split = DeleteSplitIdentity {
+            old: &old,
+            old_range: QueryRange { start: 0, end: 100 },
+            deleted_range: QueryRange { start: 40, end: 60 },
+        };
+        let derived = split.derive();
+        assert_eq!(derived, split.derive());
+        assert_ne!(derived, old);
+        assert_ne!(
+            DeleteSplitIdentity {
+                deleted_range: QueryRange { start: 40, end: 61 },
+                ..split
+            }
+            .derive(),
+            derived
         );
     }
 }

@@ -398,6 +398,7 @@ fn prune_only_generated_backups_and_keep_two_newest() {
         "pre-migrate-20261116000000-2.db",
         "pre-migrate-0-3.db",
         "manual.db",
+        "manual-20261127T085340Z.db",
         "pre-migrate-not-generated.db",
     ] {
         fs::write(root.backups().join(name), []).expect("backup file");
@@ -411,7 +412,8 @@ fn prune_only_generated_backups_and_keep_two_newest() {
             .exists()
     );
     assert!(root.backups().join("pre-migrate-0-3.db").exists());
-    assert_eq!(fs::read_dir(root.backups()).expect("backups").count(), 4);
+    assert!(root.backups().join("manual-20261127T085340Z.db").exists());
+    assert_eq!(fs::read_dir(root.backups()).expect("backups").count(), 5);
 }
 
 #[test]

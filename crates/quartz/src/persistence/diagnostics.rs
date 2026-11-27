@@ -2,7 +2,13 @@
 
 use crate::{
     core::autostart::AccessAutostartError,
-    store::{settings::AccessSettingError, versions::BumpVersionError},
+    store::{
+        data::{
+            CompactDatabaseError, CreateManualBackupError, DeleteRangeError, ReadDataInfoError,
+        },
+        settings::AccessSettingError,
+        versions::BumpVersionError,
+    },
 };
 use quartz_protocol::{ErrorKind, ProtocolError};
 
@@ -16,6 +22,19 @@ pub(crate) enum WriteFailure {
     StoredCategory,
     StoredAnnotation,
     Rule(RuleFailure),
+    Data(DataFailure),
+}
+#[derive(Debug)]
+pub(crate) enum DataFailure {
+    InvalidPath,
+    ReadMetadata,
+    ReadDirectory,
+    CreateDirectory,
+    InvalidTimestamp,
+    StoredRow,
+    TimeZone,
+    ReadVersions,
+    DigestVersions,
 }
 #[derive(Debug)]
 pub(crate) enum AutostartFailure {
@@ -158,6 +177,50 @@ impl WriteFailure {
             }
         })
     }
+    pub(crate) fn data_info(error: &ReadDataInfoError) -> Self {
+        Self::Data(match error {
+            ReadDataInfoError::InvalidPath => DataFailure::InvalidPath,
+            ReadDataInfoError::ReadDatabaseMetadata { .. }
+            | ReadDataInfoError::ReadWalMetadata { .. }
+            | ReadDataInfoError::InspectBackupEntry { .. } => DataFailure::ReadMetadata,
+            ReadDataInfoError::ReadBackupsDirectory { .. }
+            | ReadDataInfoError::ReadBackupEntry { .. } => DataFailure::ReadDirectory,
+        })
+    }
+    pub(crate) fn data_backup(error: &CreateManualBackupError) -> Self {
+        match error {
+            CreateManualBackupError::InvalidTimestamp => Self::Data(DataFailure::InvalidTimestamp),
+            CreateManualBackupError::InvalidPath => Self::Data(DataFailure::InvalidPath),
+            CreateManualBackupError::CreateBackupDirectory { .. } => {
+                Self::Data(DataFailure::CreateDirectory)
+            }
+            CreateManualBackupError::CheckBackupTarget { .. }
+            | CreateManualBackupError::ReadBackupMetadata { .. }
+            | CreateManualBackupError::AlreadyExists { .. } => {
+                Self::Data(DataFailure::ReadMetadata)
+            }
+            CreateManualBackupError::ExecuteBackup { source, .. } => Self::database(source),
+        }
+    }
+    pub(crate) fn data_compact(error: &CompactDatabaseError) -> Self {
+        match error {
+            CompactDatabaseError::ReadDatabaseMetadata { .. }
+            | CompactDatabaseError::ReadWalMetadata { .. } => Self::Data(DataFailure::ReadMetadata),
+            CompactDatabaseError::Vacuum { source }
+            | CompactDatabaseError::Checkpoint { source } => Self::database(source),
+        }
+    }
+    pub(crate) fn data_delete(error: &DeleteRangeError) -> Self {
+        match error {
+            DeleteRangeError::EmptyRange => Self::Version(VersionFailure::InvalidRange),
+            DeleteRangeError::InvalidStoredRow { .. } => Self::Data(DataFailure::StoredRow),
+            DeleteRangeError::InvalidAnnotationUuid { .. } => Self::Identity,
+            DeleteRangeError::Database { source } | DeleteRangeError::Checkpoint { source } => {
+                Self::database(source)
+            }
+            DeleteRangeError::Version { source } => Self::version(source),
+        }
+    }
     pub(crate) fn into_protocol_error(self) -> ProtocolError {
         let kind = match &self {
             Self::Version(VersionFailure::DayExhausted | VersionFailure::MetadataExhausted) => {
@@ -185,6 +248,10 @@ impl WriteFailure {
             | Self::StoredAnnotation => ErrorKind::Internal,
             Self::Rule(rule) => {
                 tracing::error!(failure = ?rule, "rule write failed");
+                return ProtocolError::new(ErrorKind::Internal);
+            }
+            Self::Data(data) => {
+                tracing::error!(failure = ?data, "data operation failed");
                 return ProtocolError::new(ErrorKind::Internal);
             }
         };

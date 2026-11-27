@@ -9,6 +9,11 @@ pub use categories::{
 };
 mod client_request;
 pub use client_request::CoreRequest;
+mod data;
+pub use data::{
+    BackupEntry, BackupKind, DataBackupRequest, DataCompactRequest, DataCompactResponse,
+    DataDeleteRangeRequest, DataDeleteRangeResponse, DataInfoRequest, DataInfoResponse,
+};
 /// Raw JSON at the protocol envelope boundary.
 pub use serde_json::{Error as JsonError, Value as JsonValue};
 mod envelope;

@@ -3,6 +3,7 @@
 pub(crate) mod annotations;
 pub(crate) mod capture;
 pub(crate) mod categories;
+pub(crate) mod data;
 mod enums;
 pub(crate) mod facts;
 mod identifiers;
@@ -84,7 +85,10 @@ impl OpenStoreError {
 
 /// Owns both connections on the database thread.
 pub(crate) struct Store {
+    /// Database file used to reopen the query reader.
     path: PathBuf,
+    /// Data directory for backups and size reporting.
+    directory: DataDirectory,
     writer: SqliteConnection,
     reader: Option<ReadOnlyStore>,
     pending_effects: versions::TxEffects,
@@ -227,6 +231,7 @@ impl Store {
         let reader = ReadOnlyStore::connect(&path)?;
         Ok(Self {
             path,
+            directory: directory.clone(),
             writer,
             reader: Some(reader),
             pending_effects: versions::TxEffects::default(),
@@ -316,13 +321,13 @@ const INITIAL_DATABASE_VERSION: &str = "0";
 const RETAINED_MIGRATION_BACKUPS: usize = 2;
 
 #[derive(Debug, PartialEq, Eq)]
-struct BackupName {
+pub(super) struct BackupName {
     version: String,
-    timestamp: i64,
+    pub(super) timestamp: i64,
 }
 impl BackupName {
     /// Recognizes automatic backup names; unrelated files remain untouched.
-    fn parse(name: &str) -> Option<Self> {
+    pub(super) fn parse(name: &str) -> Option<Self> {
         let body = name.strip_prefix("pre-migrate-")?.strip_suffix(".db")?;
         let (version, timestamp) = body.split_once('-')?;
         if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {

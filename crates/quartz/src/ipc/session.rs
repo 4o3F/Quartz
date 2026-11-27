@@ -327,7 +327,11 @@ impl ConnectionSession {
                     | Op::CategoriesCreate
                     | Op::CategoriesUpdate
                     | Op::CategoriesArchive
-                    | Op::CategoriesReorder => {
+                    | Op::CategoriesReorder
+                    | Op::DataInfo
+                    | Op::DataBackup
+                    | Op::DataCompact
+                    | Op::DataDeleteRange => {
                         match crate::persistence::dispatch::WriteRequest::decode(
                             request.op,
                             request.body,
@@ -406,6 +410,13 @@ mod tests {
             (
                 Op::RulesPreview,
                 serde_json::json!({"mutation":{"op":"rule_sets.edit","body":{"key":"user.a","base_version":0,"text":""}},"start_date":"2025-01-02","end_date":"2025-01-03"}),
+            ),
+            (Op::DataInfo, serde_json::json!({})),
+            (Op::DataBackup, serde_json::json!({})),
+            (Op::DataCompact, serde_json::json!({})),
+            (
+                Op::DataDeleteRange,
+                serde_json::json!({"start_date":"2025-01-02","end_date":"2025-01-03"}),
             ),
         ];
         for (op, body) in ui_only {

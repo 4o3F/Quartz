@@ -1,6 +1,6 @@
 //! Atomic annotation writes, validation, clipping, and transaction-local day invalidations.
 
-mod clipping;
+pub(super) mod clipping;
 
 use super::{
     Store, WriteTx,

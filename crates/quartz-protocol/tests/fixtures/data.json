@@ -1,0 +1,43 @@
+{
+  "info_request": {},
+  "info_response": {
+    "database_path": "C:\\Users\\demo\\AppData\\Local\\Quartz\\quartz.db",
+    "database_bytes": 1048576,
+    "logs_path": "C:\\Users\\demo\\AppData\\Local\\Quartz\\logs",
+    "backups_path": "C:\\Users\\demo\\AppData\\Local\\Quartz\\backups",
+    "backups": [
+      {
+        "file_name": "manual-20261127T085340Z.db",
+        "bytes": 983040,
+        "created_utc_ms": 1795769620000,
+        "kind": "manual"
+      },
+      {
+        "file_name": "pre-migrate-20261116000000-1795600000000.db",
+        "bytes": 655360,
+        "created_utc_ms": 1795600000000,
+        "kind": "migration"
+      }
+    ]
+  },
+  "backup_request": {},
+  "backup_response": {
+    "file_name": "manual-20261127T085340Z.db",
+    "bytes": 983040,
+    "created_utc_ms": 1795769620000,
+    "kind": "manual"
+  },
+  "compact_request": {},
+  "compact_response": {
+    "before_bytes": 1048576,
+    "after_bytes": 786432
+  },
+  "delete_range_request": {
+    "start_date": "2026-11-20",
+    "end_date": "2026-11-22"
+  },
+  "delete_range_response": {
+    "deleted_ms": 3600000,
+    "versions": "data-delete-range-v1"
+  }
+}

@@ -31,6 +31,8 @@ pub enum OpFamily {
     Tracking,
     /// The `privacy_mode` operation family.
     PrivacyMode,
+    /// The `data` operation family.
+    Data,
     /// An unrecognized operation; no role may authorize it.
     Unknown,
 }
@@ -158,6 +160,18 @@ pub enum Op {
     /// The `privacy_mode.set` request.
     #[serde(rename = "privacy_mode.set")]
     PrivacyModeSet,
+    /// The `data.info` request.
+    #[serde(rename = "data.info")]
+    DataInfo,
+    /// The `data.backup` request.
+    #[serde(rename = "data.backup")]
+    DataBackup,
+    /// The `data.compact` request.
+    #[serde(rename = "data.compact")]
+    DataCompact,
+    /// The `data.delete_range` request.
+    #[serde(rename = "data.delete_range")]
+    DataDeleteRange,
     /// A future or invalid request name; respond with `unknown_op`.
     #[serde(other, skip_serializing)]
     Unknown,
@@ -203,6 +217,9 @@ impl Op {
                 OpFamily::Tracking
             }
             Self::PrivacyModeSet => OpFamily::PrivacyMode,
+            Self::DataInfo | Self::DataBackup | Self::DataCompact | Self::DataDeleteRange => {
+                OpFamily::Data
+            }
             Self::Unknown => OpFamily::Unknown,
         }
     }

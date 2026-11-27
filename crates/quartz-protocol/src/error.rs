@@ -65,6 +65,8 @@ pub enum ErrorKind {
     VersionExhausted,
     /// The bounded query queue is full; retry later.
     Busy,
+    /// The manual backup target file already exists.
+    BackupExists,
     /// An unrecognized future code; additional fields are ignored by this client.
     #[serde(other, skip_serializing)]
     Unknown,
@@ -92,6 +94,7 @@ impl ErrorKind {
             Self::RuleValidationFailed { .. } => "rule_validation_failed",
             Self::Internal => "internal",
             Self::Busy => "busy",
+            Self::BackupExists => "backup_exists",
             Self::VersionExhausted => "version_exhausted",
             Self::Unknown => "unknown",
         }
@@ -144,6 +147,7 @@ mod tests {
             "internal",
             "version_exhausted",
             "busy",
+            "backup_exists",
         ] {
             let wire = serde_json::json!({"code": name, "supported": {"min": 1, "max": 3}, "current_version": 7, "key": "user.local", "core_version": "test-core", "field":"parent", "diagnostics":[], "truncated":false});
             let kind: ErrorKind = serde_json::from_value(wire).expect("known error kind");

@@ -124,6 +124,24 @@ impl Store {
         Settings::new(&mut self.writer).query_settings()
     }
     #[cfg(any(windows, test))]
+    pub(crate) fn range_versions(
+        &mut self,
+        range: QueryRange,
+    ) -> Result<BTreeMap<VersionKey, i64>, ReadQueryError> {
+        let days = UtcDays::covering(range);
+        let rows = data_day_versions::table
+            .filter(data_day_versions::utc_date.ge(days.start().0))
+            .filter(data_day_versions::utc_date.le(days.end().0))
+            .order((data_day_versions::source, data_day_versions::utc_date))
+            .select(DataDayVersionsRow::as_select())
+            .load::<DataDayVersionsRow>(&mut self.writer)?;
+        Ok(rows
+            .into_iter()
+            .map(FactVersion::from)
+            .map(|fact| (fact.key, fact.version))
+            .collect())
+    }
+    #[cfg(any(windows, test))]
     pub(crate) fn version_state(&mut self) -> Result<StoredVersions, ReadQueryError> {
         let settings = self
             .reader
@@ -198,34 +216,43 @@ impl TxEffects {
                 .ok_or(BumpVersionError::AnnotationWork)?;
         }
         for day in days.start().0..=days.end().0 {
-            let previous = data_day_versions::table
-                .filter(data_day_versions::source.eq(source))
-                .filter(data_day_versions::utc_date.eq(day))
-                .select(data_day_versions::version)
-                .first::<i64>(connection)
-                .optional()?;
-            let version = match previous {
-                Some(version) => version.checked_add(1).ok_or(BumpVersionError::DayVersion)?,
-                None => 1,
-            };
-            diesel::insert_into(data_day_versions::table)
-                .values((
-                    data_day_versions::source.eq(source),
-                    data_day_versions::utc_date.eq(day),
-                    data_day_versions::version.eq(version),
-                ))
-                .on_conflict((data_day_versions::source, data_day_versions::utc_date))
-                .do_update()
-                .set(data_day_versions::version.eq(version))
-                .execute(connection)?;
-            self.days.insert(
-                VersionKey {
-                    source: VersionSource(source.code()),
-                    day: UtcDay(day),
-                },
-                version,
-            );
+            self.bump_day(connection, source, UtcDay(day))?;
         }
+        Ok(())
+    }
+    pub(super) fn bump_day(
+        &mut self,
+        connection: &mut diesel::SqliteConnection,
+        source: DataSource,
+        day: UtcDay,
+    ) -> Result<(), BumpVersionError> {
+        let previous = data_day_versions::table
+            .filter(data_day_versions::source.eq(source))
+            .filter(data_day_versions::utc_date.eq(day.0))
+            .select(data_day_versions::version)
+            .first::<i64>(connection)
+            .optional()?;
+        let version = match previous {
+            Some(version) => version.checked_add(1).ok_or(BumpVersionError::DayVersion)?,
+            None => 1,
+        };
+        diesel::insert_into(data_day_versions::table)
+            .values((
+                data_day_versions::source.eq(source),
+                data_day_versions::utc_date.eq(day.0),
+                data_day_versions::version.eq(version),
+            ))
+            .on_conflict((data_day_versions::source, data_day_versions::utc_date))
+            .do_update()
+            .set(data_day_versions::version.eq(version))
+            .execute(connection)?;
+        self.days.insert(
+            VersionKey {
+                source: VersionSource(source.code()),
+                day,
+            },
+            version,
+        );
         Ok(())
     }
     pub(super) fn bump_metadata(

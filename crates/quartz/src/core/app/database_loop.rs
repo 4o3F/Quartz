@@ -375,6 +375,23 @@ impl DatabaseLoop {
                 .map_err(|source| RunDatabaseLoopError::Clock { source })?;
             self.flush_and_publish(now)?;
         }
+        // Finish any active read snapshot before VACUUM or WAL truncation runs on the writer.
+        if command.request.requires_idle_reader() {
+            while self.runner.is_running() {
+                if self.persistence.writer().shutdown().is_some() {
+                    let _ = command.reply.send(Err(quartz_protocol::ProtocolError::new(
+                        quartz_protocol::ErrorKind::Busy,
+                    )));
+                    if let Some(wake) = &command.completion {
+                        wake.wake();
+                    }
+                    return Ok(());
+                }
+                self.runner
+                    .step(&mut self.store)
+                    .map_err(|source| RunDatabaseLoopError::Query { source })?;
+            }
+        }
         // Lock contention must return to capture settlement within its commit headroom.
         self.store.limit_write_wait(COMMIT_HEADROOM);
         let settings_changed = matches!(
@@ -386,9 +403,11 @@ impl DatabaseLoop {
         if result.is_ok()
             && !matches!(
                 result,
-                Ok(crate::persistence::dispatch::WriteResponse::RuleValidation(
-                    _
-                ))
+                Ok(
+                    crate::persistence::dispatch::WriteResponse::RuleValidation(_)
+                        | crate::persistence::dispatch::WriteResponse::DataInfo(_)
+                        | crate::persistence::dispatch::WriteResponse::DataBackup(_)
+                )
             )
         {
             self.publish_versions()?;
@@ -1538,5 +1557,93 @@ mod tests {
             "shutdown owns the final capture drain"
         );
         assert!(fixture._commands.is_empty());
+    }
+
+    #[test]
+    fn data_ops_execute_over_ipc_and_delete_publishes_version_updates() {
+        use quartz_domain::capture::limits::UTC_DAY_MS;
+        use quartz_protocol::{
+            BackupEntry, BackupKind, DataCompactResponse, DataDeleteRangeResponse,
+            DataInfoResponse, ErrorKind, Op,
+        };
+        let mut fixture = Fixture::new();
+        // 1970-01-04T12:00:00Z ensures 1970-01-01..1970-01-03 is fully finished in any time zone.
+        fixture.database.clock = Arc::new(TestClock(Timestamp {
+            utc: UtcInstant::try_from(3 * UTC_DAY_MS + 12 * 3_600_000).expect("clock"),
+            mono: MonoInstant::from_millis(0),
+        }));
+        fixture.subscribe_category_day();
+
+        let annotation = serde_json::json!({
+            "entities": [{
+                "uuid": "00000000-0000-4000-8000-000000000321",
+                "kind": "note",
+                "start_utc_ms": UTC_DAY_MS - 3_600_000,
+                "end_utc_ms": UTC_DAY_MS + 3_600_000,
+                "label": "boundary note"
+            }]
+        });
+        fixture
+            .ipc(Op::AnnotationsCreate, annotation)
+            .expect("create boundary note");
+        fixture.assert_category_publication();
+
+        let backup: BackupEntry = serde_json::from_value(
+            fixture
+                .ipc(Op::DataBackup, serde_json::json!({}))
+                .expect("manual backup"),
+        )
+        .expect("backup response");
+        assert_eq!(backup.kind, BackupKind::Manual);
+        assert_eq!(backup.file_name, "manual-19700104T120000Z.db");
+        assert_eq!(
+            fixture
+                .ipc(Op::DataBackup, serde_json::json!({}))
+                .expect_err("duplicate manual backup refused")
+                .kind,
+            ErrorKind::BackupExists
+        );
+
+        let info: DataInfoResponse = serde_json::from_value(
+            fixture
+                .ipc(Op::DataInfo, serde_json::json!({}))
+                .expect("data info"),
+        )
+        .expect("info response");
+        assert!(info.database_bytes > 0);
+        assert!(info.backups.contains(&backup));
+
+        let deleted: DataDeleteRangeResponse = serde_json::from_value(
+            fixture
+                .ipc(
+                    Op::DataDeleteRange,
+                    serde_json::json!({"start_date": "1970-01-01", "end_date": "1970-01-03"}),
+                )
+                .expect("delete range"),
+        )
+        .expect("delete response");
+        assert_eq!(deleted.deleted_ms, 0);
+        assert!(!deleted.versions.0.is_empty());
+        fixture.assert_category_publication();
+
+        assert_eq!(
+            fixture
+                .ipc(
+                    Op::DataDeleteRange,
+                    serde_json::json!({"start_date": "1970-01-04", "end_date": "1970-01-06"}),
+                )
+                .expect_err("today/future cannot be deleted")
+                .kind,
+            ErrorKind::BadRequest
+        );
+
+        let compact: DataCompactResponse = serde_json::from_value(
+            fixture
+                .ipc(Op::DataCompact, serde_json::json!({}))
+                .expect("compact"),
+        )
+        .expect("compact response");
+        assert!(compact.before_bytes > 0);
+        assert!(compact.after_bytes > 0);
     }
 }

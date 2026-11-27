@@ -10,7 +10,7 @@ use super::{
     schema::{
         annotations, applications, availability_intervals, capture_gaps, capture_runs, categories,
         clock_segments, data_day_versions, intervals, rule_set_versions, rule_sets, titles,
-        window_instances,
+        web_intervals, window_instances,
     },
 };
 use diesel::{
@@ -225,6 +225,31 @@ pub(super) struct WindowInstancesRow {
     pub window_class: Option<String>,
     pub first_seen_utc_ms: i64,
     pub last_seen_utc_ms: i64,
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]
+#[diesel(table_name = web_intervals)]
+#[diesel(check_for_backend(Sqlite))]
+pub(super) struct WebIntervalsRow {
+    pub id: Option<i64>,
+    pub stream_id: i64,
+    pub interval_id: i64,
+    pub start_utc_ms: i64,
+    pub end_utc_ms: Option<i64>,
+    pub confirmed_utc_ms: Option<i64>,
+    pub end_reason: Option<i32>,
+    pub domain_id: Option<i64>,
+    pub tab_title_id: Option<i64>,
+    pub tab_title_status: TitleStatus,
+    pub tab_id: Option<i64>,
+    pub browser_window_id: Option<i64>,
+    pub navigation_id: Option<i64>,
+    pub audible: i32,
+    pub link_status: i32,
+    pub web_level: i32,
+    pub privacy_rule_id: Option<String>,
+    pub privacy_label_key: Option<String>,
+    pub privacy_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Queryable, Selectable, Insertable, AsChangeset)]

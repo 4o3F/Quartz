@@ -186,7 +186,16 @@
 | `ingest_receipts`、`deletion_barriers` | 14 天 | 按时间清理已到期且不再被任务占用的记录 |
 | 迁移前备份 | 最近 2 份 | 自动删除更旧迁移备份；手动备份由用户管理 |
 
-历史隐私清理与通用按范围/保留期删除推迟到 M6（见 [06 第 4.2 节](06-privacy.md#42-历史隐私清理)）。届时仍沿用全局 `secure_delete = ON`、写 `deletion_barriers` 拦截迟到写入、清理无引用字典后执行 `wal_checkpoint(TRUNCATE)` 与所选备份联动的物理清理不变量。
+**按日期范围删除与数据维护（`data.*`）：**
+
+- **范围约束**：`data.delete_range` 仅接受已结束的完整逻辑日半开区间（`start_date < end_date <= 当前逻辑日`，跨度 ≤ 366 天），按与查询一致的 `day.start_offset_min` 与当前系统时区换算为 UTC 范围。
+- **单事务裁剪与字典清理**：在一个即时写事务内处理 `intervals`、`availability_intervals`、`capture_gaps`、`web_intervals`、`annotations`（含 `note`）五张事实表——完全落入范围的行直接删除，跨越任一边界的行裁剪保留范围外部分，横跨整个范围的行拆分为前后两段（保持各表时钟段、开放行 ID、UTC 午夜切分、外键与唯一约束不变量）；随后删除不再被引用的 `titles` 与 `domains`，并仅对受影响的 UTC 日与数据源推进 `data_day_versions`。
+- **物理覆写与 WAL 截断**：全局连接已启用 `PRAGMA secure_delete = ON`；删除提交后立即执行 `PRAGMA wal_checkpoint(TRUNCATE)` 并刷新已订阅日期版本与托盘摘要。
+- **备份隔离**：手动备份（`backups\manual-<UTC yyyymmddThhmmssZ>.db`，不覆盖已有文件且永不自动清理）与迁移前备份均不随删除改写，可能仍包含已删除数据，由界面在删除前明确提示用户。
+- **不写 `deletion_barriers`**：由于仅允许删除已结束的完整逻辑日，正常采集不会再向该范围写入；仅系统时钟大幅回拨时才可能写入已删范围，该极端情况予以接受。
+- **执行时长**：`data.compact`（`VACUUM` + `wal_checkpoint(TRUNCATE)`）与大范围删除在数据库写线程串行执行前先等待在途只读快照结束，大库上可能阻塞其他写入数秒；采集写入队列会继续缓冲并在忙时重试，不丢数据。
+
+历史隐私清理仍留待以后（见 [06 第 4.2 节](06-privacy.md#42-历史隐私清理)）。
 
 ## 7. 版本升级与兼容
 

@@ -1,6 +1,6 @@
 //! Bounded I/O and main-thread admission to the database writer.
 
-use super::{categories::CategoryRequest, diagnostics::WriteFailure};
+use super::{categories::CategoryRequest, data::DataRequest, diagnostics::WriteFailure};
 use crate::store::{Store, annotations::ExecuteAnnotationWritesError};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use quartz_domain::capture::UtcInstant;
@@ -17,6 +17,10 @@ pub(crate) enum WriteResponse {
     Category(quartz_protocol::CategoryResponse),
     Categories(quartz_protocol::CategoriesListResponse),
     Settings(quartz_protocol::SettingsResponse),
+    DataInfo(quartz_protocol::DataInfoResponse),
+    DataBackup(quartz_protocol::BackupEntry),
+    DataCompact(quartz_protocol::DataCompactResponse),
+    DataDeleteRange(quartz_protocol::DataDeleteRangeResponse),
     Accepted(quartz_protocol::AcceptedBody),
 }
 impl WriteRequest {
@@ -70,6 +74,21 @@ impl WriteRequest {
                     .map(|_| Self::SettingsGet)
             }
             quartz_protocol::Op::SettingsSet => serde_json::from_value(body).map(Self::SettingsSet),
+            quartz_protocol::Op::DataInfo => {
+                serde_json::from_value::<quartz_protocol::DataInfoRequest>(body)
+                    .map(|_| Self::Data(DataRequest::Info))
+            }
+            quartz_protocol::Op::DataBackup => {
+                serde_json::from_value::<quartz_protocol::DataBackupRequest>(body)
+                    .map(|_| Self::Data(DataRequest::Backup))
+            }
+            quartz_protocol::Op::DataCompact => {
+                serde_json::from_value::<quartz_protocol::DataCompactRequest>(body)
+                    .map(|_| Self::Data(DataRequest::Compact))
+            }
+            quartz_protocol::Op::DataDeleteRange => serde_json::from_value(body)
+                .map(DataRequest::DeleteRange)
+                .map(Self::Data),
             _ => unreachable!("write decoding follows implemented operation dispatch"),
         }?;
         Ok(request)
@@ -92,6 +111,7 @@ impl WriteRequest {
                     .map(WriteResponse::Rules);
             }
             Self::Categories(request) => return request.execute(store),
+            Self::Data(request) => return request.execute(store, now, registry),
             Self::SettingsGet | Self::SettingsSet(_) => {
                 let ports = settings.ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?;
                 let (autostart, result) = match self {
@@ -176,10 +196,17 @@ pub(crate) enum WriteRequest {
     SettingsSet(quartz_protocol::SettingsSetRequest),
     Annotations(AnnotationWrite),
     Categories(CategoryRequest),
+    Data(DataRequest),
     #[cfg(test)]
     BumpMetadata {
         outcome: TestCommit,
     },
+}
+impl WriteRequest {
+    /// Returns true for operations that require an idle WAL reader (VACUUM / WAL truncation).
+    pub(crate) fn requires_idle_reader(&self) -> bool {
+        matches!(self, Self::Data(request) if request.requires_idle_reader())
+    }
 }
 /// Annotation transaction selected by the three typed IPC operations.
 #[derive(Debug)]

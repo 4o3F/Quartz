@@ -399,7 +399,7 @@ impl EnumColumn for AnnotationLabelPreset {
 }
 
 /// Fact source whose per-day version invalidates cached results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Integer)]
 #[derive(IntoPrimitive, TryFromPrimitive, VariantArray, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]

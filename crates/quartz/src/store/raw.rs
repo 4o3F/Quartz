@@ -14,9 +14,12 @@ const APPLIED: &str = "SELECT version AS value FROM __diesel_schema_migrations O
 const ALLOW_BACKUP: &str = "PRAGMA query_only = OFF";
 const RESTORE_QUERY_ONLY: &str = "PRAGMA query_only = ON";
 const BACKUP: &str = "VACUUM INTO ?";
+const VACUUM: &str = "VACUUM";
 const INTEGRITY: &str = "PRAGMA integrity_check";
 const CHECKPOINT: &str = "PRAGMA wal_checkpoint(TRUNCATE)";
 const FOREIGN_KEYS: &str = "PRAGMA foreign_key_check";
+const DELETE_UNREFERENCED_TITLES: &str = "DELETE FROM titles WHERE NOT EXISTS (SELECT 1 FROM intervals WHERE title_id = titles.id) AND NOT EXISTS (SELECT 1 FROM web_intervals WHERE tab_title_id = titles.id)";
+const DELETE_UNREFERENCED_DOMAINS: &str = "DELETE FROM domains WHERE NOT EXISTS (SELECT 1 FROM web_intervals WHERE domain_id = domains.id)";
 
 #[derive(QueryableByName)]
 struct TextValue {
@@ -80,6 +83,15 @@ impl<'connection> ConnectionSql<'connection> {
             .execute(self.connection)
             .map(|_| ())
     }
+    pub(super) fn vacuum(&mut self) -> QueryResult<()> {
+        self.connection.batch_execute(VACUUM)
+    }
+    pub(super) fn delete_unreferenced_titles(&mut self) -> QueryResult<usize> {
+        diesel::sql_query(DELETE_UNREFERENCED_TITLES).execute(self.connection)
+    }
+    pub(super) fn delete_unreferenced_domains(&mut self) -> QueryResult<usize> {
+        diesel::sql_query(DELETE_UNREFERENCED_DOMAINS).execute(self.connection)
+    }
     pub(super) fn is_healthy(&mut self) -> QueryResult<bool> {
         let checks = diesel::sql_query(INTEGRITY).load::<Integrity>(self.connection)?;
         let violations =
@@ -126,11 +138,14 @@ mod tests {
                 HAS_MIGRATIONS,
                 APPLIED,
                 BACKUP,
+                VACUUM,
                 INTEGRITY,
                 FOREIGN_KEYS,
                 CHECKPOINT,
                 ALLOW_BACKUP,
                 RESTORE_QUERY_ONLY,
+                DELETE_UNREFERENCED_TITLES,
+                DELETE_UNREFERENCED_DOMAINS,
             ])
         {
             let explain = format!("EXPLAIN {sql}");

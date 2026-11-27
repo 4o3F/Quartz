@@ -52,7 +52,11 @@ impl DataDirectory {
     pub(crate) fn database(&self) -> PathBuf {
         self.0.join("quartz.db")
     }
-    #[cfg(any(windows, test))]
+    pub(crate) fn database_wal(&self) -> PathBuf {
+        let mut sidecar = self.database().into_os_string();
+        sidecar.push("-wal");
+        PathBuf::from(sidecar)
+    }
     pub(crate) fn logs(&self) -> PathBuf {
         self.0.join("logs")
     }
