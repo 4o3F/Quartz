@@ -41,6 +41,10 @@ deny = [
     "native-tls",
     "openssl",
     "openssl-sys",
+    "rustls",
+    "quinn",
+    "h2",
+    "tungstenite",
 ]
 
 [sources]

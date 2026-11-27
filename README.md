@@ -2,7 +2,7 @@
 
 A low-resource automatic time tracker for Windows.
 
-Quartz is in the design phase. The design documents are in [docs/design](docs/design/README.md), and the public rule format is described in [docs/rules/rule-format.md](docs/rules/rule-format.md).
+Installation and usage notes (Simplified Chinese) are in [docs/install.md](docs/install.md). The design documents are in [docs/design](docs/design/README.md), and the public rule format is described in [docs/rules/rule-format.md](docs/rules/rule-format.md).
 
 ## License
 

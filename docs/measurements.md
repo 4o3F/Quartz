@@ -979,3 +979,10 @@ cargo test --workspace --all-features --target-dir target/windows
 按需模式的句柄增长判为脚本误报：每次打开都是新的 UI 进程并成为前台窗口，前台身份解析的进程缓存（`PROCESS_CACHE_CAPACITY` = 128）为其保留一个查询句柄，已退出进程在下一次复查时逐出；常驻模式 PID 不变，句柄保持 229。缓存有界，属采集代码，未改。`measure.ts` 的按需句柄判定未相应放宽。
 
 打开状态 UI 内存较 M3-E 上升（常驻 ~160 MiB，按需 ~117 MiB），包含 M4 规则页、编辑器与标注界面；与 M3-E 一致，按用户决定在功能完整后统一优化。原始报告：`target/windows/m4-auto/run-20261127-101310/`，查询日志：`target/windows/m4-auto/bench-*.log`。
+
+## 2026-11-27 M6 依赖审计（不联网）
+
+- `cargo tree -e normal,build,dev --all-features`，目标 `x86_64-pc-windows-msvc` 与 `x86_64-unknown-linux-gnu`：`hyper`、`h2`、`rustls`、`quinn`、`reqwest`、`ureq`、`curl`、`openssl`、`native-tls`、`tungstenite` 均不在依赖图中（`Cargo.lock` 中出现的条目只属于其他平台）。
+- 唯一进入构建的 HTTP 相关 crate 是 GPUI 的 `gpui-pre-http-client`（`http`、`url` 等类型与 trait），不含传输实现；Quartz 不安装 HTTP 客户端。
+- tokio 的 `net` 特性只用于命名管道；源码中没有 `TcpStream`、`UdpSocket`、`TcpListener`、WinHTTP 或 WinINet 调用。
+- `deny.toml` 的 `[bans].deny` 补充 `rustls`、`quinn`、`h2`、`tungstenite`，由 CI 的 `cargo deny check` 阻止今后引入。
