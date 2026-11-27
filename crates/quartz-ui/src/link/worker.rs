@@ -591,6 +591,11 @@ impl Worker {
         };
         match incoming {
             IncomingFrame::Response(response) => self.handle_response(response).await?,
+            IncomingFrame::Progress(progress) => {
+                if let Some(pending) = self.pending.get_mut(&progress.id) {
+                    pending.deadline = Instant::now() + RESPONSE_TIMEOUT;
+                }
+            }
             IncomingFrame::Event(event) => {
                 let event = match event.topic {
                     Topic::State => serde_json::from_value(event.body).map(LinkEvent::State),

@@ -160,6 +160,8 @@ pub(crate) struct PreviewJob {
     statistics: BTreeMap<String, wire::RulePreviewStatistics>,
     samples: BTreeMap<SampleOrder, wire::RulePreviewSample>,
     samples_truncated: bool,
+    #[cfg(any(windows, test))]
+    progress: super::progress::ProgressSink,
 }
 impl PreviewJob {
     pub(crate) fn start(
@@ -238,6 +240,8 @@ impl PreviewJob {
                     statistics,
                     samples: BTreeMap::new(),
                     samples_truncated: false,
+                    #[cfg(any(windows, test))]
+                    progress: super::progress::ProgressSink::disabled(),
                 })
             }
             Err(error) => {
@@ -269,6 +273,17 @@ impl PreviewJob {
             current,
             categories: snapshot.categories()?,
         })
+    }
+    #[cfg(any(windows, test))]
+    pub(crate) fn with_progress(mut self, progress: super::progress::ProgressSink) -> Self {
+        self.progress = progress;
+        self
+    }
+    fn report_progress(&mut self, done: u32, total: u32) {
+        #[cfg(any(windows, test))]
+        self.progress.report(done, total);
+        #[cfg(not(any(windows, test)))]
+        let _ = (done, total);
     }
     pub(crate) fn advance(&mut self) -> Result<Option<QueryResponse>, RunQueryError> {
         match std::mem::replace(&mut self.stage, Stage::Complete) {
@@ -316,6 +331,8 @@ impl PreviewJob {
                         if day.before.next().is_some() {
                             return Err(RunQueryError::InvalidRuleEntry);
                         }
+                        let done = self.calendar.completed_days();
+                        let total = self.calendar.total_days();
                         if let Some(range) = self.calendar.next_range() {
                             self.snapshot.restart_scan();
                             self.current = range;
@@ -329,6 +346,7 @@ impl PreviewJob {
                                     Classifier::new(self.after.clone(), self.categories.clone()),
                                 ),
                             };
+                            self.report_progress(done, total);
                             return Ok(None);
                         }
                         return Ok(Some(QueryResponse::Preview(self.build_response()?)));

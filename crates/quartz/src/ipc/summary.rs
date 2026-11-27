@@ -231,7 +231,7 @@ mod tests {
                 result = &mut compute => break result.expect("summary"),
                 _ = tokio::task::yield_now() => {
                     while let Ok(command) = channel.receiver.try_recv() {
-                        let crate::query::dispatch::QueryCommand::Query { request, reply } = command else { panic!("summary submits a fact query") };
+                        let crate::query::dispatch::QueryCommand::Query { request, reply, .. } = command else { panic!("summary submits a fact query") };
                         let response = fixture.run(request).map_err(|error| ProtocolError::new(error.kind()));
                         reply.send(response).expect("query receiver");
                     }
@@ -360,7 +360,7 @@ mod tests {
                             .expect("service version command");
                     }
                     while let Ok(command) = self.queries.receiver.try_recv() {
-                        let crate::query::dispatch::QueryCommand::Query { request, reply } =
+                        let crate::query::dispatch::QueryCommand::Query { request, reply, .. } =
                             command
                         else {
                             panic!("summary submits fact queries")

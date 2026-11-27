@@ -15,6 +15,7 @@ pub(super) struct DayWalker {
     pub(super) time_zone: String,
     pub(super) offset: DayStartOffset,
     days: VecDeque<LogicalDay>,
+    total_days: u32,
     pub(super) date: quartz_protocol::LocalDate,
 }
 #[derive(Debug)]
@@ -62,14 +63,23 @@ impl DayWalker {
             start: days.front().expect("validated nonempty dates").range.start,
             end: days.back().expect("validated nonempty dates").range.end,
         };
+        let total_days = u32::try_from(days.len()).expect("validated day count fits in u32");
         Ok(Self {
             range,
             time_zone: encode(&zone)
                 .map_err(|source| RunQueryError::EncodeTimeZoneError { source })?,
             offset,
             days,
+            total_days,
             date: start_date,
         })
+    }
+    pub(super) fn total_days(&self) -> u32 {
+        self.total_days
+    }
+    pub(super) fn completed_days(&self) -> u32 {
+        let remaining = u32::try_from(self.days.len()).expect("validated day count fits in u32");
+        self.total_days - remaining
     }
     pub(super) fn next_range(&mut self) -> Option<QueryRange> {
         let day = self.days.pop_front()?;

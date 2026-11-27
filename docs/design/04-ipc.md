@@ -26,7 +26,9 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 
 ## 3. 消息信封与错误
 
-消息分为请求（`t: "req"`，含 `id`/`op`/`body`）、响应（`t: "res"`，含 `id`/`ok` 及 `body` 或 `err`）和推送（`t: "evt"`，含 `topic`/`seq`/`body`），定义见 `crates/quartz-protocol/src/envelope.rs`。
+消息分为请求（`t: "req"`，含 `id`/`op`/`body`）、响应（`t: "res"`，含 `id`/`ok` 及 `body` 或 `err`）、进度（`t: "prg"`，含 `id`/`done`/`total`，要求 `done <= total` 且 `total >= 1`）和推送（`t: "evt"`，含 `topic`/`seq`/`body`），定义见 `crates/quartz-protocol/src/envelope.rs`。
+
+**进度帧**：多日查询作业（`query.range`、`query.unclassified`、`query.entity_detail`、`rules.preview`）仅向 `ui` 角色连接发送 `prg` 帧（`cli` 连接永不接收），在作业运行满 250 ms 后按最多每 250 ms（≤ 4 次/秒）上报已完成逻辑日数，且绝不在对应响应之后发出；经连接 outbox 非阻塞投递，发送预算满时直接丢弃（可丢弃，最终响应仍可靠）。客户端收到在途请求 ID 的 `prg` 帧时将该请求的 2 秒响应期限重置为当前时刻 + 2 秒，未知请求 ID 按协议错误处理。
 
 **兼容性与不变量：**
 

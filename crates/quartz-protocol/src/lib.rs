@@ -32,7 +32,9 @@ pub use timed::{
     TrackingPauseRequest, TrackingResumeRequest,
 };
 
-pub use envelope::{Envelope, Event, EventSeq, Request, RequestId, Response, ResponseOutcome};
+pub use envelope::{
+    Envelope, Event, EventSeq, Progress, Request, RequestId, Response, ResponseOutcome,
+};
 pub use error::{ErrorKind, ProtocolError, RuleSetVersion};
 #[cfg(feature = "codec")]
 pub use frame::frame_codec;

@@ -174,6 +174,12 @@ impl ConnectionSession {
             State::HelloPending | State::Closing => None,
         }
     }
+    pub(crate) fn role(&self) -> Option<Role> {
+        match self.state {
+            State::Ready(role) => Some(role.role()),
+            State::HelloPending | State::Closing => None,
+        }
+    }
     pub(crate) fn closing(&self) -> bool {
         matches!(self.state, State::Closing)
     }

@@ -2743,6 +2743,7 @@ fn preparation_rollback_failure_returns_error_to_owner_and_recovers_reader() {
                 end_utc_ms: 0,
             }),
             reply,
+            progress: crate::query::progress::ProgressSink::disabled(),
         },
         &rules,
     );

@@ -105,6 +105,12 @@ impl PendingReply {
     }
 }
 
+#[derive(Default)]
+struct ProgressClockConfig {
+    #[cfg(test)]
+    clock: Option<std::sync::Arc<dyn Fn() -> Duration + Send + Sync>>,
+}
+
 pub(crate) struct Connection {
     pub services: Services,
     pub registry: RegistryHandle,
@@ -123,9 +129,52 @@ impl Connection {
         R: AsyncRead + Unpin,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        self.run_with_config(
+            read,
+            write,
+            session,
+            hello_deadline,
+            &ProgressClockConfig::default(),
+        )
+        .await
+    }
+    #[cfg(test)]
+    async fn run_with_progress_clock<R, W>(
+        &self,
+        read: R,
+        write: W,
+        session: &mut ConnectionSession,
+        hello_deadline: tokio::time::Instant,
+        clock: std::sync::Arc<dyn Fn() -> Duration + Send + Sync>,
+    ) -> io::Result<()>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        self.run_with_config(
+            read,
+            write,
+            session,
+            hello_deadline,
+            &ProgressClockConfig { clock: Some(clock) },
+        )
+        .await
+    }
+    async fn run_with_config<R, W>(
+        &self,
+        read: R,
+        write: W,
+        session: &mut ConnectionSession,
+        hello_deadline: tokio::time::Instant,
+        progress_clock: &ProgressClockConfig,
+    ) -> io::Result<()>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let mut writer = OutboxTask::spawn(write);
         let result = self
-            .run_session(read, &mut writer, session, hello_deadline)
+            .run_session(read, &mut writer, session, hello_deadline, progress_clock)
             .await;
         result.and(writer.stop().await)
     }
@@ -135,6 +184,7 @@ impl Connection {
         writer: &mut OutboxTask,
         session: &mut ConnectionSession,
         hello_deadline: tokio::time::Instant,
+        progress_clock: &ProgressClockConfig,
     ) -> io::Result<()> {
         let mut reader = FramedRead::new(read, frame_codec());
         let outbox = writer.handle.clone();
@@ -234,10 +284,11 @@ impl Connection {
                     }
                 }),
                 Action::Preview { id, request } => {
+                    let progress = Self::progress_sink(session, id, &outbox, progress_clock);
                     self.admit_request(id, &outbox, &mut requests, &tracker, || {
                         self.services
                             .queries
-                            .submit_preview(request)
+                            .submit_preview(request, progress)
                             .map(PendingReply::Query)
                     })
                 }
@@ -250,10 +301,11 @@ impl Connection {
                     })
                 }
                 Action::Query { id, request } => {
+                    let progress = Self::progress_sink(session, id, &outbox, progress_clock);
                     self.admit_request(id, &outbox, &mut requests, &tracker, || {
                         self.services
                             .queries
-                            .submit(request)
+                            .submit_with_progress(request, progress)
                             .map(PendingReply::Query)
                     })
                 }
@@ -296,6 +348,29 @@ impl Connection {
             }
         }
         Ok(())
+    }
+    fn progress_sink(
+        session: &ConnectionSession,
+        id: quartz_protocol::RequestId,
+        outbox: &super::outbox::OutboxHandle,
+        progress_clock: &ProgressClockConfig,
+    ) -> crate::query::progress::ProgressSink {
+        if session.role() != Some(quartz_protocol::Role::Ui) {
+            return crate::query::progress::ProgressSink::disabled();
+        }
+        #[cfg(test)]
+        if let Some(clock) = &progress_clock.clock {
+            return crate::query::progress::ProgressSink::for_outbox_with_clock(
+                id,
+                outbox.clone(),
+                std::sync::Arc::clone(clock),
+                crate::query::progress::PROGRESS_FIRST_DELAY,
+                crate::query::progress::PROGRESS_INTERVAL,
+            );
+        }
+        #[cfg(not(test))]
+        let _ = progress_clock;
+        crate::query::progress::ProgressSink::for_outbox(id, outbox.clone())
     }
     fn admit_request<'connection>(
         &'connection self,
@@ -703,17 +778,33 @@ pub(crate) mod tests {
     }
     impl MemoryClient {
         pub(crate) async fn connect(connection: Connection, role: HelloRole) -> Self {
+            Self::connect_inner(connection, role, None).await
+        }
+        async fn connect_with_progress_clock(
+            connection: Connection,
+            role: HelloRole,
+            clock: Arc<dyn Fn() -> Duration + Send + Sync>,
+        ) -> Self {
+            Self::connect_inner(connection, role, Some(clock)).await
+        }
+        async fn connect_inner(
+            connection: Connection,
+            role: HelloRole,
+            clock: Option<Arc<dyn Fn() -> Duration + Send + Sync>>,
+        ) -> Self {
             let (server, client) = tokio::io::duplex(TEST_BUFFER_BYTES);
             let task = tokio::spawn(async move {
                 let (read, write) = split(server);
-                connection
-                    .run(
-                        read,
-                        write,
-                        &mut ConnectionSession::new(AllowedRoles::Quartz),
-                        tokio::time::Instant::now() + HELLO_TIMEOUT,
-                    )
-                    .await
+                let mut session = ConnectionSession::new(AllowedRoles::Quartz);
+                let deadline = tokio::time::Instant::now() + HELLO_TIMEOUT;
+                match clock {
+                    Some(clock) => {
+                        connection
+                            .run_with_progress_clock(read, write, &mut session, deadline, clock)
+                            .await
+                    }
+                    None => connection.run(read, write, &mut session, deadline).await,
+                }
             });
             let mut client = Self {
                 frames: Framed::new(client, frame_codec()),
@@ -986,5 +1077,91 @@ pub(crate) mod tests {
             serde_json::from_value(body).expect("typed response");
         assert_eq!(preview.totals.after.active_ms, 4000);
         client.close().await;
+    }
+
+    #[tokio::test]
+    async fn slow_multi_day_query_emits_monotonic_progress_only_for_ui_and_before_response() {
+        use quartz_protocol::{Op, Request};
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let database = TestDatabase::start();
+        let status = StatusPublisher::new(quartz_protocol::InstanceId("query-progress".into()));
+        let range_body = serde_json::json!({
+            "start_date": "2025-01-02",
+            "end_date": "2025-01-06",
+            "bucket": "day",
+            "dimensions": ["category"],
+        });
+
+        let ui_ticks = Arc::new(AtomicU64::new(0));
+        let mut ui = MemoryClient::connect_with_progress_clock(
+            connection(&database, &status),
+            HelloRole::Ui {
+                ui: quartz_protocol::UiHello {
+                    state: quartz_protocol::UiState::Visible,
+                },
+            },
+            Arc::new(move || {
+                let step = ui_ticks.fetch_add(1, Ordering::Relaxed) + 1;
+                Duration::from_millis(step * 250)
+            }),
+        )
+        .await;
+        ui.send_batch([Request {
+            id: RequestId(2),
+            op: Op::QueryRange,
+            body: range_body.clone(),
+        }])
+        .await;
+        let mut progress_done = Vec::new();
+        let response = loop {
+            match ui.next().await {
+                Envelope::Progress(progress) => {
+                    assert_eq!(progress.id, RequestId(2));
+                    assert_eq!(progress.total, 4);
+                    assert!(progress.done <= progress.total);
+                    if let Some(&previous) = progress_done.last() {
+                        assert!(progress.done > previous, "progress must be monotonic");
+                    }
+                    progress_done.push(progress.done);
+                }
+                Envelope::Response(response) => break response,
+                other => panic!("expected progress or response, got {other:?}"),
+            }
+        };
+        assert_eq!(response.id, Some(RequestId(2)));
+        assert!(matches!(response.outcome, ResponseOutcome::Ok { .. }));
+        assert_eq!(progress_done, [1, 2, 3]);
+        // Single-day queries never emit progress even on a UI connection.
+        ui.request(
+            3,
+            Op::QueryDay,
+            serde_json::json!({"local_date":"2025-01-02"}),
+        )
+        .await;
+        ui.close().await;
+
+        let cli_ticks = Arc::new(AtomicU64::new(0));
+        let mut cli = MemoryClient::connect_with_progress_clock(
+            connection(&database, &status),
+            HelloRole::Cli,
+            Arc::new(move || {
+                let step = cli_ticks.fetch_add(1, Ordering::Relaxed) + 1;
+                Duration::from_millis(step * 250)
+            }),
+        )
+        .await;
+        cli.send_batch([Request {
+            id: RequestId(2),
+            op: Op::QueryRange,
+            body: range_body,
+        }])
+        .await;
+        let Envelope::Response(response) = cli.next().await else {
+            panic!("CLI connection must never receive progress frames")
+        };
+        assert_eq!(response.id, Some(RequestId(2)));
+        assert!(matches!(response.outcome, ResponseOutcome::Ok { .. }));
+        cli.close().await;
     }
 }

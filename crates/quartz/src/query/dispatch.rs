@@ -1,6 +1,6 @@
 //! Non-blocking I/O-to-database query admission with asynchronous replies.
 
-use super::{QueryRequest, QueryResponse};
+use super::{QueryRequest, QueryResponse, progress::ProgressSink};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use quartz_protocol::{ErrorKind, ProtocolError};
 use tokio::sync::oneshot;
@@ -12,10 +12,12 @@ pub(crate) enum QueryCommand {
     Preview {
         request: super::preview::PreviewRequest,
         reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
+        progress: ProgressSink,
     },
     Query {
         request: QueryRequest,
         reply: oneshot::Sender<Result<QueryResponse, ProtocolError>>,
+        progress: ProgressSink,
     },
     RuleInputs {
         reply: oneshot::Sender<Result<crate::rules::read::ReadInputs, ProtocolError>>,
@@ -65,9 +67,14 @@ impl QueryPort {
     pub(crate) fn submit_preview(
         &self,
         request: super::preview::PreviewRequest,
+        progress: ProgressSink,
     ) -> Result<oneshot::Receiver<Result<QueryResponse, ProtocolError>>, ProtocolError> {
         let (reply, received) = oneshot::channel();
-        self.send(QueryCommand::Preview { request, reply })?;
+        self.send(QueryCommand::Preview {
+            request,
+            reply,
+            progress,
+        })?;
         Ok(received)
     }
     fn send(&self, command: QueryCommand) -> Result<(), ProtocolError> {
@@ -112,15 +119,19 @@ impl QueryPort {
         &self,
         request: QueryRequest,
     ) -> Result<oneshot::Receiver<Result<QueryResponse, ProtocolError>>, ProtocolError> {
+        self.submit_with_progress(request, ProgressSink::disabled())
+    }
+    pub(crate) fn submit_with_progress(
+        &self,
+        request: QueryRequest,
+        progress: ProgressSink,
+    ) -> Result<oneshot::Receiver<Result<QueryResponse, ProtocolError>>, ProtocolError> {
         let (reply, received) = oneshot::channel();
-        self.sender
-            .try_send(QueryCommand::Query { request, reply })
-            .map_err(|error| {
-                ProtocolError::new(match error {
-                    crossbeam_channel::TrySendError::Full(_) => ErrorKind::Busy,
-                    crossbeam_channel::TrySendError::Disconnected(_) => ErrorKind::Internal,
-                })
-            })?;
+        self.send(QueryCommand::Query {
+            request,
+            reply,
+            progress,
+        })?;
         Ok(received)
     }
 }

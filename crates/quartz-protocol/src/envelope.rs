@@ -1,4 +1,4 @@
-//! Request, response, and event wire envelopes (04 §3).
+//! Request, response, progress, and event wire envelopes (04 §3).
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 use serde_json::Value;
@@ -145,6 +145,63 @@ impl<'de> Deserialize<'de> for Response {
     }
 }
 
+/// Core-to-client progress update for an in-flight multi-day query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    /// Client request identity this progress belongs to.
+    pub id: RequestId,
+    /// Completed logical days so far (`done <= total`).
+    pub done: u32,
+    /// Total logical days in the query (`total >= 1`).
+    pub total: u32,
+}
+
+/// A progress frame contains id, done, and total; `t` belongs to the envelope.
+const PROGRESS_FIELD_COUNT: usize = 3;
+
+impl Progress {
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.total == 0 {
+            return Err("progress total must be at least 1");
+        }
+        if self.done > self.total {
+            return Err("progress done must not exceed total");
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for Progress {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let mut map = serializer.serialize_map(Some(PROGRESS_FIELD_COUNT))?;
+        map.serialize_entry("id", &self.id)?;
+        map.serialize_entry("done", &self.done)?;
+        map.serialize_entry("total", &self.total)?;
+        map.end()
+    }
+}
+
+#[derive(Deserialize)]
+struct ProgressWire {
+    id: RequestId,
+    done: u32,
+    total: u32,
+}
+
+impl<'de> Deserialize<'de> for Progress {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ProgressWire::deserialize(deserializer)?;
+        let progress = Self {
+            id: wire.id,
+            done: wire.done,
+            total: wire.total,
+        };
+        progress.validate().map_err(serde::de::Error::custom)?;
+        Ok(progress)
+    }
+}
+
 /// Core push on a typed subscription topic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
@@ -166,6 +223,9 @@ pub enum Envelope {
     /// Core-to-client response.
     #[serde(rename = "res")]
     Response(Response),
+    /// Core-to-client progress for a multi-day query.
+    #[serde(rename = "prg")]
+    Progress(Progress),
     /// Core-to-client push.
     #[serde(rename = "evt")]
     Event(Event),
@@ -183,6 +243,7 @@ mod tests {
             serde_json::json!({"t":"req","id":17,"op":"query.day","body":{}}),
             serde_json::json!({"t":"res","id":17,"ok":true,"body":{}}),
             serde_json::json!({"t":"res","id":17,"ok":false,"err":{"code":"invalid_range","msg":"..."}}),
+            serde_json::json!({"t":"prg","id":17,"done":3,"total":365}),
             serde_json::json!({"t":"evt","topic":"state","seq":42,"body":{}}),
         ];
         for wire in cases {
@@ -202,6 +263,7 @@ mod tests {
             serde_json::json!({"t":"req","id":17,"op":"future.op","body":{},"future":true}),
             serde_json::json!({"t":"res","id":17,"ok":true,"body":{},"future":true}),
             serde_json::json!({"t":"res","id":17,"ok":false,"err":{"code":"internal","future":true},"future":true}),
+            serde_json::json!({"t":"prg","id":17,"done":3,"total":365,"future":true}),
             serde_json::json!({"t":"evt","topic":"state","seq":42,"body":{},"future":true}),
         ] {
             let payload = encode_json(&wire).expect("JSON frame");
@@ -298,6 +360,47 @@ mod tests {
             serde_json::from_str::<Op>("\"ui.show\"").expect("unknown request"),
             Op::Unknown
         );
+    }
+
+    #[test]
+    fn progress_wire_roundtrip_and_invalid_bounds_are_rejected() {
+        for (done, total) in [(0, 1), (3, 365), (365, 365)] {
+            let wire = serde_json::json!({"t":"prg","id":17,"done":done,"total":total});
+            let payload = encode_json(&wire).expect("progress frame");
+            let decoded: Envelope = decode_json(&payload).expect("decode progress");
+            assert_eq!(
+                decoded,
+                Envelope::Progress(Progress {
+                    id: RequestId(17),
+                    done,
+                    total,
+                })
+            );
+            assert_eq!(serde_json::to_value(&decoded).expect("encode"), wire);
+        }
+        for wire in [
+            r#"{"t":"prg","id":17,"done":4,"total":3}"#,
+            r#"{"t":"prg","id":17,"done":0,"total":0}"#,
+            r#"{"t":"prg","id":17,"done":1,"total":0}"#,
+            r#"{"t":"prg","id":null,"done":1,"total":2}"#,
+            r#"{"t":"prg","done":1,"total":2}"#,
+        ] {
+            assert!(decode_json::<Envelope>(wire.as_bytes()).is_err(), "{wire}");
+        }
+        for invalid in [
+            Progress {
+                id: RequestId(17),
+                done: 4,
+                total: 3,
+            },
+            Progress {
+                id: RequestId(17),
+                done: 0,
+                total: 0,
+            },
+        ] {
+            assert!(serde_json::to_value(invalid).is_err(), "{invalid:?}");
+        }
     }
 
     #[test]

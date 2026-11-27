@@ -63,14 +63,24 @@ impl QueryRunner {
                 let _ = reply.send(result);
                 return Ok(());
             }
-            QueryCommand::Query { request, reply } => {
+            QueryCommand::Query {
+                request,
+                reply,
+                mut progress,
+            } => {
+                progress.mark_started();
                 let result = QueryJob::start(&mut reader, request, rules)
-                    .map(|job| RunningJob::Query(Box::new(job)));
+                    .map(|job| RunningJob::Query(Box::new(job.with_progress(progress))));
                 StartedQuery { result, reply }
             }
-            QueryCommand::Preview { request, reply } => {
+            QueryCommand::Preview {
+                request,
+                reply,
+                mut progress,
+            } => {
+                progress.mark_started();
                 let result = super::preview::PreviewJob::start(&mut reader, request, registry)
-                    .map(|job| RunningJob::Preview(Box::new(job)));
+                    .map(|job| RunningJob::Preview(Box::new(job.with_progress(progress))));
                 StartedQuery { result, reply }
             }
         };

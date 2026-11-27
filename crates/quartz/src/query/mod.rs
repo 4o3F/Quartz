@@ -17,6 +17,8 @@ mod acceptance_tests;
 pub(crate) mod input;
 mod pending_away;
 pub(crate) mod pipeline;
+#[cfg(any(windows, test))]
+pub(crate) mod progress;
 mod range;
 #[cfg(any(windows, test))]
 pub(crate) mod runner;
@@ -269,6 +271,8 @@ pub(crate) struct QueryJob {
     day_walker: Option<DayWalker>,
     unclassified: Option<UnclassifiedAccumulator>,
     range_accumulator: Option<RangeAccumulator>,
+    #[cfg(any(windows, test))]
+    progress: progress::ProgressSink,
     stage: Stage,
 }
 impl QueryJob {
@@ -320,6 +324,8 @@ impl QueryJob {
                     }
                     _ => None,
                 },
+                #[cfg(any(windows, test))]
+                progress: progress::ProgressSink::disabled(),
                 stage: if let Some(read) = prepared.annotations {
                     Stage::Annotations(Box::new(read))
                 } else if let Some((after, limit)) = prepared.facts {
@@ -606,6 +612,18 @@ impl QueryJob {
             entity_calendar,
         })
     }
+    /// Attaches a per-request progress sink for UI-initiated multi-day queries.
+    #[cfg(any(windows, test))]
+    pub(crate) fn with_progress(mut self, progress: progress::ProgressSink) -> Self {
+        self.progress = progress;
+        self
+    }
+    fn report_progress(&mut self, done: u32, total: u32) {
+        #[cfg(any(windows, test))]
+        self.progress.report(done, total);
+        #[cfg(not(any(windows, test)))]
+        let _ = (done, total);
+    }
     /// The shell services capture writes between these bounded read/sweep turns.
     pub(crate) fn advance(&mut self) -> Result<Option<QueryResponse>, RunQueryError> {
         self.advance_timed(&mut QueryTimer::disabled())
@@ -756,6 +774,9 @@ impl QueryJob {
                     }
                 });
                 if segments.len() > 0 {
+                    if let Aggregation::EntityDetail(detail) = &output {
+                        self.report_progress(detail.completed_days(), detail.total_days());
+                    }
                     self.stage = Stage::Aggregate {
                         segments,
                         facts,
@@ -763,14 +784,17 @@ impl QueryJob {
                     };
                     return Ok(None);
                 }
-                if let Some(walker) = &mut self.day_walker
-                    && let Some(range) = walker.next_range()
-                {
+                let next_day = self.day_walker.as_mut().and_then(|walker| {
+                    let done = walker.completed_days();
+                    let total = walker.total_days();
+                    let range = walker.next_range()?;
+                    Some((walker.date, range, done, total))
+                });
+                if let Some((next_date, range, done, total)) = next_day {
                     match output {
                         Aggregation::Unclassified(groups) => self.unclassified = Some(groups),
                         Aggregation::Range(mut groups) => {
-                            timer
-                                .measure(QueryStage::Aggregate, || groups.next_day(walker.date))?;
+                            timer.measure(QueryStage::Aggregate, || groups.next_day(next_date))?;
                             self.range_accumulator = Some(groups);
                         }
                         _ => unreachable!("daily scan aggregation"),
@@ -778,6 +802,7 @@ impl QueryJob {
                     self.scan_range = range;
                     self.snapshot.restart_scan();
                     self.stage = Stage::Read(Pipeline::new(range, facts.into_classifier()));
+                    self.report_progress(done, total);
                     return Ok(None);
                 }
                 let response =

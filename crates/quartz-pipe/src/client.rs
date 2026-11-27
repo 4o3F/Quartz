@@ -2,9 +2,9 @@
 
 use quartz_protocol::{
     AcceptedBody, ClientVersion, CoreRequest, CoreStatusRequest, CoreStatusResponse, Envelope,
-    ErrorKind, Event, Hello, HelloResponse, HelloRole, JsonValue, Op, PROTOCOL_VERSION, ProtoRange,
-    ProtoVersion, Request, RequestId, Response, ResponseOutcome, UiOpenRequest, decode_json,
-    encode_json, frame_codec,
+    ErrorKind, Event, Hello, HelloResponse, HelloRole, JsonValue, Op, PROTOCOL_VERSION, Progress,
+    ProtoRange, ProtoVersion, Request, RequestId, Response, ResponseOutcome, UiOpenRequest,
+    decode_json, encode_json, frame_codec,
 };
 use snafu::{ResultExt, Snafu};
 use std::{
@@ -73,7 +73,7 @@ pub enum CallCoreError {
     EncodeBody { source: quartz_protocol::JsonError },
     #[snafu(display("core transport write deadline expired"))]
     WriteTimeout { source: tokio::time::error::Elapsed },
-    #[snafu(display("expected a core response or event envelope"))]
+    #[snafu(display("expected a core response, progress, or event envelope"))]
     UnexpectedEnvelope,
     #[snafu(display("core response id {received:?} does not match request {expected:?}"))]
     ResponseIdMismatch {
@@ -131,10 +131,11 @@ impl CallCoreError {
     }
 }
 
-/// A validated response identity or an event in wire order.
+/// A validated response, progress update, or event in wire order.
 #[derive(Debug)]
 pub enum IncomingFrame {
     Response(Response),
+    Progress(Progress),
     Event(Event),
 }
 
@@ -275,6 +276,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
         loop {
             match self.read_envelope_unbounded().await? {
                 Envelope::Event(event) => return Ok(IncomingFrame::Event(event)),
+                Envelope::Progress(progress) => {
+                    if self.pending.contains(&progress.id) {
+                        return Ok(IncomingFrame::Progress(progress));
+                    }
+                    if progress.id.0 > 0 && progress.id < self.next_id {
+                        tracing::debug!(id = ?progress.id, "discarded late core progress");
+                        continue;
+                    }
+                    let expected = self.pending.first().copied().ok_or(
+                        CallCoreError::UnsolicitedResponse {
+                            received: Some(progress.id),
+                        },
+                    )?;
+                    return Err(CallCoreError::ResponseIdMismatch {
+                        expected,
+                        received: Some(progress.id),
+                    });
+                }
                 Envelope::Response(response) => {
                     let Some(id) = response.id else {
                         self.state = ConnectionState::Discard;
@@ -318,29 +337,38 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
     pub async fn request(&mut self, op: Op, body: &JsonValue) -> Result<JsonValue, CallCoreError> {
         let id = self.send_request(op, body.clone()).await?;
         let pending = PendingRequest { client: self, id };
-        tokio::time::timeout(RESPONSE_TIMEOUT, async {
-            loop {
-                match pending.client.read_incoming().await? {
-                    IncomingFrame::Event(event) => {
-                        if pending.client.events.len() == EVENT_CAPACITY {
-                            return Err(CallCoreError::EventOverflow);
-                        }
-                        pending.client.events.push_back(event);
+        let mut deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
+        loop {
+            let frame = tokio::time::timeout_at(deadline, pending.client.read_incoming())
+                .await
+                .context(call_core_error::ResponseTimeoutSnafu)??;
+            match frame {
+                IncomingFrame::Event(event) => {
+                    if pending.client.events.len() == EVENT_CAPACITY {
+                        return Err(CallCoreError::EventOverflow);
                     }
-                    IncomingFrame::Response(response) => {
-                        if response.id != Some(id) {
-                            return Err(CallCoreError::ResponseIdMismatch {
-                                expected: id,
-                                received: response.id,
-                            });
-                        }
-                        return Self::response_body(response);
+                    pending.client.events.push_back(event);
+                }
+                IncomingFrame::Progress(progress) => {
+                    if progress.id != id {
+                        return Err(CallCoreError::ResponseIdMismatch {
+                            expected: id,
+                            received: Some(progress.id),
+                        });
                     }
+                    deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
+                }
+                IncomingFrame::Response(response) => {
+                    if response.id != Some(id) {
+                        return Err(CallCoreError::ResponseIdMismatch {
+                            expected: id,
+                            received: response.id,
+                        });
+                    }
+                    return Self::response_body(response);
                 }
             }
-        })
-        .await
-        .context(call_core_error::ResponseTimeoutSnafu)?
+        }
     }
     /// Extracts a successful body while preserving structured protocol failures.
     pub fn response_body(response: Response) -> Result<JsonValue, CallCoreError> {
@@ -697,6 +725,9 @@ mod tests {
         fn response(id: u64) -> serde_json::Value {
             serde_json::json!({"t":"res","id":id,"ok":true,"body":{"accepted":true}})
         }
+        fn progress(id: u64, done: u32, total: u32) -> serde_json::Value {
+            serde_json::json!({"t":"prg","id":id,"done":done,"total":total})
+        }
     }
 
     #[tokio::test]
@@ -963,5 +994,140 @@ mod tests {
             AcceptedBody
         );
         assert!(client.pending.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_extends_response_deadline_and_timeout_resumes_when_progress_stops() {
+        const BUFFER_BYTES: usize = 4096;
+        const PROGRESS_STEP: Duration = Duration::from_millis(1_500);
+
+        let (stream, mut peer) = tokio::io::duplex(BUFFER_BYTES);
+        let mut client = AsyncCoreClient::new(stream);
+        let server = tokio::spawn(async move {
+            let mut buffer = [0; BUFFER_BYTES];
+            assert!(peer.read(&mut buffer).await.expect("request") > 0);
+            tokio::time::sleep(PROGRESS_STEP).await;
+            peer.write_all(&WireFrames::encode([WireFrames::progress(1, 1, 3)]))
+                .await
+                .expect("first progress");
+            tokio::time::sleep(PROGRESS_STEP).await;
+            peer.write_all(&WireFrames::encode([WireFrames::progress(1, 2, 3)]))
+                .await
+                .expect("second progress");
+            tokio::time::sleep(PROGRESS_STEP).await;
+            peer.write_all(&WireFrames::encode([WireFrames::response(1)]))
+                .await
+                .expect("final response");
+        });
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            client
+                .open_ui()
+                .await
+                .expect("request succeeds past single timeout when progress arrives"),
+            AcceptedBody
+        );
+        assert_eq!(started.elapsed(), PROGRESS_STEP * 3);
+        assert!(client.pending.is_empty());
+        server.await.expect("server task");
+
+        let (stream, mut peer) = tokio::io::duplex(BUFFER_BYTES);
+        let mut client = AsyncCoreClient::new(stream);
+        let server = tokio::spawn(async move {
+            let mut buffer = [0; BUFFER_BYTES];
+            assert!(peer.read(&mut buffer).await.expect("request") > 0);
+            tokio::time::sleep(PROGRESS_STEP).await;
+            peer.write_all(&WireFrames::encode([WireFrames::progress(1, 1, 3)]))
+                .await
+                .expect("single progress");
+            std::future::pending::<()>().await;
+        });
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            client.open_ui().await,
+            Err(CallCoreError::ResponseTimeout { .. })
+        ));
+        assert_eq!(started.elapsed(), PROGRESS_STEP + RESPONSE_TIMEOUT);
+        assert!(client.pending.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn receive_surfaces_pending_progress_and_rejects_unknown_progress_id() {
+        const BUFFER_BYTES: usize = 4096;
+        let (stream, mut peer) = tokio::io::duplex(BUFFER_BYTES);
+        let mut client = AsyncCoreClient::new(stream);
+        let first = client
+            .send_request(Op::UiOpen, serde_json::json!({}))
+            .await
+            .expect("first request");
+        peer.write_all(&WireFrames::encode([
+            WireFrames::progress(first.0, 2, 5),
+            WireFrames::response(first.0),
+        ]))
+        .await
+        .expect("progress then response");
+        let IncomingFrame::Progress(progress) = client.receive().await.expect("progress frame")
+        else {
+            panic!("expected progress frame");
+        };
+        assert_eq!(
+            progress,
+            Progress {
+                id: first,
+                done: 2,
+                total: 5,
+            }
+        );
+        assert!(client.pending.contains(&first));
+        let IncomingFrame::Response(response) = client.receive().await.expect("response frame")
+        else {
+            panic!("expected response frame");
+        };
+        assert_eq!(response.id, Some(first));
+        assert!(client.pending.is_empty());
+
+        peer.write_all(&WireFrames::encode([WireFrames::progress(99, 1, 5)]))
+            .await
+            .expect("unsolicited progress");
+        assert!(matches!(
+            client.receive().await,
+            Err(CallCoreError::UnsolicitedResponse {
+                received: Some(RequestId(99))
+            })
+        ));
+
+        let second = client
+            .send_request(Op::UiOpen, serde_json::json!({}))
+            .await
+            .expect("second request");
+        peer.write_all(&WireFrames::encode([WireFrames::progress(99, 1, 5)]))
+            .await
+            .expect("unknown id progress");
+        assert!(matches!(
+            client.receive().await,
+            Err(CallCoreError::ResponseIdMismatch {
+                expected,
+                received: Some(RequestId(99)),
+            }) if expected == second
+        ));
+    }
+
+    #[test]
+    fn sync_client_ignores_progress_frames_and_returns_final_response() {
+        let mut fixture = ConnectedClient::new();
+        let id = fixture.client.client.next_id;
+        inject(
+            &mut fixture,
+            &encode_json(&WireFrames::progress(id.0, 1, 4)).expect("progress"),
+        );
+        inject(
+            &mut fixture,
+            &encode_json(&WireFrames::response(id.0)).expect("response"),
+        );
+        assert_eq!(
+            fixture.client.open_ui().expect("final response"),
+            AcceptedBody
+        );
     }
 }

@@ -102,6 +102,7 @@ pub(super) struct EntityDetailAccumulator {
     entity: EntitySelection,
     extraction: BTreeSet<quartz_protocol::EntityExtractionProvenance>,
     calendar: EntityCalendar,
+    completed_days: u32,
     titles: BTreeMap<String, EntityTitleDuration>,
     rules: BTreeMap<ClassificationRuleId, EntityClassificationRule>,
 }
@@ -111,11 +112,24 @@ impl EntityDetailAccumulator {
             entity,
             extraction: BTreeSet::new(),
             calendar,
+            completed_days: 0,
             titles: BTreeMap::new(),
             rules: BTreeMap::new(),
         }
     }
+    pub(super) fn completed_days(&self) -> u32 {
+        self.completed_days
+    }
+    pub(super) fn total_days(&self) -> u32 {
+        u32::try_from(self.calendar.days.len()).expect("entity detail day count fits in u32")
+    }
     pub(super) fn push(&mut self, segment: &DerivedSegment, facts: &SegmentFacts) {
+        let passed = self
+            .calendar
+            .days
+            .partition_point(|day| day.range.end <= segment.span.start_utc_ms);
+        let passed = u32::try_from(passed).expect("entity detail day count fits in u32");
+        self.completed_days = self.completed_days.max(passed);
         if !segment.activity.is_active()
             || segment.span.duration_ms == 0
             || !self.entity.matches(segment, facts)

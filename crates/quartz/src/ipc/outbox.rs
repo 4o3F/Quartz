@@ -2,7 +2,7 @@
 
 use futures_util::SinkExt;
 use quartz_protocol::{
-    ControlBody, Envelope, Event, EventSeq, Response, StateSnapshot, Topic, encode_json,
+    ControlBody, Envelope, Event, EventSeq, Progress, Response, StateSnapshot, Topic, encode_json,
     frame_codec,
 };
 use std::{
@@ -105,9 +105,13 @@ struct LatestEvents {
     day_clocks: BTreeMap<quartz_protocol::LocalDate, Option<tokio::time::Instant>>,
 }
 
-/// Reliable mailbox entries own their byte reservations before enqueueing.
+/// FIFO mailbox entries own their byte reservations before enqueueing.
 enum OutboxMessage {
     Response {
+        payload: Vec<u8>,
+        reservation: Reservation,
+    },
+    Progress {
         payload: Vec<u8>,
         reservation: Reservation,
     },
@@ -145,6 +149,19 @@ impl OutboxHandle {
             bytes,
         })
     }
+    /// Reserves send budget for a lossy frame without closing the connection on overflow.
+    fn try_reserve_lossy(&self, payload_len: usize) -> Option<Reservation> {
+        let bytes = payload_len + FRAME_HEADER_LEN;
+        self.budget
+            .lock()
+            .expect("outbox budget lock poisoned")
+            .reserve(bytes)
+            .ok()?;
+        Some(Reservation {
+            budget: Arc::clone(&self.budget),
+            bytes,
+        })
+    }
     fn enqueue(&self, message: OutboxMessage) -> Result<(), QueueFrameError> {
         self.mailbox.try_send(message).map_err(|error| {
             tracing::debug!(%error, "outbox mailbox unavailable; closing connection");
@@ -160,6 +177,40 @@ impl OutboxHandle {
             payload,
             reservation,
         })
+    }
+    /// Non-blocking, lossy delivery for query progress frames (04 §3, §7).
+    /// Drops the frame without closing the connection when the outbox is closed,
+    /// over budget, or its mailbox is full; the final response remains reliable.
+    pub(crate) fn try_progress(&self, progress: Progress) {
+        if self.is_closed() {
+            return;
+        }
+        let payload = match encode_json(&Envelope::Progress(progress)) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(%error, "could not encode outgoing progress envelope");
+                return;
+            }
+        };
+        let Some(reservation) = self.try_reserve_lossy(payload.len()) else {
+            tracing::debug!(
+                id = ?progress.id,
+                done = progress.done,
+                total = progress.total,
+                "dropped progress frame: outbox over budget"
+            );
+            return;
+        };
+        if let Err(error) = self.mailbox.try_send(OutboxMessage::Progress {
+            payload,
+            reservation,
+        }) {
+            tracing::debug!(
+                %error,
+                id = ?progress.id,
+                "dropped progress frame: outbox mailbox unavailable"
+            );
+        }
     }
     pub(crate) fn control(&self, body: ControlBody) -> Result<(), QueueFrameError> {
         // Reserve the maximum sequence width; actual wire bytes can only be smaller.
@@ -420,6 +471,10 @@ impl OutboxActor {
             OutboxMessage::Response {
                 payload,
                 reservation,
+            }
+            | OutboxMessage::Progress {
+                payload,
+                reservation,
             } => {
                 writer.send(payload.as_slice()).await?;
                 drop(reservation);
@@ -542,6 +597,49 @@ mod tests {
                 0,
                 "cancellation releases every reservation"
             );
+        });
+    }
+    #[test]
+    fn full_outbox_drops_progress_without_closing_the_connection() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let stalled = OutboxTask::spawn(tokio::io::sink());
+            let empty = Response {
+                id: Some(quartz_protocol::RequestId(1)),
+                outcome: quartz_protocol::ResponseOutcome::Ok {
+                    body: serde_json::json!(""),
+                },
+            };
+            let overhead = encode_json(&Envelope::Response(empty))
+                .expect("empty response")
+                .len();
+            let payload_len = SEND_BUFFER_LIMIT / 4 - FRAME_HEADER_LEN;
+            for _ in 0..4 {
+                stalled
+                    .handle
+                    .response(Response {
+                        id: Some(quartz_protocol::RequestId(1)),
+                        outcome: quartz_protocol::ResponseOutcome::Ok {
+                            body: serde_json::json!("x".repeat(payload_len - overhead)),
+                        },
+                    })
+                    .expect("fits budget");
+            }
+            assert_eq!(stalled.handle.queued_bytes(), SEND_BUFFER_LIMIT);
+            stalled.handle.try_progress(Progress {
+                id: quartz_protocol::RequestId(1),
+                done: 1,
+                total: 10,
+            });
+            assert!(
+                !stalled.handle.is_closed(),
+                "lossy progress drop must not close the connection"
+            );
+            assert_eq!(stalled.handle.queued_bytes(), SEND_BUFFER_LIMIT);
+            assert_eq!(stalled.handle.peak_bytes(), SEND_BUFFER_LIMIT);
         });
     }
     #[test]
