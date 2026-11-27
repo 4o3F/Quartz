@@ -5174,6 +5174,14 @@ dependencies = [
 [[package]]
 name = "quartz-host"
 version = "0.0.0"
+dependencies = [
+ "quartz-pipe",
+ "quartz-protocol",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tokio",
+]
 
 [[package]]
 name = "quartz-i18n"
