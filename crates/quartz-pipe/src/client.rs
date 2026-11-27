@@ -430,6 +430,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncCoreClient<T> {
     }
     /// Asks the core to open or activate the UI.
     pub async fn open_ui(&mut self) -> Result<AcceptedBody, CallCoreError> {
+        #[cfg(windows)]
+        crate::windows::allow_any_foreground_window();
         self.call(&UiOpenRequest {}).await
     }
 }

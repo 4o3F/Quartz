@@ -7,6 +7,7 @@ use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use windows::Win32::{
     Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE},
     System::Pipes::GetNamedPipeServerProcessId,
+    UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow},
 };
 
 /// Bounds CLI discovery and second-launch forwarding (04 §1, 01 §3).
@@ -129,6 +130,15 @@ impl PipeClient {
     /// Transfers the authenticated pipe to the protocol client.
     pub fn into_inner(self) -> NamedPipeClient {
         self.pipe
+    }
+}
+
+/// Hands the launching process's foreground right to any process before forwarding `ui.open`.
+pub(crate) fn allow_any_foreground_window() {
+    // SAFETY: ASFW_ANY is a Win32 sentinel value with no pointer or lifetime preconditions.
+    let permission = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    if let Err(error) = permission {
+        tracing::debug!(%error, "could not grant foreground permission before opening UI");
     }
 }
 
