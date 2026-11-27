@@ -131,6 +131,8 @@
 
 - 08 的全部指标，并附 8 小时长时间运行的结果。
 
+**进展**（2026-11-27）：本周页、设置页（常规、记录、数据、关于）、开机自启、标题保留期、手动备份、压缩数据库、按日期范围删除（仅已结束的逻辑日）、依赖审计与[安装说明](../install.md)已完成。按 YAGNI 不做：固定时区、可调空闲阈值、应用豁免空闲、“不记录任何标题”开关、内置识别器列表、按隐私规则清理历史（留待以后）；浏览器分组随 M5。`gen-data` 与 `bench-query` 已满足基准需要，未再扩展。待完成：08 指标复测与 8 小时运行（需用户空出机器）。
+
 ### 持续集成与发布
 
 推送到 `main`、提交拉取请求或手动触发时，GitHub Actions 在 `windows-latest` 上先使用 Deno 2.9.8 运行 `deno task check`，检查 `scripts/` 的格式、lint 和 TypeScript 类型；依赖精确版本写在 `deno.json`，由 `deno.lock` 锁定并缓存。随后使用 `rust-toolchain.toml` 固定的工具链，先运行 Rust 格式检查、`cargo deny check` 和 `deno task check-schema`，再运行 Clippy（警告视为错误）与工作区测试；构建与测试同时校验 `migrations.lock`。测试不开窗，CI 不运行 GUI 预览及资源、体积测量。检查通过后构建 release 版 `quartz.exe` 与 `quartz-host.exe`，由 `deno task package collect --output <目录>` 收集二进制与列出二者 SHA256 的 `SHA256SUMS`，上传为 workflow artifact（`quartz-<commit>-x86_64-pc-windows-msvc`，保留 14 天）。Diesel CLI 固定为 2.4.0，使用 `sqlite-bundled` 功能安装并缓存。依赖更新由 Renovate（仓库根目录 `renovate.json`）发起 PR：Cargo 依赖按 `bump` 更新 `Cargo.toml` 与 `Cargo.lock`，Actions 以完整版本号引用；需要同步升级的依赖放在同一分组（Diesel 与 `libsqlite3-sys`、Diesel CLI；ICU4X 与 `idna`；windows-rs；tracing；serde；Deno 运行时与脚本依赖；GitHub Actions），Rust 工具链、Diesel CLI 与 Deno 版本由自定义规则跟踪。minor、patch 与 lockfile 维护通过 GitHub 原生 auto-merge 自动合并：`main` 的 ruleset 要求 `Windows checks` 通过（仓库管理员可绕过，用于直接推送），major 更新与 `gpui-kit` 需人工审核。
