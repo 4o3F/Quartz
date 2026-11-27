@@ -596,6 +596,7 @@ mod tests {
                 run: open_run,
                 segment,
                 interval: Some(id),
+                web: None,
                 availability: Vec::new(),
                 at: confirmed,
                 commit_by_mono: confirmed.mono,

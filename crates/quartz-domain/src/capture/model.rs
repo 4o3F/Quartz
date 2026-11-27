@@ -1,13 +1,22 @@
 //! Value inputs, transactional write descriptions and sanitized shell effects.
 
 use super::{
-    BatchId, CapturedFields, Deadline, IdleException, IdleRecord, IdleSample, MonoInstant,
-    PrivacyContext, ProcessId, ReadLastInputError, RowId, RunId, SchedulerKind, SegmentId,
-    SessionKey, TimeRange, Timestamp, UtcInstant, WindowFacts, WindowHandle, WindowId,
-    WindowInstance, WriteBatch,
+    BatchId, BrowserAudible, BrowserSnapshot, BrowserStreamKey, BrowserStreamRef, CapturedFields,
+    Deadline, IdleException, IdleRecord, IdleSample, MonoInstant, PrivacyContext,
+    PrivacyExplanation, ProcessId, ReadLastInputError, RowId, RunId, SchedulerKind, SegmentId,
+    SessionKey, TimeRange, Timestamp, TitleStatus, UtcInstant, WebLevel, WindowFacts, WindowHandle,
+    WindowId, WindowInstance, WriteBatch,
 };
 use crate::rules::registry::RuleSnapshot;
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, fmt, sync::Arc};
+
+const WEB_END_BROWSER_STATE_CODE: i32 = 1;
+const WEB_END_FOREGROUND_END_CODE: i32 = 2;
+const WEB_END_DISCONNECTED_CODE: i32 = 3;
+const WEB_END_GAP_CODE: i32 = 4;
+const WEB_END_POLICY_CHANGED_CODE: i32 = 5;
+const WEB_END_CRASH_RECOVERED_CODE: i32 = 6;
+const WEB_END_SHUTDOWN_CODE: i32 = 7;
 
 /// A stop notification only changes its own reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -105,6 +114,57 @@ pub enum IntervalEndReason {
     PolicyChanged,
     /// Capture stopped producing trustworthy foreground facts.
     CaptureGap,
+}
+/// Why a linked web interval row ended; codes match `web_intervals.end_reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebEndReason {
+    /// A browser state update changed the linked tab or web fields.
+    BrowserState,
+    /// The enclosing foreground interval ended or split.
+    ForegroundEnd,
+    /// The linked browser stream disconnected.
+    Disconnected,
+    /// Capture entered an unknown-coverage gap.
+    Gap,
+    /// Effective privacy policy changed.
+    PolicyChanged,
+    /// Recovery settled the row at its durable confirmation.
+    CrashRecovered,
+    /// The core is shutting down normally.
+    Shutdown,
+}
+impl WebEndReason {
+    /// Returns the database schema code for `web_intervals.end_reason`.
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::BrowserState => WEB_END_BROWSER_STATE_CODE,
+            Self::ForegroundEnd => WEB_END_FOREGROUND_END_CODE,
+            Self::Disconnected => WEB_END_DISCONNECTED_CODE,
+            Self::Gap => WEB_END_GAP_CODE,
+            Self::PolicyChanged => WEB_END_POLICY_CHANGED_CODE,
+            Self::CrashRecovered => WEB_END_CRASH_RECOVERED_CODE,
+            Self::Shutdown => WEB_END_SHUTDOWN_CODE,
+        }
+    }
+
+    pub(super) const fn from_interval_end(reason: IntervalEndReason) -> Self {
+        match reason {
+            IntervalEndReason::Switch
+            | IntervalEndReason::Title
+            | IntervalEndReason::NoForeground
+            | IntervalEndReason::Locked
+            | IntervalEndReason::Suspended
+            | IntervalEndReason::Paused
+            | IntervalEndReason::Disconnected
+            | IntervalEndReason::ClockJump
+            | IntervalEndReason::MidnightSplit => Self::ForegroundEnd,
+            IntervalEndReason::PolicyChanged => Self::PolicyChanged,
+            IntervalEndReason::CaptureGap => Self::Gap,
+            IntervalEndReason::CrashRecovered => Self::CrashRecovered,
+            IntervalEndReason::Shutdown => Self::Shutdown,
+        }
+    }
 }
 /// Shell notifications that require a new UTC-to-monotonic clock mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +291,54 @@ pub struct OpenInterval {
     /// Fields after privacy evaluation.
     pub fact: IntervalFact,
 }
+/// Open linked web row attached to one foreground interval piece.
+///
+/// Debug formatting deliberately redacts domain and tab title text.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OpenWebInterval {
+    /// Logical row key assigned by the capture allocator.
+    pub id: RowId,
+    /// Enclosing foreground interval row key.
+    pub interval: RowId,
+    /// Persisted `browser_streams` row identifier.
+    pub stream: BrowserStreamKey,
+    /// Inclusive boundary matching the foreground interval piece start.
+    pub start: Timestamp,
+    /// Normalized domain or special marker (`(internal)`, `(local-file)`).
+    pub domain: Option<String>,
+    /// Capped tab title, absent after privacy redaction.
+    pub tab_title: Option<String>,
+    /// Read or privacy status of the tab title.
+    pub tab_title_status: TitleStatus,
+    /// Browser-assigned tab identifier.
+    pub tab_id: i64,
+    /// Browser-assigned window identifier, when reported.
+    pub browser_window_id: Option<i64>,
+    /// Whether the linked tab was producing audio.
+    pub audible: BrowserAudible,
+    /// Applied web retention level (`Full` or `DomainOnly`).
+    pub web_level: WebLevel,
+    /// Historical downgrade explanation when the web row is restricted.
+    pub privacy: Option<PrivacyExplanation>,
+}
+impl fmt::Debug for OpenWebInterval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenWebInterval")
+            .field("id", &self.id)
+            .field("interval", &self.interval)
+            .field("stream", &self.stream)
+            .field("start", &self.start)
+            .field("domain_len", &self.domain.as_ref().map(String::len))
+            .field("tab_title_len", &self.tab_title.as_ref().map(String::len))
+            .field("tab_title_status", &self.tab_title_status)
+            .field("tab_id", &self.tab_id)
+            .field("browser_window_id", &self.browser_window_id)
+            .field("audible", &self.audible)
+            .field("web_level", &self.web_level)
+            .field("privacy", &self.privacy)
+            .finish()
+    }
+}
 /// Open availability row, independently of foreground facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAvailability {
@@ -254,6 +362,8 @@ pub struct Checkpoint {
     pub segment: SegmentId,
     /// Foreground row, when tracking or recording no foreground.
     pub interval: Option<RowId>,
+    /// Linked web row, when the foreground interval has an active web row.
+    pub web: Option<RowId>,
     /// Every open availability row.
     pub availability: Vec<RowId>,
     /// Confirmation point.
@@ -321,6 +431,17 @@ pub enum CaptureWrite {
         /// Typed reason for this transition.
         reason: IntervalEndReason,
     },
+    /// Opens a sanitized linked web row belonging to the open foreground interval.
+    OpenWebInterval(OpenWebInterval),
+    /// Closes a linked web row and clears its confirmation columns.
+    CloseWebInterval {
+        /// Logical row key assigned by the capture allocator.
+        id: RowId,
+        /// Paired clock readings at this boundary.
+        at: Timestamp,
+        /// Typed reason for this transition.
+        reason: WebEndReason,
+    },
     /// Opens an availability mask row.
     OpenAvailability(OpenAvailability),
     /// Closes an availability row, splitting at UTC midnight as required.
@@ -379,6 +500,8 @@ impl CaptureWrite {
             | Self::ObserveWindow { .. }
             | Self::RetireWindow { .. }
             | Self::CloseInterval { .. }
+            | Self::OpenWebInterval(_)
+            | Self::CloseWebInterval { .. }
             | Self::CloseAvailability { .. }
             | Self::SetDeadline { .. }
             | Self::SetTimedState(_)
@@ -398,6 +521,8 @@ impl CaptureWrite {
             | Self::RetireWindow { .. }
             | Self::OpenInterval(_)
             | Self::CloseInterval { .. }
+            | Self::OpenWebInterval(_)
+            | Self::CloseWebInterval { .. }
             | Self::OpenAvailability(_)
             | Self::CloseAvailability { .. }
             | Self::SettlePersistedRows { .. }
@@ -483,6 +608,18 @@ pub enum CaptureEvent {
         source: ObservationSource,
         /// Resolved foreground facts for this work unit.
         foreground: Foreground,
+    },
+    /// Latest state snapshot received from a connected browser extension stream.
+    BrowserState {
+        /// Stable stream identity and browser family.
+        stream: BrowserStreamRef,
+        /// Current focus, window and active tab snapshot.
+        snapshot: BrowserSnapshot,
+    },
+    /// A previously connected browser extension stream closed.
+    BrowserStreamClosed {
+        /// Stream identity and browser family that closed.
+        stream: BrowserStreamRef,
     },
     /// A notification coverage gap reported by the main-thread comparison core.
     UntriggeredChange {

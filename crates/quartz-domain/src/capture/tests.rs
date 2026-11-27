@@ -1377,6 +1377,7 @@ fn backlog_coalesces_only_replaceable_checkpoint_targets_and_detects_missed_comm
         run: RunId::new(1),
         segment: ids::IdAllocator::test_segmentid(1),
         interval: Some(ids::IdAllocator::test_rowid(1)),
+        web: None,
         availability: vec![],
         at: at(59_000),
         commit_by_mono: mono(60_000),
@@ -1875,6 +1876,7 @@ fn backlog_has_one_adaptive_deadline_and_coalescing_preserves_oldest_commit_budg
         run: RunId::new(1),
         segment: ids::IdAllocator::test_segmentid(1),
         interval: Some(ids::IdAllocator::test_rowid(1)),
+        web: None,
         availability: vec![],
         at: at(59_000),
         commit_by_mono: mono(60_000),
@@ -1885,6 +1887,7 @@ fn backlog_has_one_adaptive_deadline_and_coalescing_preserves_oldest_commit_budg
         run: RunId::new(1),
         segment: ids::IdAllocator::test_segmentid(1),
         interval: Some(ids::IdAllocator::test_rowid(1)),
+        web: None,
         availability: vec![],
         at: at(59_100),
         commit_by_mono: mono(60_100),
@@ -3223,4 +3226,591 @@ fn discarding_later_metadata_preserves_an_earlier_queued_window_observation() {
         },
     );
     assert!(step.writes.iter().any(|write| matches!(write, CaptureWrite::RetireWindow { instance: retired, .. } if *retired == instance)));
+}
+
+fn browser_window(handle: u64, family: BrowserFamily, title: &str) -> Foreground {
+    let exe = family.exe_name();
+    Foreground::Window {
+        facts: Box::new(WindowFacts {
+            handle: WindowHandle::new(handle),
+            process: ProcessId::new(42),
+            process_created_utc: Some(utc(0)),
+            class: "BrowserWindow".into(),
+            app: AppIdentity::Exe(format!("c:\\browsers\\{exe}")),
+            metadata_source: MetadataSource::Process,
+            exe_name: Some(exe.into()),
+            display_name: "Browser".into(),
+            title: Title::readable(title),
+        }),
+        privacy: PrivacyContext::default(),
+    }
+}
+
+fn browser_stream(id: i64, family: BrowserFamily) -> BrowserStreamRef {
+    BrowserStreamRef {
+        id: BrowserStreamKey::new(id),
+        family,
+    }
+}
+
+fn focused_tab_snapshot(domain: Option<&str>, tab_title: &str) -> BrowserSnapshot {
+    BrowserSnapshot {
+        focus: BrowserFocus::Focused,
+        window_id: Some(100),
+        window_state: Some(BrowserWindowState::Normal),
+        tab: Some(BrowserTab {
+            id: 7,
+            domain: domain.map(str::to_owned),
+            title: Title::readable(tab_title),
+            audible: BrowserAudible::Silent,
+        }),
+    }
+}
+
+fn web_opens(step: &CaptureStep) -> Vec<&OpenWebInterval> {
+    step.writes
+        .iter()
+        .filter_map(|write| match write {
+            CaptureWrite::OpenWebInterval(row) => Some(row),
+            _ => None,
+        })
+        .collect()
+}
+
+fn web_closes(step: &CaptureStep) -> Vec<(RowId, Timestamp, WebEndReason)> {
+    step.writes
+        .iter()
+        .filter_map(|write| match write {
+            CaptureWrite::CloseWebInterval { id, at, reason } => Some((*id, *at, *reason)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn last_checkpoint(step: &CaptureStep) -> Option<&Checkpoint> {
+    step.writes.iter().rev().find_map(CaptureWrite::checkpoint)
+}
+
+#[test]
+fn browser_unlinked_hides_title_then_restores_on_policy_changed_split_after_link() {
+    let mut fixture = Fixture::active();
+    let chrome = browser_stream(1, BrowserFamily::Chrome);
+    let _ = fixture.send(
+        at(5),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("other.example"), "Other"),
+        },
+    );
+
+    let unlinked = fixture.hook(
+        at(10),
+        browser_window(2, BrowserFamily::Chrome, "Docs - Google Chrome"),
+    );
+    let unlinked_fields = fields(&unlinked);
+    assert_eq!(unlinked_fields.level, CaptureLevel::TitleHidden);
+    assert_eq!(unlinked_fields.title, None);
+    assert_eq!(unlinked_fields.title_status, TitleStatus::Redacted);
+    assert_eq!(
+        unlinked_fields.privacy,
+        Some(PrivacyExplanation {
+            rule_id: "builtin.web_unlinked@1".into(),
+            label: Some(PrivacyLabel::Key("privacy.label.title_hidden".into())),
+        })
+    );
+    assert!(web_opens(&unlinked).is_empty());
+    assert_eq!(last_checkpoint(&unlinked).expect("checkpoint").web, None);
+    assert!(!format!("{unlinked:?}").contains("Docs"));
+
+    // Re-delivering unchanged browser state produces no writes.
+    let noop = fixture.send(
+        at(15),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("other.example"), "Other"),
+        },
+    );
+    assert!(noop.writes.is_empty());
+    assert!(noop.batch.is_none());
+
+    // Matching browser state restores the window title via a policy_changed split and opens a web row.
+    let linked = fixture.send(
+        at(20),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("docs.example"), "Docs"),
+        },
+    );
+    assert!(linked.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::CloseInterval {
+            reason: IntervalEndReason::PolicyChanged,
+            ..
+        }
+    )));
+    let opened_fg = interval_opens(&linked);
+    assert_eq!(opened_fg.len(), 1);
+    assert_eq!(fields(&linked).level, CaptureLevel::Full);
+    assert_eq!(
+        fields(&linked).title.as_deref(),
+        Some("Docs - Google Chrome")
+    );
+    let opened_web = web_opens(&linked);
+    assert_eq!(opened_web.len(), 1);
+    assert_eq!(opened_web[0].interval, opened_fg[0].id);
+    assert_eq!(opened_web[0].stream, chrome.id);
+    assert_eq!(opened_web[0].domain.as_deref(), Some("docs.example"));
+    assert_eq!(opened_web[0].tab_title.as_deref(), Some("Docs"));
+    assert_eq!(opened_web[0].tab_title_status, TitleStatus::Ok);
+    assert_eq!(opened_web[0].web_level, WebLevel::Full);
+    assert_eq!(opened_web[0].privacy, None);
+    let cp = last_checkpoint(&linked).expect("linked checkpoint");
+    assert_eq!(cp.interval, Some(opened_fg[0].id));
+    assert_eq!(cp.web, Some(opened_web[0].id));
+
+    // Re-delivering identical linked browser state produces no writes.
+    let duplicate = fixture.send(
+        at(25),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("docs.example"), "Docs"),
+        },
+    );
+    assert!(duplicate.writes.is_empty());
+    assert!(duplicate.batch.is_none());
+
+    fixture.finish(at(30));
+}
+
+#[test]
+fn browser_web_domain_rules_hide_titles_keep_domain_only_and_skip_special_domains() {
+    let mut fixture = Fixture::active();
+    fixture.policy(
+        "format='quartz-rules/1'\n\
+         [set]\nkey='user.capture'\nkind='privacy'\nname='Web privacy'\n\
+         [[rule]]\nid='bank_hide'\nlabel='Bank'\npreset='title_hidden'\n\
+         when=[{field='web.domain',op='domain_suffix',value='bank.example'}]\n\
+         [[rule]]\nid='mail_domain_only'\nlabel='Mail'\nweb='domain_only'\n\
+         when=[{field='web.domain',op='equals',value='mail.example'}]\n\
+         [[rule]]\nid='vault_none'\nlabel='Vault'\nweb='none'\n\
+         when=[{field='web.domain',op='equals',value='vault.example'}]\n\
+         [[rule]]\nid='any_valid_domain_hidden'\nlabel='Special check'\npreset='title_hidden'\n\
+         when=[{field='web.domain',op='equals',value='flagged.example'}]\n",
+        0,
+    );
+    let chrome = browser_stream(1, BrowserFamily::Chrome);
+
+    // `web.domain` hide rule drops both window title and tab title, keeping domain_only.
+    let _ = fixture.send(
+        at(10),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("portal.bank.example"), "Secret Balance"),
+        },
+    );
+    let bank = fixture.hook(
+        at(12),
+        browser_window(2, BrowserFamily::Chrome, "Secret Balance - Google Chrome"),
+    );
+    assert_eq!(fields(&bank).level, CaptureLevel::TitleHidden);
+    assert_eq!(fields(&bank).title, None);
+    let bank_web = web_opens(&bank);
+    assert_eq!(bank_web.len(), 1);
+    assert_eq!(bank_web[0].domain.as_deref(), Some("portal.bank.example"));
+    assert_eq!(bank_web[0].tab_title, None);
+    assert_eq!(bank_web[0].tab_title_status, TitleStatus::Redacted);
+    assert_eq!(bank_web[0].web_level, WebLevel::DomainOnly);
+    assert!(bank_web[0].privacy.is_some());
+    assert!(!format!("{bank:?}").contains("Secret Balance"));
+
+    // Explicit `domain_only` rule keeps domain and drops window and tab titles.
+    let _ = fixture.send(
+        at(20),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("mail.example"), "Private Mail"),
+        },
+    );
+    let mail = fixture.hook(
+        at(22),
+        browser_window(2, BrowserFamily::Chrome, "Private Mail - Google Chrome"),
+    );
+    assert_eq!(fields(&mail).level, CaptureLevel::TitleHidden);
+    assert_eq!(fields(&mail).title, None);
+    let mail_web = web_opens(&mail);
+    assert_eq!(mail_web.len(), 1);
+    assert_eq!(mail_web[0].domain.as_deref(), Some("mail.example"));
+    assert_eq!(mail_web[0].tab_title, None);
+    assert_eq!(mail_web[0].tab_title_status, TitleStatus::Redacted);
+    assert_eq!(mail_web[0].web_level, WebLevel::DomainOnly);
+
+    // `web = 'none'` emits no web row.
+    let _ = fixture.send(
+        at(30),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("vault.example"), "Vault"),
+        },
+    );
+    let vault = fixture.hook(
+        at(32),
+        browser_window(2, BrowserFamily::Chrome, "Vault - Google Chrome"),
+    );
+    assert!(web_opens(&vault).is_empty());
+    assert_eq!(last_checkpoint(&vault).expect("checkpoint").web, None);
+
+    // `(internal)` and `(local-file)` leave `web.domain` unset for rule matching.
+    fixture.policy(
+        "format='quartz-rules/1'\n\
+         [set]\nkey='user.capture'\nkind='privacy'\nname='Regex domain'\n\
+         [[rule]]\nid='match_any_domain'\nlabel='Any domain'\npreset='title_hidden'\n\
+         when=[{field='web.domain',op='regex',value='.+'}]\n",
+        1,
+    );
+    for (time, marker, title) in [
+        (40, "(internal)", "Settings"),
+        (50, "(local-file)", "notes.html"),
+    ] {
+        let _ = fixture.send(
+            at(time),
+            CaptureEvent::BrowserState {
+                stream: chrome,
+                snapshot: focused_tab_snapshot(Some(marker), title),
+            },
+        );
+        let step = fixture.hook(
+            at(time + 2),
+            browser_window(
+                2,
+                BrowserFamily::Chrome,
+                &format!("{title} - Google Chrome"),
+            ),
+        );
+        assert_eq!(fields(&step).level, CaptureLevel::Full);
+        let opened = web_opens(&step);
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].domain.as_deref(), Some(marker));
+        assert_eq!(opened[0].tab_title.as_deref(), Some(title));
+        assert_eq!(opened[0].web_level, WebLevel::Full);
+    }
+
+    fixture.finish(at(60));
+}
+
+#[test]
+fn browser_private_window_and_excluded_app_emit_no_web_row_and_never_leak_titles() {
+    let mut fixture = Fixture::active();
+    let chrome = browser_stream(1, BrowserFamily::Chrome);
+    let _ = fixture.send(
+        at(10),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("private.example"), "Incognito Secret"),
+        },
+    );
+
+    let mut private_win =
+        browser_window(2, BrowserFamily::Chrome, "Incognito Secret - Google Chrome");
+    if let Foreground::Window { privacy, .. } = &mut private_win {
+        privacy.private_window = SystemSignal::Present;
+    }
+    let step = fixture.hook(at(12), private_win);
+    assert_eq!(fields(&step).level, CaptureLevel::TitleHidden);
+    assert_eq!(fields(&step).title, None);
+    assert_eq!(
+        fields(&step).privacy.as_ref().map(|p| p.rule_id.as_str()),
+        Some("builtin.browser_private@1")
+    );
+    assert!(web_opens(&step).is_empty());
+    assert_eq!(last_checkpoint(&step).expect("checkpoint").web, None);
+    assert!(!format!("{step:?}").contains("Incognito Secret"));
+
+    // Subsequent browser state cannot lift the sticky private_window floor.
+    let later = fixture.send(
+        at(15),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("public.example"), "Incognito Secret"),
+        },
+    );
+    assert!(later.writes.is_empty());
+
+    // Excluded browser app emits no web row and drops title.
+    fixture.policy(
+        &rule(
+            "excluded",
+            "{field='app.exe_name',op='equals',value='chrome.exe'}",
+        ),
+        0,
+    );
+    let _ = fixture.send(
+        at(20),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("docs.example"), "Excluded Secret"),
+        },
+    );
+    let excluded = fixture.hook(
+        at(22),
+        browser_window(3, BrowserFamily::Chrome, "Excluded Secret - Google Chrome"),
+    );
+    assert_eq!(fields(&excluded).level, CaptureLevel::Excluded);
+    assert_eq!(fields(&excluded).title, None);
+    assert!(web_opens(&excluded).is_empty());
+    assert!(!format!("{excluded:?}").contains("Excluded Secret"));
+
+    fixture.finish(at(30));
+}
+
+#[test]
+fn browser_web_row_closes_with_foreground_on_midnight_segment_stream_close_and_shutdown() {
+    let before_midnight = 86_400_000 - 1_000;
+    let mut fixture = Fixture::new(at(before_midnight));
+    let _ = fixture.send(
+        at(before_midnight),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    let chrome = browser_stream(1, BrowserFamily::Chrome);
+    let _ = fixture.send(
+        at(before_midnight),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("docs.example"), "Docs"),
+        },
+    );
+    let opened = fixture.review(
+        at(before_midnight),
+        browser_window(2, BrowserFamily::Chrome, "Docs - Google Chrome"),
+    );
+    let first_web_id = web_opens(&opened)[0].id;
+
+    // Midnight split closes the old web row and opens a new one for the next UTC day piece.
+    let after_midnight = 86_400_000 + 500;
+    let split = fixture.send(at(after_midnight), CaptureEvent::Wake);
+    let split_closes = web_closes(&split);
+    assert_eq!(
+        split_closes,
+        vec![(first_web_id, at(86_400_000), WebEndReason::ForegroundEnd)]
+    );
+    let split_opens = web_opens(&split);
+    assert_eq!(split_opens.len(), 1);
+    assert_eq!(split_opens[0].start, at(86_400_000));
+    let second_web_id = split_opens[0].id;
+    assert_eq!(
+        last_checkpoint(&split).expect("split checkpoint").web,
+        Some(second_web_id)
+    );
+
+    // Clock segment split closes the web row so it never crosses segments.
+    let resumed = fixture.send(
+        at(after_midnight + 500),
+        CaptureEvent::ClockChanged(ClockChange::Resume),
+    );
+    assert_eq!(
+        web_closes(&resumed),
+        vec![(
+            second_web_id,
+            at(after_midnight + 500),
+            WebEndReason::ForegroundEnd
+        )]
+    );
+    assert_eq!(
+        last_checkpoint(&resumed).expect("resume checkpoint").web,
+        None
+    );
+
+    // Re-open after resume, then close the browser stream -> Disconnected.
+    let reopened = fixture.review(
+        at(after_midnight + 1_000),
+        browser_window(2, BrowserFamily::Chrome, "Docs - Google Chrome"),
+    );
+    let third_web_id = web_opens(&reopened)[0].id;
+    let disconnected = fixture.send(
+        at(after_midnight + 1_500),
+        CaptureEvent::BrowserStreamClosed { stream: chrome },
+    );
+    assert_eq!(
+        web_closes(&disconnected),
+        vec![(
+            third_web_id,
+            at(after_midnight + 1_500),
+            WebEndReason::Disconnected
+        )]
+    );
+    assert!(disconnected.writes.iter().any(|write| matches!(
+        write,
+        CaptureWrite::CloseInterval {
+            reason: IntervalEndReason::PolicyChanged,
+            ..
+        }
+    )));
+    assert_eq!(
+        last_checkpoint(&disconnected)
+            .expect("disconnect checkpoint")
+            .web,
+        None
+    );
+
+    // Reconnect stream and shut down -> Shutdown.
+    let reconnected = fixture.send(
+        at(after_midnight + 2_000),
+        CaptureEvent::BrowserState {
+            stream: chrome,
+            snapshot: focused_tab_snapshot(Some("docs.example"), "Docs"),
+        },
+    );
+    let fourth_web_id = web_opens(&reconnected)[0].id;
+    let shutdown = fixture.send(at(after_midnight + 2_500), CaptureEvent::Shutdown);
+    assert_eq!(
+        web_closes(&shutdown),
+        vec![(
+            fourth_web_id,
+            at(after_midnight + 2_500),
+            WebEndReason::Shutdown
+        )]
+    );
+    assert_conservation(&fixture.writes);
+}
+
+#[test]
+fn browser_linking_handles_edge_zero_width_chinese_emoji_ambiguity_and_no_stream_offline() {
+    let mut fixture = Fixture::active();
+    let edge_one = browser_stream(10, BrowserFamily::Edge);
+    let edge_two = browser_stream(11, BrowserFamily::Edge);
+    let tab_title = "项目规划 🚀 讨论";
+    let snap = focused_tab_snapshot(Some("secret-docs.example"), tab_title);
+
+    let _ = fixture.send(
+        at(10),
+        CaptureEvent::BrowserState {
+            stream: edge_one,
+            snapshot: snap.clone(),
+        },
+    );
+    let linked = fixture.hook(
+        at(12),
+        browser_window(
+            2,
+            BrowserFamily::Edge,
+            "项目规划 🚀 讨论 - Work - Microsoft\u{200b} Edge",
+        ),
+    );
+    let opened = web_opens(&linked);
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].stream, edge_one.id);
+    assert_eq!(opened[0].domain.as_deref(), Some("secret-docs.example"));
+    assert_eq!(opened[0].tab_title.as_deref(), Some(tab_title));
+    assert_eq!(opened[0].web_level, WebLevel::Full);
+    // OpenWebInterval Debug must redact domain and tab title.
+    let web_debug = format!("{:?}", opened[0]);
+    assert!(!web_debug.contains("secret-docs.example"));
+    assert!(!web_debug.contains("项目规划"));
+    assert!(!web_debug.contains("🚀"));
+
+    // Adding a second focused Edge stream with the same title makes linking ambiguous.
+    let ambiguous = fixture.send(
+        at(20),
+        CaptureEvent::BrowserState {
+            stream: edge_two,
+            snapshot: snap,
+        },
+    );
+    assert_eq!(
+        web_closes(&ambiguous),
+        vec![(opened[0].id, at(20), WebEndReason::BrowserState)]
+    );
+    assert_eq!(fields(&ambiguous).level, CaptureLevel::TitleHidden);
+    assert_eq!(
+        fields(&ambiguous)
+            .privacy
+            .as_ref()
+            .map(|p| p.rule_id.as_str()),
+        Some("builtin.web_unlinked@1")
+    );
+    assert_eq!(last_checkpoint(&ambiguous).expect("checkpoint").web, None);
+
+    // Firefox has no connected stream -> keeps existing Offline behaviour.
+    let firefox_allowed = fixture.hook(
+        at(30),
+        browser_window(
+            3,
+            BrowserFamily::Firefox,
+            "Open Docs \u{2014} Mozilla Firefox",
+        ),
+    );
+    assert_eq!(fields(&firefox_allowed).level, CaptureLevel::Full);
+    assert_eq!(
+        fields(&firefox_allowed).title.as_deref(),
+        Some("Open Docs \u{2014} Mozilla Firefox")
+    );
+    assert!(web_opens(&firefox_allowed).is_empty());
+
+    // With a web privacy rule, no-stream Firefox discards its title via Offline rule.
+    fixture.policy(
+        &rule(
+            "title_hidden",
+            "{field='web.domain',op='domain_suffix',value='bank.example'}",
+        ),
+        0,
+    );
+    let firefox_hidden = fixture.hook(
+        at(40),
+        browser_window(
+            3,
+            BrowserFamily::Firefox,
+            "Offline Secret \u{2014} Mozilla Firefox",
+        ),
+    );
+    assert_eq!(fields(&firefox_hidden).level, CaptureLevel::TitleHidden);
+    assert_eq!(fields(&firefox_hidden).title, None);
+    assert_eq!(
+        fields(&firefox_hidden)
+            .privacy
+            .as_ref()
+            .map(|p| p.rule_id.as_str()),
+        Some("builtin.web_context_unknown@1")
+    );
+    assert!(!format!("{firefox_hidden:?}").contains("Offline Secret"));
+
+    fixture.finish(at(50));
+}
+
+#[test]
+fn backlog_coalesces_checkpoints_only_when_web_target_matches() {
+    let mut backlog = WriteBacklog::new();
+    let base = Checkpoint {
+        run: RunId::new(1),
+        segment: ids::IdAllocator::test_segmentid(1),
+        interval: Some(ids::IdAllocator::test_rowid(1)),
+        web: Some(ids::IdAllocator::test_rowid(2)),
+        availability: vec![],
+        at: at(10_000),
+        commit_by_mono: mono(11_000),
+    };
+    let mut first = batch(1, 0, 10_000, 0);
+    first.writes.push(CaptureWrite::Checkpoint(base.clone()));
+    let _ = backlog.push(first, at(10_000));
+
+    let mut same_target = batch(2, 10_000, 10_100, 0);
+    same_target
+        .writes
+        .push(CaptureWrite::Checkpoint(Checkpoint {
+            at: at(10_100),
+            commit_by_mono: mono(11_100),
+            ..base.clone()
+        }));
+    let coalesced = backlog.push(same_target, at(10_100));
+    assert_eq!(coalesced.coalesced, vec![ids::IdAllocator::test_batchid(1)]);
+
+    let mut different_web = batch(3, 10_100, 10_200, 0);
+    different_web
+        .writes
+        .push(CaptureWrite::Checkpoint(Checkpoint {
+            web: None,
+            at: at(10_200),
+            commit_by_mono: mono(11_200),
+            ..base
+        }));
+    let distinct = backlog.push(different_web, at(10_200));
+    assert!(distinct.coalesced.is_empty());
 }

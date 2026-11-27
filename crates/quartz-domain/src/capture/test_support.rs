@@ -17,6 +17,12 @@ struct OpenRow {
     mask: Mask,
 }
 #[derive(Debug)]
+struct OpenWebRow {
+    interval: RowId,
+    segment: SegmentId,
+    start: Timestamp,
+}
+#[derive(Debug)]
 struct Span {
     start: MonoInstant,
     end: MonoInstant,
@@ -32,6 +38,7 @@ struct Segment {
 /// Stop masks are unioned; idle is validated independently and never contributes coverage.
 pub fn assert_conservation(writes: &[CaptureWrite]) {
     let mut rows = BTreeMap::<RowId, OpenRow>::new();
+    let mut web_rows = BTreeMap::<RowId, OpenWebRow>::new();
     let mut spans = BTreeMap::<SegmentId, Vec<Span>>::new();
     let mut segments = BTreeMap::<SegmentId, Segment>::new();
     let mut run = None;
@@ -87,8 +94,55 @@ pub fn assert_conservation(writes: &[CaptureWrite]) {
                     .is_none()
                 );
             }
+            CaptureWrite::OpenWebInterval(row) => {
+                let parent = rows
+                    .get(&row.interval)
+                    .expect("web row must reference an open foreground interval");
+                assert!(
+                    matches!(parent.mask, Mask::Fact),
+                    "web row parent must be a foreground interval: {row:?}"
+                );
+                assert_eq!(
+                    row.start, parent.start,
+                    "web row start must match its foreground piece: {row:?}"
+                );
+                assert!(
+                    web_rows
+                        .insert(
+                            row.id,
+                            OpenWebRow {
+                                interval: row.interval,
+                                segment: parent.segment,
+                                start: row.start,
+                            },
+                        )
+                        .is_none()
+                );
+            }
+            CaptureWrite::CloseWebInterval { id, at, .. } => {
+                let OpenWebRow { start, .. } = web_rows
+                    .remove(id)
+                    .expect("close web must refer to an open web row");
+                assert!(
+                    at.utc >= start.utc && at.mono >= start.mono,
+                    "negative web duration: {write:?}, {start:?}"
+                );
+                assert!(
+                    at.utc
+                        .duration_since(start.utc)
+                        .expect("ordered UTC endpoints")
+                        <= limits::UTC_DAY,
+                    "web row exceeded UTC day: {write:?}"
+                );
+            }
             CaptureWrite::CloseInterval { id, at, .. }
             | CaptureWrite::CloseAvailability { id, at, .. } => {
+                if matches!(write, CaptureWrite::CloseInterval { .. }) {
+                    assert!(
+                        web_rows.values().all(|web| web.interval != *id),
+                        "web row must close before its foreground interval: {write:?}"
+                    );
+                }
                 let OpenRow {
                     segment,
                     start,
@@ -114,6 +168,16 @@ pub fn assert_conservation(writes: &[CaptureWrite]) {
                 });
             }
             CaptureWrite::SettlePersistedRows { segment, at, .. } => {
+                let web_ids: Vec<_> = web_rows
+                    .iter()
+                    .filter(|(_, row)| row.segment == *segment)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in web_ids {
+                    let OpenWebRow { start, .. } =
+                        web_rows.remove(&id).expect("persisted open web row");
+                    assert!(at.mono >= start.mono && at.utc >= start.utc);
+                }
                 let ids: Vec<_> = rows
                     .iter()
                     .filter(|(_, row)| row.segment == *segment)
@@ -148,6 +212,7 @@ pub fn assert_conservation(writes: &[CaptureWrite]) {
         }
     }
     assert!(rows.is_empty(), "unsettled rows: {rows:?}");
+    assert!(web_rows.is_empty(), "unsettled web rows: {web_rows:?}");
     let mut previous_end = run.expect("run opened").mono;
     for (segment, Segment { start, end }) in segments {
         let end = end.expect("segment closed");

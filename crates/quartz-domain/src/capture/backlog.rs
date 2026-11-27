@@ -387,6 +387,7 @@ impl WriteBatch {
                 left.run == right.run
                     && left.segment == right.segment
                     && left.interval == right.interval
+                    && left.web == right.web
                     && left.availability == right.availability
             }
             _ => false,

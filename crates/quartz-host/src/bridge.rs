@@ -260,14 +260,11 @@ mod tests {
         stdin_tx.send(Ok(state)).await.expect("queue state");
 
         let mut stdout = Vec::new();
-        let bridge = run_host_bridge(parsed_hello, core, stdin_rx, &mut stdout);
-        // Close stdin after core finishes so the bridge exits cleanly.
-        let closer = tokio::spawn(async move {
-            core_task.await.expect("core task");
-            drop(stdin_tx);
-        });
-        bridge.await;
-        closer.await.expect("closer");
+        // The mock core drops its pipe end after the last response; the bridge drains that
+        // response before seeing the disconnect. Stdin stays open until the bridge returns.
+        run_host_bridge(parsed_hello, core, stdin_rx, &mut stdout).await;
+        core_task.await.expect("core task");
+        drop(stdin_tx);
 
         let frames = parse_stdout_envelopes(&stdout);
         assert_eq!(frames.len(), 3);

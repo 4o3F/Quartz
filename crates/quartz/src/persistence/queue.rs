@@ -400,6 +400,7 @@ mod tests {
                 run: RunId::new(1),
                 segment: self.segment,
                 interval: None,
+                web: None,
                 availability: Vec::new(),
                 at,
                 commit_by_mono: Self::at(1_000).mono,

@@ -1,10 +1,12 @@
 //! Foreground observation history, privacy evaluation and per-instance title activity.
 
 use super::{
-    BrowserContext, CaptureLevel, CapturedFields, Foreground, HookTarget, IntervalFact,
-    MetadataRefresh, MonoInstant, NoForegroundReason, ObservationSource, PrivacyContext,
-    PrivacyMode, Timestamp, TitleActivity, WindowFacts, WindowId, WindowInstance, WindowInstances,
+    CaptureLevel, CapturedFields, Foreground, HookTarget, IntervalFact, MetadataRefresh,
+    MonoInstant, NoForegroundReason, ObservationSource, PrivacyContext, PrivacyMode, Timestamp,
+    TitleActivity, WindowFacts, WindowId, WindowInstance, WindowInstances,
+    browser::BrowserStreams,
     limits,
+    privacy::{CaptureEvaluation, CapturedWeb},
 };
 use crate::rules::registry::RuleSnapshot;
 use std::collections::{BTreeMap, VecDeque};
@@ -44,6 +46,8 @@ struct ObservedWindow {
     privacy: PrivacyContext,
     instance: WindowInstance,
     fields: CapturedFields,
+    sticky_floor: CapturedFields,
+    web: Option<CapturedWeb>,
     fingerprint: [u8; 32],
 }
 #[derive(Debug)]
@@ -62,33 +66,43 @@ impl ForegroundReading {
     pub(super) fn evaluate(
         self,
         windows: &mut WindowInstances,
+        browsers: &BrowserStreams,
         context: EvaluationContext<'_>,
         protected: Option<WindowId>,
     ) -> EvaluatedForeground {
         let mut retired = None;
         let observed = match self.foreground {
             Foreground::None(reason) => ObservedForeground::None(reason),
-            Foreground::Window {
-                mut facts,
-                mut privacy,
-            } => {
+            Foreground::Window { mut facts, privacy } => {
                 let fingerprint = facts.title.fingerprint();
                 let observation = windows.observe_with_retirement(&facts, self.at, protected);
                 retired = observation.retired;
                 let instance = observation.instance;
-                let mut fields = facts.capture(&privacy, context.rules);
+                let resolved_browser = browsers.resolve(
+                    facts.exe_name.as_deref(),
+                    facts.title.text(),
+                    &privacy.browser,
+                );
+                let CaptureEvaluation {
+                    mut fields,
+                    mut sticky_floor,
+                    mut web,
+                } = facts.capture(&privacy, resolved_browser, context.rules);
                 if let Retention::Cached(floor) = context.retention {
                     fields.restrict_to(&floor);
+                    sticky_floor.restrict_to(&floor);
+                    web = web.and_then(|captured| captured.restrict_to(&floor));
                 }
-                if fields.level != CaptureLevel::Full {
+                if sticky_floor.level != CaptureLevel::Full {
                     facts.title.redact();
                 }
-                privacy.clean_web(&fields);
                 ObservedForeground::Window(Box::new(ObservedWindow {
                     facts,
                     privacy,
                     instance,
                     fields,
+                    sticky_floor,
+                    web,
                     fingerprint,
                 }))
             }
@@ -101,13 +115,6 @@ impl ForegroundReading {
         }
     }
 }
-impl PrivacyContext {
-    fn clean_web(&mut self, fields: &CapturedFields) {
-        if fields.web == crate::rules::WebAction::None {
-            self.browser = BrowserContext::Offline;
-        }
-    }
-}
 impl EvaluatedForeground {
     pub(super) fn fact(&self) -> IntervalFact {
         match &self.observed {
@@ -116,6 +123,12 @@ impl EvaluatedForeground {
                 instance: (row.fields.level != CaptureLevel::Excluded).then_some(row.instance.id),
                 fields: row.fields.clone(),
             },
+        }
+    }
+    pub(super) fn web(&self) -> Option<&CapturedWeb> {
+        match &self.observed {
+            ObservedForeground::Window(row) => row.web.as_ref(),
+            ObservedForeground::None(_) => None,
         }
     }
     pub(super) fn instance(&self) -> Option<&WindowInstance> {
@@ -144,6 +157,7 @@ struct CachedWindow {
     facts: Box<WindowFacts>,
     privacy: PrivacyContext,
     instance: WindowId,
+    sticky_floor: CapturedFields,
     fingerprint: [u8; 32],
 }
 #[derive(Debug)]
@@ -194,6 +208,12 @@ impl ForegroundTracker {
             }),
         }
     }
+    pub(super) fn retention(&self) -> Retention {
+        match &self.last {
+            LastForeground::Window(row) => Retention::Cached(row.sticky_floor.clone()),
+            LastForeground::Unobserved | LastForeground::None(_) => Retention::Fresh,
+        }
+    }
     pub(super) fn metadata_refresh(&self) -> MetadataRefresh {
         match &self.last {
             LastForeground::Window(row) => row.facts.metadata_source.refresh(),
@@ -241,6 +261,7 @@ impl ForegroundTracker {
                 facts: row.facts,
                 privacy: row.privacy,
                 instance: row.instance.id,
+                sticky_floor: row.sticky_floor,
                 fingerprint: row.fingerprint,
             }),
         };

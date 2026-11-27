@@ -1,17 +1,20 @@
 //! Capture state transitions and transaction plans.
 
+use super::browser::BrowserStreams;
 use super::foreground::{
     EvaluatedForeground, EvaluationContext, ForegroundReading, ForegroundTracker, RebindDecision,
     Retention,
 };
+use super::privacy::CapturedWeb;
 use super::{
-    AvailabilityEndReason, AvailabilityReason, BatchId, CaptureEffect, CaptureEvent, CaptureGap,
-    CaptureInput, CaptureState, CaptureStep, CaptureWrite, Checkpoint, ClockChange, ClockEndReason,
-    Deadline, DeadlineKind, DeadlineScheduler, Foreground, ForegroundView, GapReason, IdleRecord,
-    IdleSample, IntervalEndReason, IntervalFact, MetadataRefresh, NoForegroundReason,
-    ObservationSource, OpenInterval, PolicyObservation, RowId, RunEndReason, RunId, SchedulerKind,
-    SegmentRange, SessionStatus, StopChange, StopReason, TimeRange, TimedPolicyKind, Timer,
-    Timestamp, WindowId, WindowInstances, ids::IdAllocator, limits,
+    AvailabilityEndReason, AvailabilityReason, BatchId, BrowserFamily, CaptureEffect, CaptureEvent,
+    CaptureGap, CaptureInput, CaptureState, CaptureStep, CaptureWrite, Checkpoint, ClockChange,
+    ClockEndReason, Deadline, DeadlineKind, DeadlineScheduler, Foreground, ForegroundView,
+    GapReason, IdleRecord, IdleSample, IntervalEndReason, IntervalFact, MetadataRefresh,
+    NoForegroundReason, ObservationSource, OpenInterval, PolicyObservation, RowId, RunEndReason,
+    RunId, SchedulerKind, SegmentRange, SessionStatus, StopChange, StopReason, TimeRange,
+    TimedPolicyKind, Timer, Timestamp, WebEndReason, WindowId, WindowInstances, ids::IdAllocator,
+    limits,
 };
 use crate::rules::registry::{RuleSnapshot, SnapshotEpoch};
 use std::collections::BTreeSet;
@@ -63,6 +66,12 @@ pub struct StartedCapture {
     /// Initial run/segment writes and session query.
     pub step: CaptureStep,
 }
+#[derive(Debug)]
+struct ActiveWebInterval {
+    id: RowId,
+    start: Timestamp,
+    fields: CapturedWeb,
+}
 /// Sans-IO capture state owned by one capture event loop.
 #[derive(Debug)]
 pub struct CaptureCore {
@@ -71,6 +80,8 @@ pub struct CaptureCore {
     ids: IdAllocator,
     phase: Phase,
     tracker: ForegroundTracker,
+    browsers: BrowserStreams,
+    open_web: Option<ActiveWebInterval>,
     availability: AvailabilitySet,
     pending_availability: Vec<AvailabilityEvidence>,
     review_history: ReviewHistory,
@@ -116,6 +127,8 @@ impl CaptureCore {
             ids,
             phase: Phase::startup(),
             tracker: ForegroundTracker::new(),
+            browsers: BrowserStreams::default(),
+            open_web: None,
             availability: AvailabilitySet::new(at),
             pending_availability: Vec::new(),
             review_history: ReviewHistory::default(),
@@ -295,6 +308,26 @@ impl CaptureCore {
             CaptureEvent::Foreground { source, foreground } => {
                 self.on_foreground(source, foreground, at, rules, step)?
             }
+            CaptureEvent::BrowserState { stream, snapshot } => {
+                self.browsers.update(stream, snapshot);
+                self.reevaluate_browser(
+                    stream.family,
+                    at,
+                    rules,
+                    WebEndReason::BrowserState,
+                    step,
+                )?;
+            }
+            CaptureEvent::BrowserStreamClosed { stream } => {
+                self.browsers.remove(stream.id);
+                self.reevaluate_browser(
+                    stream.family,
+                    at,
+                    rules,
+                    WebEndReason::Disconnected,
+                    step,
+                )?;
+            }
             CaptureEvent::UntriggeredChange {
                 previous_window,
                 reviewed_window,
@@ -469,6 +502,7 @@ impl CaptureCore {
         step: &mut CaptureStep,
     ) -> Result<(), AdvanceTimeError> {
         self.phase.take_interval();
+        self.open_web = None;
         self.phase.take_waiting();
         self.review_history.ranges.clear();
         for evidence in self.availability.reopen_evidence() {
@@ -518,6 +552,8 @@ impl CaptureCore {
                 write,
                 CaptureWrite::OpenInterval(_)
                     | CaptureWrite::CloseInterval { .. }
+                    | CaptureWrite::OpenWebInterval(_)
+                    | CaptureWrite::CloseWebInterval { .. }
                     | CaptureWrite::OpenAvailability(_)
                     | CaptureWrite::CloseAvailability { .. }
                     | CaptureWrite::ObserveWindow { .. }
@@ -668,6 +704,7 @@ impl CaptureCore {
         {
             // The dependent interval was discarded too; closing it would reference a missing row.
             self.phase.take_interval();
+            self.open_web = None;
             self.phase.request_review();
             self.tracker.forget();
             step.effects.push(CaptureEffect::ReviewForeground);
@@ -757,6 +794,7 @@ impl CaptureCore {
     fn open_interval(
         &mut self,
         fact: IntervalFact,
+        web: Option<CapturedWeb>,
         at: Timestamp,
         session: SessionBoundary,
         step: &mut CaptureStep,
@@ -772,10 +810,36 @@ impl CaptureCore {
             start: at,
             fact,
         };
+        let interval_id = row.id;
         step.writes.push(CaptureWrite::OpenInterval(row.clone()));
         self.phase.open_interval(row);
+        if let Some(web) = web {
+            debug_assert!(self.open_web.is_none());
+            let web_id = self.row_id();
+            let open = web.to_open(web_id, interval_id, at);
+            step.writes.push(CaptureWrite::OpenWebInterval(open));
+            self.open_web = Some(ActiveWebInterval {
+                id: web_id,
+                start: at,
+                fields: web,
+            });
+        }
+    }
+    fn close_web_interval(&mut self, at: Timestamp, reason: WebEndReason, step: &mut CaptureStep) {
+        if let Some(web) = self.open_web.take() {
+            let at = Timestamp {
+                utc: at.utc.max(web.start.utc),
+                mono: at.mono.max(web.start.mono),
+            };
+            step.writes.push(CaptureWrite::CloseWebInterval {
+                id: web.id,
+                at,
+                reason,
+            });
+        }
     }
     fn close_interval(&mut self, at: Timestamp, reason: IntervalEndReason, step: &mut CaptureStep) {
+        self.close_web_interval(at, WebEndReason::from_interval_end(reason), step);
         if let Some(row) = self.phase.take_interval() {
             let at = Timestamp {
                 utc: at.utc.max(row.start.utc),
@@ -806,8 +870,15 @@ impl CaptureCore {
             .boundary_at(midnight)?;
             let fact = row.fact.clone();
             let session = row.session;
+            let web = self.open_web.as_ref().map(|web| web.fields.clone());
             self.close_interval(boundary, IntervalEndReason::MidnightSplit, step);
-            self.open_interval(fact, boundary, SessionBoundary::Continue(session), step);
+            self.open_interval(
+                fact,
+                web,
+                boundary,
+                SessionBoundary::Continue(session),
+                step,
+            );
         }
         Ok(())
     }
@@ -994,7 +1065,12 @@ impl CaptureCore {
         }
         self.confirm_foreground_read(reading.at, step)?;
         self.split_foreground(reading.at, step)?;
-        let observed = reading.evaluate(&mut self.windows, context, self.tracker.instance());
+        let observed = reading.evaluate(
+            &mut self.windows,
+            &self.browsers,
+            context,
+            self.tracker.instance(),
+        );
         let retired = observed.retired;
         let at = observed.at;
         self.tracker.prune_histories(at.mono);
@@ -1024,8 +1100,11 @@ impl CaptureCore {
         let same_window =
             observed.instance().map(|instance| instance.id) == self.tracker.instance();
         let same_title = observed.fingerprint() == self.tracker.fingerprint();
-        let same =
-            self.phase.interval().is_some_and(|row| row.fact == fact) && same_window && same_title;
+        let same_web = self.open_web.as_ref().map(|row| &row.fields) == observed.web();
+        let same = self.phase.interval().is_some_and(|row| row.fact == fact)
+            && same_window
+            && same_title
+            && same_web;
         if same && observed.source == ObservationSource::Hook {
             self.tracker.remember(observed);
             return;
@@ -1045,7 +1124,8 @@ impl CaptureCore {
                 step.title_storm = self.tracker.title_activity(instance.id, observed.at.mono);
             }
             self.close_interval(observed.at, reason, step);
-            self.open_interval(fact, observed.at, SessionBoundary::New, step);
+            let web = observed.web().cloned();
+            self.open_interval(fact, web, observed.at, SessionBoundary::New, step);
         }
         self.tracker.remember(observed);
     }
@@ -1056,13 +1136,16 @@ impl CaptureCore {
         match observed.fact() {
             IntervalFact::NoForeground(_) => IntervalEndReason::NoForeground,
             _ if same_window
-                && !same_title
                 && self
                     .phase
                     .interval()
                     .is_some_and(|row| matches!(row.fact, IntervalFact::Window { .. })) =>
             {
-                IntervalEndReason::Title
+                if same_title {
+                    IntervalEndReason::PolicyChanged
+                } else {
+                    IntervalEndReason::Title
+                }
             }
             _ => IntervalEndReason::Switch,
         }
@@ -1075,16 +1158,13 @@ impl CaptureCore {
         step: &mut CaptureStep,
     ) -> Result<(), AdvanceTimeError> {
         let old = self.phase.take_interval();
+        let old_web = self.open_web.take();
+        debug_assert!(old.is_some() || old_web.is_none());
         let cached = matches!(foreground, PolicyObservation::Refresh);
-        let retention = match (&old, cached) {
-            (
-                Some(OpenInterval {
-                    fact: IntervalFact::Window { fields, .. },
-                    ..
-                }),
-                true,
-            ) => Retention::Cached(fields.clone()),
-            _ => Retention::Fresh,
+        let retention = if cached {
+            self.tracker.retention()
+        } else {
+            Retention::Fresh
         };
         let start = step.writes.len();
         self.reevaluate_policy(at, foreground, rules, retention, step)?;
@@ -1093,14 +1173,32 @@ impl CaptureCore {
                 .iter()
                 .position(|write| matches!(write, CaptureWrite::OpenInterval(_)))
                 .map_or(step.writes.len(), |position| start + position);
+            let close_at = Timestamp {
+                utc: at.utc.max(old.start.utc),
+                mono: at.mono.max(old.start.mono),
+            };
             step.writes.insert(
                 position,
                 CaptureWrite::CloseInterval {
                     id: old.id,
-                    at,
+                    at: close_at,
                     reason: IntervalEndReason::PolicyChanged,
                 },
             );
+            if let Some(web) = old_web {
+                let web_close_at = Timestamp {
+                    utc: at.utc.max(web.start.utc),
+                    mono: at.mono.max(web.start.mono),
+                };
+                step.writes.insert(
+                    position,
+                    CaptureWrite::CloseWebInterval {
+                        id: web.id,
+                        at: web_close_at,
+                        reason: WebEndReason::PolicyChanged,
+                    },
+                );
+            }
         }
         Ok(())
     }
@@ -1147,12 +1245,81 @@ impl CaptureCore {
         } else {
             self.open_interval(
                 IntervalFact::NoForeground(NoForegroundReason::Empty),
+                None,
                 at,
                 SessionBoundary::New,
                 step,
             );
         }
         step.effects.push(CaptureEffect::ReviewForeground);
+        Ok(())
+    }
+    fn reevaluate_browser(
+        &mut self,
+        family: BrowserFamily,
+        at: Timestamp,
+        rules: &RuleSnapshot,
+        web_end: WebEndReason,
+        step: &mut CaptureStep,
+    ) -> Result<(), AdvanceTimeError> {
+        if !self.phase.ready()
+            || !self.phase.reasons().is_empty()
+            || self.phase.gap().is_some()
+            || self.phase.needs_review()
+        {
+            return Ok(());
+        }
+        let Some(open) = self.phase.interval() else {
+            return Ok(());
+        };
+        let Some(mut foreground) = self.tracker.current() else {
+            return Ok(());
+        };
+        let Foreground::Window { facts, privacy } = &mut foreground else {
+            return Ok(());
+        };
+        if facts
+            .exe_name
+            .as_deref()
+            .and_then(BrowserFamily::from_exe_name)
+            != Some(family)
+        {
+            return Ok(());
+        }
+        if let Some(mode) = self.timed.privacy(self.clock.observed) {
+            privacy.mode = mode;
+        }
+        let retention = self.tracker.retention();
+        let fingerprint = self.tracker.fingerprint();
+        let observed = ForegroundReading {
+            source: ObservationSource::Review,
+            foreground,
+            at,
+        }
+        .evaluate(
+            &mut self.windows,
+            &self.browsers,
+            EvaluationContext { rules, retention },
+            self.tracker.instance(),
+        );
+        let fact = observed.fact();
+        let same_web = self.open_web.as_ref().map(|row| &row.fields) == observed.web();
+        if open.fact == fact && same_web {
+            return Ok(());
+        }
+        if let Some(instance) = observed.allowed_instance() {
+            self.window_registrations.observe(instance.id);
+            step.writes.push(CaptureWrite::ObserveWindow {
+                instance: instance.clone(),
+                at,
+            });
+        }
+        self.close_web_interval(at, web_end, step);
+        self.close_interval(at, IntervalEndReason::PolicyChanged, step);
+        let web = observed.web().cloned();
+        self.open_interval(fact, web, at, SessionBoundary::New, step);
+        self.tracker.remember(observed);
+        self.tracker.restore_fingerprint(fingerprint);
         Ok(())
     }
     fn checkpoint(&mut self, at: Timestamp, step: &mut CaptureStep) {
@@ -1187,6 +1354,7 @@ impl CaptureCore {
             run: self.clock.run,
             segment: self.clock.segment,
             interval: self.phase.interval().as_ref().map(|row| row.id),
+            web: self.open_web.as_ref().map(|row| row.id),
             availability: self.availability.open_ids(),
             at,
             commit_by_mono: at.mono.advance(limits::BATCH_WAIT),

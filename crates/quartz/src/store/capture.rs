@@ -166,6 +166,9 @@ impl<'connection> Capture<'connection> {
             CaptureWrite::CloseInterval { id, at, reason } => {
                 self.close_interval(run, *id, *at, *reason)
             }
+            CaptureWrite::OpenWebInterval(_) | CaptureWrite::CloseWebInterval { .. } => {
+                unreachable!("web rows are persisted in M5-B2b")
+            }
             CaptureWrite::OpenAvailability(row) => self.open_availability(run, row),
             CaptureWrite::CloseAvailability { id, at, reason } => {
                 self.close_availability(run, *id, *at, *reason)

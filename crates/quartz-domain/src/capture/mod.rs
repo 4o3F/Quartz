@@ -6,6 +6,7 @@
 //! steps in [`WriteBacklog`] until acknowledged and report any discarded range as a gap.
 
 mod backlog;
+mod browser;
 mod components;
 mod core;
 mod deadlines;
@@ -22,6 +23,11 @@ mod timed;
 mod window;
 
 pub use backlog::{BacklogFailure, BacklogOutcome, StoredGap, WriteBacklog, WriteBatch};
+pub use browser::{
+    BrowserAudible, BrowserFamily, BrowserFocus, BrowserLink, BrowserSnapshot, BrowserStreamKey,
+    BrowserStreamRef, BrowserTab, BrowserWindowState, WebLevel, link_browser_window,
+    strip_browser_title_suffix,
+};
 pub use core::{CaptureCore, StartCaptureError, StartedCapture, StepCaptureError};
 pub use deadlines::{Deadline, DeadlineKind, DeadlineScheduler, SchedulerKind};
 pub use idle::{
@@ -46,8 +52,8 @@ pub use model::{
     CaptureInput, CaptureParts, CaptureState, CaptureStep, CaptureWrite, Checkpoint, ClockChange,
     ClockEndReason, Foreground, ForegroundView, GapReason, HookTarget, IntervalEndReason,
     IntervalFact, NoForegroundReason, ObservationSource, OpenAvailability, OpenInterval,
-    PolicyObservation, RunEndReason, SegmentRange, SessionReadiness, SessionStatus, StopChange,
-    StopReason, Timer, TitleActivity,
+    OpenWebInterval, PolicyObservation, RunEndReason, SegmentRange, SessionReadiness,
+    SessionStatus, StopChange, StopReason, Timer, TitleActivity, WebEndReason,
 };
 
 const _: () = {

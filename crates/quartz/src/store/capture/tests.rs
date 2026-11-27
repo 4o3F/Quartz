@@ -623,6 +623,7 @@ fn checkpoint_is_atomic_and_advances_every_open_row() {
         run: recovered.run,
         segment: recovered.segments[0].segment,
         interval: Some(recovered.intervals[0].row.id),
+        web: None,
         availability: vec![availability_id],
         at: at(100),
         commit_by_mono: at(1000).mono,
