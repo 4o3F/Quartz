@@ -60,6 +60,27 @@ pub enum PreviewState {
     TodayData(TodayPreviewState),
     /// Today with application details.
     TodayAppDetails,
+    /// Rules page with builtin and user sets, a disabled user set, an override marker,
+    /// and a user set selected with entries.
+    Rules,
+    /// Rules page Categories tab with an archived category visible and the create editor open.
+    RulesCategories,
+    /// Rules page with a user classification set open in the editor and one diagnostic shown.
+    RuleEditor,
+    /// Rules page with a cleanly validated rule set and 7-day impact preview results.
+    RuleEditorPreview,
+    /// Rules page paste-import pane with pasted text targeting an existing user rule set.
+    RuleImport,
+    /// Rules page Unclassified tab grouped by application with 5 rows including a hidden entity.
+    Unclassified,
+    /// Today page with the side panel Annotations tab listing 3 annotations, one missing category.
+    TodayAnnotations,
+    /// Today page with the annotation create editor open and an end-time validation error.
+    AnnotationEditor,
+    /// Today page with an active 45-minute timeline drag-selection band.
+    TimelineSelect,
+    /// Today page with the Classify-as menu open over a selected timeline segment.
+    ClassifyMenu,
     /// The shared failure/connecting screen, without a core or pipe.
     Error(ErrorPreviewState),
 }
@@ -180,6 +201,16 @@ impl FromStr for PreviewState {
             "today-details" => Ok(Self::TodayDetails),
             "today-hover" => Ok(Self::TodayHover),
             "today-full-day" => Ok(Self::TodayFullDay),
+            "rules" => Ok(Self::Rules),
+            "rules-categories" => Ok(Self::RulesCategories),
+            "rule-editor" => Ok(Self::RuleEditor),
+            "rule-editor-preview" => Ok(Self::RuleEditorPreview),
+            "rule-import" => Ok(Self::RuleImport),
+            "unclassified" => Ok(Self::Unclassified),
+            "today-annotations" => Ok(Self::TodayAnnotations),
+            "annotation-editor" => Ok(Self::AnnotationEditor),
+            "timeline-select" => Ok(Self::TimelineSelect),
+            "classify-menu" => Ok(Self::ClassifyMenu),
             "connecting" => Ok(Self::Error(ErrorPreviewState::Connecting)),
             "core-not-running" => Ok(Self::Error(ErrorPreviewState::CoreNotRunning)),
             "core-not-running-starting" => {
@@ -373,6 +404,29 @@ struct InitialView {
 }
 
 impl PreviewState {
+    /// The top-level page this preview state opens on.
+    const fn page(self) -> Page {
+        match self {
+            Self::Rules
+            | Self::RulesCategories
+            | Self::RuleEditor
+            | Self::RuleEditorPreview
+            | Self::RuleImport
+            | Self::Unclassified => Page::Rules,
+            Self::Today
+            | Self::TodayDetails
+            | Self::TodayAppDetails
+            | Self::TodayHover
+            | Self::TodayFullDay
+            | Self::TodayData(_)
+            | Self::TodayAnnotations
+            | Self::AnnotationEditor
+            | Self::TimelineSelect
+            | Self::ClassifyMenu
+            | Self::Error(_) => Page::Today,
+        }
+    }
+
     /// The timeline range this state opens with.
     const fn range(self) -> RangeChoice {
         match self {
@@ -382,6 +436,16 @@ impl PreviewState {
             | Self::TodayAppDetails
             | Self::TodayData(_)
             | Self::TodayHover
+            | Self::Rules
+            | Self::RulesCategories
+            | Self::RuleEditor
+            | Self::RuleEditorPreview
+            | Self::RuleImport
+            | Self::Unclassified
+            | Self::TodayAnnotations
+            | Self::AnnotationEditor
+            | Self::TimelineSelect
+            | Self::ClassifyMenu
             | Self::Error(_) => RangeChoice::Activity,
         }
     }
@@ -389,9 +453,20 @@ impl PreviewState {
     /// The details subject and hovered segment this state opens on the sample day.
     fn initial_view(self, sample: &SampleDay) -> InitialView {
         match self {
-            Self::Today | Self::TodayFullDay | Self::TodayData(_) | Self::Error(_) => {
-                InitialView::default()
-            }
+            Self::Today
+            | Self::TodayFullDay
+            | Self::TodayData(_)
+            | Self::Rules
+            | Self::RulesCategories
+            | Self::RuleEditor
+            | Self::RuleEditorPreview
+            | Self::RuleImport
+            | Self::Unclassified
+            | Self::TodayAnnotations
+            | Self::AnnotationEditor
+            | Self::TimelineSelect
+            | Self::ClassifyMenu
+            | Self::Error(_) => InitialView::default(),
             Self::TodayAppDetails => InitialView {
                 details: sample
                     .day
@@ -437,7 +512,7 @@ impl PreviewOptions {
                     day: sample.day,
                     formatter: Formatter::new(self.language),
                     tokens,
-                    page: Page::Today,
+                    page: self.state.page(),
                     details: initial.details,
                     range: self.state.range(),
                     text_scale: LiveTextScale::read(text_scale_source)
@@ -565,7 +640,7 @@ impl PreviewOptions {
             cx.new(|cx| {
                 super::system_theme::SystemTheme::observe_activation(window, cx);
                 let mut shell = AppShell::new(init, window, cx);
-                shell.configure_preview(self.state);
+                shell.configure_preview(self.state, window, cx);
                 if let Some(segment) = hover {
                     shell.show_tooltip(segment, HOVER_POSITION);
                 }
@@ -802,5 +877,101 @@ mod tests {
         assert_eq!("dark".parse(), Ok(Appearance::Dark));
         assert!("ligth".parse::<Appearance>().is_err());
         assert!("today-detail".parse::<PreviewState>().is_err());
+    }
+
+    #[test]
+    fn m4_editing_scenarios_parse_and_select_expected_pages() {
+        let cases = [
+            ("rules", PreviewState::Rules, Page::Rules),
+            (
+                "rules-categories",
+                PreviewState::RulesCategories,
+                Page::Rules,
+            ),
+            ("rule-editor", PreviewState::RuleEditor, Page::Rules),
+            (
+                "rule-editor-preview",
+                PreviewState::RuleEditorPreview,
+                Page::Rules,
+            ),
+            ("rule-import", PreviewState::RuleImport, Page::Rules),
+            ("unclassified", PreviewState::Unclassified, Page::Rules),
+            (
+                "today-annotations",
+                PreviewState::TodayAnnotations,
+                Page::Today,
+            ),
+            (
+                "annotation-editor",
+                PreviewState::AnnotationEditor,
+                Page::Today,
+            ),
+            ("timeline-select", PreviewState::TimelineSelect, Page::Today),
+            ("classify-menu", PreviewState::ClassifyMenu, Page::Today),
+        ];
+        let sample = SampleDay::new();
+        for (name, state, page) in cases {
+            assert_eq!(name.parse::<PreviewState>(), Ok(state), "scenario {name}");
+            assert_eq!(state.page(), page, "page for {name}");
+            assert_eq!(state.range(), RangeChoice::Activity, "range for {name}");
+            assert_eq!(
+                state.initial_view(&sample),
+                InitialView::default(),
+                "initial view for {name}"
+            );
+        }
+    }
+
+    fn extract_ts_string_array<'a>(source: &'a str, marker: &str) -> Vec<&'a str> {
+        let after_marker = source
+            .split_once(marker)
+            .map(|(_, rest)| rest)
+            .expect("scenario array marker exists in preview-screenshots.ts");
+        let body = after_marker
+            .split_once(']')
+            .map(|(inside, _)| inside)
+            .expect("scenario array closes with ']'");
+        let mut items = Vec::new();
+        let mut rest = body;
+        while let Some((_, after_open)) = rest.split_once('"') {
+            let (value, tail) = after_open
+                .split_once('"')
+                .expect("quoted scenario string is closed");
+            items.push(value);
+            rest = tail;
+        }
+        items
+    }
+
+    #[test]
+    fn every_scenario_in_screenshot_script_parses() {
+        let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/preview-screenshots.ts");
+        let source = std::fs::read_to_string(&script_path)
+            .expect("screenshot script exists at workspace scripts/preview-screenshots.ts");
+
+        let scenarios = extract_ts_string_array(&source, "export const scenarios = [");
+        assert!(
+            !scenarios.is_empty(),
+            "preview-screenshots.ts scenarios list must not be empty"
+        );
+        for name in &scenarios {
+            assert!(
+                name.parse::<PreviewState>().is_ok(),
+                "scenario {name:?} in scripts/preview-screenshots.ts failed to parse in PreviewState"
+            );
+        }
+
+        let narrow = extract_ts_string_array(&source, "export const narrowScenarios = [");
+        assert!(
+            !narrow.is_empty(),
+            "preview-screenshots.ts narrowScenarios list must not be empty"
+        );
+        for name in &narrow {
+            assert!(
+                name.parse::<PreviewState>().is_ok(),
+                "narrow scenario {name:?} in scripts/preview-screenshots.ts failed to parse in PreviewState"
+            );
+        }
     }
 }

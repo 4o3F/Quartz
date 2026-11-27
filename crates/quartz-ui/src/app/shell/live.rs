@@ -485,11 +485,15 @@ impl AppShell {
         canvas(
             move |bounds, window, app| {
                 let origin_x = f32::from(bounds.origin.x);
+                #[cfg(feature = "preview")]
+                let origin_y = f32::from(bounds.origin.y);
                 let width = f32::from(bounds.size.width);
                 let scale = window.scale_factor();
                 window.defer(app, move |_, app| {
                     entity.update(app, |shell, cx| {
-                        shell.observe_plot(origin_x, width, scale, cx)
+                        shell.observe_plot(origin_x, width, scale, cx);
+                        #[cfg(feature = "preview")]
+                        shell.sync_preview_plot_overlays(origin_x, origin_y, width, cx);
                     })
                 });
             },

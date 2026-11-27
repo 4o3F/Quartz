@@ -194,7 +194,7 @@ impl AppShell {
         cx.notify();
     }
 
-    fn sync_category_name_input(
+    pub(super) fn sync_category_name_input(
         &mut self,
         initial: &str,
         placeholder: String,

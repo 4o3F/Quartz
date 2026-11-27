@@ -31,6 +31,30 @@ export const scenarios = [
   "connect-failed-expanded",
   "other-session-expanded",
   "core-not-running-starting-expanded",
+  "rules",
+  "rules-categories",
+  "rule-editor",
+  "rule-editor-preview",
+  "rule-import",
+  "unclassified",
+  "today-annotations",
+  "annotation-editor",
+  "timeline-select",
+  "classify-menu",
+] as const;
+export const narrowScenarios = [
+  "today",
+  "migration-failed",
+  "rules",
+  "rules-categories",
+  "rule-editor",
+  "rule-editor-preview",
+  "rule-import",
+  "unclassified",
+  "today-annotations",
+  "annotation-editor",
+  "timeline-select",
+  "classify-menu",
 ] as const;
 const closeMessage = 0x10;
 const windowDeadlineMs = 30000;
@@ -251,7 +275,7 @@ async function main(): Promise<void> {
     }
     for (const variant of variants) {
       for (const language of languages) {
-        for (const state of ["today", "migration-failed"]) {
+        for (const state of narrowScenarios) {
           await capture(variant, state, language, true);
         }
       }

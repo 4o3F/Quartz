@@ -443,6 +443,10 @@ impl<Focus> AppShell<Focus> {
 
 impl AppShell {
     fn today_clamp_now_utc_ms(&self) -> Option<i64> {
+        #[cfg(feature = "preview")]
+        if self.preview.is_some() {
+            return None;
+        }
         let is_today = self
             .day_snapshot()
             .is_some_and(|snapshot| self.day.date() == snapshot.logical_date);

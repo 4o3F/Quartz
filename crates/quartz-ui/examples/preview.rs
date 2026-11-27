@@ -1,16 +1,26 @@
-//! Opens the main window on the sample day.
+//! Opens the main window on a synthetic fixture state without starting a core or pipe.
 //!
-//! Error states: `connecting`, `core-not-running`, `core-not-running-starting`, `core-start-failed`,
-//! `connect-failed`, `migration-failed`, `newer-database`, `version-mismatch`, `other-session`,
-//! `identity-rejected`, `handshake-rejected`, `invalid-response`, `interface-unavailable`.
-//! These use the shared error component with sample diagnostics and never start a core or pipe.
-//! `QUARTZ_PREVIEW_THEME=system|light|dark`, `QUARTZ_PREVIEW_STATE=today|today-details|today-hover|today-full-day`,
-//! `QUARTZ_PREVIEW_LANG=zh-CN|en|en-XA`, `QUARTZ_PREVIEW_OFFSCREEN=0|1` (with 1 the window is
-//! created hidden, moved off every display and shown without activation),
-//! `QUARTZ_PREVIEW_SIZE=<width>x<height>` in logical pixels from 640x480 up (default 1280x800) and
-//! `QUARTZ_PREVIEW_TEXT_SCALE=<factor>` from 1.0 to 2.25 (default: the Windows "Text size"
-//! setting). Unset variables take the first value; any other value is an error written to
-//! standard error.
+//! `QUARTZ_PREVIEW_STATE` values:
+//! - Today views: `today`, `today-details`, `today-app-details`, `today-hover`, `today-full-day`.
+//! - Today data states: `loading`, `empty-today`, `empty-past`, `stopped-paused`,
+//!   `stopped-persistence-failed`, `query-failed`, `date-picker`, `today-nav`.
+//! - M4 editing flows: `rules`, `rules-categories`, `rule-editor`, `rule-editor-preview`,
+//!   `rule-import`, `unclassified`, `today-annotations`, `annotation-editor`,
+//!   `timeline-select`, `classify-menu`.
+//! - Error states (shared error component with sample diagnostics): `connecting`,
+//!   `core-not-running`, `core-not-running-starting`, `core-start-failed`, `connect-failed`,
+//!   `migration-failed`, `newer-database`, `version-mismatch`, `other-session`,
+//!   `identity-rejected`, `handshake-rejected`, `invalid-response`, `interface-unavailable`,
+//!   `core-not-running-expanded`, `connect-failed-expanded`, `other-session-expanded`,
+//!   `core-not-running-starting-expanded`.
+//!
+//! Other environment variables:
+//! `QUARTZ_PREVIEW_THEME=system|light|dark`, `QUARTZ_PREVIEW_LANG=zh-CN|en|en-XA`,
+//! `QUARTZ_PREVIEW_OFFSCREEN=0|1` (with 1 the window is created hidden, moved off every display
+//! and shown without activation), `QUARTZ_PREVIEW_SIZE=<width>x<height>` in logical pixels from
+//! 640x480 up (default 1280x800) and `QUARTZ_PREVIEW_TEXT_SCALE=<factor>` from 1.0 to 2.25
+//! (default: the Windows "Text size" setting). Unset variables take the first value; any other
+//! value is an error written to standard error.
 //!
 //! `QUARTZ_PREVIEW_MICA_FALLBACK=0|1` forces the solid background; `QUARTZ_PREVIEW_HIGH_CONTRAST=0|1` uses the preview-only fixed system-color palette. High contrast takes precedence. Both switches exist only with the `preview` feature.
 //!
