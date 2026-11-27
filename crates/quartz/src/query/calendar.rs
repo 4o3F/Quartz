@@ -95,6 +95,24 @@ impl DayCalendar {
             RunQueryError::system_time_zone(TimeZone::try_system)?,
         )
     }
+    /// Returns the UTC start of the logical day `retention` days before the current logical day,
+    /// or `None` when titles are kept forever (03 §6).
+    #[cfg(any(windows, test))]
+    pub(crate) fn retention_cutoff_in_zone(
+        now: jiff::Timestamp,
+        retention: quartz_protocol::TitleRetention,
+        offset: DayStartOffset,
+        zone: TimeZone,
+    ) -> Result<Option<i64>, RunQueryError> {
+        let Some(days) = retention.days() else {
+            return Ok(None);
+        };
+        let mut cutoff_date = Self::current_date_in_zone(now, offset, zone.clone())?;
+        for _ in 0..days {
+            cutoff_date = cutoff_date.yesterday()?;
+        }
+        Ok(Some(Self::range_in_zone(cutoff_date, offset, zone)?.start))
+    }
     pub(crate) fn range_in_zone(
         date: LocalDate,
         offset: DayStartOffset,
@@ -341,5 +359,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn retention_cutoff_uses_logical_day_offset_dst_and_returns_none_for_forever() {
+        use quartz_protocol::TitleRetention;
+        let utc = TimeZone::UTC;
+        let now: jiff::Timestamp = "2026-11-27T12:00:00Z".parse().expect("timestamp");
+        assert_eq!(
+            DayCalendar::retention_cutoff_in_zone(
+                now,
+                TitleRetention::Forever,
+                DayStartOffset::MIDNIGHT,
+                utc.clone(),
+            )
+            .expect("forever cutoff"),
+            None
+        );
+        assert_eq!(
+            DayCalendar::retention_cutoff_in_zone(
+                now,
+                TitleRetention::Days30,
+                DayStartOffset::MIDNIGHT,
+                utc.clone(),
+            )
+            .expect("30d cutoff"),
+            Some(
+                "2026-10-28T00:00:00Z"
+                    .parse::<jiff::Timestamp>()
+                    .expect("expected 30d")
+                    .as_millisecond()
+            )
+        );
+        // At 03:00 UTC with 04:00 offset, current logical day is 2026-11-26; 30d prior is 2026-10-27 04:00.
+        let early: jiff::Timestamp = "2026-11-27T03:00:00Z".parse().expect("early timestamp");
+        let offset = DayStartOffset::try_from(240).expect("offset");
+        assert_eq!(
+            DayCalendar::retention_cutoff_in_zone(early, TitleRetention::Days30, offset, utc)
+                .expect("offset cutoff"),
+            Some(
+                "2026-10-27T04:00:00Z"
+                    .parse::<jiff::Timestamp>()
+                    .expect("expected offset cutoff")
+                    .as_millisecond()
+            )
+        );
+        // Across fall-back DST in America/Los_Angeles (2026-11-01): 2026-11-27 minus 30 days is 2026-10-28 (PDT, UTC-7).
+        let la = TimeZone::get("America/Los_Angeles").expect("LA zone");
+        assert_eq!(
+            DayCalendar::retention_cutoff_in_zone(
+                now,
+                TitleRetention::Days30,
+                DayStartOffset::MIDNIGHT,
+                la,
+            )
+            .expect("DST cutoff"),
+            Some(
+                "2026-10-28T07:00:00Z"
+                    .parse::<jiff::Timestamp>()
+                    .expect("expected PDT midnight")
+                    .as_millisecond()
+            )
+        );
     }
 }

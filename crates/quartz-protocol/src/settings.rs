@@ -84,6 +84,40 @@ impl FirstDayOfWeekSetting {
         }
     }
 }
+/// Retention window lengths in logical days (03 §6).
+const RETENTION_DAYS_30: u32 = 30;
+const RETENTION_DAYS_90: u32 = 90;
+const RETENTION_DAYS_365: u32 = 365;
+
+/// Retention period for stored window and browser tab titles (03 §6).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TitleRetention {
+    /// Keep stored titles indefinitely.
+    #[default]
+    #[serde(rename = "forever")]
+    Forever,
+    /// Purge titles from closed intervals ending at or before 30 logical days ago.
+    #[serde(rename = "30d")]
+    Days30,
+    /// Purge titles from closed intervals ending at or before 90 logical days ago.
+    #[serde(rename = "90d")]
+    Days90,
+    /// Purge titles from closed intervals ending at or before 365 logical days ago.
+    #[serde(rename = "365d")]
+    Days365,
+}
+impl TitleRetention {
+    /// Number of retained logical days before the current logical day, or `None` for forever.
+    #[must_use]
+    pub const fn days(self) -> Option<u32> {
+        match self {
+            Self::Forever => None,
+            Self::Days30 => Some(RETENTION_DAYS_30),
+            Self::Days90 => Some(RETENTION_DAYS_90),
+            Self::Days365 => Some(RETENTION_DAYS_365),
+        }
+    }
+}
 /// Whether Quartz launches automatically when the user signs in to Windows (01 §8).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "bool", into = "bool")]
@@ -274,6 +308,13 @@ pub struct SettingsSetRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub autostart: Option<AutostartEnabled>,
+    /// Optional title retention period update (`capture.title_retention`); explicit null is rejected.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub title_retention: Option<TitleRetention>,
     /// Optional partial update to ui.resident.*.
     #[serde(
         default,
@@ -325,6 +366,9 @@ pub struct SettingsResponse {
     /// Current Windows autostart state read from the registry at request time.
     #[serde(default)]
     pub autostart: AutostartEnabled,
+    /// Configured window and browser tab title retention period (03 §6).
+    #[serde(default)]
+    pub title_retention: TitleRetention,
 }
 
 #[cfg(test)]
@@ -383,6 +427,37 @@ mod tests {
         }))
         .expect("legacy response without autostart");
         assert_eq!(legacy_response.autostart, AutostartEnabled::Disabled);
+        assert_eq!(legacy_response.title_retention, TitleRetention::Forever);
+    }
+    #[test]
+    fn title_retention_wire_values_round_trip_and_reject_null_and_unknown_values() {
+        for (wire, expected, expected_days) in [
+            ("forever", TitleRetention::Forever, None),
+            ("30d", TitleRetention::Days30, Some(RETENTION_DAYS_30)),
+            ("90d", TitleRetention::Days90, Some(RETENTION_DAYS_90)),
+            ("365d", TitleRetention::Days365, Some(RETENTION_DAYS_365)),
+        ] {
+            let parsed: SettingsSetRequest =
+                serde_json::from_value(serde_json::json!({"title_retention": wire}))
+                    .expect("valid retention");
+            assert_eq!(parsed.title_retention, Some(expected));
+            assert_eq!(expected.days(), expected_days);
+            assert_eq!(
+                serde_json::to_value(parsed).expect("serialize retention"),
+                serde_json::json!({"title_retention": wire})
+            );
+        }
+        assert_eq!(TitleRetention::default(), TitleRetention::Forever);
+        for body in [
+            serde_json::json!({"title_retention": null}),
+            serde_json::json!({"title_retention": "7d"}),
+            serde_json::json!({"title_retention": 90}),
+        ] {
+            assert!(
+                serde_json::from_value::<SettingsSetRequest>(body).is_err(),
+                "invalid title_retention must fail"
+            );
+        }
     }
     #[test]
     fn explicit_preferences_override_system_and_auto_preserves_it() {

@@ -5,7 +5,8 @@ use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, Sqlite
 use quartz_domain::capture::{SchedulerKind, UtcInstant};
 use quartz_protocol::{
     FirstDayOfWeekSetting, HourCycleSetting, PrewarmEnabled, PrewarmOnBattery, PrewarmSettings,
-    ResidentEnabled, ResidentSettings, SettingsSetRequest, UiLanguageSetting, UiSettings,
+    ResidentEnabled, ResidentSettings, SettingsSetRequest, TitleRetention, UiLanguageSetting,
+    UiSettings,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -20,6 +21,7 @@ pub(crate) enum SettingKey {
     IdleDeadline,
     RemovedPrivacyContextDeadline,
     MidnightDeadline,
+    CaptureTitleRetention,
     UiResidentEnabled,
     UiPrewarmEnabled,
     UiPrewarmOnBattery,
@@ -38,6 +40,7 @@ impl SettingKey {
             Self::IdleDeadline => "capture.deadline.idle",
             Self::RemovedPrivacyContextDeadline => "capture.deadline.privacy_context",
             Self::MidnightDeadline => "capture.deadline.midnight",
+            Self::CaptureTitleRetention => "capture.title_retention",
             Self::UiResidentEnabled => "ui.resident.enabled",
             Self::UiPrewarmEnabled => "ui.prewarm.enabled",
             Self::UiPrewarmOnBattery => "ui.prewarm.on_battery",
@@ -87,6 +90,25 @@ impl From<diesel::result::Error> for AccessSettingError {
     fn from(source: diesel::result::Error) -> Self {
         Self::Database { source }
     }
+}
+/// Whether a settings update changed `capture.title_retention`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetentionChange {
+    Unchanged,
+    Changed,
+}
+/// Stored UI preferences together with the capture title retention policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoredAppSettings {
+    pub ui: UiSettings,
+    pub title_retention: TitleRetention,
+}
+/// Committed settings values returned by `Store::update_settings`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UpdatedSettings {
+    pub ui: UiSettings,
+    pub title_retention: TitleRetention,
+    pub retention_changed: RetentionChange,
 }
 pub(super) struct Settings<'connection> {
     connection: &'connection mut SqliteConnection,
@@ -214,6 +236,30 @@ impl Settings<'_> {
             i64::try_from(at).map_err(|source| AccessSettingError::Deadline { key, source })?;
         self.put(key, &millis)
     }
+    pub(super) fn title_retention(&mut self) -> Result<TitleRetention, AccessSettingError> {
+        Ok(self
+            .get::<TitleRetention>(SettingKey::CaptureTitleRetention)?
+            .unwrap_or_default())
+    }
+    pub(super) fn put_title_retention(
+        &mut self,
+        value: TitleRetention,
+    ) -> Result<(), AccessSettingError> {
+        self.put(SettingKey::CaptureTitleRetention, &value)
+    }
+    fn recover_capture_value<T: DeserializeOwned + Serialize + Default>(
+        &mut self,
+        key: SettingKey,
+    ) -> Result<(), AccessSettingError> {
+        match self.get::<T>(key) {
+            Ok(_) => Ok(()),
+            Err(error @ AccessSettingError::Json { .. }) => {
+                tracing::warn!(%key, %error, "recovering corrupt capture setting to its default");
+                self.put(key, &T::default())
+            }
+            Err(error) => Err(error),
+        }
+    }
     pub(super) fn first_day_of_week(
         &mut self,
     ) -> Result<FirstDayOfWeekSetting, AccessSettingError> {
@@ -314,6 +360,55 @@ impl Store {
     pub(crate) fn day_start_offset(&mut self) -> Result<DayStartOffset, AccessSettingError> {
         Settings::new(&mut self.writer).day_start_offset()
     }
+    pub(crate) fn title_retention(&mut self) -> Result<TitleRetention, AccessSettingError> {
+        Settings::new(&mut self.writer).title_retention()
+    }
+    pub(crate) fn app_settings(&mut self) -> Result<StoredAppSettings, AccessSettingError> {
+        let mut settings = Settings::new(&mut self.writer);
+        Ok(StoredAppSettings {
+            ui: settings.ui()?,
+            title_retention: settings.title_retention()?,
+        })
+    }
+    pub(crate) fn recover_title_retention(&mut self) -> Result<TitleRetention, AccessSettingError> {
+        self.write(|tx| {
+            let mut settings = Settings::new(tx.connection);
+            settings.recover_capture_value::<TitleRetention>(SettingKey::CaptureTitleRetention)?;
+            settings.title_retention()
+        })
+    }
+    pub(crate) fn update_settings(
+        &mut self,
+        request: SettingsSetRequest,
+    ) -> Result<UpdatedSettings, AccessSettingError> {
+        self.write(|tx| {
+            let before_ui = Settings::new(tx.connection).ui()?;
+            let before_retention = Settings::new(tx.connection).title_retention()?;
+            let updated_ui = Settings::new(tx.connection).update_ui(request)?;
+            if let Some(retention) = request.title_retention {
+                Settings::new(tx.connection).put_title_retention(retention)?;
+            }
+            let updated_retention = Settings::new(tx.connection).title_retention()?;
+            if updated_ui != before_ui {
+                tx.effects.bump_metadata(tx.connection).map_err(|source| {
+                    AccessSettingError::Version {
+                        source: Box::new(source),
+                    }
+                })?;
+            }
+            let retention_changed = if updated_retention != before_retention {
+                RetentionChange::Changed
+            } else {
+                RetentionChange::Unchanged
+            };
+            Ok(UpdatedSettings {
+                ui: updated_ui,
+                title_retention: updated_retention,
+                retention_changed,
+            })
+        })
+    }
+    #[cfg(test)]
     pub(crate) fn ui_settings(&mut self) -> Result<UiSettings, AccessSettingError> {
         Settings::new(&mut self.writer).ui()
     }
@@ -329,6 +424,7 @@ impl Store {
             settings.ui()
         })
     }
+    #[cfg(test)]
     pub(crate) fn update_ui_settings(
         &mut self,
         request: SettingsSetRequest,
@@ -685,6 +781,58 @@ mod tests {
                 .resident
                 .enabled,
             ResidentEnabled::Enabled
+        );
+    }
+    #[test]
+    fn title_retention_setting_defaults_round_trips_tracks_changes_and_recovers() {
+        let directory = tempfile::tempdir().expect("title retention settings");
+        let data = DataDirectory::new(directory.path());
+        let mut store = Store::open(&data).expect("store");
+        assert_eq!(
+            store.title_retention().expect("default"),
+            TitleRetention::Forever
+        );
+        let first = store
+            .update_settings(SettingsSetRequest {
+                title_retention: Some(TitleRetention::Days90),
+                ..Default::default()
+            })
+            .expect("set 90d");
+        assert_eq!(first.title_retention, TitleRetention::Days90);
+        assert_eq!(first.retention_changed, RetentionChange::Changed);
+
+        let repeat = store
+            .update_settings(SettingsSetRequest {
+                title_retention: Some(TitleRetention::Days90),
+                ..Default::default()
+            })
+            .expect("idempotent 90d");
+        assert_eq!(repeat.title_retention, TitleRetention::Days90);
+        assert_eq!(repeat.retention_changed, RetentionChange::Unchanged);
+
+        drop(store);
+        let mut reopened = Store::open(&data).expect("reopen");
+        assert_eq!(
+            reopened.app_settings().expect("persisted").title_retention,
+            TitleRetention::Days90
+        );
+        Settings::new(&mut reopened.writer)
+            .corrupt(SettingKey::CaptureTitleRetention, "\"invalid\"")
+            .expect("corrupt retention");
+        assert!(matches!(
+            reopened.title_retention(),
+            Err(AccessSettingError::Json {
+                key: SettingKey::CaptureTitleRetention,
+                ..
+            })
+        ));
+        assert_eq!(
+            reopened.recover_title_retention().expect("recover"),
+            TitleRetention::Forever
+        );
+        assert_eq!(
+            reopened.title_retention().expect("repaired"),
+            TitleRetention::Forever
         );
     }
 }

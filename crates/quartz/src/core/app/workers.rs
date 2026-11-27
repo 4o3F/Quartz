@@ -271,6 +271,8 @@ impl Workers {
             feedback: channels.feedback.sender.clone(),
             main: main.clone(),
             clock,
+            startup_purge: super::database_loop::StartupPurge::Pending,
+            title_purge_queued: user_writes.title_purge_queued,
         };
         let db = channels.spawn_database(database, main.clone())?;
         let mut workers = Self {

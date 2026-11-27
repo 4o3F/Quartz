@@ -5,7 +5,7 @@ use super::{
     annotations::clipping::{DeleteSplitIdentity, Remainders},
     enums::{
         AvailabilityEndReason, AvailabilityReason, CaptureLevel, DataSource, IntervalEndReason,
-        IntervalKind,
+        IntervalKind, TitleStatus,
     },
     raw::ConnectionSql,
     rows::{
@@ -37,6 +37,11 @@ use std::{
 const WEB_END_REASON_POLICY_CHANGED: i32 = 5;
 /// Exact ASCII length of `YYYYMMDDTHHMMSSZ` in manual backup file names.
 const MANUAL_TIMESTAMP_LEN: usize = 16;
+/// Maximum UTC days processed in one title-retention write transaction so large purges do not
+/// hold SQLite's write lock across an entire year of rows.
+const TITLE_PURGE_CHUNK_DAYS: i64 = 30;
+/// Millisecond width of one title-retention purge chunk.
+const TITLE_PURGE_CHUNK_MS: i64 = TITLE_PURGE_CHUNK_DAYS * UTC_DAY_MS;
 
 #[derive(Debug, Snafu)]
 #[snafu(module(read_data_info_error))]
@@ -140,6 +145,48 @@ impl From<BumpVersionError> for DeleteRangeError {
     fn from(source: BumpVersionError) -> Self {
         Self::Version { source }
     }
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module(purge_titles_error))]
+pub(crate) enum PurgeTitlesError {
+    #[snafu(display("stored row in {table} violated time invariants during title purge"))]
+    InvalidPurgeRow { table: &'static str },
+    #[snafu(display("could not purge expired titles from database: {source}"))]
+    PurgeDatabase { source: diesel::result::Error },
+    #[snafu(display("could not bump data day versions after title purge: {source}"))]
+    PurgeVersion { source: BumpVersionError },
+    #[snafu(display("could not truncate WAL after title purge: {source}"))]
+    PurgeCheckpoint { source: diesel::result::Error },
+}
+
+impl From<diesel::result::Error> for PurgeTitlesError {
+    fn from(source: diesel::result::Error) -> Self {
+        Self::PurgeDatabase { source }
+    }
+}
+
+impl From<BumpVersionError> for PurgeTitlesError {
+    fn from(source: BumpVersionError) -> Self {
+        Self::PurgeVersion { source }
+    }
+}
+
+/// Counts of rows and dictionary entries cleared by `Store::purge_expired_titles`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PurgeTitlesSummary {
+    /// Closed `intervals` rows whose `title_id` was cleared and marked `purged`.
+    pub intervals_purged: usize,
+    /// Closed `web_intervals` rows whose `tab_title_id` was cleared and marked `purged`.
+    pub web_intervals_purged: usize,
+    /// Unreferenced rows deleted from `titles`.
+    pub titles_deleted: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PurgeChunkPosition {
+    Intermediate,
+    Final,
 }
 
 /// Minimal summary returned by `Store::delete_range`.
@@ -396,6 +443,211 @@ impl Store {
         }
         Ok(summary)
     }
+
+    /// Clears `title_id` / `tab_title_id` and marks `purged` on closed `intervals` and
+    /// `web_intervals` ending at or before `cutoff_utc_ms` (whole-row granularity: rows
+    /// straddling `cutoff_utc_ms` and open rows are left untouched), deletes unreferenced
+    /// `titles`, bumps affected UTC-day versions, and truncates the WAL after commit.
+    ///
+    /// Large historical backlogs are committed in chunks of [`TITLE_PURGE_CHUNK_DAYS`] UTC days
+    /// so SQLite's write lock stays bounded; small or incremental purges complete in one
+    /// write transaction.
+    pub(crate) fn purge_expired_titles(
+        &mut self,
+        cutoff_utc_ms: i64,
+    ) -> Result<PurgeTitlesSummary, PurgeTitlesError> {
+        let mut cursor = next_eligible_title_start(&mut self.writer, cutoff_utc_ms, None)?;
+        if cursor.is_none() {
+            return Ok(PurgeTitlesSummary::default());
+        }
+        let mut summary = PurgeTitlesSummary::default();
+        while let Some(chunk_start) = cursor {
+            let chunk_end = chunk_start
+                .checked_add(TITLE_PURGE_CHUNK_MS - 1)
+                .map_or(cutoff_utc_ms, |end| end.min(cutoff_utc_ms));
+            let next_cursor = if chunk_end >= cutoff_utc_ms {
+                None
+            } else {
+                next_eligible_title_start(&mut self.writer, cutoff_utc_ms, Some(chunk_end))?
+            };
+            let position = if next_cursor.is_none() {
+                PurgeChunkPosition::Final
+            } else {
+                PurgeChunkPosition::Intermediate
+            };
+            let chunk_summary = self.write(|tx| {
+                purge_titles_chunk_in_tx(tx, chunk_start, chunk_end, cutoff_utc_ms, position)
+            })?;
+            summary.intervals_purged += chunk_summary.intervals_purged;
+            summary.web_intervals_purged += chunk_summary.web_intervals_purged;
+            summary.titles_deleted += chunk_summary.titles_deleted;
+            cursor = next_cursor;
+        }
+        if summary.intervals_purged > 0 || summary.web_intervals_purged > 0 {
+            let truncated = ConnectionSql::new(&mut self.writer)
+                .checkpoint()
+                .context(purge_titles_error::PurgeCheckpointSnafu)?;
+            if !truncated {
+                tracing::warn!("WAL truncation after title purge was blocked by an active reader");
+            }
+            tracing::debug!(
+                cutoff_utc_ms,
+                intervals_purged = summary.intervals_purged,
+                web_intervals_purged = summary.web_intervals_purged,
+                titles_deleted = summary.titles_deleted,
+                "purged expired titles"
+            );
+        }
+        Ok(summary)
+    }
+}
+
+fn next_eligible_title_start(
+    connection: &mut diesel::SqliteConnection,
+    cutoff_utc_ms: i64,
+    after_start_utc_ms: Option<i64>,
+) -> Result<Option<i64>, diesel::result::Error> {
+    let interval_start = match after_start_utc_ms {
+        Some(after) => intervals::table
+            .filter(intervals::start_utc_ms.gt(after))
+            .filter(intervals::start_utc_ms.le(cutoff_utc_ms))
+            .filter(intervals::end_utc_ms.is_not_null())
+            .filter(intervals::end_utc_ms.le(cutoff_utc_ms))
+            .filter(intervals::title_id.is_not_null())
+            .select(diesel::dsl::min(intervals::start_utc_ms))
+            .first::<Option<i64>>(connection)?,
+        None => intervals::table
+            .filter(intervals::start_utc_ms.le(cutoff_utc_ms))
+            .filter(intervals::end_utc_ms.is_not_null())
+            .filter(intervals::end_utc_ms.le(cutoff_utc_ms))
+            .filter(intervals::title_id.is_not_null())
+            .select(diesel::dsl::min(intervals::start_utc_ms))
+            .first::<Option<i64>>(connection)?,
+    };
+    let web_start = match after_start_utc_ms {
+        Some(after) => web_intervals::table
+            .filter(web_intervals::start_utc_ms.gt(after))
+            .filter(web_intervals::start_utc_ms.le(cutoff_utc_ms))
+            .filter(web_intervals::end_utc_ms.is_not_null())
+            .filter(web_intervals::end_utc_ms.le(cutoff_utc_ms))
+            .filter(web_intervals::tab_title_id.is_not_null())
+            .select(diesel::dsl::min(web_intervals::start_utc_ms))
+            .first::<Option<i64>>(connection)?,
+        None => web_intervals::table
+            .filter(web_intervals::start_utc_ms.le(cutoff_utc_ms))
+            .filter(web_intervals::end_utc_ms.is_not_null())
+            .filter(web_intervals::end_utc_ms.le(cutoff_utc_ms))
+            .filter(web_intervals::tab_title_id.is_not_null())
+            .select(diesel::dsl::min(web_intervals::start_utc_ms))
+            .first::<Option<i64>>(connection)?,
+    };
+    Ok(match (interval_start, web_start) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(start), None) | (None, Some(start)) => Some(start),
+        (None, None) => None,
+    })
+}
+
+fn purge_titles_chunk_in_tx(
+    tx: &mut WriteTx<'_>,
+    chunk_start: i64,
+    chunk_end: i64,
+    cutoff_utc_ms: i64,
+    position: PurgeChunkPosition,
+) -> Result<PurgeTitlesSummary, PurgeTitlesError> {
+    let mut affected: BTreeMap<DataSource, BTreeSet<UtcDay>> = BTreeMap::new();
+    let interval_spans = intervals::table
+        .filter(intervals::start_utc_ms.ge(chunk_start))
+        .filter(intervals::start_utc_ms.le(chunk_end))
+        .filter(intervals::end_utc_ms.is_not_null())
+        .filter(intervals::end_utc_ms.le(cutoff_utc_ms))
+        .filter(intervals::title_id.is_not_null())
+        .select((intervals::start_utc_ms, intervals::end_utc_ms))
+        .load::<(i64, Option<i64>)>(tx.connection)?;
+    let intervals_purged = if interval_spans.is_empty() {
+        0
+    } else {
+        for (start, end) in interval_spans {
+            let end = end.ok_or(PurgeTitlesError::InvalidPurgeRow { table: "intervals" })?;
+            if end < start {
+                return Err(PurgeTitlesError::InvalidPurgeRow { table: "intervals" });
+            }
+            record_affected(
+                &mut affected,
+                DataSource::Intervals,
+                QueryRange { start, end },
+            );
+        }
+        diesel::update(
+            intervals::table
+                .filter(intervals::start_utc_ms.ge(chunk_start))
+                .filter(intervals::start_utc_ms.le(chunk_end))
+                .filter(intervals::end_utc_ms.is_not_null())
+                .filter(intervals::end_utc_ms.le(cutoff_utc_ms))
+                .filter(intervals::title_id.is_not_null()),
+        )
+        .set((
+            intervals::title_id.eq(None::<i64>),
+            intervals::title_status.eq(TitleStatus::Purged),
+        ))
+        .execute(tx.connection)?
+    };
+
+    let web_spans = web_intervals::table
+        .filter(web_intervals::start_utc_ms.ge(chunk_start))
+        .filter(web_intervals::start_utc_ms.le(chunk_end))
+        .filter(web_intervals::end_utc_ms.is_not_null())
+        .filter(web_intervals::end_utc_ms.le(cutoff_utc_ms))
+        .filter(web_intervals::tab_title_id.is_not_null())
+        .select((web_intervals::start_utc_ms, web_intervals::end_utc_ms))
+        .load::<(i64, Option<i64>)>(tx.connection)?;
+    let web_intervals_purged = if web_spans.is_empty() {
+        0
+    } else {
+        for (start, end) in web_spans {
+            let end = end.ok_or(PurgeTitlesError::InvalidPurgeRow {
+                table: "web_intervals",
+            })?;
+            if end < start {
+                return Err(PurgeTitlesError::InvalidPurgeRow {
+                    table: "web_intervals",
+                });
+            }
+            record_affected(&mut affected, DataSource::Web, QueryRange { start, end });
+        }
+        diesel::update(
+            web_intervals::table
+                .filter(web_intervals::start_utc_ms.ge(chunk_start))
+                .filter(web_intervals::start_utc_ms.le(chunk_end))
+                .filter(web_intervals::end_utc_ms.is_not_null())
+                .filter(web_intervals::end_utc_ms.le(cutoff_utc_ms))
+                .filter(web_intervals::tab_title_id.is_not_null()),
+        )
+        .set((
+            web_intervals::tab_title_id.eq(None::<i64>),
+            web_intervals::tab_title_status.eq(TitleStatus::Purged),
+        ))
+        .execute(tx.connection)?
+    };
+
+    let titles_deleted = match position {
+        PurgeChunkPosition::Intermediate => 0,
+        PurgeChunkPosition::Final => {
+            ConnectionSql::new(tx.connection).delete_unreferenced_titles()?
+        }
+    };
+
+    for (source, days) in affected {
+        for day in days {
+            tx.effects.bump_day(tx.connection, source, day)?;
+        }
+    }
+
+    Ok(PurgeTitlesSummary {
+        intervals_purged,
+        web_intervals_purged,
+        titles_deleted,
+    })
 }
 
 fn delete_range_in_tx(

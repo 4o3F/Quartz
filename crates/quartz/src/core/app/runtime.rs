@@ -201,6 +201,9 @@ impl CoreRuntime {
         let ui = store
             .recover_ui_settings()
             .map_err(|source| StartCoreError::LoadSettings { source })?;
+        let _ = store
+            .recover_title_retention()
+            .map_err(|source| StartCoreError::LoadSettings { source })?;
         let effective = ui.resolve(system);
         let now = ports
             .clock

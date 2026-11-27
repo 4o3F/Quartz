@@ -531,6 +531,7 @@ impl AppShell {
                 ui,
                 effective: ui.resolve(system),
                 autostart,
+                title_retention: wire::TitleRetention::Forever,
             }),
         );
         self.settings_selects_sync = InputSyncState::NeedsSync;

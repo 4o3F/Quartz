@@ -379,6 +379,7 @@ mod tests {
             ui,
             effective: ui.resolve(system),
             autostart: wire::AutostartEnabled::Disabled,
+            title_retention: wire::TitleRetention::Forever,
         }
     }
 

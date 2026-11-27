@@ -4,7 +4,8 @@ use crate::{
     core::autostart::AccessAutostartError,
     store::{
         data::{
-            CompactDatabaseError, CreateManualBackupError, DeleteRangeError, ReadDataInfoError,
+            CompactDatabaseError, CreateManualBackupError, DeleteRangeError, PurgeTitlesError,
+            ReadDataInfoError,
         },
         settings::AccessSettingError,
         versions::BumpVersionError,
@@ -219,6 +220,25 @@ impl WriteFailure {
                 Self::database(source)
             }
             DeleteRangeError::Version { source } => Self::version(source),
+        }
+    }
+    pub(crate) fn title_purge(error: &PurgeTitlesError) -> Self {
+        match error {
+            PurgeTitlesError::InvalidPurgeRow { .. } => Self::Data(DataFailure::StoredRow),
+            PurgeTitlesError::PurgeDatabase { source }
+            | PurgeTitlesError::PurgeCheckpoint { source } => Self::database(source),
+            PurgeTitlesError::PurgeVersion { source } => Self::version(source),
+        }
+    }
+    pub(crate) fn run_title_purge(error: &super::data::RunTitlePurgeError) -> Self {
+        use super::data::RunTitlePurgeError;
+        match error {
+            RunTitlePurgeError::ReadRetention { source }
+            | RunTitlePurgeError::ReadDayOffset { source } => Self::setting(source),
+            RunTitlePurgeError::ResolveTimeZone | RunTitlePurgeError::ResolveCutoff { .. } => {
+                Self::Data(DataFailure::TimeZone)
+            }
+            RunTitlePurgeError::Purge { source } => Self::title_purge(source),
         }
     }
     pub(crate) fn into_protocol_error(self) -> ProtocolError {

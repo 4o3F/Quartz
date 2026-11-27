@@ -17,7 +17,7 @@ use crate::{
         Autostart, CoreRuntime, MainCommand, PlatformPorts, RuntimeExit, StartCoreError,
         StopCoreError, Worker,
     },
-    ipc::{RefreshLogicalDay, StatusPublisher, UiCommand},
+    ipc::{LogicalDayTransition, RefreshLogicalDay, StatusPublisher, UiCommand},
     persistence::PersistenceState,
 };
 use quartz_domain::capture::{CaptureEffect, CaptureState};
@@ -406,11 +406,15 @@ impl CoreProcess {
             } else {
                 &handles[..MAIN_WAKE_HANDLE_COUNT]
             };
-            let logical_wait = status.update_logical_day(
+            let logical_day = status.advance_logical_day(
                 RefreshLogicalDay::CheckDeadline,
                 &sources::SystemClock,
                 jiff::tz::TimeZone::try_system,
             );
+            if logical_day.transition == LogicalDayTransition::Changed {
+                runtime.writes().request_title_purge();
+            }
+            let logical_wait = logical_day.wait;
             let wait = match logical_wait {
                 Some(logical) => Some(
                     self.ui

@@ -11,13 +11,82 @@ use crate::{
         versions::VersionState,
     },
     rules::registry::RegistryShell,
-    store::{Store, data::CreateManualBackupError},
+    store::{
+        Store,
+        data::{CreateManualBackupError, PurgeTitlesError, PurgeTitlesSummary},
+        settings::AccessSettingError,
+    },
 };
 use jiff::tz::TimeZone;
 use quartz_domain::{capture::UtcInstant, facts::QueryRange};
 use quartz_protocol::{
     DataDeleteRangeRequest, DataDeleteRangeResponse, ErrorKind, ProtocolError, RANGE_MAX_DAYS,
+    TitleRetention,
 };
+use snafu::Snafu;
+
+#[derive(Debug, Snafu)]
+pub(crate) enum RunTitlePurgeError {
+    #[snafu(display("could not read title retention setting: {source}"))]
+    ReadRetention { source: AccessSettingError },
+    #[snafu(display("could not read day start offset for title purge: {source}"))]
+    ReadDayOffset { source: AccessSettingError },
+    #[snafu(display("could not resolve system time zone for title purge"))]
+    ResolveTimeZone,
+    #[snafu(display("could not compute title retention cutoff: {source}"))]
+    ResolveCutoff { source: RunQueryError },
+    #[snafu(display("could not execute title retention purge: {source}"))]
+    Purge { source: PurgeTitlesError },
+}
+
+/// Reads `capture.title_retention` and purges expired titles in the current system time zone.
+pub(crate) fn purge_expired_titles_for_store(
+    store: &mut Store,
+    now: UtcInstant,
+) -> Result<PurgeTitlesSummary, RunTitlePurgeError> {
+    let retention = store
+        .title_retention()
+        .map_err(|source| RunTitlePurgeError::ReadRetention { source })?;
+    purge_expired_titles_for_retention(store, retention, now)
+}
+
+/// Purges expired titles for `retention` in the current system time zone (`Forever` is a no-op).
+pub(crate) fn purge_expired_titles_for_retention(
+    store: &mut Store,
+    retention: TitleRetention,
+    now: UtcInstant,
+) -> Result<PurgeTitlesSummary, RunTitlePurgeError> {
+    if retention == TitleRetention::Forever {
+        return Ok(PurgeTitlesSummary::default());
+    }
+    let zone = RunQueryError::system_time_zone(TimeZone::try_system)
+        .map_err(|_| RunTitlePurgeError::ResolveTimeZone)?;
+    purge_expired_titles_in_zone(store, retention, now, zone)
+}
+
+/// Purges expired titles for `retention` using `zone` and stored `day.start_offset_min`.
+pub(crate) fn purge_expired_titles_in_zone(
+    store: &mut Store,
+    retention: TitleRetention,
+    now: UtcInstant,
+    zone: TimeZone,
+) -> Result<PurgeTitlesSummary, RunTitlePurgeError> {
+    if retention == TitleRetention::Forever {
+        return Ok(PurgeTitlesSummary::default());
+    }
+    let offset = store
+        .day_start_offset()
+        .map_err(|source| RunTitlePurgeError::ReadDayOffset { source })?;
+    let Some(cutoff_utc_ms) =
+        DayCalendar::retention_cutoff_in_zone(now.get(), retention, offset, zone)
+            .map_err(|source| RunTitlePurgeError::ResolveCutoff { source })?
+    else {
+        return Ok(PurgeTitlesSummary::default());
+    };
+    store
+        .purge_expired_titles(cutoff_utc_ms)
+        .map_err(|source| RunTitlePurgeError::Purge { source })
+}
 
 #[derive(Debug)]
 pub(crate) enum DataRequest {
@@ -255,5 +324,60 @@ mod tests {
             finished.end,
             utc_ms("2026-11-26T04:00:00Z").get().as_millisecond()
         );
+    }
+
+    #[test]
+    fn title_retention_forever_is_a_noop_and_configured_days_purges_expired_titles() {
+        use crate::store::{
+            ReadOnlyStore,
+            capture::test_support::{Fixture, at, foreground},
+        };
+        use quartz_domain::capture::{CaptureEvent, limits::UTC_DAY_MS};
+        use quartz_protocol::facts::{FactFields, FactTitleStatus};
+
+        let day_ms = u64::try_from(UTC_DAY_MS).expect("day ms");
+        let mut fixture = Fixture::new(at(0));
+        fixture.ready(at(0));
+        fixture.persist(at(10_000), foreground(1, "old window title"));
+        fixture.persist(at(60_000), CaptureEvent::Shutdown);
+
+        let now = at(100 * day_ms).utc;
+        let forever = purge_expired_titles_in_zone(
+            &mut fixture.store,
+            TitleRetention::Forever,
+            now,
+            TimeZone::UTC,
+        )
+        .expect("forever purge");
+        assert_eq!(forever, PurgeTitlesSummary::default());
+
+        let db_path = fixture._directory.path().join("quartz.db");
+        let mut reader = ReadOnlyStore::open(&db_path).expect("reader");
+        assert_eq!(reader.row_counts().expect("counts").titles, 2);
+
+        let purged = purge_expired_titles_in_zone(
+            &mut fixture.store,
+            TitleRetention::Days30,
+            now,
+            TimeZone::UTC,
+        )
+        .expect("30d purge");
+        assert_eq!(purged.intervals_purged, 2);
+        assert_eq!(purged.titles_deleted, 2);
+
+        let facts = reader.dump_range(0, 120_000).expect("dump purged");
+        let foregrounds: Vec<_> = facts
+            .iter()
+            .filter_map(|fact| match fact.record().expect("record").fields {
+                FactFields::Foreground { interval } => Some(interval),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(foregrounds.len(), 2);
+        for interval in foregrounds {
+            assert_eq!(interval.title_status, FactTitleStatus::Purged);
+            assert_eq!(interval.title, None);
+        }
+        assert_eq!(reader.row_counts().expect("counts after purge").titles, 0);
     }
 }

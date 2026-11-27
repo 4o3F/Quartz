@@ -109,6 +109,6 @@ pub use annotations::{
 pub use settings::{
     AutostartEnabled, EffectiveUiSettings, FirstDayOfWeekSetting, HourCycleSetting, PrewarmEnabled,
     PrewarmOnBattery, PrewarmSettings, PrewarmUpdate, ResidentEnabled, ResidentSettings,
-    ResidentUpdate, SettingsGetRequest, SettingsResponse, SettingsSetRequest, UiLanguageSetting,
-    UiSettings,
+    ResidentUpdate, SettingsGetRequest, SettingsResponse, SettingsSetRequest, TitleRetention,
+    UiLanguageSetting, UiSettings,
 };

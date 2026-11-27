@@ -112,34 +112,60 @@ impl WriteRequest {
             }
             Self::Categories(request) => return request.execute(store),
             Self::Data(request) => return request.execute(store, now, registry),
+            Self::PurgeExpiredTitles => {
+                return super::data::purge_expired_titles_for_store(store, now)
+                    .map(|_| WriteResponse::Accepted(quartz_protocol::AcceptedBody))
+                    .map_err(|error| WriteFailure::run_title_purge(&error).into_protocol_error());
+            }
             Self::SettingsGet | Self::SettingsSet(_) => {
                 let ports = settings.ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?;
-                let (autostart, result) = match self {
+                match self {
                     Self::SettingsSet(update) => {
                         let autostart = match update.autostart {
                             Some(desired) => ports.autostart.set(desired),
                             None => ports.autostart.state(),
                         }
                         .map_err(|error| WriteFailure::autostart(&error).into_protocol_error())?;
-                        (autostart, store.update_ui_settings(update))
+                        let updated = store
+                            .update_settings(update)
+                            .map_err(|error| WriteFailure::setting(&error).into_protocol_error())?;
+                        if updated.retention_changed
+                            == crate::store::settings::RetentionChange::Changed
+                            && updated.title_retention != quartz_protocol::TitleRetention::Forever
+                        {
+                            // The setting is committed; a failed purge is retried at the next
+                            // startup or logical-day rollover instead of reporting a failed set.
+                            if let Err(error) = super::data::purge_expired_titles_for_retention(
+                                store,
+                                updated.title_retention,
+                                now,
+                            ) {
+                                tracing::error!(%error, "title retention purge after setting change failed");
+                            }
+                        }
+                        return Ok(WriteResponse::Settings(quartz_protocol::SettingsResponse {
+                            ui: updated.ui,
+                            effective: updated.ui.resolve(ports.system),
+                            autostart,
+                            title_retention: updated.title_retention,
+                        }));
                     }
                     Self::SettingsGet => {
                         let autostart = ports.autostart.state().map_err(|error| {
                             WriteFailure::autostart(&error).into_protocol_error()
                         })?;
-                        (autostart, store.ui_settings())
+                        let stored = store
+                            .app_settings()
+                            .map_err(|error| WriteFailure::setting(&error).into_protocol_error())?;
+                        return Ok(WriteResponse::Settings(quartz_protocol::SettingsResponse {
+                            ui: stored.ui,
+                            effective: stored.ui.resolve(ports.system),
+                            autostart,
+                            title_retention: stored.title_retention,
+                        }));
                     }
                     _ => unreachable!("settings dispatch"),
-                };
-                return result
-                    .map(|ui| {
-                        WriteResponse::Settings(quartz_protocol::SettingsResponse {
-                            ui,
-                            effective: ui.resolve(ports.system),
-                            autostart,
-                        })
-                    })
-                    .map_err(|error| WriteFailure::setting(&error).into_protocol_error());
+                }
             }
             Self::Annotations(AnnotationWrite::Create(request)) => store
                 .create_annotations(request, now)
@@ -197,6 +223,7 @@ pub(crate) enum WriteRequest {
     Annotations(AnnotationWrite),
     Categories(CategoryRequest),
     Data(DataRequest),
+    PurgeExpiredTitles,
     #[cfg(test)]
     BumpMetadata {
         outcome: TestCommit,
@@ -205,7 +232,14 @@ pub(crate) enum WriteRequest {
 impl WriteRequest {
     /// Returns true for operations that require an idle WAL reader (VACUUM / WAL truncation).
     pub(crate) fn requires_idle_reader(&self) -> bool {
-        matches!(self, Self::Data(request) if request.requires_idle_reader())
+        match self {
+            Self::Data(request) => request.requires_idle_reader(),
+            Self::PurgeExpiredTitles => true,
+            Self::SettingsSet(request) => request
+                .title_retention
+                .is_some_and(|retention| retention != quartz_protocol::TitleRetention::Forever),
+            _ => false,
+        }
     }
 }
 /// Annotation transaction selected by the three typed IPC operations.
@@ -254,25 +288,47 @@ pub(crate) struct WritePort {
     completion: Option<CompletionWake>,
     sender: Sender<WriteCommand>,
     settings: Option<SettingsPorts>,
+    purge_queued: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 pub(crate) struct WriteChannel {
     pub port: WritePort,
     pub receiver: Receiver<WriteCommand>,
+    pub title_purge_queued: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl WriteChannel {
     pub(crate) fn new() -> Self {
         let (sender, receiver) = bounded(WRITE_CHANNEL_CAPACITY);
+        let purge_queued = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         Self {
             port: WritePort {
                 completion: None,
                 sender,
                 settings: None,
+                purge_queued: std::sync::Arc::clone(&purge_queued),
             },
             receiver,
+            title_purge_queued: purge_queued,
         }
     }
 }
 impl WritePort {
+    /// Coalesces nonblocking title-retention purge requests triggered by logical-day rollover.
+    pub(crate) fn request_title_purge(&self) {
+        use std::sync::atomic::Ordering;
+        if self.purge_queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (reply, _received) = oneshot::channel();
+        if let Err(error) = self.sender.try_send(WriteCommand {
+            completion: None,
+            request: WriteRequest::PurgeExpiredTitles,
+            reply,
+            settings: None,
+        }) {
+            self.purge_queued.store(false, Ordering::Release);
+            tracing::warn!(%error, "could not queue title retention purge");
+        }
+    }
     pub(crate) fn with_completion_wake(
         mut self,
         wake: std::sync::Arc<dyn Fn() + Send + Sync>,
@@ -387,5 +443,15 @@ mod tests {
                 .kind,
             ErrorKind::Internal
         );
+    }
+    #[test]
+    fn title_purge_requests_coalesce_without_blocking() {
+        let channel = WriteChannel::new();
+        channel.port.request_title_purge();
+        channel.port.request_title_purge();
+        assert_eq!(channel.receiver.len(), 1);
+        let command = channel.receiver.try_recv().expect("queued purge");
+        assert!(matches!(command.request, WriteRequest::PurgeExpiredTitles));
+        assert!(command.request.requires_idle_reader());
     }
 }

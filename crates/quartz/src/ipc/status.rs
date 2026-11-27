@@ -14,6 +14,20 @@ use crate::persistence::PersistenceState;
 use quartz_domain::capture::{AppIdentity, ForegroundView};
 use quartz_protocol::{ForegroundState, LocaleSettings, StateSnapshot, UiLanguage};
 
+/// Whether a logical-day refresh changed the published logical date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogicalDayTransition {
+    Unchanged,
+    Changed,
+}
+
+/// Next logical-day wait together with whether the logical date rolled over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LogicalDayUpdate {
+    pub wait: Option<Duration>,
+    pub transition: LogicalDayTransition,
+}
+
 /// Main-thread facts; the registry constructs wire state only when subscribed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishedStatus {
@@ -110,14 +124,23 @@ impl StatusPublisher {
         }
     }
     /// Retries failed reads on main-thread wakes, keeping the last successful date and boundary.
+    pub(crate) fn advance_logical_day(
+        &self,
+        change: RefreshLogicalDay,
+        clock: &dyn ClockReader,
+        zone: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
+    ) -> LogicalDayUpdate {
+        self.request_logical_day(change);
+        self.read_logical_day(clock, zone)
+    }
+    #[cfg(test)]
     pub(crate) fn update_logical_day(
         &self,
         change: RefreshLogicalDay,
         clock: &dyn ClockReader,
         zone: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
     ) -> Option<Duration> {
-        self.request_logical_day(change);
-        self.read_logical_day(clock, zone)
+        self.advance_logical_day(change, clock, zone).wait
     }
     pub(crate) fn request_logical_day(&self, change: RefreshLogicalDay) {
         match change {
@@ -132,12 +155,15 @@ impl StatusPublisher {
         &self,
         clock: &dyn ClockReader,
         zone: impl FnOnce() -> Result<jiff::tz::TimeZone, jiff::Error>,
-    ) -> Option<Duration> {
+    ) -> LogicalDayUpdate {
         let now = match clock.read() {
             Ok(at) => at.utc.get(),
             Err(source) => {
                 self.retain_logical_day(RefreshLogicalDayError::ReadClock { source });
-                return None;
+                return LogicalDayUpdate {
+                    wait: None,
+                    transition: LogicalDayTransition::Unchanged,
+                };
             }
         };
         let next = match self.pending_offset.get() {
@@ -152,20 +178,28 @@ impl StatusPublisher {
         };
         match next {
             Ok(day) => {
-                if let Some(day) = day {
-                    self.publish_logical_day(day);
-                }
+                let transition = match day {
+                    Some(day) => self.publish_logical_day(day),
+                    None => LogicalDayTransition::Unchanged,
+                };
                 self.pending_offset.set(None);
-                Some(self.logical_day.borrow().wait(now))
+                LogicalDayUpdate {
+                    wait: Some(self.logical_day.borrow().wait(now)),
+                    transition,
+                }
             }
             Err(source) => {
                 self.retain_logical_day(RefreshLogicalDayError::ResolveCalendar { source });
                 let previous = self.logical_day.borrow();
                 // An expired boundary stays stored, but cannot arm a zero-delay retry loop.
-                if previous.is_due(now) {
+                let wait = if previous.is_due(now) {
                     None
                 } else {
                     Some(previous.wait(now))
+                };
+                LogicalDayUpdate {
+                    wait,
+                    transition: LogicalDayTransition::Unchanged,
                 }
             }
         }
@@ -182,16 +216,19 @@ impl StatusPublisher {
             "retaining logical day until the next main-thread wake"
         );
     }
-    fn publish_logical_day(&self, day: LogicalDay) {
+    fn publish_logical_day(&self, day: LogicalDay) -> LogicalDayTransition {
         let date = day.date();
         self.logical_day.replace(day);
+        let mut transition = LogicalDayTransition::Unchanged;
         self.sender.send_if_modified(|published| {
             if published.logical_date == date {
                 return false;
             }
             published.logical_date = date;
+            transition = LogicalDayTransition::Changed;
             true
         });
+        transition
     }
     pub(crate) fn apply_ui_settings(
         &self,
@@ -791,5 +828,46 @@ mod tests {
             receiver.borrow().snapshot().timed_policies,
             quartz_protocol::TimedPolicies::default()
         );
+    }
+
+    #[test]
+    fn advance_logical_day_reports_transition_only_when_date_changes() {
+        use crate::ipc::LogicalDayTransition;
+        let zone = jiff::tz::TimeZone::UTC;
+        let before = "2026-11-26T23:59:59.999Z".parse().expect("before midnight");
+        let boundary = "2026-11-27T00:00:00Z".parse().expect("midnight");
+        let publisher = StatusPublisher::with_locale(
+            InstanceId("rollover-transition".into()),
+            quartz_protocol::EffectiveUiSettings {
+                resident: Default::default(),
+                prewarm: Default::default(),
+                ui_language: UiLanguage::English,
+                locale: None,
+            },
+            LogicalDay::in_zone(before, DayStartOffset::MIDNIGHT, zone.clone())
+                .expect("initial day"),
+        );
+        let unchanged = publisher.advance_logical_day(
+            RefreshLogicalDay::CheckDeadline,
+            &TestClock::At(before),
+            || Ok(zone.clone()),
+        );
+        assert_eq!(unchanged.transition, LogicalDayTransition::Unchanged);
+        assert_eq!(unchanged.wait, Some(Duration::from_millis(1)));
+
+        let rolled = publisher.advance_logical_day(
+            RefreshLogicalDay::CheckDeadline,
+            &TestClock::At(boundary),
+            || Ok(zone.clone()),
+        );
+        assert_eq!(rolled.transition, LogicalDayTransition::Changed);
+        assert_eq!(rolled.wait, Some(Duration::from_hours(24)));
+
+        let repeat = publisher.advance_logical_day(
+            RefreshLogicalDay::CheckDeadline,
+            &TestClock::At(boundary),
+            || Ok(zone),
+        );
+        assert_eq!(repeat.transition, LogicalDayTransition::Unchanged);
     }
 }

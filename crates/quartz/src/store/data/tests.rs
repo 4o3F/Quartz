@@ -748,3 +748,370 @@ fn delete_range_clips_open_foreground_interval_preserving_id_and_utc_midnight_sp
         .batch_execute("PRAGMA foreign_key_check")
         .expect("fk check");
 }
+
+#[test]
+fn purge_expired_titles_clears_only_rows_at_or_before_cutoff_and_bumps_only_affected_days() {
+    let (_temp, directory, mut store) = open_test_store();
+    let (run_id, clock_id, app_id) = seed_parents(&mut store);
+    let stream_id = insert_stream(&mut store);
+
+    let day1 = UTC_DAY_MS;
+    let day2 = 2 * UTC_DAY_MS;
+    let day3 = 3 * UTC_DAY_MS;
+    let day4 = 4 * UTC_DAY_MS;
+    let cutoff = day3;
+
+    let title_expired_only = insert_title(&mut store, "expired-only");
+    let title_shared = insert_title(&mut store, "shared-with-recent");
+    let title_web_expired = insert_title(&mut store, "web-expired-only");
+    let title_straddling = insert_title(&mut store, "straddling-cutoff");
+    let title_open = insert_title(&mut store, "open-interval-title");
+
+    // Day 1: closed interval already without title (Redacted) -> must stay Redacted and not bump Day 1.
+    let redacted_day1 = insert_closed_interval(
+        &mut store,
+        run_id,
+        clock_id,
+        app_id,
+        None,
+        day1 + 1_000..day1 + 2_000,
+        CaptureLevel::TitleHidden,
+    );
+    // Day 2: closed interval ending before cutoff -> purged; bumps Intervals on Day 2.
+    let expired_before = insert_closed_interval(
+        &mut store,
+        run_id,
+        clock_id,
+        app_id,
+        Some(title_expired_only),
+        day2 + 1_000..day2 + 5_000,
+        CaptureLevel::Full,
+    );
+    // Day 2: closed interval ending exactly at cutoff (`end_utc_ms == cutoff`) with shared title -> purged.
+    let expired_at_cutoff = insert_closed_interval(
+        &mut store,
+        run_id,
+        clock_id,
+        app_id,
+        Some(title_shared),
+        day2 + 10_000..cutoff,
+        CaptureLevel::Full,
+    );
+    // Straddling cutoff `[cutoff - 1000, cutoff + 1000)` -> kept untouched (whole-row granularity).
+    let straddling = insert_closed_interval(
+        &mut store,
+        run_id,
+        clock_id,
+        app_id,
+        Some(title_straddling),
+        cutoff - 1_000..cutoff + 1_000,
+        CaptureLevel::Full,
+    );
+    // Day 4: recent closed interval referencing `title_shared` -> kept untouched; keeps `title_shared` alive.
+    let recent_shared = insert_closed_interval(
+        &mut store,
+        run_id,
+        clock_id,
+        app_id,
+        Some(title_shared),
+        day4 + 1_000..day4 + 5_000,
+        CaptureLevel::Full,
+    );
+    // Open interval starting before cutoff -> kept untouched.
+    let open_interval = diesel::insert_into(intervals::table)
+        .values(IntervalsRow {
+            id: None,
+            run_id,
+            sequence: 999,
+            clock_segment_id: clock_id,
+            kind: IntervalKind::Window,
+            no_foreground_reason: None,
+            app_id: Some(app_id),
+            window_instance_id: None,
+            title_id: Some(title_open),
+            title_status: TitleStatus::Ok,
+            capture_level: CaptureLevel::Full,
+            privacy_rule_id: None,
+            privacy_label_key: None,
+            privacy_label: None,
+            session_key: 2,
+            start_utc_ms: day2 + 20_000,
+            start_mono_ms: day2 + 20_000,
+            end_utc_ms: None,
+            end_mono_ms: None,
+            confirmed_utc_ms: Some(day4 + 9_000),
+            confirmed_mono_ms: Some(day4 + 9_000),
+            duration_ms: None,
+            end_reason: None,
+        })
+        .returning(intervals::id.assume_not_null())
+        .get_result::<i64>(&mut store.writer)
+        .expect("insert open interval");
+
+    // Web intervals: closed ending at cutoff (purged, bumps Web on Day 2) + straddling (kept) + open (kept).
+    let web_expired = diesel::insert_into(web_intervals::table)
+        .values(WebIntervalsRow {
+            id: None,
+            stream_id,
+            interval_id: expired_at_cutoff,
+            start_utc_ms: day2 + 12_000,
+            end_utc_ms: Some(cutoff),
+            confirmed_utc_ms: None,
+            end_reason: Some(1),
+            domain_id: None,
+            tab_title_id: Some(title_web_expired),
+            tab_title_status: TitleStatus::Ok,
+            tab_id: Some(1),
+            browser_window_id: Some(1),
+            navigation_id: Some(1),
+            audible: 0,
+            link_status: 1,
+            web_level: 1,
+            privacy_rule_id: None,
+            privacy_label_key: None,
+            privacy_label: None,
+        })
+        .returning(web_intervals::id.assume_not_null())
+        .get_result::<i64>(&mut store.writer)
+        .expect("insert expired web");
+    let web_straddling = diesel::insert_into(web_intervals::table)
+        .values(WebIntervalsRow {
+            id: None,
+            stream_id,
+            interval_id: straddling,
+            start_utc_ms: cutoff - 500,
+            end_utc_ms: Some(cutoff + 500),
+            confirmed_utc_ms: None,
+            end_reason: Some(1),
+            domain_id: None,
+            tab_title_id: Some(title_straddling),
+            tab_title_status: TitleStatus::Ok,
+            tab_id: Some(2),
+            browser_window_id: Some(1),
+            navigation_id: Some(2),
+            audible: 0,
+            link_status: 1,
+            web_level: 1,
+            privacy_rule_id: None,
+            privacy_label_key: None,
+            privacy_label: None,
+        })
+        .returning(web_intervals::id.assume_not_null())
+        .get_result::<i64>(&mut store.writer)
+        .expect("insert straddling web");
+    let web_open = diesel::insert_into(web_intervals::table)
+        .values(WebIntervalsRow {
+            id: None,
+            stream_id,
+            interval_id: open_interval,
+            start_utc_ms: day2 + 25_000,
+            end_utc_ms: None,
+            confirmed_utc_ms: Some(day4 + 8_000),
+            end_reason: None,
+            domain_id: None,
+            tab_title_id: Some(title_open),
+            tab_title_status: TitleStatus::Ok,
+            tab_id: Some(3),
+            browser_window_id: Some(1),
+            navigation_id: Some(3),
+            audible: 0,
+            link_status: 1,
+            web_level: 1,
+            privacy_rule_id: None,
+            privacy_label_key: None,
+            privacy_label: None,
+        })
+        .returning(web_intervals::id.assume_not_null())
+        .get_result::<i64>(&mut store.writer)
+        .expect("insert open web");
+
+    let summary = store.purge_expired_titles(cutoff).expect("purge titles");
+    assert_eq!(
+        summary,
+        PurgeTitlesSummary {
+            intervals_purged: 2,
+            web_intervals_purged: 1,
+            titles_deleted: 2,
+        }
+    );
+
+    let load_interval = |conn: &mut diesel::SqliteConnection, id: i64| {
+        intervals::table
+            .filter(intervals::id.eq(id))
+            .select(IntervalsRow::as_select())
+            .first::<IntervalsRow>(conn)
+            .expect("load interval")
+    };
+    let row = load_interval(&mut store.writer, redacted_day1);
+    assert_eq!(row.title_id, None);
+    assert_eq!(row.title_status, TitleStatus::Redacted);
+
+    for id in [expired_before, expired_at_cutoff] {
+        let row = load_interval(&mut store.writer, id);
+        assert_eq!(row.title_id, None);
+        assert_eq!(row.title_status, TitleStatus::Purged);
+    }
+    let row = load_interval(&mut store.writer, straddling);
+    assert_eq!(row.title_id, Some(title_straddling));
+    assert_eq!(row.title_status, TitleStatus::Ok);
+
+    let row = load_interval(&mut store.writer, recent_shared);
+    assert_eq!(row.title_id, Some(title_shared));
+    assert_eq!(row.title_status, TitleStatus::Ok);
+
+    let row = load_interval(&mut store.writer, open_interval);
+    assert_eq!(row.title_id, Some(title_open));
+    assert_eq!(row.title_status, TitleStatus::Ok);
+
+    let load_web = |conn: &mut diesel::SqliteConnection, id: i64| {
+        web_intervals::table
+            .filter(web_intervals::id.eq(id))
+            .select(WebIntervalsRow::as_select())
+            .first::<WebIntervalsRow>(conn)
+            .expect("load web interval")
+    };
+    let row = load_web(&mut store.writer, web_expired);
+    assert_eq!(row.tab_title_id, None);
+    assert_eq!(row.tab_title_status, TitleStatus::Purged);
+    assert_eq!(
+        load_web(&mut store.writer, web_straddling).tab_title_id,
+        Some(title_straddling)
+    );
+    assert_eq!(
+        load_web(&mut store.writer, web_open).tab_title_id,
+        Some(title_open)
+    );
+
+    let remaining_titles: Vec<String> = titles::table
+        .order(titles::text)
+        .select(titles::text)
+        .load(&mut store.writer)
+        .expect("remaining titles");
+    assert_eq!(
+        remaining_titles,
+        vec![
+            "open-interval-title",
+            "shared-with-recent",
+            "straddling-cutoff",
+        ]
+    );
+
+    let bumped: Vec<(i32, i64, i64)> = data_day_versions::table
+        .order((data_day_versions::source, data_day_versions::utc_date))
+        .select(DataDayVersionsRow::as_select())
+        .load::<DataDayVersionsRow>(&mut store.writer)
+        .expect("day versions")
+        .into_iter()
+        .map(|row| (row.source.code(), row.utc_date, row.version))
+        .collect();
+    assert_eq!(
+        bumped,
+        vec![
+            (DataSource::Intervals.code(), 2, 1),
+            (DataSource::Web.code(), 2, 1),
+        ]
+    );
+    let effects = store.take_committed_versions();
+    assert_eq!(effects.facts.len(), 2);
+
+    let wal_len = fs::metadata(directory.database_wal()).map_or(0, |meta| meta.len());
+    assert_eq!(wal_len, 0, "WAL should be truncated after title purge");
+
+    // Re-running with the same cutoff is a no-op and bumps no versions.
+    let second = store
+        .purge_expired_titles(cutoff)
+        .expect("idempotent purge");
+    assert_eq!(second, PurgeTitlesSummary::default());
+    assert!(store.take_committed_versions().facts.is_empty());
+
+    // Query snapshot reads purged rows cleanly with absent title text and no panic.
+    let mut snapshot = crate::store::ReadOnlyStore::open(&directory.database())
+        .expect("reader")
+        .snapshot();
+    snapshot.begin().expect("begin snapshot");
+    let mut seen_purged = 0usize;
+    while let Some(batch) = snapshot
+        .read_batch(QueryRange {
+            start: day2,
+            end: cutoff,
+        })
+        .expect("read purged batch")
+    {
+        for row in batch {
+            if let crate::store::query::InputRow::Foreground(fg) = row
+                && (fg.span.id.0 == expired_before || fg.span.id.0 == expired_at_cutoff)
+            {
+                assert_eq!(fg.visible_title(), None);
+                assert_eq!(fg.visible_title_id(), None);
+                seen_purged += 1;
+            }
+        }
+    }
+    assert_eq!(seen_purged, 2);
+}
+
+#[test]
+fn purge_expired_titles_batches_across_multiple_utc_day_chunks() {
+    let (_temp, _directory, mut store) = open_test_store();
+    let (run_id, clock_id, app_id) = seed_parents(&mut store);
+
+    let span_days = TITLE_PURGE_CHUNK_DAYS * 2 + 5;
+    let first_day = 10_i64;
+    let last_day = first_day + span_days;
+    let cutoff = (last_day + 1) * UTC_DAY_MS;
+
+    let title_a = insert_title(&mut store, "chunk-early");
+    let title_b = insert_title(&mut store, "chunk-late");
+    let title_kept = insert_title(&mut store, "after-cutoff");
+
+    insert_closed_interval(
+        &mut store,
+        run_id,
+        clock_id,
+        app_id,
+        Some(title_a),
+        first_day * UTC_DAY_MS + 1_000..first_day * UTC_DAY_MS + 2_000,
+        CaptureLevel::Full,
+    );
+    insert_closed_interval(
+        &mut store,
+        run_id,
+        clock_id,
+        app_id,
+        Some(title_b),
+        last_day * UTC_DAY_MS + 1_000..last_day * UTC_DAY_MS + 2_000,
+        CaptureLevel::Full,
+    );
+    insert_closed_interval(
+        &mut store,
+        run_id,
+        clock_id,
+        app_id,
+        Some(title_kept),
+        cutoff + 1_000..cutoff + 2_000,
+        CaptureLevel::Full,
+    );
+
+    let summary = store
+        .purge_expired_titles(cutoff)
+        .expect("multi-chunk purge");
+    assert_eq!(
+        summary,
+        PurgeTitlesSummary {
+            intervals_purged: 2,
+            web_intervals_purged: 0,
+            titles_deleted: 2,
+        }
+    );
+    let bumped_days: Vec<i64> = data_day_versions::table
+        .order(data_day_versions::utc_date)
+        .select(data_day_versions::utc_date)
+        .load(&mut store.writer)
+        .expect("bumped days");
+    assert_eq!(bumped_days, vec![first_day, last_day]);
+    let remaining_titles: Vec<String> = titles::table
+        .select(titles::text)
+        .load(&mut store.writer)
+        .expect("remaining titles");
+    assert_eq!(remaining_titles, vec!["after-cutoff"]);
+}

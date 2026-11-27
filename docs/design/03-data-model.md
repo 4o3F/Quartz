@@ -182,9 +182,11 @@
 | 数据 | 默认保留期 | 到期处理 |
 |---|---|---|
 | 前台区间、可用状态、采集缺口、域名、标注 | 永久 | —（标注不受自动保留期影响） |
-| 窗口标题与网页标签标题 | 永久（可配置如 90 天） | 置空 `title_id`/`tab_title_id`、写 `purged`，删除无引用 `titles` |
+| 窗口标题与网页标签标题 | 永久（可选 `forever` / `30d` / `90d` / `365d`，存 `settings` 的 `capture.title_retention`） | 置空 `title_id`/`tab_title_id`、写 `purged`，删除无引用 `titles` |
 | `ingest_receipts`、`deletion_barriers` | 14 天 | 按时间清理已到期且不再被任务占用的记录 |
 | 迁移前备份 | 最近 2 份 | 自动删除更旧迁移备份；手动备份由用户管理 |
+
+**标题保留期自动清理（`capture.title_retention`）：** 取值 `forever`（默认，不清理）、`30d`、`90d`、`365d`；截止点（cutoff）为当前逻辑日往前推 N 个逻辑日的逻辑日起点（UTC），沿用与查询一致的 `day.start_offset_min` 与当前系统时区。清理采用整行粒度：仅处理已结束且 `end_utc_ms <= cutoff` 且仍引用标题的 `intervals` 与 `web_intervals`，置空 `title_id`/`tab_title_id` 并写 `title_status`/`tab_title_status = purged`；跨越截止点的行与开放行均保持不变，不改变采集期隐私行为。随后删除无引用 `titles`，仅推进受影响 UTC 日的 `intervals`/`web` 版本号（大跨度历史按固定 UTC 天数分批提交以控制写锁时长），提交后执行 `PRAGMA wal_checkpoint(TRUNCATE)` 并发布版本以刷新托盘与日期订阅。触发时机仅为：（1）核心启动后执行一次；（2）逻辑日跨日（复用现有逻辑日边界唤醒，不新增周期定时器）；（3）通过 `settings.set` 修改保留期提交后立即执行一次。已有手动备份与迁移前备份不会被改写。
 
 **按日期范围删除与数据维护（`data.*`）：**
 

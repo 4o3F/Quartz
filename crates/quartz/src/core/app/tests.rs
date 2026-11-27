@@ -1686,3 +1686,217 @@ fn rule_validation_dispatch_returns_diagnostics_without_publishing_or_saving_a_r
         0
     );
 }
+
+#[test]
+fn changing_title_retention_setting_triggers_immediate_purge_and_publishes_versions() {
+    use crate::core::app::MainCommand;
+    use crate::core::autostart::test_support::in_memory_autostart;
+    use crate::query::calendar::{DayCalendar, DayStartOffset};
+    use crate::store::ReadOnlyStore;
+    use quartz_domain::capture::limits::UTC_DAY_MS;
+    use quartz_protocol::{
+        EffectiveUiSettings, ErrorKind, HourCycle, LocaleSettings, Op, ProtocolError,
+        ResponseOutcome, Role, SettingsResponse, TitleRetention, UiLanguage, Weekday,
+        facts::{FactFields, FactTitleStatus},
+    };
+
+    let day_ms = u64::try_from(UTC_DAY_MS).expect("day ms");
+    let old_start = 10 * day_ms;
+    let now_start = 100 * day_ms;
+
+    // Seed a closed historical interval well before the 30-day cutoff.
+    let mut old = Fixture::new(at(old_start));
+    old.persist(
+        at(old_start),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    old.persist(
+        at(old_start),
+        crate::store::capture::test_support::foreground(1, "expired core title"),
+    );
+    old.persist(at(old_start + 60_000), CaptureEvent::Shutdown);
+    let directory = old.into_directory();
+
+    let store = Store::open(&DataDirectory::new(directory.path())).expect("reopen store");
+    let clock = Arc::new(RuntimeClock::new());
+    clock.advance(now_start);
+    let workers = crate::core::app::Workers::start(
+        store,
+        metadata(),
+        clock.clone(),
+        Arc::new(|| {}),
+        create_foreground(),
+    )
+    .expect("workers");
+    let runtime = RuntimeFixture {
+        directory,
+        workers,
+        clock,
+    };
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+
+    // Record a current open interval whose title must be retained after the purge.
+    runtime.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
+    runtime.wait(|command| {
+        matches!(
+            command,
+            MainCommand::Effect(CaptureEffect::ReviewForeground)
+        )
+    });
+    runtime.observe(crate::store::capture::test_support::foreground(
+        2,
+        "retained open title",
+    ));
+    runtime.wait(|command| {
+        matches!(
+            command,
+            MainCommand::CaptureSnapshot {
+                state: CaptureState::Tracking(_),
+                foreground: Some(_),
+                ..
+            }
+        )
+    });
+    runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
+
+    let status = crate::ipc::StatusPublisher::new(quartz_protocol::InstanceId(
+        "retention-integration".into(),
+    ));
+    let system = EffectiveUiSettings {
+        resident: Default::default(),
+        prewarm: Default::default(),
+        ui_language: UiLanguage::English,
+        locale: Some(LocaleSettings {
+            hour_cycle: HourCycle::H24,
+            first_day_of_week: Weekday::Monday,
+        }),
+    };
+    let (autostart_port, _autostart_registry) =
+        in_memory_autostart(r"C:\Program Files\Quartz\quartz.exe");
+    let channel = crate::ipc::UiCommands::channel(Arc::new(|_| Ok(())));
+    let services = crate::ipc::Services {
+        summary: None,
+        timed: crate::ipc::TimedPolicyPort::unavailable(),
+        queries: runtime.workers.queries.clone(),
+        writes: runtime.workers.writes.clone().with_settings(
+            system,
+            Arc::clone(&channel.port),
+            autostart_port,
+        ),
+        versions: runtime.workers.versions.clone(),
+        status: status.subscribe(),
+        ui: Arc::clone(&channel.port),
+    };
+
+    let old_date = DayCalendar::current_date(at(old_start).utc.get(), DayStartOffset::MIDNIGHT)
+        .expect("old logical date");
+    let db_path = runtime.directory.path().join("quartz.db");
+
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("retention I/O runtime");
+    io.block_on(async {
+        let registry = services.start_registry();
+        let mut subscriber =
+            AnnotationClient::connect(services.clone(), registry.clone(), Role::Ui).await;
+        subscriber
+            .send(
+                2,
+                Op::Subscribe,
+                serde_json::json!({"topics": [format!("day:{old_date}")]}),
+            )
+            .await;
+        subscriber.success(2).await;
+        let quartz_protocol::Envelope::Event(initial_day) = subscriber.receive().await else {
+            panic!("initial day event");
+        };
+        assert_eq!(initial_day.topic, quartz_protocol::Topic::Day(old_date));
+        let initial_day: quartz_protocol::DayChanged =
+            serde_json::from_value(initial_day.body).expect("initial day version");
+
+        let mut ui = AnnotationClient::connect(services.clone(), registry.clone(), Role::Ui).await;
+        ui.send(2, Op::SettingsGet, serde_json::json!({})).await;
+        let initial: SettingsResponse =
+            serde_json::from_value(ui.success(2).await).expect("initial settings");
+        assert_eq!(initial.title_retention, TitleRetention::Forever);
+
+        // Explicit null is rejected.
+        ui.send(
+            3,
+            Op::SettingsSet,
+            serde_json::json!({"title_retention": null}),
+        )
+        .await;
+        assert_eq!(
+            ui.response(3).await,
+            ResponseOutcome::Err {
+                error: ProtocolError::new(ErrorKind::BadRequest)
+            }
+        );
+
+        // Changing retention to 30d commits the setting, purges expired titles, and publishes day versions.
+        ui.send(
+            4,
+            Op::SettingsSet,
+            serde_json::json!({"title_retention": "30d"}),
+        )
+        .await;
+        let updated: SettingsResponse =
+            serde_json::from_value(ui.success(4).await).expect("updated retention");
+        assert_eq!(updated.title_retention, TitleRetention::Days30);
+
+        let quartz_protocol::Envelope::Event(changed_day) = subscriber.receive().await else {
+            panic!("changed day event after title purge");
+        };
+        assert_eq!(changed_day.topic, quartz_protocol::Topic::Day(old_date));
+        let changed_day: quartz_protocol::DayChanged =
+            serde_json::from_value(changed_day.body).expect("changed day version");
+        assert_ne!(
+            changed_day.versions, initial_day.versions,
+            "purge must publish updated day versions to subscribers"
+        );
+
+        let mut reader = ReadOnlyStore::open(&db_path).expect("reader");
+        let old_facts = reader
+            .dump_range(
+                i64::try_from(old_start).expect("old start"),
+                i64::try_from(old_start + 120_000).expect("old end"),
+            )
+            .expect("dump expired range");
+        let expired_intervals: Vec<_> = old_facts
+            .iter()
+            .filter_map(|fact| match fact.record().expect("record").fields {
+                FactFields::Foreground { interval } => Some(interval),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(expired_intervals.len(), 1);
+        assert_eq!(expired_intervals[0].title_status, FactTitleStatus::Purged);
+        assert_eq!(expired_intervals[0].title, None);
+        assert_eq!(
+            reader.row_counts().expect("counts").titles,
+            1,
+            "only the retained open interval title should remain"
+        );
+
+        // Nonblocking rollover purge trigger executes cleanly on the database loop.
+        runtime.workers.writes.request_title_purge();
+        ui.send(5, Op::SettingsGet, serde_json::json!({})).await;
+        let after_rollover: SettingsResponse =
+            serde_json::from_value(ui.success(5).await).expect("settings after rollover purge");
+        assert_eq!(after_rollover.title_retention, TitleRetention::Days30);
+
+        ui.close().await;
+        subscriber.close().await;
+    });
+
+    drop(services);
+    let directory = runtime.shutdown();
+    let mut reopened =
+        Store::open(&DataDirectory::new(directory.path())).expect("reopen retention");
+    assert_eq!(
+        reopened.title_retention().expect("persisted retention"),
+        TitleRetention::Days30
+    );
+}

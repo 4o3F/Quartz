@@ -148,8 +148,8 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 | `annotations.create` | 事务内批量幂等创建标注，按类型执行同类型裁剪（见 03 第 5.1 节） |
 | `annotations.update` | 事务内按 UUID 整体更新标注（`kind` 创建后固定，省略可选字段即清空） |
 | `annotations.delete` | 按 UUID 批量删除标注（不存在亦成功，不恢复既往裁剪） |
-| `settings.get` | 读取已保存与已解析生效的界面/区域/常驻/预热设置，以及实时读取注册表得到的开机自启状态 |
-| `settings.set` | 部分更新界面设置或开机自启注册表项（省略字段保持原值，忽略未知字段，提交后刷新托盘与 `state`） |
+| `settings.get` | 读取已保存与已解析生效的界面/区域/常驻/预热设置、标题保留期（`title_retention`），以及实时读取注册表得到的开机自启状态 |
+| `settings.set` | 部分更新界面设置、标题保留期（`forever`/`30d`/`90d`/`365d`，拒绝 `null`；变更提交后立即触发一次清理）或开机自启注册表项（省略字段保持原值，忽略未知字段，提交后刷新托盘与 `state`） |
 | `tracking.pause` | 设置暂停采集至未来指定 UTC 毫秒（经采集队列接纳，状态由 `state` 观察） |
 | `tracking.resume` | 立即取消暂停 |
 | `tracking.keep_alive` | 设置保持计时并抑制空闲至未来指定 UTC 毫秒 |

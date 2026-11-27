@@ -19,7 +19,7 @@ pub(crate) use crate::persistence::dispatch::WriteChannel;
 
 pub(crate) use crate::process_id::ProcessId;
 pub(crate) use session::{AllowedRoles, ConnectionSession, UiCommand};
-pub(crate) use status::{PublishedStatus, StatusPublisher};
+pub(crate) use status::{LogicalDayTransition, PublishedStatus, StatusPublisher};
 
 use std::sync::Arc;
 

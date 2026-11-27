@@ -78,6 +78,13 @@ impl From<SendMainCommandError> for ShutdownDatabaseError {
     }
 }
 
+/// Tracks whether the one-shot startup title-retention purge has executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StartupPurge {
+    Pending,
+    Done,
+}
+
 pub(super) struct DatabaseLoop {
     // Release any active read snapshot before closing the writer connection.
     pub runner: crate::query::runner::QueryRunner,
@@ -91,6 +98,8 @@ pub(super) struct DatabaseLoop {
     pub feedback: Sender<Feedback>,
     pub main: MainPort,
     pub clock: Arc<dyn ClockReader>,
+    pub startup_purge: StartupPurge,
+    pub title_purge_queued: Arc<std::sync::atomic::AtomicBool>,
 }
 enum DatabaseInput {
     Write(Option<DatabaseCommand>),
@@ -230,6 +239,13 @@ impl DatabaseLoop {
                     .map_err(|source| RunDatabaseLoopError::Query { source })?;
                 continue;
             }
+            if self.startup_purge == StartupPurge::Pending
+                && self.persistence.state() == PersistenceState::Ready
+            {
+                self.startup_purge = StartupPurge::Done;
+                self.run_startup_title_purge()?;
+                continue;
+            }
             match self.wait_for_input()? {
                 DatabaseInput::Write(command) => {
                     if let DatabaseProgress::Ended = self.handle_command(command)? {
@@ -354,6 +370,13 @@ impl DatabaseLoop {
         &mut self,
         command: crate::persistence::dispatch::WriteCommand,
     ) -> Result<(), RunDatabaseLoopError> {
+        if matches!(
+            command.request,
+            crate::persistence::dispatch::WriteRequest::PurgeExpiredTitles
+        ) {
+            self.title_purge_queued
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         // Commit queued capture prefixes, checking shutdown between transactions.
         loop {
             if self.persistence.writer().shutdown().is_some()
@@ -434,6 +457,26 @@ impl DatabaseLoop {
         let _ = command.reply.send(result);
         if let Some(wake) = &command.completion {
             wake.wake();
+        }
+        Ok(())
+    }
+    fn run_startup_title_purge(&mut self) -> Result<(), RunDatabaseLoopError> {
+        let now = match self.now() {
+            Ok(now) => now,
+            Err(error) => {
+                tracing::warn!(%error, "could not read clock for startup title retention purge");
+                return Ok(());
+            }
+        };
+        self.store.limit_write_wait(COMMIT_HEADROOM);
+        let result =
+            crate::persistence::data::purge_expired_titles_for_store(&mut self.store, now.utc);
+        self.store.limit_write_wait(Duration::MAX);
+        match result {
+            Ok(_) => self.publish_versions()?,
+            Err(error) => {
+                tracing::error!(%error, "startup title retention purge failed");
+            }
         }
         Ok(())
     }
@@ -1376,6 +1419,8 @@ mod tests {
                         utc: UtcInstant::try_from(0).expect("UTC"),
                         mono: MonoInstant::from_millis(0),
                     })),
+                    startup_purge: StartupPurge::Done,
+                    title_purge_queued: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 },
                 _directory: directory,
                 _commands: commands,
