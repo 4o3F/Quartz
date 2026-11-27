@@ -188,6 +188,22 @@ impl ActionWrites {
         });
     }
 }
+/// Maps a core [`StopReason`] to its localized status message key.
+pub(super) const fn stop_reason_msg(reason: StopReason) -> Msg {
+    match reason {
+        StopReason::Starting => Msg::StopStarting,
+        StopReason::PersistenceFailed => Msg::StopPersistence,
+        StopReason::SessionUnavailable => Msg::StopSession,
+        StopReason::CaptureGap => Msg::StopGap,
+        StopReason::Locked => Msg::StopLocked,
+        StopReason::Disconnected => Msg::StopDisconnected,
+        StopReason::Suspended => Msg::StopSuspended,
+        StopReason::Paused => Msg::StopPaused,
+        StopReason::NoForeground => Msg::StopForeground,
+        StopReason::Ended => Msg::StopEnded,
+    }
+}
+
 impl AppShell {
     pub(super) fn day_snapshot(&self) -> Option<&StateSnapshot> {
         #[cfg(feature = "preview")]
@@ -337,6 +353,8 @@ impl AppShell {
         if follow {
             self.cancel_details(cx);
         }
+        let recording = snapshot.recording;
+        let stop_reason = snapshot.stop_reason;
         if let Some(live) = &mut self.live {
             live.snapshot = snapshot;
             live.observe_recording();
@@ -356,6 +374,11 @@ impl AppShell {
                 live.timer = None;
                 live.indicator = Indicator::Hidden;
             }
+        }
+        self.settings.sync_recording_state(recording, stop_reason);
+        if previous_today != new_today {
+            self.settings.on_logical_date_changed(new_today);
+            self.settings_calendar = None;
         }
         if follow {
             self.on_live_day_context_changed(None, cx);
@@ -559,18 +582,7 @@ impl AppShell {
             return None;
         }
         let reason = snapshot.stop_reason?;
-        let message = match reason {
-            StopReason::Starting => Msg::StopStarting,
-            StopReason::PersistenceFailed => Msg::StopPersistence,
-            StopReason::SessionUnavailable => Msg::StopSession,
-            StopReason::CaptureGap => Msg::StopGap,
-            StopReason::Locked => Msg::StopLocked,
-            StopReason::Disconnected => Msg::StopDisconnected,
-            StopReason::Suspended => Msg::StopSuspended,
-            StopReason::Paused => Msg::StopPaused,
-            StopReason::NoForeground => Msg::StopForeground,
-            StopReason::Ended => Msg::StopEnded,
-        };
+        let message = stop_reason_msg(reason);
         let critical = reason == StopReason::PersistenceFailed;
         let colors = ui.info_bar_colors(if critical {
             InfoBarStyle::Critical

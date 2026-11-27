@@ -12,6 +12,7 @@ pub(crate) mod system_theme;
 pub use system_theme::PreviewTheme;
 mod measure;
 pub(crate) mod metrics;
+pub(crate) mod open_folder;
 #[cfg(feature = "preview")]
 mod preview;
 mod runtime;

@@ -694,6 +694,68 @@ impl Formatter {
             &[Arg::Done.with(&done), Arg::Total.with(&total)],
         )
     }
+
+    /// Formats deleted foreground duration as whole hours and minutes.
+    #[must_use]
+    pub(crate) fn deleted_foreground_summary(self, deleted_ms: i64) -> String {
+        let millis = u64::try_from(deleted_ms).unwrap_or(0);
+        let millis_per_second = u64::from(crate::model::MILLIS_PER_SECOND);
+        let seconds_per_minute = u64::from(SECONDS_PER_MINUTE);
+        let minutes_per_hour = u64::from(MINUTES_PER_HOUR);
+        let total_seconds = (millis + millis_per_second / 2) / millis_per_second;
+        let total_minutes = (total_seconds + seconds_per_minute / 2) / seconds_per_minute;
+        let hours = total_minutes / minutes_per_hour;
+        let minutes = total_minutes % minutes_per_hour;
+        self.text_with(
+            Msg::SettingsDataDeleteSuccess,
+            &[
+                Arg::Hours.with(&hours.to_string()),
+                Arg::Minutes.with(&minutes.to_string()),
+            ],
+        )
+    }
+
+    /// Formats a UTC millisecond timestamp as a local date and clock time for backup entries.
+    #[must_use]
+    pub(crate) fn backup_timestamp(
+        self,
+        utc_ms: i64,
+        zone: &jiff::tz::TimeZone,
+        hour_cycle: Option<quartz_protocol::HourCycle>,
+    ) -> Option<String> {
+        let zoned = jiff::Timestamp::from_millisecond(utc_ms)
+            .ok()?
+            .to_zoned_datetime(zone.clone());
+        let date = zoned.date();
+        let time = zoned.time();
+        let clock = match hour_cycle {
+            Some(quartz_protocol::HourCycle::H12) => {
+                let hour = time.hour();
+                let hour12 = if hour % 12 == 0 { 12 } else { hour % 12 };
+                self.text_with(
+                    Msg::ClockTwelve,
+                    &[
+                        Arg::Hours.with(&hour12.to_string()),
+                        Arg::Minutes.with(&format!("{:02}", time.minute())),
+                        Arg::Name.with(&self.text(if hour < 12 {
+                            Msg::ClockMorning
+                        } else {
+                            Msg::ClockAfternoon
+                        })),
+                    ],
+                )
+            }
+            Some(quartz_protocol::HourCycle::H24) | None => {
+                format!("{:02}:{:02}", time.hour(), time.minute())
+            }
+        };
+        Some(format!(
+            "{:04}-{:02}-{:02} {clock}",
+            date.year(),
+            date.month(),
+            date.day()
+        ))
+    }
 }
 
 /// Replaces every `%{name}` whose name appears in `values`; other text, including placeholders
@@ -1127,6 +1189,44 @@ mod tests {
                 total: 365,
             }),
             "Calculating day 365 of 365"
+        );
+    }
+
+    #[test]
+    fn deleted_foreground_and_backup_timestamp_format_in_both_languages() {
+        assert_eq!(
+            ZH.deleted_foreground_summary(5_400_000),
+            "已删除 1 小时 30 分钟的前台记录"
+        );
+        assert_eq!(
+            EN.deleted_foreground_summary(5_400_000),
+            "Deleted 1 h 30 min of foreground records"
+        );
+        assert_eq!(
+            ZH.deleted_foreground_summary(0),
+            "已删除 0 小时 0 分钟的前台记录"
+        );
+        let utc_ms = jiff::civil::date(2026, 11, 20)
+            .at(14, 5, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .expect("valid timestamp")
+            .timestamp()
+            .as_millisecond();
+        assert_eq!(
+            ZH.backup_timestamp(
+                utc_ms,
+                &jiff::tz::TimeZone::UTC,
+                Some(quartz_protocol::HourCycle::H24),
+            ),
+            Some("2026-11-20 14:05".to_owned())
+        );
+        assert_eq!(
+            EN.backup_timestamp(
+                utc_ms,
+                &jiff::tz::TimeZone::UTC,
+                Some(quartz_protocol::HourCycle::H12),
+            ),
+            Some("2026-11-20 2:05 PM".to_owned())
         );
     }
 }

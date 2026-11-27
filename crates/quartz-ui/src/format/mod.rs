@@ -1,5 +1,6 @@
 //! Locale-aware text: typed message ids and the formatter that fills them (10 section 6.1).
 
+mod bytes;
 mod formatter;
 mod message;
 

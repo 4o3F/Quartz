@@ -1146,4 +1146,130 @@ settings.general.first_weekday.saturday:
   en: "Saturday"
 settings.general.first_weekday.sunday:
   en: "Sunday"
+format.bytes.b:
+  en: "%{value} B"
+format.bytes.kb:
+  en: "%{value} KB"
+format.bytes.mb:
+  en: "%{value} MB"
+format.bytes.gb:
+  en: "%{value} GB"
+format.bytes.tb:
+  en: "%{value} TB"
+settings.group.recording:
+  en: "Recording"
+settings.group.data:
+  en: "Data"
+settings.group.about:
+  en: "About"
+settings.action.cancel:
+  en: "Cancel"
+settings.recording.title_retention.label:
+  en: "Title retention"
+settings.recording.title_retention.description:
+  en: "Older window and browser tab titles are cleared and cannot be recovered. Existing backups are unaffected."
+settings.recording.title_retention.forever:
+  en: "Forever"
+settings.recording.title_retention.days_30:
+  en: "30 days"
+settings.recording.title_retention.days_90:
+  en: "90 days"
+settings.recording.title_retention.days_365:
+  en: "365 days"
+settings.recording.title_retention.confirm_prompt:
+  en: "Shortening title retention to %{value} will immediately clear older window and tab titles permanently. Existing backups are unaffected."
+settings.recording.title_retention.confirm_action:
+  en: "Confirm"
+settings.data.load_failed.title:
+  en: "Could not load data information"
+settings.data.load_failed.message:
+  en: "Retry to load database and backup details."
+settings.data.db_location.label:
+  en: "Database location"
+settings.data.open_folder:
+  en: "Open folder"
+settings.data.copy_path:
+  en: "Copy path"
+settings.data.db_size.label:
+  en: "Database size"
+settings.data.backup.title:
+  en: "Backups"
+settings.data.backup.note:
+  en: "Deleting data or clearing titles does not modify existing backups"
+settings.data.backup.now:
+  en: "Back up now"
+settings.data.backup.running:
+  en: "Backing up…"
+settings.data.backup.empty:
+  en: "No backups yet"
+settings.data.backup.kind.manual:
+  en: "Manual"
+settings.data.backup.kind.migration:
+  en: "Pre-migration"
+settings.data.backup.error.exists:
+  en: "A backup for this second already exists. Try again in a moment."
+settings.data.backup.error.generic:
+  en: "Could not create backup. Try again."
+settings.data.compact.title:
+  en: "Compact database"
+settings.data.compact.description:
+  en: "Reclaim disk space from deleted records; large databases may take several seconds"
+settings.data.compact.action:
+  en: "Compact database"
+settings.data.compact.running:
+  en: "Compacting…"
+settings.data.compact.success:
+  en: "Compacted from %{start} to %{end}"
+settings.data.compact.failed:
+  en: "Could not compact database. Try again."
+settings.data.delete.title:
+  en: "Delete by date range"
+settings.data.delete.description:
+  en: "Only finished logical days can be deleted (up to yesterday)"
+settings.data.delete.start_label:
+  en: "Start date"
+settings.data.delete.end_label:
+  en: "End date"
+settings.data.delete.pick_date:
+  en: "Select date"
+settings.data.delete.span_days:
+  en: "%{count} days selected"
+settings.data.delete.action:
+  en: "Delete"
+settings.data.delete.running:
+  en: "Deleting…"
+settings.data.delete.confirm_prompt:
+  en: "Delete all records from %{range} (%{count} days)? This cannot be undone, and existing backups still contain this data."
+settings.data.delete.confirm_action:
+  en: "Confirm delete"
+settings.data.delete.success:
+  en: "Deleted %{hours} h %{minutes} min of foreground records"
+settings.data.delete.validation.order:
+  en: "End date cannot be earlier than start date."
+settings.data.delete.validation.today:
+  en: "Only finished logical days up to yesterday can be deleted."
+settings.data.delete.validation.span:
+  en: "At most %{count} days can be deleted at once."
+settings.data.delete.error.bad_request:
+  en: "Invalid date range. Only finished logical days can be deleted."
+settings.data.delete.error.generic:
+  en: "Could not delete records. Try again."
+settings.about.version.label:
+  en: "Version"
+settings.about.version.ui:
+  en: "UI %{value}"
+settings.about.version.core:
+  en: "Core %{value}"
+settings.about.status.label:
+  en: "Core status"
+settings.about.status.loading:
+  en: "Loading…"
+settings.about.status.failed:
+  en: "Could not read core status"
+settings.about.logs.label:
+  en: "Logs directory"
+settings.about.open:
+  en: "Open"
+settings.about.local_only:
+  en: "All data stays on this device. Quartz makes no network connections."
 

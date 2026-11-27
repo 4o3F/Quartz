@@ -46,6 +46,9 @@ export const scenarios = [
   "week-loading",
   "settings",
   "settings-resident-off",
+  "settings-data",
+  "settings-delete-confirm",
+  "settings-about",
 ] as const;
 export const narrowScenarios = [
   "today",

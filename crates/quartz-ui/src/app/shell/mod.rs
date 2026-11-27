@@ -329,7 +329,15 @@ pub(crate) struct AppShell<Focus = FocusHandle> {
             >,
         >,
     >,
+    settings_retention_select: Option<
+        Entity<
+            gpui_kit::component::select::SelectState<
+                Vec<settings::SelectOption<quartz_protocol::TitleRetention>>,
+            >,
+        >,
+    >,
     settings_selects_sync: InputSyncState,
+    settings_calendar: Option<settings::SettingsCalendar>,
     annotation_editor: crate::model::AnnotationEditor,
     annotation_start_input: Option<Entity<gpui_kit::component::input::InputState>>,
     annotation_end_input: Option<Entity<gpui_kit::component::input::InputState>>,
@@ -416,7 +424,9 @@ impl AppShell {
             settings_language_select: None,
             settings_hour_cycle_select: None,
             settings_first_weekday_select: None,
+            settings_retention_select: None,
             settings_selects_sync: InputSyncState::Synced,
+            settings_calendar: None,
             annotation_editor: crate::model::AnnotationEditor::new(),
             annotation_start_input: None,
             annotation_end_input: None,
@@ -596,6 +606,7 @@ impl AppShell {
             self.pan = None;
             self.range_select = None;
             self.segment_menu = None;
+            self.settings_calendar = None;
             self.cancel_details(cx);
             self.annotation_editor.close_panel();
             if page == Page::Rules {
@@ -705,6 +716,11 @@ impl Render for AppShell {
                         return;
                     }
                     if this.calendar.take().is_some() {
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if this.settings_calendar.take().is_some() {
                         cx.notify();
                         cx.stop_propagation();
                         return;

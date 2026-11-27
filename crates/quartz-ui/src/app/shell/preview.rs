@@ -66,12 +66,22 @@ pub(super) enum PreviewTimelineOverlay {
     ClassifyMenu { span: TimeSpan, range: UtcRange },
 }
 
+/// Which Settings section a preview screenshot anchors at the top of the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum SettingsPreviewSection {
+    #[default]
+    All,
+    Data,
+    About,
+}
+
 #[derive(Debug)]
 pub(super) struct PreviewDay {
     pub snapshot: StateSnapshot,
     pub phase: LoadPhase,
     pub failure: Option<LoadDataError>,
     pub timeline_overlay: Option<PreviewTimelineOverlay>,
+    pub settings_section: SettingsPreviewSection,
 }
 
 impl AppShell {
@@ -129,6 +139,7 @@ impl AppShell {
         }
 
         let mut timeline_overlay = None;
+        let mut settings_section = SettingsPreviewSection::All;
         match state {
             PreviewState::Rules => {
                 self.configure_rules_preview();
@@ -180,6 +191,23 @@ impl AppShell {
             PreviewState::SettingsResidentOff => {
                 self.configure_settings_preview(wire::ResidentEnabled::Disabled, first_day_of_week);
             }
+            PreviewState::SettingsData => {
+                self.configure_settings_preview(wire::ResidentEnabled::Enabled, first_day_of_week);
+                settings_section = SettingsPreviewSection::Data;
+            }
+            PreviewState::SettingsDeleteConfirm => {
+                self.configure_settings_preview(wire::ResidentEnabled::Enabled, first_day_of_week);
+                let delete_start = jiff::civil::date(2026, 11, 10);
+                let delete_end = jiff::civil::date(2026, 11, 14);
+                self.settings.set_delete_start(delete_start, today);
+                self.settings.set_delete_end(delete_end, today);
+                self.settings.request_delete_range(today);
+                settings_section = SettingsPreviewSection::Data;
+            }
+            PreviewState::SettingsAbout => {
+                self.configure_settings_preview(wire::ResidentEnabled::Enabled, first_day_of_week);
+                settings_section = SettingsPreviewSection::About;
+            }
             PreviewState::Today
             | PreviewState::TodayDetails
             | PreviewState::TodayHover
@@ -218,6 +246,7 @@ impl AppShell {
             failure: (scenario == Some(TodayPreviewState::QueryFailed))
                 .then_some(LoadDataError::InvalidData),
             timeline_overlay,
+            settings_section,
         });
     }
 
@@ -494,8 +523,8 @@ impl AppShell {
         resident: wire::ResidentEnabled,
         first_day_of_week: wire::Weekday,
     ) {
-        let crate::model::SettingsEffect::Load { generation } = self.settings.open() else {
-            unreachable!("opening SettingsPage emits Load");
+        let crate::model::SettingsEffect::LoadSettings { generation } = self.settings.open() else {
+            unreachable!("opening SettingsPage emits LoadSettings");
         };
         let ui_language = if self.formatter.language() == quartz_i18n::Language::SimplifiedChinese {
             wire::UiLanguage::SimplifiedChinese
@@ -534,6 +563,22 @@ impl AppShell {
                 title_retention: wire::TitleRetention::Forever,
             }),
         );
+        let crate::model::SettingsEffect::LoadDataInfo {
+            generation: data_gen,
+        } = self.settings.load_data_info()
+        else {
+            unreachable!("load_data_info emits LoadDataInfo");
+        };
+        self.settings
+            .apply_data_info_loaded(data_gen, Ok(fixture_data_info_response()));
+        let crate::model::SettingsEffect::LoadCoreStatus {
+            generation: status_gen,
+        } = self.settings.load_core_status()
+        else {
+            unreachable!("load_core_status emits LoadCoreStatus");
+        };
+        self.settings
+            .apply_core_status_loaded(status_gen, Ok(fixture_core_status_response()));
         self.settings_selects_sync = InputSyncState::NeedsSync;
     }
 
@@ -624,6 +669,47 @@ fn sample_day_start_utc_ms() -> i64 {
         .expect("sample date at UTC midnight")
         .timestamp()
         .as_millisecond()
+}
+
+fn fixture_data_info_response() -> wire::DataInfoResponse {
+    let base_ms = sample_day_start_utc_ms();
+    wire::DataInfoResponse {
+        database_path: r"C:\Users\alice\AppData\Local\Quartz\quartz.db".to_owned(),
+        database_bytes: 148_500_000,
+        logs_path: r"C:\Users\alice\AppData\Local\Quartz\logs".to_owned(),
+        backups_path: r"C:\Users\alice\AppData\Local\Quartz\backups".to_owned(),
+        backups: vec![
+            wire::BackupEntry {
+                file_name: "manual-20261115T183000Z.db".to_owned(),
+                bytes: 145_200_000,
+                created_utc_ms: base_ms - 5 * HOUR_MS - 30 * MINUTE_MS,
+                kind: wire::BackupKind::Manual,
+            },
+            wire::BackupEntry {
+                file_name: "pre-migrate-20261110-20261112T091500Z.db".to_owned(),
+                bytes: 132_800_000,
+                created_utc_ms: base_ms - 4 * 24 * HOUR_MS + 9 * HOUR_MS + 15 * MINUTE_MS,
+                kind: wire::BackupKind::Migration,
+            },
+            wire::BackupEntry {
+                file_name: "manual-20261108T210000Z.db".to_owned(),
+                bytes: 118_400_000,
+                created_utc_ms: base_ms - 8 * 24 * HOUR_MS + 21 * HOUR_MS,
+                kind: wire::BackupKind::Manual,
+            },
+        ],
+    }
+}
+
+fn fixture_core_status_response() -> wire::CoreStatusResponse {
+    wire::CoreStatusResponse {
+        recording: true,
+        stop_reason: None,
+        database: wire::DatabaseState::Ok,
+        browser_streams: Vec::new(),
+        instance_id: wire::InstanceId("preview-core-instance".to_owned()),
+        core_version: wire::CoreVersion(env!("CARGO_PKG_VERSION").to_owned()),
+    }
 }
 
 fn category_ref_dev() -> wire::CategoryRef {
@@ -2138,5 +2224,43 @@ mod tests {
                 total: PREVIEW_WEEK_PROGRESS_TOTAL,
             }
         );
+    }
+
+    #[test]
+    fn settings_data_delete_confirm_and_about_fixtures_satisfy_invariants() {
+        use crate::model::{
+            CoreStatusLoadState, DataInfoLoadState, DeleteRangeConfirm, SettingsEffect,
+            SettingsPage,
+        };
+
+        let mut page = SettingsPage::new();
+        let SettingsEffect::LoadDataInfo { generation } = page.load_data_info() else {
+            panic!("load_data_info emits LoadDataInfo");
+        };
+        page.apply_data_info_loaded(generation, Ok(fixture_data_info_response()));
+        let DataInfoLoadState::Ready(info) = page.data_info() else {
+            panic!("fixture data info ready");
+        };
+        assert_eq!(info.backups.len(), 3);
+        assert!(!info.logs_path.is_empty());
+
+        let today = sample_day_date();
+        page.set_delete_start(jiff::civil::date(2026, 11, 10), today);
+        page.set_delete_end(jiff::civil::date(2026, 11, 14), today);
+        page.request_delete_range(today);
+        assert!(matches!(
+            page.delete_confirm(),
+            DeleteRangeConfirm::Pending(range) if range.days == 5
+        ));
+
+        let SettingsEffect::LoadCoreStatus { generation } = page.load_core_status() else {
+            panic!("load_core_status emits LoadCoreStatus");
+        };
+        page.apply_core_status_loaded(generation, Ok(fixture_core_status_response()));
+        let CoreStatusLoadState::Ready(status) = page.core_status() else {
+            panic!("fixture core status ready");
+        };
+        assert!(status.recording);
+        assert_eq!(status.core_version.0, env!("CARGO_PKG_VERSION"));
     }
 }

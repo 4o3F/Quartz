@@ -81,8 +81,10 @@ pub(crate) use rules::{
 pub(crate) use segment::{ClassificationSource, Segment, SegmentId};
 #[cfg(windows)]
 pub(crate) use settings::{
-    GeneralSettingChange, RowVisibility, SaveActivity, SettingsEffect, SettingsLoadState,
-    SettingsPage, SettingsValues,
+    CompactNotice, CoreStatusLoadState, DataInfoLoadState, DataInfoView, DataOperation,
+    DeleteNotice, DeleteRangeConfirm, GeneralSettingChange, MAX_DELETE_RANGE_DAYS,
+    RetentionConfirm, RowVisibility, SaveActivity, SettingsEffect, SettingsLoadState, SettingsPage,
+    SettingsValues, ValidateDeleteRangeError, max_deletable_date,
 };
 pub(crate) use state::{AwayLabel, ClockAnomaly, StateBlock, StateKind};
 pub(crate) use summary::{DaySummary, HourlyBar, Share};

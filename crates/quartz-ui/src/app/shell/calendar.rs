@@ -29,10 +29,63 @@ const DAYS_PER_WEEK: i8 = 7;
 /// Align the flyout below the date picker after the previous-day button (today-states.html).
 const FLYOUT_LEFT: f32 = 40.;
 #[derive(Debug, Clone, Copy)]
-enum MonthDirection {
+pub(super) enum MonthDirection {
     Previous,
     Next,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CalendarTarget {
+    TodayDate,
+    SettingsDeleteStart,
+    SettingsDeleteEnd,
+}
+
+impl CalendarTarget {
+    const fn flyout_id(self) -> &'static str {
+        match self {
+            Self::TodayDate => "date-calendar",
+            Self::SettingsDeleteStart => "settings-delete-start-calendar",
+            Self::SettingsDeleteEnd => "settings-delete-end-calendar",
+        }
+    }
+
+    const fn prev_id(self) -> &'static str {
+        match self {
+            Self::TodayDate => "calendar-prev",
+            Self::SettingsDeleteStart => "settings-delete-start-calendar-prev",
+            Self::SettingsDeleteEnd => "settings-delete-end-calendar-prev",
+        }
+    }
+
+    const fn next_id(self) -> &'static str {
+        match self {
+            Self::TodayDate => "calendar-next",
+            Self::SettingsDeleteStart => "settings-delete-start-calendar-next",
+            Self::SettingsDeleteEnd => "settings-delete-end-calendar-next",
+        }
+    }
+
+    const fn cell_prefix(self) -> &'static str {
+        match self {
+            Self::TodayDate => "calendar-cell",
+            Self::SettingsDeleteStart => "settings-delete-start-cell",
+            Self::SettingsDeleteEnd => "settings-delete-end-cell",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CalendarPopover {
+    pub(super) month: CalendarMonth,
+    pub(super) selected: Option<Date>,
+    pub(super) today: Date,
+    pub(super) max_selectable: Date,
+    pub(super) first_weekday: Weekday,
+    pub(super) left: f32,
+    pub(super) target: CalendarTarget,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CalendarMonth {
     first: Date,
@@ -43,6 +96,16 @@ impl CalendarMonth {
             first: selected.first_of_month(),
         }
     }
+
+    pub(super) fn step(self, direction: MonthDirection, max_selectable: Date) -> Option<Self> {
+        let span = match direction {
+            MonthDirection::Previous => (-1).months(),
+            MonthDirection::Next => 1.months(),
+        };
+        let date = self.first.checked_add(span).ok()?;
+        (date <= max_selectable.first_of_month()).then(|| Self::new(date))
+    }
+
     fn cells(self, start: Weekday) -> Vec<Option<Date>> {
         let leading = (self.first.weekday().to_monday_zero_offset()
             - start.to_monday_zero_offset())
@@ -85,23 +148,61 @@ impl AppShell {
         self.hover = None;
         cx.notify();
     }
-    fn move_calendar(&mut self, direction: MonthDirection, cx: &mut Context<Self>) {
-        let Some(month) = self.calendar else {
-            return;
-        };
-        let span = match direction {
-            MonthDirection::Previous => (-1).months(),
-            MonthDirection::Next => 1.months(),
-        };
-        if let Ok(date) = month.first.checked_add(span)
-            && self
-                .day_snapshot()
-                .is_some_and(|snapshot| date <= snapshot.logical_date.first_of_month())
-        {
-            self.calendar = Some(CalendarMonth::new(date));
-            cx.notify();
+
+    fn move_calendar_target(
+        &mut self,
+        target: CalendarTarget,
+        direction: MonthDirection,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            CalendarTarget::TodayDate => {
+                let Some(month) = self.calendar else {
+                    return;
+                };
+                let Some(today) = self.day_snapshot().map(|snapshot| snapshot.logical_date) else {
+                    return;
+                };
+                if let Some(next) = month.step(direction, today) {
+                    self.calendar = Some(next);
+                    cx.notify();
+                }
+            }
+            CalendarTarget::SettingsDeleteStart | CalendarTarget::SettingsDeleteEnd => {
+                self.move_settings_calendar(direction, cx);
+            }
         }
     }
+
+    fn select_calendar_date(&mut self, target: CalendarTarget, date: Date, cx: &mut Context<Self>) {
+        match target {
+            CalendarTarget::TodayDate => {
+                self.select_date(date, cx);
+                self.calendar = None;
+                cx.notify();
+            }
+            CalendarTarget::SettingsDeleteStart => {
+                self.select_settings_delete_date(super::settings::DeleteDateField::Start, date, cx);
+            }
+            CalendarTarget::SettingsDeleteEnd => {
+                self.select_settings_delete_date(super::settings::DeleteDateField::End, date, cx);
+            }
+        }
+    }
+
+    fn dismiss_calendar(&mut self, target: CalendarTarget, cx: &mut Context<Self>) {
+        match target {
+            CalendarTarget::TodayDate => {
+                self.calendar = None;
+                cx.notify();
+            }
+            CalendarTarget::SettingsDeleteStart | CalendarTarget::SettingsDeleteEnd => {
+                self.settings_calendar = None;
+                cx.notify();
+            }
+        }
+    }
+
     pub(super) fn render_calendar(
         &self,
         ui: &Widgets<'_>,
@@ -110,22 +211,47 @@ impl AppShell {
         let month = self.calendar?;
         let snapshot = self.day_snapshot()?;
         let locale = snapshot.locale?;
-        let first = crate::model::weekday_from_protocol(locale.first_day_of_week);
+        let first_weekday = crate::model::weekday_from_protocol(locale.first_day_of_week);
         let today = snapshot.logical_date;
-        let selected = self.day.date();
-        let next = if month.first >= today.first_of_month() {
+        Some(self.render_calendar_popover(
+            ui,
+            CalendarPopover {
+                month,
+                selected: Some(self.day.date()),
+                today,
+                max_selectable: today,
+                first_weekday,
+                left: FLYOUT_LEFT,
+                target: CalendarTarget::TodayDate,
+            },
+            cx,
+        ))
+    }
+
+    pub(super) fn render_calendar_popover(
+        &self,
+        ui: &Widgets<'_>,
+        popover: CalendarPopover,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let month = popover.month;
+        let first = popover.first_weekday;
+        let target = popover.target;
+        let next = if month.first >= popover.max_selectable.first_of_month() {
             ui.disabled_button(
-                "calendar-next",
+                target.next_id(),
                 Density::Compact,
                 ButtonContent::Icon(IconName::ChevronRight),
             )
         } else {
             ui.button(
-                "calendar-next",
+                target.next_id(),
                 Density::Compact,
                 ButtonContent::Icon(IconName::ChevronRight),
             )
-            .on_click(cx.listener(|this, _, _, cx| this.move_calendar(MonthDirection::Next, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.move_calendar_target(target, MonthDirection::Next, cx);
+            }))
         };
         let month_text = self.formatter.text_with(
             Msg::CalendarMonth,
@@ -158,13 +284,13 @@ impl AppShell {
             )
             .child(
                 ui.button(
-                    "calendar-prev",
+                    target.prev_id(),
                     Density::Compact,
                     ButtonContent::Icon(IconName::ChevronLeft),
                 )
-                .on_click(
-                    cx.listener(|this, _, _, cx| this.move_calendar(MonthDirection::Previous, cx)),
-                ),
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.move_calendar_target(target, MonthDirection::Previous, cx);
+                })),
             )
             .child(next);
         let weekdays = div()
@@ -187,13 +313,14 @@ impl AppShell {
                             .weekday(first.wrapping_add(i64::from(offset))),
                     )
             }));
+        let cell_prefix = target.cell_prefix();
         let cells = month
             .cells(first)
             .into_iter()
             .enumerate()
             .map(|(index, date)| {
                 let mut cell = div()
-                    .id(("calendar-cell", index))
+                    .id((cell_prefix, index))
                     .h(px(DAY_ROW_HEIGHT))
                     .flex()
                     .items_center()
@@ -207,65 +334,60 @@ impl AppShell {
                         .justify_center()
                         .ramp(ui, Ramp::Body)
                         .child(date.day().to_string());
-                    if date == selected {
+                    if popover.selected == Some(date) {
                         circle = circle
                             .bg(ui.palette.accent_fill)
                             .text_color(ui.palette.text_on_accent);
-                    } else if date == today {
+                    } else if date == popover.today {
                         circle = circle.border_color(ui.palette.accent_fill);
                         circle.style().border_widths.top = Some(px(TODAY_RING_WIDTH).into());
                         circle.style().border_widths.right = Some(px(TODAY_RING_WIDTH).into());
                         circle.style().border_widths.bottom = Some(px(TODAY_RING_WIDTH).into());
                         circle.style().border_widths.left = Some(px(TODAY_RING_WIDTH).into());
                     }
-                    if date > today {
+                    if date > popover.max_selectable {
                         circle = circle.text_color(ui.palette.text_disabled);
                     } else {
                         cell =
                             cell.cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.select_date(date, cx);
-                                    this.calendar = None;
-                                    cx.notify();
+                                    this.select_calendar_date(target, date, cx);
                                 }));
                     }
                     cell = cell.child(circle);
                 }
                 cell
             });
-        Some(
-            deferred(
-                ui.flyout()
-                    .id("date-calendar")
-                    .absolute()
-                    .top(ui.metrics.density(Density::Standard).control_height + ui.metrics.space.xs)
-                    .left(px(FLYOUT_LEFT))
-                    .w(px(FLYOUT_WIDTH))
-                    .rounded(ui.metrics.radius.overlay)
-                    .shadow(ui.shadows(&ui.metrics.shadow.overlay))
-                    .on_mouse_down_out(cx.listener(
-                        |this, event: &gpui_kit::MouseDownEvent, _, cx| {
-                            if event.button == MouseButton::Left {
-                                this.calendar = None;
-                                cx.notify();
-                            }
-                        },
-                    ))
-                    .child(header)
-                    .child(
-                        div().p(ui.metrics.space.m).child(weekdays).child(
-                            div()
-                                .grid()
-                                .grid_cols(
-                                    u16::try_from(DAYS_PER_WEEK).expect("positive weekday count"),
-                                )
-                                .gap_y(ui.metrics.space.xxs)
-                                .children(cells),
-                        ),
+        deferred(
+            ui.flyout()
+                .id(target.flyout_id())
+                .absolute()
+                .top(ui.metrics.density(Density::Standard).control_height + ui.metrics.space.xs)
+                .left(px(popover.left))
+                .w(px(FLYOUT_WIDTH))
+                .rounded(ui.metrics.radius.overlay)
+                .shadow(ui.shadows(&ui.metrics.shadow.overlay))
+                .on_mouse_down_out(cx.listener(
+                    move |this, event: &gpui_kit::MouseDownEvent, _, cx| {
+                        if event.button == MouseButton::Left {
+                            this.dismiss_calendar(target, cx);
+                        }
+                    },
+                ))
+                .child(header)
+                .child(
+                    div().p(ui.metrics.space.m).child(weekdays).child(
+                        div()
+                            .grid()
+                            .grid_cols(
+                                u16::try_from(DAYS_PER_WEEK).expect("positive weekday count"),
+                            )
+                            .gap_y(ui.metrics.space.xxs)
+                            .children(cells),
                     ),
-            )
-            .into_any_element(),
+                ),
         )
+        .into_any_element()
     }
 }
 #[cfg(test)]

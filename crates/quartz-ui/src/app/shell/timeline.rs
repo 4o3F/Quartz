@@ -1785,6 +1785,8 @@ mod tests {
             unclassified_query_task: None,
             week: crate::model::WeekPage::new(),
             settings: crate::model::SettingsPage::new(),
+            settings_retention_select: None,
+            settings_calendar: None,
             settings_language_select: None,
             settings_hour_cycle_select: None,
             settings_first_weekday_select: None,

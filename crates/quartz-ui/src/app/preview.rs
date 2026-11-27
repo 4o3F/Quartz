@@ -92,6 +92,12 @@ pub enum PreviewState {
     Settings,
     /// Settings page General card with resident UI disabled and prewarm enabled (both prewarm rows shown).
     SettingsResidentOff,
+    /// Settings page Data group with database info and 3 backups.
+    SettingsData,
+    /// Settings page Data group with the date-range deletion confirmation block visible.
+    SettingsDeleteConfirm,
+    /// Settings page About group with versions, core status, and logs directory.
+    SettingsAbout,
     /// The shared failure/connecting screen, without a core or pipe.
     Error(ErrorPreviewState),
 }
@@ -227,6 +233,9 @@ impl FromStr for PreviewState {
             "week-loading" => Ok(Self::WeekLoading),
             "settings" => Ok(Self::Settings),
             "settings-resident-off" => Ok(Self::SettingsResidentOff),
+            "settings-data" => Ok(Self::SettingsData),
+            "settings-delete-confirm" => Ok(Self::SettingsDeleteConfirm),
+            "settings-about" => Ok(Self::SettingsAbout),
             "connecting" => Ok(Self::Error(ErrorPreviewState::Connecting)),
             "core-not-running" => Ok(Self::Error(ErrorPreviewState::CoreNotRunning)),
             "core-not-running-starting" => {
@@ -424,7 +433,11 @@ impl PreviewState {
     const fn page(self) -> Page {
         match self {
             Self::Week | Self::WeekLoading => Page::Week,
-            Self::Settings | Self::SettingsResidentOff => Page::Settings,
+            Self::Settings
+            | Self::SettingsResidentOff
+            | Self::SettingsData
+            | Self::SettingsDeleteConfirm
+            | Self::SettingsAbout => Page::Settings,
             Self::Rules
             | Self::RulesCategories
             | Self::RuleEditor
@@ -459,6 +472,9 @@ impl PreviewState {
             | Self::WeekLoading
             | Self::Settings
             | Self::SettingsResidentOff
+            | Self::SettingsData
+            | Self::SettingsDeleteConfirm
+            | Self::SettingsAbout
             | Self::Rules
             | Self::RulesCategories
             | Self::RuleEditor
@@ -484,6 +500,9 @@ impl PreviewState {
             | Self::WeekLoading
             | Self::Settings
             | Self::SettingsResidentOff
+            | Self::SettingsData
+            | Self::SettingsDeleteConfirm
+            | Self::SettingsAbout
             | Self::Rules
             | Self::RulesCategories
             | Self::RuleEditor
@@ -944,6 +963,17 @@ mod tests {
             (
                 "settings-resident-off",
                 PreviewState::SettingsResidentOff,
+                Page::Settings,
+            ),
+            ("settings-data", PreviewState::SettingsData, Page::Settings),
+            (
+                "settings-delete-confirm",
+                PreviewState::SettingsDeleteConfirm,
+                Page::Settings,
+            ),
+            (
+                "settings-about",
+                PreviewState::SettingsAbout,
                 Page::Settings,
             ),
         ];

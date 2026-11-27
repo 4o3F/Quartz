@@ -1146,4 +1146,130 @@ settings.general.first_weekday.saturday:
   zh-CN: "周六"
 settings.general.first_weekday.sunday:
   zh-CN: "周日"
+format.bytes.b:
+  zh-CN: "%{value} B"
+format.bytes.kb:
+  zh-CN: "%{value} KB"
+format.bytes.mb:
+  zh-CN: "%{value} MB"
+format.bytes.gb:
+  zh-CN: "%{value} GB"
+format.bytes.tb:
+  zh-CN: "%{value} TB"
+settings.group.recording:
+  zh-CN: "记录"
+settings.group.data:
+  zh-CN: "数据"
+settings.group.about:
+  zh-CN: "关于"
+settings.action.cancel:
+  zh-CN: "取消"
+settings.recording.title_retention.label:
+  zh-CN: "标题保留期"
+settings.recording.title_retention.description:
+  zh-CN: "超出保留期的窗口标题与网页标签标题将被清除且无法恢复，已有备份不受影响"
+settings.recording.title_retention.forever:
+  zh-CN: "永久"
+settings.recording.title_retention.days_30:
+  zh-CN: "30 天"
+settings.recording.title_retention.days_90:
+  zh-CN: "90 天"
+settings.recording.title_retention.days_365:
+  zh-CN: "365 天"
+settings.recording.title_retention.confirm_prompt:
+  zh-CN: "将标题保留期缩短为 %{value} 会立即清除超出期限的历史窗口与标签标题，且无法恢复。已有备份不受影响。"
+settings.recording.title_retention.confirm_action:
+  zh-CN: "确认缩短"
+settings.data.load_failed.title:
+  zh-CN: "暂时无法读取数据信息"
+settings.data.load_failed.message:
+  zh-CN: "请重试以读取数据库与备份信息。"
+settings.data.db_location.label:
+  zh-CN: "数据库位置"
+settings.data.open_folder:
+  zh-CN: "打开所在文件夹"
+settings.data.copy_path:
+  zh-CN: "复制路径"
+settings.data.db_size.label:
+  zh-CN: "数据库大小"
+settings.data.backup.title:
+  zh-CN: "备份"
+settings.data.backup.note:
+  zh-CN: "删除数据或清除标题不会修改已有备份"
+settings.data.backup.now:
+  zh-CN: "立即备份"
+settings.data.backup.running:
+  zh-CN: "正在备份…"
+settings.data.backup.empty:
+  zh-CN: "暂无备份"
+settings.data.backup.kind.manual:
+  zh-CN: "手动"
+settings.data.backup.kind.migration:
+  zh-CN: "迁移前"
+settings.data.backup.error.exists:
+  zh-CN: "同一秒内已存在备份文件，请稍后重试。"
+settings.data.backup.error.generic:
+  zh-CN: "创建备份失败，请重试。"
+settings.data.compact.title:
+  zh-CN: "压缩数据库"
+settings.data.compact.description:
+  zh-CN: "回收已删除记录占用的磁盘空间，大数据库可能需要数秒"
+settings.data.compact.action:
+  zh-CN: "压缩数据库"
+settings.data.compact.running:
+  zh-CN: "正在压缩…"
+settings.data.compact.success:
+  zh-CN: "已从 %{start} 压缩到 %{end}"
+settings.data.compact.failed:
+  zh-CN: "压缩数据库失败，请重试。"
+settings.data.delete.title:
+  zh-CN: "按日期范围删除"
+settings.data.delete.description:
+  zh-CN: "仅可删除已结束的完整逻辑日（最晚为昨天）"
+settings.data.delete.start_label:
+  zh-CN: "开始日期"
+settings.data.delete.end_label:
+  zh-CN: "结束日期"
+settings.data.delete.pick_date:
+  zh-CN: "选择日期"
+settings.data.delete.span_days:
+  zh-CN: "已选择 %{count} 天"
+settings.data.delete.action:
+  zh-CN: "删除"
+settings.data.delete.running:
+  zh-CN: "正在删除…"
+settings.data.delete.confirm_prompt:
+  zh-CN: "确定删除 %{range}（共 %{count} 天）的全部记录吗？此操作无法撤销，已有备份仍包含这些数据。"
+settings.data.delete.confirm_action:
+  zh-CN: "确认删除"
+settings.data.delete.success:
+  zh-CN: "已删除 %{hours} 小时 %{minutes} 分钟的前台记录"
+settings.data.delete.validation.order:
+  zh-CN: "结束日期不能早于开始日期。"
+settings.data.delete.validation.today:
+  zh-CN: "仅可删除昨天及之前的已结束逻辑日。"
+settings.data.delete.validation.span:
+  zh-CN: "单次最多删除 %{count} 天。"
+settings.data.delete.error.bad_request:
+  zh-CN: "日期范围无效，仅可删除已结束的完整逻辑日。"
+settings.data.delete.error.generic:
+  zh-CN: "删除记录失败，请重试。"
+settings.about.version.label:
+  zh-CN: "版本"
+settings.about.version.ui:
+  zh-CN: "界面 %{value}"
+settings.about.version.core:
+  zh-CN: "核心 %{value}"
+settings.about.status.label:
+  zh-CN: "核心状态"
+settings.about.status.loading:
+  zh-CN: "正在读取…"
+settings.about.status.failed:
+  zh-CN: "无法读取核心状态"
+settings.about.logs.label:
+  zh-CN: "日志目录"
+settings.about.open:
+  zh-CN: "打开"
+settings.about.local_only:
+  zh-CN: "所有记录仅保存在本机，Quartz 不会发起网络连接。"
 
