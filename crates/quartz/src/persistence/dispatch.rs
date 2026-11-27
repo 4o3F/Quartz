@@ -195,30 +195,32 @@ impl WriteRequest {
                     .map_err(|_| ProtocolError::new(ErrorKind::Internal));
             }
         };
-        result.map_err(|error| {
-            let kind = match error {
-                ExecuteAnnotationWritesError::InvalidRange => ErrorKind::InvalidRange,
-                ExecuteAnnotationWritesError::InvalidFields
-                | ExecuteAnnotationWritesError::InvalidCategory
-                | ExecuteAnnotationWritesError::MissingAnnotation
-                | ExecuteAnnotationWritesError::ChangeKind
-                | ExecuteAnnotationWritesError::DuplicateIdentity => ErrorKind::BadRequest,
-                ExecuteAnnotationWritesError::Database { source } => {
-                    return WriteFailure::database(&source).into_protocol_error();
-                }
-                ExecuteAnnotationWritesError::Version { source } => {
-                    return WriteFailure::version(&source).into_protocol_error();
-                }
-                ExecuteAnnotationWritesError::InvalidStoredAnnotation => {
-                    return WriteFailure::StoredAnnotation.into_protocol_error();
-                }
-                ExecuteAnnotationWritesError::Identity { .. } => {
-                    return WriteFailure::Identity.into_protocol_error();
-                }
-            };
-            ProtocolError::new(kind)
-        })
+        result.map_err(annotation_write_error)
     }
+}
+
+fn annotation_write_error(error: ExecuteAnnotationWritesError) -> ProtocolError {
+    let kind = match error {
+        ExecuteAnnotationWritesError::InvalidRange => ErrorKind::InvalidRange,
+        ExecuteAnnotationWritesError::MissingAnnotation => ErrorKind::AnnotationNotFound,
+        ExecuteAnnotationWritesError::InvalidFields
+        | ExecuteAnnotationWritesError::InvalidCategory
+        | ExecuteAnnotationWritesError::ChangeKind
+        | ExecuteAnnotationWritesError::DuplicateIdentity => ErrorKind::BadRequest,
+        ExecuteAnnotationWritesError::Database { source } => {
+            return WriteFailure::database(&source).into_protocol_error();
+        }
+        ExecuteAnnotationWritesError::Version { source } => {
+            return WriteFailure::version(&source).into_protocol_error();
+        }
+        ExecuteAnnotationWritesError::InvalidStoredAnnotation => {
+            return WriteFailure::StoredAnnotation.into_protocol_error();
+        }
+        ExecuteAnnotationWritesError::Identity { .. } => {
+            return WriteFailure::Identity.into_protocol_error();
+        }
+    };
+    ProtocolError::new(kind)
 }
 
 /// Limits pending user writes independently of capture persistence and queries.
@@ -465,5 +467,20 @@ mod tests {
         let command = channel.receiver.try_recv().expect("queued purge");
         assert!(matches!(command.request, WriteRequest::PurgeExpiredTitles));
         assert!(command.request.requires_idle_reader());
+    }
+    #[test]
+    fn annotation_write_error_maps_missing_annotation_to_annotation_not_found() {
+        assert_eq!(
+            annotation_write_error(ExecuteAnnotationWritesError::MissingAnnotation).kind,
+            ErrorKind::AnnotationNotFound
+        );
+        assert_eq!(
+            annotation_write_error(ExecuteAnnotationWritesError::InvalidRange).kind,
+            ErrorKind::InvalidRange
+        );
+        assert_eq!(
+            annotation_write_error(ExecuteAnnotationWritesError::ChangeKind).kind,
+            ErrorKind::BadRequest
+        );
     }
 }

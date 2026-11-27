@@ -27,9 +27,9 @@ pub(crate) mod week;
 pub(crate) use annotation_editor::{
     AnnotationCategoryDisplay, AnnotationDraft, AnnotationEditor, AnnotationEditorEffect,
     AnnotationEditorMode, AnnotationList, AnnotationWriteNotice, DayTimeContext,
-    DeleteConfirmState, EndpointRole, FoldChoice, SavedAnnotationRow, TodayPanelTab,
-    ValidateAnnotationDraftError, ValidateAnnotationTimeError, format_note_excerpt,
-    resolve_annotation_category,
+    DeleteConfirmState, EndpointBoundary, EndpointRole, FoldChoice, OutsideDayHint,
+    SavedAnnotationRow, TodayPanelTab, ValidateAnnotationDraftError, ValidateAnnotationTimeError,
+    format_note_excerpt, resolve_annotation_category,
 };
 pub(crate) use application::{AppId, AppInfo, Glyph};
 pub(crate) use category::{BuiltinCategory, Category, CategoryId, CategoryName, Tendency};

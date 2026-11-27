@@ -125,16 +125,16 @@ impl CategoryRequest {
     fn store_error(error: ExecuteCategoryCommandError) -> ProtocolError {
         let kind = match error {
             ExecuteCategoryCommandError::Validation { source } => match source {
-                domain::EditCategoryError::NotFound
-                | domain::EditCategoryError::BlankName
+                domain::EditCategoryError::NotFound => ErrorKind::CategoryNotFound,
+                domain::EditCategoryError::BuiltinIdentityViolation => ErrorKind::Forbidden,
+                domain::EditCategoryError::OrderOverflow => ErrorKind::VersionExhausted,
+                domain::EditCategoryError::BlankName
                 | domain::EditCategoryError::NameTooLong
                 | domain::EditCategoryError::ReservedName
                 | domain::EditCategoryError::MissingName
                 | domain::EditCategoryError::InvalidParent
                 | domain::EditCategoryError::Cycle
-                | domain::EditCategoryError::BuiltinIdentityViolation
-                | domain::EditCategoryError::ReorderSetMismatch
-                | domain::EditCategoryError::OrderOverflow => ErrorKind::BadRequest,
+                | domain::EditCategoryError::ReorderSetMismatch => ErrorKind::BadRequest,
             },
             ExecuteCategoryCommandError::Database { source } => {
                 return WriteFailure::database(&source).into_protocol_error();
@@ -292,6 +292,33 @@ mod tests {
                 .expect("name")
                 .as_str(),
             "Renamed"
+        );
+    }
+
+    #[test]
+    fn store_error_maps_not_found_forbidden_and_order_overflow_specifically() {
+        let map = |source: domain::EditCategoryError| {
+            CategoryRequest::store_error(ExecuteCategoryCommandError::Validation { source }).kind
+        };
+        assert_eq!(
+            map(domain::EditCategoryError::NotFound),
+            ErrorKind::CategoryNotFound
+        );
+        assert_eq!(
+            map(domain::EditCategoryError::BuiltinIdentityViolation),
+            ErrorKind::Forbidden
+        );
+        assert_eq!(
+            map(domain::EditCategoryError::OrderOverflow),
+            ErrorKind::VersionExhausted
+        );
+        assert_eq!(
+            map(domain::EditCategoryError::BlankName),
+            ErrorKind::BadRequest
+        );
+        assert_eq!(
+            map(domain::EditCategoryError::ReorderSetMismatch),
+            ErrorKind::BadRequest
         );
     }
 }

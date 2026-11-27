@@ -736,6 +736,8 @@ rules.categories.mutation_failed.readonly:
   zh-CN: "不允许执行此分类操作。"
 rules.categories.mutation_failed.busy:
   zh-CN: "核心正忙，请稍后重试。"
+rules.categories.mutation_failed.not_found:
+  zh-CN: "该分类已不存在，已刷新。"
 rules.categories.mutation_failed.generic:
   zh-CN: "无法更新分类，请重试。"
 rules.action.edit:
@@ -982,6 +984,10 @@ today.annotations.editor.end_label:
   zh-CN: "结束"
 today.annotations.editor.time_placeholder:
   zh-CN: "HH:MM"
+today.annotations.editor.prev_day_time:
+  zh-CN: "前一天 %{value}"
+today.annotations.editor.next_day_time:
+  zh-CN: "次日 %{value}"
 today.annotations.editor.category_label:
   zh-CN: "分类"
 today.annotations.editor.category_none:
@@ -1044,6 +1050,8 @@ today.annotations.error.generic:
   zh-CN: "保存标注变更失败，请重试。"
 today.annotations.error.category_unavailable:
   zh-CN: "所选分类已不可用或已归档，请刷新分类后重试。"
+today.annotations.error.not_found:
+  zh-CN: "该标注已不存在，已刷新。"
 timeline.mode.pan:
   zh-CN: "平移"
 timeline.mode.select:

@@ -28,6 +28,9 @@ const DEFAULT_CREATE_DURATION_MINUTES: i64 = 30;
 const DEFAULT_CREATE_START_HOUR: i8 = 9;
 /// Milliseconds in one minute.
 const MILLIS_PER_MINUTE: i64 = 60_000;
+/// Maximum distance from a logical day boundary that still uses an adjacent-day label
+/// (25 hours covers DST fall-back days).
+const MAX_ADJACENT_DAY_MS: i64 = 25 * 60 * MILLIS_PER_MINUTE;
 /// Maximum accepted hour value (`24:00` marks the exclusive end of a midnight-based day).
 const MAX_HOUR_END_OF_DAY: u8 = 24;
 /// Minutes per hour for `HH:MM` parsing.
@@ -68,6 +71,22 @@ pub(crate) struct DayTimeContext {
 pub(crate) enum EndpointRole {
     Start,
     End,
+}
+
+/// Whether an annotation endpoint lies inside the shown logical day (editable via `HH:MM`) or
+/// outside its bounds (shown read-only with a day hint and preserved verbatim on save).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndpointBoundary {
+    InDay,
+    OutsideDay,
+}
+
+/// Day-relative display hint for a read-only annotation endpoint outside the shown logical day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OutsideDayHint {
+    PreviousDay { hm: String },
+    NextDay { hm: String },
+    DateTime { text: String },
 }
 
 /// Disambiguation choice when a local `HH:MM` repeats during a DST fall-back fold.
@@ -230,12 +249,93 @@ impl DayTimeContext {
         format!("UTC{offset}")
     }
 
+    /// Classifies whether `utc_ms` lies inside the shown logical day for `role`, or outside it.
+    #[must_use]
+    pub(crate) const fn classify_endpoint(
+        &self,
+        utc_ms: i64,
+        role: EndpointRole,
+    ) -> EndpointBoundary {
+        let in_day = match role {
+            EndpointRole::Start => utc_ms >= self.bounds.start && utc_ms < self.bounds.end,
+            EndpointRole::End => utc_ms > self.bounds.start && utc_ms <= self.bounds.end,
+        };
+        if in_day {
+            EndpointBoundary::InDay
+        } else {
+            EndpointBoundary::OutsideDay
+        }
+    }
+
+    /// Formats a day-relative hint for an endpoint outside the shown logical day bounds.
+    #[must_use]
+    pub(crate) fn outside_day_hint(&self, utc_ms: i64) -> OutsideDayHint {
+        let Ok(ts) = jiff::Timestamp::from_millisecond(utc_ms) else {
+            return OutsideDayHint::DateTime {
+                text: String::new(),
+            };
+        };
+        let local = ts.to_zoned_datetime(self.zone.clone());
+        let hm = format!("{:02}:{:02}", local.hour(), local.minute());
+        if utc_ms < self.bounds.start {
+            let is_prev_day = jiff::Timestamp::from_millisecond(self.bounds.start)
+                .ok()
+                .map(|start_ts| start_ts.to_zoned_datetime(self.zone.clone()).date())
+                .is_some_and(|start_date| {
+                    (local.date() == start_date
+                        || start_date.yesterday().ok() == Some(local.date()))
+                        && self.bounds.start.saturating_sub(utc_ms) <= MAX_ADJACENT_DAY_MS
+                });
+            if is_prev_day {
+                return OutsideDayHint::PreviousDay { hm };
+            }
+        } else if utc_ms > self.bounds.end {
+            let is_next_day = jiff::Timestamp::from_millisecond(self.bounds.end)
+                .ok()
+                .map(|end_ts| end_ts.to_zoned_datetime(self.zone.clone()).date())
+                .is_some_and(|end_date| {
+                    (local.date() == end_date || end_date.tomorrow().ok() == Some(local.date()))
+                        && utc_ms.saturating_sub(self.bounds.end) <= MAX_ADJACENT_DAY_MS
+                });
+            if is_next_day {
+                return OutsideDayHint::NextDay { hm };
+            }
+        }
+        OutsideDayHint::DateTime {
+            text: format!("{} {hm}", local.date()),
+        }
+    }
+
+    /// Parses and resolves a single in-day `HH:MM` endpoint against this logical day.
+    ///
+    /// # Errors
+    /// Returns [`ValidateAnnotationTimeError`] if `raw` is malformed, falls in a DST gap,
+    /// or lies outside the shown logical day.
+    pub(crate) fn parse_endpoint(
+        &self,
+        raw: &str,
+        role: EndpointRole,
+        fold: FoldChoice,
+    ) -> Result<i64, ValidateAnnotationTimeError> {
+        let clock = parse_hm(raw)?;
+        let utc_ms = self.resolve_endpoint(clock, role, fold)?;
+        let in_bounds = match role {
+            EndpointRole::Start => utc_ms >= self.bounds.start && utc_ms < self.bounds.end,
+            EndpointRole::End => utc_ms >= self.bounds.start && utc_ms <= self.bounds.end,
+        };
+        if !in_bounds {
+            return Err(ValidateAnnotationTimeError::OutsideDay);
+        }
+        Ok(utc_ms)
+    }
+
     /// Resolves and validates `start_raw` and `end_raw` (`HH:MM`) into a half-open UTC range
     /// inside this logical day.
     ///
     /// # Errors
     /// Returns [`ValidateAnnotationTimeError`] if either input is malformed, falls in a DST gap,
     /// lies outside the shown logical day, or has `end <= start`.
+    #[cfg(test)]
     pub(crate) fn parse_time_range(
         &self,
         start_raw: &str,
@@ -243,17 +343,8 @@ impl DayTimeContext {
         start_fold: FoldChoice,
         end_fold: FoldChoice,
     ) -> Result<UtcRange, ValidateAnnotationTimeError> {
-        let start_clock = parse_hm(start_raw)?;
-        let end_clock = parse_hm(end_raw)?;
-        let start = self.resolve_endpoint(start_clock, EndpointRole::Start, start_fold)?;
-        let end = self.resolve_endpoint(end_clock, EndpointRole::End, end_fold)?;
-        if start < self.bounds.start
-            || start >= self.bounds.end
-            || end < self.bounds.start
-            || end > self.bounds.end
-        {
-            return Err(ValidateAnnotationTimeError::OutsideDay);
-        }
+        let start = self.parse_endpoint(start_raw, EndpointRole::Start, start_fold)?;
+        let end = self.parse_endpoint(end_raw, EndpointRole::End, end_fold)?;
         if end <= start {
             return Err(ValidateAnnotationTimeError::EndNotAfterStart);
         }
@@ -387,6 +478,7 @@ pub(crate) enum AnnotationWriteNotice {
     Busy { code: LoadDataErrorCode },
     Generic { code: LoadDataErrorCode },
     CategoryUnavailable { code: LoadDataErrorCode },
+    NotFound { code: LoadDataErrorCode },
 }
 
 impl AnnotationWriteNotice {
@@ -403,6 +495,7 @@ impl AnnotationWriteNotice {
             ) => Self::Stale { code },
             LoadDataErrorCode::Protocol(ErrorKind::Busy) => Self::Busy { code },
             LoadDataErrorCode::Protocol(ErrorKind::InvalidRange) => Self::InvalidRange { code },
+            LoadDataErrorCode::Protocol(ErrorKind::AnnotationNotFound) => Self::NotFound { code },
             LoadDataErrorCode::Protocol(ErrorKind::BadRequest) => Self::BadRequest { code },
             LoadDataErrorCode::Protocol(_) | LoadDataErrorCode::Local(_) => Self::Generic { code },
         }
@@ -417,7 +510,8 @@ impl AnnotationWriteNotice {
             | Self::Stale { code }
             | Self::Busy { code }
             | Self::Generic { code }
-            | Self::CategoryUnavailable { code } => code,
+            | Self::CategoryUnavailable { code }
+            | Self::NotFound { code } => code,
         }
     }
 }
@@ -579,6 +673,7 @@ pub(crate) enum AnnotationEditorMode {
     Edit {
         uuid: wire::AnnotationId,
         kind: wire::AnnotationKind,
+        range: UtcRange,
         label_preset: Option<wire::AnnotationLabelPreset>,
         delete_confirm: DeleteConfirmState,
     },
@@ -598,6 +693,8 @@ impl AnnotationEditorMode {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct AnnotationDraft {
     pub(crate) mode: AnnotationEditorMode,
+    pub(crate) start_boundary: EndpointBoundary,
+    pub(crate) end_boundary: EndpointBoundary,
     pub(crate) start_input: String,
     pub(crate) end_input: String,
     pub(crate) start_fold: FoldChoice,
@@ -614,6 +711,8 @@ impl fmt::Debug for AnnotationDraft {
         formatter
             .debug_struct("AnnotationDraft")
             .field("mode", &self.mode)
+            .field("start_boundary", &self.start_boundary)
+            .field("end_boundary", &self.end_boundary)
             .field("start_input", &self.start_input)
             .field("end_input", &self.end_input)
             .field("start_fold", &self.start_fold)
@@ -976,6 +1075,8 @@ impl AnnotationEditor {
                 session_id: None,
                 kind,
             },
+            start_boundary: EndpointBoundary::InDay,
+            end_boundary: EndpointBoundary::InDay,
             start_input,
             end_input,
             start_fold,
@@ -1097,20 +1198,25 @@ impl AnnotationEditor {
         };
         self.visibility = PanelVisibility::Open;
         self.active_tab = TodayPanelTab::Annotations;
-        let (start_input, end_input, start_fold, end_fold) = match &self.day_context {
-            Some(ctx) => (
-                ctx.format_endpoint_hm(row.range.start, EndpointRole::Start),
-                ctx.format_endpoint_hm(row.range.end, EndpointRole::End),
-                ctx.detect_fold_choice(row.range.start),
-                ctx.detect_fold_choice(row.range.end),
-            ),
-            None => (
-                format_utc_hm(row.range.start),
-                format_utc_hm(row.range.end),
-                FoldChoice::Earlier,
-                FoldChoice::Earlier,
-            ),
-        };
+        let (start_boundary, end_boundary, start_input, end_input, start_fold, end_fold) =
+            match &self.day_context {
+                Some(ctx) => (
+                    ctx.classify_endpoint(row.range.start, EndpointRole::Start),
+                    ctx.classify_endpoint(row.range.end, EndpointRole::End),
+                    ctx.format_endpoint_hm(row.range.start, EndpointRole::Start),
+                    ctx.format_endpoint_hm(row.range.end, EndpointRole::End),
+                    ctx.detect_fold_choice(row.range.start),
+                    ctx.detect_fold_choice(row.range.end),
+                ),
+                None => (
+                    EndpointBoundary::InDay,
+                    EndpointBoundary::InDay,
+                    format_utc_hm(row.range.start),
+                    format_utc_hm(row.range.end),
+                    FoldChoice::Earlier,
+                    FoldChoice::Earlier,
+                ),
+            };
         let category = row.category.as_ref().and_then(|cat| match cat {
             wire::AnnotationCategory::Uuid { uuid } => Some(uuid.clone()),
             wire::AnnotationCategory::Builtin { key } => {
@@ -1128,9 +1234,12 @@ impl AnnotationEditor {
             mode: AnnotationEditorMode::Edit {
                 uuid: row.uuid,
                 kind: row.kind,
+                range: row.range,
                 label_preset: row.label_preset,
                 delete_confirm: DeleteConfirmState::Idle,
             },
+            start_boundary,
+            end_boundary,
             start_input,
             end_input,
             start_fold,
@@ -1165,9 +1274,10 @@ impl AnnotationEditor {
         }
     }
 
-    /// Updates the start time `HH:MM` input string.
+    /// Updates the start time `HH:MM` input string when the start endpoint is editable in-day.
     pub(crate) fn set_start_input(&mut self, value: String) {
         if let Some(draft) = &mut self.draft
+            && draft.start_boundary == EndpointBoundary::InDay
             && draft.start_input != value
         {
             draft.start_input = value;
@@ -1176,9 +1286,10 @@ impl AnnotationEditor {
         }
     }
 
-    /// Updates the end time `HH:MM` input string.
+    /// Updates the end time `HH:MM` input string when the end endpoint is editable in-day.
     pub(crate) fn set_end_input(&mut self, value: String) {
         if let Some(draft) = &mut self.draft
+            && draft.end_boundary == EndpointBoundary::InDay
             && draft.end_input != value
         {
             draft.end_input = value;
@@ -1191,8 +1302,13 @@ impl AnnotationEditor {
     pub(crate) fn set_fold_choice(&mut self, role: EndpointRole, choice: FoldChoice) {
         if let Some(draft) = &mut self.draft {
             match role {
-                EndpointRole::Start => draft.start_fold = choice,
-                EndpointRole::End => draft.end_fold = choice,
+                EndpointRole::Start if draft.start_boundary == EndpointBoundary::InDay => {
+                    draft.start_fold = choice;
+                }
+                EndpointRole::End if draft.end_boundary == EndpointBoundary::InDay => {
+                    draft.end_fold = choice;
+                }
+                EndpointRole::Start | EndpointRole::End => return,
             }
             draft.validation_error = None;
             draft.mutation_error = None;
@@ -1251,12 +1367,7 @@ impl AnnotationEditor {
             return AnnotationEditorEffect::None;
         };
 
-        let range = match ctx.parse_time_range(
-            &draft.start_input,
-            &draft.end_input,
-            draft.start_fold,
-            draft.end_fold,
-        ) {
+        let range = match resolve_draft_range(&ctx, draft) {
             Ok(range) => range,
             Err(source) => {
                 draft.validation_error = Some(ValidateAnnotationDraftError::Time { source });
@@ -1458,25 +1569,15 @@ impl AnnotationEditor {
                 self.draft = None;
                 self.quick_notice = None;
                 self.quick_session = None;
-                if self
-                    .day_context
-                    .as_ref()
-                    .is_some_and(|ctx| ctx.date == date)
-                {
-                    if self.is_panel_open() && self.active_tab == TodayPanelTab::Annotations {
-                        self.query_current_day()
-                    } else {
-                        if self.list_state.is_some() {
-                            self.list_state = Some(LoadState::Stale);
-                        }
-                        AnnotationEditorEffect::None
-                    }
-                } else {
-                    AnnotationEditorEffect::None
-                }
+                self.refresh_after_write(date)
             }
             Err(error) => {
                 let notice = AnnotationWriteNotice::from_error(&error);
+                if matches!(notice, AnnotationWriteNotice::NotFound { .. }) {
+                    self.draft = None;
+                    self.quick_notice = Some(notice);
+                    return self.refresh_after_write(date);
+                }
                 if let Some(draft) = &mut self.draft {
                     if let AnnotationEditorMode::Edit { delete_confirm, .. } = &mut draft.mode {
                         *delete_confirm = DeleteConfirmState::Idle;
@@ -1487,6 +1588,25 @@ impl AnnotationEditor {
                 }
                 AnnotationEditorEffect::None
             }
+        }
+    }
+
+    fn refresh_after_write(&mut self, date: wire::LocalDate) -> AnnotationEditorEffect {
+        if self
+            .day_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.date == date)
+        {
+            if self.is_panel_open() && self.active_tab == TodayPanelTab::Annotations {
+                self.query_current_day()
+            } else {
+                if self.list_state.is_some() {
+                    self.list_state = Some(LoadState::Stale);
+                }
+                AnnotationEditorEffect::None
+            }
+        } else {
+            AnnotationEditorEffect::None
         }
     }
 
@@ -1516,6 +1636,40 @@ impl AnnotationEditor {
             generation: self.generation,
         }
     }
+}
+
+fn resolve_draft_range(
+    ctx: &DayTimeContext,
+    draft: &AnnotationDraft,
+) -> Result<UtcRange, ValidateAnnotationTimeError> {
+    let original_range = match &draft.mode {
+        AnnotationEditorMode::Edit { range, .. } => Some(*range),
+        AnnotationEditorMode::Create { .. } => None,
+    };
+    let start = match draft.start_boundary {
+        EndpointBoundary::InDay => {
+            ctx.parse_endpoint(&draft.start_input, EndpointRole::Start, draft.start_fold)?
+        }
+        EndpointBoundary::OutsideDay => {
+            original_range
+                .ok_or(ValidateAnnotationTimeError::OutsideDay)?
+                .start
+        }
+    };
+    let end = match draft.end_boundary {
+        EndpointBoundary::InDay => {
+            ctx.parse_endpoint(&draft.end_input, EndpointRole::End, draft.end_fold)?
+        }
+        EndpointBoundary::OutsideDay => {
+            original_range
+                .ok_or(ValidateAnnotationTimeError::OutsideDay)?
+                .end
+        }
+    };
+    if end <= start {
+        return Err(ValidateAnnotationTimeError::EndNotAfterStart);
+    }
+    Ok(UtcRange { start, end })
 }
 
 fn format_utc_hm(utc_ms: i64) -> String {
@@ -1840,6 +1994,9 @@ mod tests {
 
         let catalog = sample_catalog();
         editor.open_edit(&sample_id(ANNO_ID_1), Some(&catalog));
+        let opened = editor.draft().expect("opened draft");
+        assert_eq!(opened.start_boundary, EndpointBoundary::InDay);
+        assert_eq!(opened.end_boundary, EndpointBoundary::InDay);
         editor.set_kind(wire::AnnotationKind::Note); // Must be ignored in edit mode.
         editor.set_end_input("10:30".into());
         editor.set_label_input("Updated label".into());
@@ -1851,6 +2008,10 @@ mod tests {
         let entity = request.entities.first().expect("update entity");
         assert_eq!(entity.uuid, sample_id(ANNO_ID_1));
         assert_eq!(entity.kind, Some(wire::AnnotationKind::CategoryOverride));
+        assert_eq!(
+            entity.values.start_utc_ms,
+            ctx.bounds.start + 9 * 60 * MILLIS_PER_MINUTE
+        );
         assert_eq!(
             entity.values.end_utc_ms,
             ctx.bounds.start + (10 * 60 + 30) * MILLIS_PER_MINUTE
@@ -2217,5 +2378,174 @@ mod tests {
             editor.quick_notice(),
             Some(AnnotationWriteNotice::CategoryUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn annotation_not_found_closes_draft_sets_notice_and_refreshes_day() {
+        let ctx = utc_day_context("2026-11-21");
+        let mut editor = AnnotationEditor::new();
+        let _ = editor.set_day_context(Some(ctx.clone()));
+        let AnnotationEditorEffect::Query { generation, .. } = editor.open_panel() else {
+            panic!("expected initial query");
+        };
+        editor.apply_loaded(
+            generation,
+            ctx.date,
+            Ok(wire::QueryAnnotationsResponse {
+                entities: vec![wire::SavedAnnotation {
+                    uuid: sample_id(ANNO_ID_1),
+                    kind: wire::AnnotationKind::Note,
+                    start_utc_ms: ctx.bounds.start + 60 * MILLIS_PER_MINUTE,
+                    end_utc_ms: ctx.bounds.start + 120 * MILLIS_PER_MINUTE,
+                    category: None,
+                    label_preset: None,
+                    label: Some("Note".into()),
+                    note: None,
+                    created_utc_ms: 1,
+                    updated_utc_ms: 2,
+                }],
+                versions: wire::QueryVersions("v1".into()),
+                truncated: false,
+            }),
+        );
+        editor.open_edit(&sample_id(ANNO_ID_1), None);
+        editor.set_label_input("Updated".into());
+        assert!(matches!(
+            editor.submit(|| panic!("edit must not generate id")),
+            AnnotationEditorEffect::Update { .. }
+        ));
+
+        let not_found = LoadDataError::from(RequestCoreError::Call {
+            source: CallCoreError::Protocol {
+                kind: ErrorKind::AnnotationNotFound,
+            },
+        });
+        assert!(matches!(
+            AnnotationWriteNotice::from_error(&not_found),
+            AnnotationWriteNotice::NotFound { .. }
+        ));
+        let effect = editor.apply_write_finished(ctx.date, Err(not_found));
+        assert!(matches!(effect, AnnotationEditorEffect::Query { .. }));
+        assert!(editor.draft().is_none());
+        assert!(matches!(
+            editor.quick_notice(),
+            Some(AnnotationWriteNotice::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn cross_midnight_edit_preserves_previous_day_start_when_changing_end() {
+        let ctx = utc_day_context("2026-11-21");
+        let prev_day_start = ctx.bounds.start - 2 * 60 * MILLIS_PER_MINUTE; // 2026-11-20 22:00
+        let shown_day_end = ctx.bounds.start + 60 * MILLIS_PER_MINUTE; // 2026-11-21 01:00
+        let mut editor = AnnotationEditor::new();
+        let _ = editor.set_day_context(Some(ctx.clone()));
+        let AnnotationEditorEffect::Query { generation, .. } = editor.open_panel() else {
+            panic!("expected query");
+        };
+        editor.apply_loaded(
+            generation,
+            ctx.date,
+            Ok(wire::QueryAnnotationsResponse {
+                entities: vec![wire::SavedAnnotation {
+                    uuid: sample_id(ANNO_ID_1),
+                    kind: wire::AnnotationKind::Note,
+                    start_utc_ms: prev_day_start,
+                    end_utc_ms: shown_day_end,
+                    category: None,
+                    label_preset: None,
+                    label: Some("Overnight".into()),
+                    note: None,
+                    created_utc_ms: 1,
+                    updated_utc_ms: 2,
+                }],
+                versions: wire::QueryVersions("v1".into()),
+                truncated: false,
+            }),
+        );
+
+        editor.open_edit(&sample_id(ANNO_ID_1), None);
+        let draft = editor.draft().expect("edit draft");
+        assert_eq!(draft.start_boundary, EndpointBoundary::OutsideDay);
+        assert_eq!(draft.end_boundary, EndpointBoundary::InDay);
+        assert_eq!(draft.end_input, "01:00");
+        assert_eq!(
+            ctx.outside_day_hint(prev_day_start),
+            OutsideDayHint::PreviousDay {
+                hm: "22:00".to_owned(),
+            }
+        );
+
+        // Changing start input on an outside-day start must be ignored; changing end updates only end.
+        editor.set_start_input("00:30".into());
+        editor.set_end_input("01:30".into());
+        let effect = editor.submit(|| panic!("edit must not allocate id"));
+        let AnnotationEditorEffect::Update { request, .. } = effect else {
+            panic!("expected update effect");
+        };
+        let entity = request.entities.first().expect("entity");
+        assert_eq!(entity.values.start_utc_ms, prev_day_start);
+        assert_eq!(
+            entity.values.end_utc_ms,
+            ctx.bounds.start + 90 * MILLIS_PER_MINUTE
+        );
+    }
+
+    #[test]
+    fn cross_midnight_edit_preserves_next_day_end_when_changing_start() {
+        let ctx = utc_day_context("2026-11-21");
+        let shown_day_start = ctx.bounds.end - 60 * MILLIS_PER_MINUTE; // 2026-11-21 23:00
+        let next_day_end = ctx.bounds.end + 2 * 60 * MILLIS_PER_MINUTE; // 2026-11-22 02:00
+        let mut editor = AnnotationEditor::new();
+        let _ = editor.set_day_context(Some(ctx.clone()));
+        let AnnotationEditorEffect::Query { generation, .. } = editor.open_panel() else {
+            panic!("expected query");
+        };
+        editor.apply_loaded(
+            generation,
+            ctx.date,
+            Ok(wire::QueryAnnotationsResponse {
+                entities: vec![wire::SavedAnnotation {
+                    uuid: sample_id(ANNO_ID_1),
+                    kind: wire::AnnotationKind::Note,
+                    start_utc_ms: shown_day_start,
+                    end_utc_ms: next_day_end,
+                    category: None,
+                    label_preset: None,
+                    label: Some("Late night".into()),
+                    note: None,
+                    created_utc_ms: 1,
+                    updated_utc_ms: 2,
+                }],
+                versions: wire::QueryVersions("v1".into()),
+                truncated: false,
+            }),
+        );
+
+        editor.open_edit(&sample_id(ANNO_ID_1), None);
+        let draft = editor.draft().expect("edit draft");
+        assert_eq!(draft.start_boundary, EndpointBoundary::InDay);
+        assert_eq!(draft.end_boundary, EndpointBoundary::OutsideDay);
+        assert_eq!(draft.start_input, "23:00");
+        assert_eq!(
+            ctx.outside_day_hint(next_day_end),
+            OutsideDayHint::NextDay {
+                hm: "02:00".to_owned(),
+            }
+        );
+
+        // Changing end input on an outside-day end must be ignored; changing start updates only start.
+        editor.set_end_input("23:30".into());
+        editor.set_start_input("22:30".into());
+        let effect = editor.submit(|| panic!("edit must not allocate id"));
+        let AnnotationEditorEffect::Update { request, .. } = effect else {
+            panic!("expected update effect");
+        };
+        let entity = request.entities.first().expect("entity");
+        assert_eq!(
+            entity.values.start_utc_ms,
+            ctx.bounds.start + (22 * 60 + 30) * MILLIS_PER_MINUTE
+        );
+        assert_eq!(entity.values.end_utc_ms, next_day_end);
     }
 }

@@ -153,6 +153,7 @@ impl ReadInputs {
             warnings.dedup();
             nodes.push(RuleSetNode {
                 key: node.key.clone(),
+                name: set.current.set.header.name.clone(),
                 parent: set.current.set.header.parent.clone(),
                 version: set.current.version,
                 enabled: node.enabled == domain::Enablement::Enabled,
@@ -234,6 +235,7 @@ impl ReadInputs {
             .collect::<Result<Vec<_>, _>>()?;
         let response = RuleSetsGetResponse {
             key: request.key,
+            name: set.current.set.header.name.clone(),
             version,
             parent_version: revision.parent_version,
             entries,

@@ -736,6 +736,8 @@ rules.categories.mutation_failed.readonly:
   en: "This category operation is not permitted."
 rules.categories.mutation_failed.busy:
   en: "Core is busy. Try again in a moment."
+rules.categories.mutation_failed.not_found:
+  en: "This category no longer exists. The list has been refreshed."
 rules.categories.mutation_failed.generic:
   en: "Could not update categories. Try again."
 rules.action.edit:
@@ -982,6 +984,10 @@ today.annotations.editor.end_label:
   en: "End"
 today.annotations.editor.time_placeholder:
   en: "HH:MM"
+today.annotations.editor.prev_day_time:
+  en: "Previous day %{value}"
+today.annotations.editor.next_day_time:
+  en: "Next day %{value}"
 today.annotations.editor.category_label:
   en: "Category"
 today.annotations.editor.category_none:
@@ -1044,6 +1050,8 @@ today.annotations.error.generic:
   en: "Couldn’t save annotation changes. Try again."
 today.annotations.error.category_unavailable:
   en: "The selected category is no longer active. Refresh categories and try again."
+today.annotations.error.not_found:
+  en: "This annotation no longer exists. The list has been refreshed."
 timeline.mode.pan:
   en: "Pan"
 timeline.mode.select:

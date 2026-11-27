@@ -131,6 +131,7 @@ pub(crate) enum MapRuleTreeError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuleTreeNode {
     pub(crate) key: String,
+    pub(crate) name: String,
     pub(crate) parent: Option<String>,
     pub(crate) kind: wire::RuleKind,
     pub(crate) source: wire::RuleSetSource,
@@ -340,6 +341,7 @@ fn build_tree_node<'a>(
 
     Ok(RuleTreeNode {
         key: wire_node.key.clone(),
+        name: wire_node.name.clone(),
         parent: wire_node.parent.clone(),
         kind,
         source: wire_node.source,
@@ -538,6 +540,7 @@ impl RuleEntryDetail {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuleSetDetail {
     pub(crate) key: String,
+    pub(crate) name: String,
     pub(crate) version: u32,
     pub(crate) parent_version: Option<u32>,
     pub(crate) entries: Vec<RuleEntryDetail>,
@@ -550,6 +553,7 @@ impl RuleSetDetail {
     pub(crate) fn from_protocol(response: wire::RuleSetsGetResponse) -> Self {
         Self {
             key: response.key,
+            name: response.name,
             version: response.version,
             parent_version: response.parent_version,
             entries: response
@@ -1793,6 +1797,15 @@ impl RulesPage {
                 self.reload_categories()
             }
             Err(error) => {
+                if matches!(
+                    error.code(),
+                    LoadDataErrorCode::Protocol(ErrorKind::CategoryNotFound)
+                ) {
+                    self.category_editor = None;
+                    let effect = self.reload_categories();
+                    self.category_mutation_notice = Some(MutationNotice { error });
+                    return effect;
+                }
                 if matches!(error, LoadDataError::Stale)
                     || matches!(
                         error.code(),
@@ -1975,6 +1988,7 @@ mod tests {
     ) -> RuleSetNode {
         RuleSetNode {
             key: key.to_owned(),
+            name: format!("Set {key}"),
             parent: parent.map(str::to_owned),
             version: 2,
             enabled,
@@ -1998,6 +2012,7 @@ mod tests {
     fn get_response(key: &str, label: &str) -> RuleSetsGetResponse {
         RuleSetsGetResponse {
             key: key.to_owned(),
+            name: format!("Set {key}"),
             version: 2,
             parent_version: Some(1),
             entries: vec![RuleSetEntry {
@@ -2753,5 +2768,53 @@ mod tests {
         assert!(page.category_editor().is_some());
         assert_eq!(page.handle_key(RulesKeyAction::Cancel), RulesEffect::None);
         assert!(page.category_editor().is_none());
+    }
+
+    #[test]
+    fn rule_set_name_is_mapped_for_tree_nodes_and_detail() {
+        let tree = RuleTree::from_responses(&[tree_response(vec![node(
+            "user.study",
+            None,
+            RuleSetSource::User,
+            true,
+            RuleSetCounts {
+                added: 1,
+                overridden: 0,
+                disabled: 0,
+            },
+        )])])
+        .expect("tree");
+        let found = tree.find("user.study").expect("node");
+        assert_eq!(found.name, "Set user.study");
+
+        let detail = RuleSetDetail::from_protocol(get_response("user.study", "Study"));
+        assert_eq!(detail.name, "Set user.study");
+    }
+
+    #[test]
+    fn category_not_found_closes_editor_preserves_notice_and_reloads() {
+        let mut page = loaded_categories_page();
+        page.begin_edit_category(&uuid(2));
+        page.set_category_editor_name("Renamed".to_owned());
+        let RulesEffect::MutateCategory { generation, .. } = page.submit_category_editor() else {
+            panic!("expected category update mutation");
+        };
+
+        let not_found = LoadDataError::from(crate::link::RequestCoreError::Call {
+            source: quartz_pipe::CallCoreError::Protocol {
+                kind: ErrorKind::CategoryNotFound,
+            },
+        });
+        let effect = page.apply_category_mutation_finished(generation, Err(not_found));
+        assert!(matches!(effect, RulesEffect::LoadCategories { .. }));
+        assert!(page.category_editor().is_none());
+        assert!(matches!(page.categories_state(), LoadState::Loading));
+        assert_eq!(
+            page.category_mutation_notice()
+                .expect("not-found notice")
+                .error
+                .code(),
+            LoadDataErrorCode::Protocol(ErrorKind::CategoryNotFound)
+        );
     }
 }

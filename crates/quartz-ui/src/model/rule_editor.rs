@@ -1608,6 +1608,7 @@ mod tests {
     fn sample_tree() -> RuleTree {
         let make_node = |key: &str, parent: Option<&str>, source: RuleSetSource| RuleSetNode {
             key: key.to_owned(),
+            name: key.to_owned(),
             parent: parent.map(str::to_owned),
             version: 1,
             enabled: true,

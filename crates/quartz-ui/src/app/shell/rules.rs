@@ -995,7 +995,7 @@ impl AppShell {
                                         },
                                     )
                                     .text_color(title_color)
-                                    .child(node.key.clone()),
+                                    .child(node.name.clone()),
                             )
                             .when(node.source == RuleSetSource::Builtin, |header| {
                                 header.child(Self::badge(
@@ -1004,6 +1004,16 @@ impl AppShell {
                                     BadgeTone::Neutral,
                                 ))
                             }),
+                    )
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .ramp(ui, Ramp::Caption)
+                            .font(ui.mono_font())
+                            .text_color(meta_color)
+                            .child(node.key.clone()),
                     )
                     .child(
                         div()
@@ -1117,6 +1127,7 @@ impl AppShell {
         let busy = self.rules.mutating() == MutationActivity::Busy;
         let is_user = node.source == RuleSetSource::User;
         let display_key = detail.map_or(node.key.as_str(), |loaded| loaded.key.as_str());
+        let display_name = detail.map_or(node.name.as_str(), |loaded| loaded.name.as_str());
         let display_version = detail.map_or(node.version, |loaded| loaded.version);
         let parent_version = detail.and_then(|loaded| loaded.parent_version);
         let toggle_label = match node.self_enablement {
@@ -1244,7 +1255,7 @@ impl AppShell {
                                     .min_w(px(0.))
                                     .ramp(ui, Ramp::Subtitle)
                                     .text_color(palette.text_primary)
-                                    .child(display_key.to_owned()),
+                                    .child(display_name.to_owned()),
                             )
                             .child(Self::badge(
                                 ui,
@@ -1258,6 +1269,13 @@ impl AppShell {
                                     BadgeTone::Neutral,
                                 ))
                             }),
+                    )
+                    .child(
+                        div()
+                            .ramp(ui, Ramp::Caption)
+                            .font(ui.mono_font())
+                            .text_color(palette.text_secondary)
+                            .child(display_key.to_owned()),
                     )
                     .child(
                         div()
@@ -2128,6 +2146,9 @@ impl AppShell {
                 ) => Msg::RulesCategoriesMutationFailedReadonly,
                 LoadDataErrorCode::Protocol(ErrorKind::Busy) => {
                     Msg::RulesCategoriesMutationFailedBusy
+                }
+                LoadDataErrorCode::Protocol(ErrorKind::CategoryNotFound) => {
+                    Msg::RulesCategoriesMutationFailedNotFound
                 }
                 _ => Msg::RulesCategoriesMutationFailedGeneric,
             };

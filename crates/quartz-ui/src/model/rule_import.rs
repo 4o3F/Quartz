@@ -796,6 +796,7 @@ mod tests {
         let make_node =
             |key: &str, parent: Option<&str>, version: u32, source: RuleSetSource| RuleSetNode {
                 key: key.to_owned(),
+                name: key.to_owned(),
                 parent: parent.map(str::to_owned),
                 version,
                 enabled: true,
@@ -1129,6 +1130,7 @@ mod tests {
             effective_version: "c2".to_owned(),
             nodes: vec![RuleSetNode {
                 key: "user.study-sites".to_owned(),
+                name: "Study sites".to_owned(),
                 parent: None,
                 version: 7,
                 enabled: true,

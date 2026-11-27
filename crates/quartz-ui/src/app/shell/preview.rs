@@ -894,6 +894,7 @@ fn fixture_rule_tree_responses() -> Vec<wire::RuleSetsTreeResponse> {
             nodes: vec![
                 wire::RuleSetNode {
                     key: "builtin.classification".to_owned(),
+                    name: "Built-in classification".to_owned(),
                     parent: None,
                     version: 1,
                     enabled: true,
@@ -908,6 +909,7 @@ fn fixture_rule_tree_responses() -> Vec<wire::RuleSetsTreeResponse> {
                 },
                 wire::RuleSetNode {
                     key: PREVIEW_USER_SET_KEY.to_owned(),
+                    name: "Study sites".to_owned(),
                     parent: Some("builtin.classification".to_owned()),
                     version: PREVIEW_USER_SET_VERSION,
                     enabled: true,
@@ -922,6 +924,7 @@ fn fixture_rule_tree_responses() -> Vec<wire::RuleSetsTreeResponse> {
                 },
                 wire::RuleSetNode {
                     key: "user.weekend-mode".to_owned(),
+                    name: "Weekend mode".to_owned(),
                     parent: Some("builtin.classification".to_owned()),
                     version: 1,
                     enabled: false,
@@ -943,6 +946,7 @@ fn fixture_rule_tree_responses() -> Vec<wire::RuleSetsTreeResponse> {
             effective_version: "ext-eff-1".to_owned(),
             nodes: vec![wire::RuleSetNode {
                 key: "builtin.extraction".to_owned(),
+                name: "Built-in extraction".to_owned(),
                 parent: None,
                 version: 1,
                 enabled: true,
@@ -963,6 +967,7 @@ fn fixture_rule_tree_responses() -> Vec<wire::RuleSetsTreeResponse> {
             effective_version: "prv-eff-1".to_owned(),
             nodes: vec![wire::RuleSetNode {
                 key: "builtin.privacy".to_owned(),
+                name: "Built-in privacy".to_owned(),
                 parent: None,
                 version: 1,
                 enabled: true,
@@ -984,6 +989,7 @@ fn fixture_rule_tree_responses() -> Vec<wire::RuleSetsTreeResponse> {
 fn fixture_user_set_detail_response() -> wire::RuleSetsGetResponse {
     wire::RuleSetsGetResponse {
         key: PREVIEW_USER_SET_KEY.to_owned(),
+        name: "Study sites".to_owned(),
         version: PREVIEW_USER_SET_VERSION,
         parent_version: Some(1),
         entries: vec![

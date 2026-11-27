@@ -52,6 +52,8 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 | `stale_document_ref` | 文档引用绑定的查询输入已变化，需重查 | 无 |
 | `rule_set_stale` | 规则集 `base_version` 过期 | `key`、`current_version`（u32，不存在/已删为 0） |
 | `rule_set_not_found` | 规则集不存在 | `key` |
+| `category_not_found` | 目标分类不存在 | 无 |
+| `annotation_not_found` | 目标标注不存在 | 无 |
 | `rule_set_read_only` | 试图修改内置规则集 | `key` |
 | `rule_set_has_children` | 试图删除仍有活跃子集的规则集 | `key` |
 | `rule_set_identity` | 已有 `key` 的 `kind` 或 `parent` 不一致 | `key`、`field` |

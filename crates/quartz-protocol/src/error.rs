@@ -45,6 +45,10 @@ pub enum ErrorKind {
     },
     /// The selected rule set does not exist.
     RuleSetNotFound { key: String },
+    /// The targeted category does not exist.
+    CategoryNotFound,
+    /// The targeted annotation does not exist.
+    AnnotationNotFound,
     /// Builtin rule sets can only be changed by embedded upgrades.
     RuleSetReadOnly { key: String },
     /// A set with active children cannot be deleted.
@@ -90,6 +94,8 @@ impl ErrorKind {
             Self::StaleDocumentRef => "stale_document_ref",
             Self::RuleSetStale { .. } => "rule_set_stale",
             Self::RuleSetNotFound { .. } => "rule_set_not_found",
+            Self::CategoryNotFound => "category_not_found",
+            Self::AnnotationNotFound => "annotation_not_found",
             Self::RuleSetReadOnly { .. } => "rule_set_read_only",
             Self::RuleSetHasChildren { .. } => "rule_set_has_children",
             Self::RuleSetIdentity { .. } => "rule_set_identity",
@@ -143,6 +149,8 @@ mod tests {
             "stale_document_ref",
             "rule_set_stale",
             "rule_set_not_found",
+            "category_not_found",
+            "annotation_not_found",
             "rule_set_read_only",
             "rule_set_has_children",
             "rule_set_identity",

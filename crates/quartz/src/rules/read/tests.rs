@@ -138,9 +138,12 @@ fn disabled_subtrees_use_resolver_states() {
     assert!(nodes[0].enabled);
     assert!(!nodes[1].enabled);
     assert!(!nodes[2].enabled);
+    assert_eq!(nodes[0].name, "Read test");
     let own = fixture.get("user.leaf", RuleView::Own);
+    assert_eq!(own.name, "Read test");
     assert_eq!(own.entries[0].state, RuleEntryState::Disabled);
     let effective = fixture.get("user.leaf", RuleView::Effective);
+    assert_eq!(effective.name, "Read test");
     assert_eq!(
         effective
             .entries

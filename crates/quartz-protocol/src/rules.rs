@@ -200,6 +200,7 @@ pub struct RuleSetWarning {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleSetNode {
     pub key: String,
+    pub name: String,
     pub parent: Option<String>,
     pub version: u32,
     pub enabled: bool,
@@ -372,6 +373,7 @@ pub struct RuleSetEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleSetsGetResponse {
     pub key: String,
+    pub name: String,
     pub version: u32,
     pub parent_version: Option<u32>,
     pub entries: Vec<RuleSetEntry>,

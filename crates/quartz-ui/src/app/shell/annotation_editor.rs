@@ -25,10 +25,11 @@ use crate::{
     link::{LoadDataError, RequestCoreError},
     model::{
         AnnotationCategoryDisplay, AnnotationDraft, AnnotationEditorEffect, AnnotationEditorMode,
-        AnnotationList, AnnotationWriteNotice, DayTimeContext, DeleteConfirmState, EndpointRole,
-        FoldChoice, LoadState, MutationActivity, SavedAnnotationRow, TodayPanelTab,
-        ValidateAnnotationDraftError, ValidateAnnotationTimeError, format_note_excerpt,
-        resolve_annotation_category, rules::CategoryArchiveState,
+        AnnotationList, AnnotationWriteNotice, DayTimeContext, DeleteConfirmState,
+        EndpointBoundary, EndpointRole, FoldChoice, LoadState, MutationActivity, OutsideDayHint,
+        SavedAnnotationRow, TodayPanelTab, ValidateAnnotationDraftError,
+        ValidateAnnotationTimeError, format_note_excerpt, resolve_annotation_category,
+        rules::CategoryArchiveState,
     },
 };
 
@@ -1088,6 +1089,7 @@ impl AppShell {
             AnnotationWriteNotice::CategoryUnavailable { .. } => {
                 Msg::TodayAnnotationsErrorCategoryUnavailable
             }
+            AnnotationWriteNotice::NotFound { .. } => Msg::TodayAnnotationsErrorNotFound,
         };
         ui.card()
             .p(space.m)
@@ -1291,51 +1293,73 @@ impl AppShell {
         let space = &ui.metrics.space;
         let palette = ui.palette;
 
-        let start_control = render_single_line_input(
-            ui,
-            self.annotation_start_input.as_ref(),
-            &draft.start_input,
-            busy,
-        );
-        let end_control = render_single_line_input(
-            ui,
-            self.annotation_end_input.as_ref(),
-            &draft.end_input,
-            busy,
-        );
+        let original_range = match &draft.mode {
+            AnnotationEditorMode::Edit { range, .. } => Some(*range),
+            AnnotationEditorMode::Create { .. } => None,
+        };
+        let start_control = match (draft.start_boundary, original_range) {
+            (EndpointBoundary::OutsideDay, Some(range)) => {
+                render_readonly_endpoint(ui, &self.format_outside_endpoint(range.start))
+            }
+            _ => render_single_line_input(
+                ui,
+                self.annotation_start_input.as_ref(),
+                &draft.start_input,
+                busy,
+            ),
+        };
+        let end_control = match (draft.end_boundary, original_range) {
+            (EndpointBoundary::OutsideDay, Some(range)) => {
+                render_readonly_endpoint(ui, &self.format_outside_endpoint(range.end))
+            }
+            _ => render_single_line_input(
+                ui,
+                self.annotation_end_input.as_ref(),
+                &draft.end_input,
+                busy,
+            ),
+        };
 
-        let start_fold = self
-            .annotation_editor
-            .day_context()
-            .and_then(|ctx| ctx.fold_offsets_for_input(&draft.start_input, EndpointRole::Start))
-            .map(|(before, after)| {
-                self.render_fold_selector(
-                    ui,
-                    "annotation-start-fold",
-                    EndpointRole::Start,
-                    before,
-                    after,
-                    draft.start_fold,
-                    busy,
-                    cx,
-                )
-            });
-        let end_fold = self
-            .annotation_editor
-            .day_context()
-            .and_then(|ctx| ctx.fold_offsets_for_input(&draft.end_input, EndpointRole::End))
-            .map(|(before, after)| {
-                self.render_fold_selector(
-                    ui,
-                    "annotation-end-fold",
-                    EndpointRole::End,
-                    before,
-                    after,
-                    draft.end_fold,
-                    busy,
-                    cx,
-                )
-            });
+        let start_fold = (draft.start_boundary == EndpointBoundary::InDay)
+            .then(|| {
+                self.annotation_editor
+                    .day_context()
+                    .and_then(|ctx| {
+                        ctx.fold_offsets_for_input(&draft.start_input, EndpointRole::Start)
+                    })
+                    .map(|(before, after)| {
+                        self.render_fold_selector(
+                            ui,
+                            "annotation-start-fold",
+                            EndpointRole::Start,
+                            before,
+                            after,
+                            draft.start_fold,
+                            busy,
+                            cx,
+                        )
+                    })
+            })
+            .flatten();
+        let end_fold = (draft.end_boundary == EndpointBoundary::InDay)
+            .then(|| {
+                self.annotation_editor
+                    .day_context()
+                    .and_then(|ctx| ctx.fold_offsets_for_input(&draft.end_input, EndpointRole::End))
+                    .map(|(before, after)| {
+                        self.render_fold_selector(
+                            ui,
+                            "annotation-end-fold",
+                            EndpointRole::End,
+                            before,
+                            after,
+                            draft.end_fold,
+                            busy,
+                            cx,
+                        )
+                    })
+            })
+            .flatten();
 
         div()
             .flex()
@@ -1986,6 +2010,43 @@ impl AppShell {
             }
         }
     }
+
+    fn format_outside_endpoint(&self, utc_ms: i64) -> String {
+        let Some(ctx) = self.annotation_editor.day_context() else {
+            return String::new();
+        };
+        match ctx.outside_day_hint(utc_ms) {
+            OutsideDayHint::PreviousDay { hm } => self.formatter.text_with(
+                Msg::TodayAnnotationsEditorPrevDayTime,
+                &[Arg::Value.with(&hm)],
+            ),
+            OutsideDayHint::NextDay { hm } => self.formatter.text_with(
+                Msg::TodayAnnotationsEditorNextDayTime,
+                &[Arg::Value.with(&hm)],
+            ),
+            OutsideDayHint::DateTime { text } => text,
+        }
+    }
+}
+
+fn render_readonly_endpoint(ui: &Widgets<'_>, text: &str) -> AnyElement {
+    let space = &ui.metrics.space;
+    let palette = ui.palette;
+    div()
+        .w_full()
+        .min_h(ui.metrics.density(Density::Standard).control_height)
+        .px(space.s)
+        .py(space.xs)
+        .rounded(ui.metrics.radius.control)
+        .bg(palette.fill_card_secondary)
+        .border_1()
+        .border_color(palette.stroke_control)
+        .flex()
+        .items_center()
+        .ramp(ui, Ramp::Body)
+        .text_color(palette.text_secondary)
+        .child(text.to_owned())
+        .into_any_element()
 }
 
 fn render_single_line_input(
