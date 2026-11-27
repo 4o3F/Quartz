@@ -16,7 +16,7 @@
 - 最低版本 Chrome/Edge 120、Firefox 128。
 - 权限：`tabs`、`nativeMessaging`、`alarms`、`storage`。不申请 `<all_urls>`，不注入内容脚本。
 - manifest 设 `incognito: "not_allowed"`，扩展不进入无痕窗口（06 第 3.4 节）。
-- Chrome/Edge 的 manifest 带 `key` 固定扩展 ID；Firefox 用 `browser_specific_settings.gecko.id` 固定 ID（`quartz@4o3f.dev`）。
+- Chrome/Edge 的 manifest 带 `key` 固定扩展 ID（`hmhnlfjafbcngnjgafhphcmljgldbakm`）；Firefox 用 `browser_specific_settings.gecko.id` 固定 ID（`quartz@4o3f.dev`）。
 - `storage.local` 只保存首次运行随机生成的 `profile_instance_id`，不存任何浏览内容。
 
 ### 1.2 握手与上报

@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Quartz",
+  "version": "0.1.0",
+  "description": "Report active browser tab domain and title to local Quartz.",
+  "minimum_chrome_version": "120",
+  "incognito": "not_allowed",
+  "permissions": ["tabs", "nativeMessaging", "alarms", "storage"],
+  "action": {
+    "default_title": "Quartz"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAycvkV124VR7gCbEnB6O6jZt9iOqAmu5f1IlJszfjcFKxur3ayQH4cN+C+7emr5c9iVcATGZOz2ZPUGG+tP4NmAm6dBcHNouP3r9pWOs8ztWOYQQESiCpH7hybS8/CaLkCCKkigj7P/yoW6aOR8mppopubxxGw60vW0u2lHxpmLJbo/rau54tpMqTxgci2eWPKDxmza6advR+F3gls2tnx7UCTQdnZvbIvcvGqITrmFE43VNSo32y5cFGAAw3GieFITdx2AF/AsK26P8tdDDMVIxSq9wfXoVjqK3h/hKWSv96LguTWNr1lqAWjNEfz3nnpUge0r22Of1dyC5l1NgLJwIDAQAB"
+}

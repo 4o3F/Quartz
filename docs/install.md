@@ -9,7 +9,12 @@ Quartz 是解压即用的单个程序，不需要安装程序，也不联网。
 3. 双击 `quartz.exe`。Quartz 在托盘区出现图标并开始记录，点击图标打开界面。
 4. 在 **设置 → 常规** 中打开 **开机自启**。它写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Quartz`，只影响当前用户，不需要管理员权限。
 
-`quartz-host.exe` 用于浏览器扩展（M5），目前不需要运行。
+## 浏览器扩展
+
+1. 运行 `deno task package-extension`，生成 `target/extension/chromium` 与 `target/extension/firefox`。
+2. Chrome / Edge：打开扩展管理页，开启 **开发者模式**，点击 **加载已解压的扩展程序** 并选择 `target/extension/chromium`。
+3. Firefox：打开 `about:debugging`，选择 **临时加载** 并载入 `target/extension/firefox/manifest.json`。
+4. 扩展通过同目录的 `quartz-host.exe` 连接 Quartz；宿主注册由 **设置 → 浏览器** 完成（下一批次）。
 
 ## 数据
 

@@ -6,8 +6,8 @@ use quartz_domain::capture::UtcInstant;
 use quartz_protocol::{BrowserKind, Uuid};
 use snafu::Snafu;
 
-/// Fixed Chromium (Chrome/Edge) extension ID placeholder, to be filled in M5-B3.
-pub(crate) const CHROMIUM_EXTENSION_ID: &str = "TODO_CHROMIUM_EXTENSION_ID_M5_B3";
+/// Fixed Chromium (Chrome/Edge) extension ID derived from the manifest public key (05 §1.1).
+pub(crate) const CHROMIUM_EXTENSION_ID: &str = "hmhnlfjafbcngnjgafhphcmljgldbakm";
 
 /// Fixed Firefox add-on ID (05 §1.1).
 pub(crate) const FIREFOX_EXTENSION_ID: &str = "quartz@4o3f.dev";

@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Quartz",
+  "version": "0.1.0",
+  "description": "Report active browser tab domain and title to local Quartz.",
+  "incognito": "not_allowed",
+  "permissions": ["tabs", "nativeMessaging", "alarms", "storage"],
+  "action": {
+    "default_title": "Quartz"
+  },
+  "background": {
+    "scripts": ["src/background.js"],
+    "type": "module"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "quartz@4o3f.dev",
+      "strict_min_version": "128.0"
+    }
+  }
+}
