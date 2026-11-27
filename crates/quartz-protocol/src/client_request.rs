@@ -226,5 +226,11 @@ mod tests {
         AdditiveFields::response::<QueryUnclassifiedRequest>(include_str!(
             "../tests/fixtures/unclassified-document.json"
         ));
+        AdditiveFields::response::<SettingsGetRequest>(include_str!(
+            "../tests/fixtures/settings.json"
+        ));
+        AdditiveFields::response::<SettingsSetRequest>(include_str!(
+            "../tests/fixtures/settings.json"
+        ));
     }
 }

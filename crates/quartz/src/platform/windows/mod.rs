@@ -1,5 +1,6 @@
 //! Windows core lifecycle and main-thread platform integration.
 
+mod autostart;
 pub(crate) mod foreground;
 mod handle;
 mod instance;

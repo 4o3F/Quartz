@@ -1080,4 +1080,70 @@ week.locale_unavailable.message:
   zh-CN: "系统区域设置暂时不可用，无法计算本周的起止日期。"
 week.truncated:
   zh-CN: "部分日期的分类过多，已仅显示前若干项。"
+settings.group.general:
+  zh-CN: "常规"
+settings.load_failed.title:
+  zh-CN: "暂时无法加载设置"
+settings.load_failed.message:
+  zh-CN: "请重试以重新读取当前设置。"
+settings.save_failed:
+  zh-CN: "未能保存更改，已恢复原值。"
+settings.retry:
+  zh-CN: "重试"
+settings.general.autostart.label:
+  zh-CN: "开机自启"
+settings.general.autostart.description:
+  zh-CN: "登录 Windows 时自动在后台启动 Quartz 核心"
+settings.general.resident.label:
+  zh-CN: "界面常驻"
+settings.general.resident.description:
+  zh-CN: "关闭窗口后保留界面进程，以便更快再次打开"
+settings.general.prewarm.label:
+  zh-CN: "关闭常驻后的界面预热"
+settings.general.prewarm.description:
+  zh-CN: "悬停托盘图标时提前启动隐藏界面，缩短打开等待"
+settings.general.prewarm_battery.label:
+  zh-CN: "电池供电时也预热"
+settings.general.prewarm_battery.description:
+  zh-CN: "允许设备使用电池供电时执行托盘悬停预热"
+settings.general.language.label:
+  zh-CN: "界面语言"
+settings.general.language.description:
+  zh-CN: "选择 Quartz 界面与托盘的显示语言"
+settings.general.language.auto:
+  zh-CN: "跟随系统"
+settings.general.language.zh_cn:
+  zh-CN: "简体中文"
+settings.general.language.en:
+  zh-CN: "English"
+settings.general.hour_cycle.label:
+  zh-CN: "时间格式"
+settings.general.hour_cycle.description:
+  zh-CN: "控制时间轴与详情中的时钟显示方式"
+settings.general.hour_cycle.auto:
+  zh-CN: "跟随系统"
+settings.general.hour_cycle.h12:
+  zh-CN: "12 小时"
+settings.general.hour_cycle.h24:
+  zh-CN: "24 小时"
+settings.general.first_weekday.label:
+  zh-CN: "每周第一天"
+settings.general.first_weekday.description:
+  zh-CN: "决定日历与本周页的起始星期"
+settings.general.first_weekday.auto:
+  zh-CN: "跟随系统"
+settings.general.first_weekday.monday:
+  zh-CN: "周一"
+settings.general.first_weekday.tuesday:
+  zh-CN: "周二"
+settings.general.first_weekday.wednesday:
+  zh-CN: "周三"
+settings.general.first_weekday.thursday:
+  zh-CN: "周四"
+settings.general.first_weekday.friday:
+  zh-CN: "周五"
+settings.general.first_weekday.saturday:
+  zh-CN: "周六"
+settings.general.first_weekday.sunday:
+  zh-CN: "周日"
 

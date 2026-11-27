@@ -1016,6 +1016,10 @@ fn core_runtime_with_fake_ports_flushes_shutdown_over_test_pipe() {
             }),
             language: quartz_i18n::Language::English,
             locale: None,
+            autostart: crate::core::autostart::test_support::in_memory_autostart(
+                r"C:\Quartz\quartz.exe",
+            )
+            .0,
         },
     )
     .expect("start runtime with isolated named pipe");

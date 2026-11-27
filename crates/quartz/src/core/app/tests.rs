@@ -575,6 +575,10 @@ impl RuntimePortsFixture {
             }),
             language: quartz_i18n::Language::English,
             locale: None,
+            autostart: crate::core::autostart::test_support::in_memory_autostart(
+                r"C:\Quartz\quartz.exe",
+            )
+            .0,
         };
         Self { ports, log, clock }
     }
@@ -1178,9 +1182,10 @@ fn annotations_ipc_writes_retry_permissions_busy_and_day_push() {
 
 #[test]
 fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port() {
+    use crate::core::autostart::test_support::{FakeRegistryFault, in_memory_autostart};
     use quartz_protocol::{
-        EffectiveUiSettings, HourCycle, LocaleSettings, Op, Role, SettingsResponse, UiLanguage,
-        Weekday,
+        AutostartEnabled, EffectiveUiSettings, HourCycle, LocaleSettings, Op, Role,
+        SettingsResponse, UiLanguage, Weekday,
     };
     let runtime = RuntimeFixture::recovered();
     runtime.wait(|command| matches!(command, MainCommand::Persistence(PersistenceState::Ready)));
@@ -1196,16 +1201,18 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
             first_day_of_week: Weekday::Monday,
         }),
     };
+    let (autostart_port, autostart_registry) =
+        in_memory_autostart(r"C:\Program Files\Quartz\quartz.exe");
     let mut channel = crate::ipc::UiCommands::channel(Arc::new(|_| Ok(())));
     let services = crate::ipc::Services {
         summary: None,
         timed: crate::ipc::TimedPolicyPort::unavailable(),
         queries: runtime.workers.queries.clone(),
-        writes: runtime
-            .workers
-            .writes
-            .clone()
-            .with_settings(system, Arc::clone(&channel.port)),
+        writes: runtime.workers.writes.clone().with_settings(
+            system,
+            Arc::clone(&channel.port),
+            autostart_port,
+        ),
         versions: runtime.workers.versions.clone(),
         status: status.subscribe(),
         ui: Arc::clone(&channel.port),
@@ -1226,6 +1233,28 @@ fn settings_ipc_commits_before_reply_and_updates_tray_and_state_through_ui_port(
         let initial: SettingsResponse = serde_json::from_value(ui.success(2).await).expect("typed defaults");
         assert_eq!(initial.ui, quartz_protocol::UiSettings::default());
         assert_eq!(initial.effective, system);
+        assert_eq!(initial.autostart, AutostartEnabled::Disabled);
+        ui.send(8, Op::SettingsSet, serde_json::json!({"autostart": true})).await;
+        let enabled: SettingsResponse = serde_json::from_value(ui.success(8).await).expect("autostart enabled");
+        assert_eq!(enabled.autostart, AutostartEnabled::Enabled);
+        assert_eq!(
+            autostart_registry.raw().as_deref(),
+            Some(r#""C:\Program Files\Quartz\quartz.exe" --autostart"#)
+        );
+        ui.send(9, Op::SettingsSet, serde_json::json!({"autostart": false})).await;
+        let disabled: SettingsResponse = serde_json::from_value(ui.success(9).await).expect("autostart disabled");
+        assert_eq!(disabled.autostart, AutostartEnabled::Disabled);
+        assert_eq!(autostart_registry.raw(), None);
+        let _ = channel.commands.take_settings_change();
+        autostart_registry.set_fault(FakeRegistryFault::FailRead);
+        ui.send(10, Op::SettingsGet, serde_json::json!({})).await;
+        assert_eq!(
+            ui.response(10).await,
+            quartz_protocol::ResponseOutcome::Err {
+                error: quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::Internal)
+            }
+        );
+        autostart_registry.set_fault(FakeRegistryFault::None);
         ui.send(3, Op::SettingsSet, serde_json::json!({"language":"zh-CN", "hour_cycle":"h12", "first_day_of_week":"sunday"})).await;
         let updated: SettingsResponse = serde_json::from_value(ui.success(3).await).expect("typed updated settings");
         assert_eq!(updated.effective.ui_language, UiLanguage::SimplifiedChinese);

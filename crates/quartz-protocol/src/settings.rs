@@ -84,6 +84,26 @@ impl FirstDayOfWeekSetting {
         }
     }
 }
+/// Whether Quartz launches automatically when the user signs in to Windows (01 §8).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "bool", into = "bool")]
+pub enum AutostartEnabled {
+    /// The current executable is registered in the Windows Run key.
+    Enabled,
+    /// Autostart is not registered for the current executable.
+    #[default]
+    Disabled,
+}
+impl From<bool> for AutostartEnabled {
+    fn from(value: bool) -> Self {
+        if value { Self::Enabled } else { Self::Disabled }
+    }
+}
+impl From<AutostartEnabled> for bool {
+    fn from(value: AutostartEnabled) -> Self {
+        value == AutostartEnabled::Enabled
+    }
+}
 /// Whether the UI remains running without a window.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "bool", into = "bool")]
@@ -247,6 +267,13 @@ pub struct SettingsGetRequest {}
 /// Partial settings.set body with typed preferences and nested prewarm updates.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsSetRequest {
+    /// Optional Windows autostart update; explicit null is rejected.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub autostart: Option<AutostartEnabled>,
     /// Optional partial update to ui.resident.*.
     #[serde(
         default,
@@ -295,6 +322,9 @@ pub struct SettingsResponse {
     pub ui: UiSettings,
     /// Effective presentation values.
     pub effective: EffectiveUiSettings,
+    /// Current Windows autostart state read from the registry at request time.
+    #[serde(default)]
+    pub autostart: AutostartEnabled,
 }
 
 #[cfg(test)]
@@ -314,6 +344,8 @@ mod tests {
             serde_json::json!({})
         );
         for body in [
+            serde_json::json!({"autostart":null}),
+            serde_json::json!({"autostart":"yes"}),
             serde_json::json!({"language":null}),
             serde_json::json!({"language":"fr"}),
             serde_json::json!({"hour_cycle":24}),
@@ -321,6 +353,36 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<SettingsSetRequest>(body).is_err());
         }
+    }
+    #[test]
+    fn autostart_wire_values_round_trip_and_default_additively() {
+        let enabled: SettingsSetRequest =
+            serde_json::from_value(serde_json::json!({"autostart": true})).expect("enable");
+        assert_eq!(enabled.autostart, Some(AutostartEnabled::Enabled));
+        assert_eq!(
+            serde_json::to_value(enabled).expect("serialize enable"),
+            serde_json::json!({"autostart": true})
+        );
+        let disabled: SettingsSetRequest =
+            serde_json::from_value(serde_json::json!({"autostart": false})).expect("disable");
+        assert_eq!(disabled.autostart, Some(AutostartEnabled::Disabled));
+        assert_eq!(
+            serde_json::to_value(disabled).expect("serialize disable"),
+            serde_json::json!({"autostart": false})
+        );
+        let legacy_response: SettingsResponse = serde_json::from_value(serde_json::json!({
+            "ui": {
+                "language": "auto",
+                "hour_cycle": "auto",
+                "first_day_of_week": "auto"
+            },
+            "effective": {
+                "ui_language": "en",
+                "locale": null
+            }
+        }))
+        .expect("legacy response without autostart");
+        assert_eq!(legacy_response.autostart, AutostartEnabled::Disabled);
     }
     #[test]
     fn explicit_preferences_override_system_and_auto_preserves_it() {

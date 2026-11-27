@@ -88,6 +88,10 @@ pub enum PreviewState {
     Week,
     /// Week page in its initial loading state with per-day progress and static skeletons.
     WeekLoading,
+    /// Settings page General card with resident UI enabled (prewarm rows hidden).
+    Settings,
+    /// Settings page General card with resident UI disabled and prewarm enabled (both prewarm rows shown).
+    SettingsResidentOff,
     /// The shared failure/connecting screen, without a core or pipe.
     Error(ErrorPreviewState),
 }
@@ -221,6 +225,8 @@ impl FromStr for PreviewState {
             "classify-menu" => Ok(Self::ClassifyMenu),
             "week" => Ok(Self::Week),
             "week-loading" => Ok(Self::WeekLoading),
+            "settings" => Ok(Self::Settings),
+            "settings-resident-off" => Ok(Self::SettingsResidentOff),
             "connecting" => Ok(Self::Error(ErrorPreviewState::Connecting)),
             "core-not-running" => Ok(Self::Error(ErrorPreviewState::CoreNotRunning)),
             "core-not-running-starting" => {
@@ -418,6 +424,7 @@ impl PreviewState {
     const fn page(self) -> Page {
         match self {
             Self::Week | Self::WeekLoading => Page::Week,
+            Self::Settings | Self::SettingsResidentOff => Page::Settings,
             Self::Rules
             | Self::RulesCategories
             | Self::RuleEditor
@@ -450,6 +457,8 @@ impl PreviewState {
             | Self::TodayHover
             | Self::Week
             | Self::WeekLoading
+            | Self::Settings
+            | Self::SettingsResidentOff
             | Self::Rules
             | Self::RulesCategories
             | Self::RuleEditor
@@ -473,6 +482,8 @@ impl PreviewState {
             | Self::TodayData(_)
             | Self::Week
             | Self::WeekLoading
+            | Self::Settings
+            | Self::SettingsResidentOff
             | Self::Rules
             | Self::RulesCategories
             | Self::RuleEditor
@@ -929,6 +940,12 @@ mod tests {
             ("classify-menu", PreviewState::ClassifyMenu, Page::Today),
             ("week", PreviewState::Week, Page::Week),
             ("week-loading", PreviewState::WeekLoading, Page::Week),
+            ("settings", PreviewState::Settings, Page::Settings),
+            (
+                "settings-resident-off",
+                PreviewState::SettingsResidentOff,
+                Page::Settings,
+            ),
         ];
         let sample = SampleDay::new();
         for (name, state, page) in cases {

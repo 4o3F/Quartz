@@ -15,6 +15,7 @@ pub(crate) mod rule_editor;
 pub(crate) mod rule_import;
 pub(crate) mod rules;
 mod segment;
+pub(crate) mod settings;
 mod state;
 mod summary;
 mod time;
@@ -78,6 +79,11 @@ pub(crate) use rules::{
     ResolvedCategory, RuleEntryLabel,
 };
 pub(crate) use segment::{ClassificationSource, Segment, SegmentId};
+#[cfg(windows)]
+pub(crate) use settings::{
+    GeneralSettingChange, RowVisibility, SaveActivity, SettingsEffect, SettingsLoadState,
+    SettingsPage, SettingsValues,
+};
 pub(crate) use state::{AwayLabel, ClockAnomaly, StateBlock, StateKind};
 pub(crate) use summary::{DaySummary, HourlyBar, Share};
 pub(crate) use time::{

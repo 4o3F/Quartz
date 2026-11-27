@@ -1080,4 +1080,70 @@ week.locale_unavailable.message:
   en: "System regional settings are unavailable, so week boundaries cannot be determined."
 week.truncated:
   en: "Some days had too many categories; only the top entries are shown."
+settings.group.general:
+  en: "General"
+settings.load_failed.title:
+  en: "Could not load settings"
+settings.load_failed.message:
+  en: "Retry to load the current settings again."
+settings.save_failed:
+  en: "Could not save change; previous value restored."
+settings.retry:
+  en: "Retry"
+settings.general.autostart.label:
+  en: "Start at sign-in"
+settings.general.autostart.description:
+  en: "Launch the Quartz core in the background when you sign in to Windows"
+settings.general.resident.label:
+  en: "Keep UI resident"
+settings.general.resident.description:
+  en: "Keep the UI process running after closing the window for faster reopening"
+settings.general.prewarm.label:
+  en: "Prewarm UI on tray hover"
+settings.general.prewarm.description:
+  en: "Start a hidden UI process when hovering the tray icon to reduce open delay"
+settings.general.prewarm_battery.label:
+  en: "Prewarm on battery"
+settings.general.prewarm_battery.description:
+  en: "Allow tray hover prewarming while running on battery power"
+settings.general.language.label:
+  en: "Language"
+settings.general.language.description:
+  en: "Choose the display language for the UI and tray"
+settings.general.language.auto:
+  en: "Follow system"
+settings.general.language.zh_cn:
+  en: "简体中文"
+settings.general.language.en:
+  en: "English"
+settings.general.hour_cycle.label:
+  en: "Time format"
+settings.general.hour_cycle.description:
+  en: "Control how clock times appear on the timeline and details"
+settings.general.hour_cycle.auto:
+  en: "Follow system"
+settings.general.hour_cycle.h12:
+  en: "12-hour"
+settings.general.hour_cycle.h24:
+  en: "24-hour"
+settings.general.first_weekday.label:
+  en: "First day of week"
+settings.general.first_weekday.description:
+  en: "Set the starting weekday for the calendar and Week page"
+settings.general.first_weekday.auto:
+  en: "Follow system"
+settings.general.first_weekday.monday:
+  en: "Monday"
+settings.general.first_weekday.tuesday:
+  en: "Tuesday"
+settings.general.first_weekday.wednesday:
+  en: "Wednesday"
+settings.general.first_weekday.thursday:
+  en: "Thursday"
+settings.general.first_weekday.friday:
+  en: "Friday"
+settings.general.first_weekday.saturday:
+  en: "Saturday"
+settings.general.first_weekday.sunday:
+  en: "Sunday"
 

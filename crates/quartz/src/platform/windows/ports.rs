@@ -142,6 +142,7 @@ impl PlatformPorts {
                     None
                 }
             },
+            autostart: super::autostart::autostart_port(),
         })
     }
 }

@@ -258,6 +258,7 @@ impl SettingsCommand {
                 resident_enabled,
                 prewarm_on_battery,
             } => Some(quartz_protocol::SettingsSetRequest {
+                autostart: None,
                 language: language.map(Into::into),
                 hour_cycle: hour_cycle.map(Into::into),
                 first_day_of_week: first_day_of_week.map(Into::into),

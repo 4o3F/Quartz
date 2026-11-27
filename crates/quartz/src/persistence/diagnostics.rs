@@ -1,6 +1,9 @@
 //! Write diagnostics contain typed failure classes and no stored values or database messages.
 
-use crate::store::{settings::AccessSettingError, versions::BumpVersionError};
+use crate::{
+    core::autostart::AccessAutostartError,
+    store::{settings::AccessSettingError, versions::BumpVersionError},
+};
 use quartz_protocol::{ErrorKind, ProtocolError};
 
 #[derive(Debug)]
@@ -8,10 +11,21 @@ pub(crate) enum WriteFailure {
     Database(DatabaseFailure),
     Version(VersionFailure),
     Setting(SettingFailure),
+    Autostart(AutostartFailure),
     Identity,
     StoredCategory,
     StoredAnnotation,
     Rule(RuleFailure),
+}
+#[derive(Debug)]
+pub(crate) enum AutostartFailure {
+    ResolveExecutable,
+    EncodeExecutablePath,
+    ReadRegistry,
+    WriteRegistry,
+    DeleteRegistry,
+    ConvertRegistryLength,
+    DecodeRegistryValue,
 }
 #[derive(Debug)]
 pub(crate) enum RuleFailure {
@@ -129,6 +143,21 @@ impl WriteFailure {
             AccessSettingError::MetadataVersion => Self::Setting(SettingFailure::MetadataVersion),
         }
     }
+    pub(crate) fn autostart(error: &AccessAutostartError) -> Self {
+        Self::Autostart(match error {
+            AccessAutostartError::ResolveExecutable { .. } => AutostartFailure::ResolveExecutable,
+            AccessAutostartError::EncodeExecutablePath => AutostartFailure::EncodeExecutablePath,
+            AccessAutostartError::ReadRegistry { .. } => AutostartFailure::ReadRegistry,
+            AccessAutostartError::WriteRegistry { .. } => AutostartFailure::WriteRegistry,
+            AccessAutostartError::DeleteRegistry { .. } => AutostartFailure::DeleteRegistry,
+            AccessAutostartError::ConvertRegistryLength { .. } => {
+                AutostartFailure::ConvertRegistryLength
+            }
+            AccessAutostartError::DecodeRegistryValue { .. } => {
+                AutostartFailure::DecodeRegistryValue
+            }
+        })
+    }
     pub(crate) fn into_protocol_error(self) -> ProtocolError {
         let kind = match &self {
             Self::Version(VersionFailure::DayExhausted | VersionFailure::MetadataExhausted) => {
@@ -136,6 +165,10 @@ impl WriteFailure {
             }
             Self::Setting(setting) => {
                 tracing::error!(failure = ?setting, "database write failed");
+                return ProtocolError::new(ErrorKind::Internal);
+            }
+            Self::Autostart(autostart) => {
+                tracing::error!(failure = ?autostart, "autostart registry access failed");
                 return ProtocolError::new(ErrorKind::Internal);
             }
             Self::Database(database) => {

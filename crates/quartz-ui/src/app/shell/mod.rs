@@ -15,6 +15,7 @@ mod ranking;
 mod rule_editor;
 mod rule_import;
 mod rules;
+mod settings;
 mod stat_grid;
 mod timeline;
 mod today;
@@ -306,6 +307,29 @@ pub(crate) struct AppShell<Focus = FocusHandle> {
     unclassified_search_sync: InputSyncState,
     unclassified_query_task: Option<gpui_kit::Task<()>>,
     week: crate::model::WeekPage,
+    settings: crate::model::SettingsPage,
+    settings_language_select: Option<
+        Entity<
+            gpui_kit::component::select::SelectState<
+                Vec<settings::SelectOption<quartz_protocol::UiLanguageSetting>>,
+            >,
+        >,
+    >,
+    settings_hour_cycle_select: Option<
+        Entity<
+            gpui_kit::component::select::SelectState<
+                Vec<settings::SelectOption<quartz_protocol::HourCycleSetting>>,
+            >,
+        >,
+    >,
+    settings_first_weekday_select: Option<
+        Entity<
+            gpui_kit::component::select::SelectState<
+                Vec<settings::SelectOption<quartz_protocol::FirstDayOfWeekSetting>>,
+            >,
+        >,
+    >,
+    settings_selects_sync: InputSyncState,
     annotation_editor: crate::model::AnnotationEditor,
     annotation_start_input: Option<Entity<gpui_kit::component::input::InputState>>,
     annotation_end_input: Option<Entity<gpui_kit::component::input::InputState>>,
@@ -388,6 +412,11 @@ impl AppShell {
             unclassified_search_sync: InputSyncState::Synced,
             unclassified_query_task: None,
             week: crate::model::WeekPage::new(),
+            settings: crate::model::SettingsPage::new(),
+            settings_language_select: None,
+            settings_hour_cycle_select: None,
+            settings_first_weekday_select: None,
+            settings_selects_sync: InputSyncState::Synced,
             annotation_editor: crate::model::AnnotationEditor::new(),
             annotation_start_input: None,
             annotation_end_input: None,
@@ -575,6 +604,9 @@ impl AppShell {
             if page == Page::Week {
                 self.open_week_page(cx);
             }
+            if page == Page::Settings {
+                self.open_settings_page(cx);
+            }
             cx.notify();
         }
     }
@@ -608,6 +640,7 @@ impl Render for AppShell {
         self.sync_rule_import_input_if_needed(window, cx);
         self.sync_unclassified_search_input_if_needed(window, cx);
         self.sync_annotation_inputs_if_needed(window, cx);
+        self.sync_settings_selects_if_needed(window, cx);
         let (font_family, mode) = {
             let theme = cx.theme();
             (theme.font_family.clone(), theme.mode)
@@ -625,9 +658,7 @@ impl Render for AppShell {
             Page::Today => self.render_today(&ui, &frame, cx).into_any_element(),
             Page::Week => self.render_week(&ui, &frame, cx).into_any_element(),
             Page::Rules => self.render_rules(&ui, &frame, cx).into_any_element(),
-            Page::Settings => self
-                .render_placeholder(&ui, Page::Settings)
-                .into_any_element(),
+            Page::Settings => self.render_settings(&ui, &frame, cx).into_any_element(),
         };
         let suppress_tooltip = self.segment_menu.is_some()
             || self
@@ -758,13 +789,5 @@ impl AppShell {
                     .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
                     .child(panel),
             )
-    }
-
-    fn render_placeholder(&self, ui: &Widgets<'_>, page: Page) -> impl IntoElement {
-        div()
-            .p(ui.metrics.space.xxl)
-            .ramp(ui, Ramp::Title)
-            .text_color(ui.palette.text_primary)
-            .child(self.formatter.text(page.label()))
     }
 }

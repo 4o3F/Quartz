@@ -305,6 +305,9 @@ impl AppShell {
         if self.page == super::Page::Week {
             self.open_week_page(cx);
         }
+        if self.page == super::Page::Settings {
+            self.open_settings_page(cx);
+        }
         cx.notify();
     }
     pub(crate) fn state_changed(
@@ -313,6 +316,9 @@ impl AppShell {
         formatter: Formatter,
         cx: &mut Context<Self>,
     ) {
+        if self.formatter != formatter {
+            self.settings_selects_sync = super::InputSyncState::NeedsSync;
+        }
         self.formatter = formatter;
         let previous_today = self.current_logical_today();
         let new_today = snapshot.logical_date;

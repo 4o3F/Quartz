@@ -44,6 +44,8 @@ export const scenarios = [
   "classify-menu",
   "week",
   "week-loading",
+  "settings",
+  "settings-resident-off",
 ] as const;
 export const narrowScenarios = [
   "today",
@@ -60,6 +62,7 @@ export const narrowScenarios = [
   "timeline-select",
   "classify-menu",
   "week",
+  "settings",
 ] as const;
 const closeMessage = 0x10;
 const windowDeadlineMs = 30000;

@@ -1,0 +1,29 @@
+{
+  "ui": {
+    "resident": {
+      "enabled": true
+    },
+    "prewarm": {
+      "enabled": true,
+      "on_battery": false
+    },
+    "language": "auto",
+    "hour_cycle": "auto",
+    "first_day_of_week": "auto"
+  },
+  "effective": {
+    "resident": {
+      "enabled": true
+    },
+    "prewarm": {
+      "enabled": true,
+      "on_battery": false
+    },
+    "ui_language": "zh-CN",
+    "locale": {
+      "hour_cycle": "h24",
+      "first_day_of_week": "monday"
+    }
+  },
+  "autostart": true
+}

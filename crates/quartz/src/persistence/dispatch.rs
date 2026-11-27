@@ -78,7 +78,7 @@ impl WriteRequest {
         self,
         store: &mut Store,
         now: UtcInstant,
-        system: Option<quartz_protocol::EffectiveUiSettings>,
+        settings: Option<&SettingsPorts>,
         registry: &mut crate::rules::registry::RegistryShell,
     ) -> Result<WriteResponse, ProtocolError> {
         let result = match self {
@@ -93,17 +93,30 @@ impl WriteRequest {
             }
             Self::Categories(request) => return request.execute(store),
             Self::SettingsGet | Self::SettingsSet(_) => {
-                let system = system.ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?;
-                let result = match self {
-                    Self::SettingsSet(update) => store.update_ui_settings(update),
-                    Self::SettingsGet => store.ui_settings(),
+                let ports = settings.ok_or_else(|| ProtocolError::new(ErrorKind::Internal))?;
+                let (autostart, result) = match self {
+                    Self::SettingsSet(update) => {
+                        let autostart = match update.autostart {
+                            Some(desired) => ports.autostart.set(desired),
+                            None => ports.autostart.state(),
+                        }
+                        .map_err(|error| WriteFailure::autostart(&error).into_protocol_error())?;
+                        (autostart, store.update_ui_settings(update))
+                    }
+                    Self::SettingsGet => {
+                        let autostart = ports.autostart.state().map_err(|error| {
+                            WriteFailure::autostart(&error).into_protocol_error()
+                        })?;
+                        (autostart, store.ui_settings())
+                    }
                     _ => unreachable!("settings dispatch"),
                 };
                 return result
                     .map(|ui| {
                         WriteResponse::Settings(quartz_protocol::SettingsResponse {
                             ui,
-                            effective: ui.resolve(system),
+                            effective: ui.resolve(ports.system),
+                            autostart,
                         })
                     })
                     .map_err(|error| WriteFailure::setting(&error).into_protocol_error());
@@ -200,6 +213,7 @@ pub(crate) struct WriteCommand {
 pub(crate) struct SettingsPorts {
     pub system: quartz_protocol::EffectiveUiSettings,
     pub notify: crate::ipc::UiPort,
+    pub autostart: std::sync::Arc<dyn crate::core::autostart::AutostartPort>,
 }
 impl std::fmt::Debug for SettingsPorts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -243,8 +257,13 @@ impl WritePort {
         mut self,
         system: quartz_protocol::EffectiveUiSettings,
         notify: crate::ipc::UiPort,
+        autostart: std::sync::Arc<dyn crate::core::autostart::AutostartPort>,
     ) -> Self {
-        self.settings = Some(SettingsPorts { system, notify });
+        self.settings = Some(SettingsPorts {
+            system,
+            notify,
+            autostart,
+        });
         self
     }
     #[cfg(test)]

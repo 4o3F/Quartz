@@ -53,6 +53,7 @@ pub(crate) struct PlatformPorts {
     pub pipe: StartPipePort,
     pub language: quartz_i18n::Language,
     pub locale: Option<LocaleSettings>,
+    pub autostart: Arc<dyn crate::core::autostart::AutostartPort>,
 }
 
 #[derive(Debug, snafu::Snafu)]
@@ -223,7 +224,7 @@ impl CoreRuntime {
         workers.writes = workers
             .writes
             .clone()
-            .with_settings(system, Arc::clone(&ui_port))
+            .with_settings(system, Arc::clone(&ui_port), ports.autostart)
             .with_completion_wake(Arc::clone(&ports.wake));
         let timed = workers
             .sender

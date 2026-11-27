@@ -174,6 +174,12 @@ impl AppShell {
             PreviewState::WeekLoading => {
                 self.configure_week_loading_preview(today, first_weekday);
             }
+            PreviewState::Settings => {
+                self.configure_settings_preview(wire::ResidentEnabled::Enabled, first_day_of_week);
+            }
+            PreviewState::SettingsResidentOff => {
+                self.configure_settings_preview(wire::ResidentEnabled::Disabled, first_day_of_week);
+            }
             PreviewState::Today
             | PreviewState::TodayDetails
             | PreviewState::TodayHover
@@ -481,6 +487,53 @@ impl AppShell {
                 total: PREVIEW_WEEK_PROGRESS_TOTAL,
             },
         );
+    }
+
+    fn configure_settings_preview(
+        &mut self,
+        resident: wire::ResidentEnabled,
+        first_day_of_week: wire::Weekday,
+    ) {
+        let crate::model::SettingsEffect::Load { generation } = self.settings.open() else {
+            unreachable!("opening SettingsPage emits Load");
+        };
+        let ui_language = if self.formatter.language() == quartz_i18n::Language::SimplifiedChinese {
+            wire::UiLanguage::SimplifiedChinese
+        } else {
+            wire::UiLanguage::English
+        };
+        let ui = wire::UiSettings {
+            resident: wire::ResidentSettings { enabled: resident },
+            prewarm: wire::PrewarmSettings {
+                enabled: wire::PrewarmEnabled::Enabled,
+                on_battery: wire::PrewarmOnBattery::Blocked,
+            },
+            language: wire::UiLanguageSetting::Auto,
+            hour_cycle: wire::HourCycleSetting::Auto,
+            first_day_of_week: wire::FirstDayOfWeekSetting::Auto,
+        };
+        let system = wire::EffectiveUiSettings {
+            resident: wire::ResidentSettings::default(),
+            prewarm: wire::PrewarmSettings::default(),
+            ui_language,
+            locale: Some(LocaleSettings {
+                hour_cycle: wire::HourCycle::H24,
+                first_day_of_week,
+            }),
+        };
+        let autostart = match resident {
+            wire::ResidentEnabled::Enabled => wire::AutostartEnabled::Enabled,
+            wire::ResidentEnabled::Disabled => wire::AutostartEnabled::Disabled,
+        };
+        self.settings.apply_loaded(
+            generation,
+            Ok(wire::SettingsResponse {
+                ui,
+                effective: ui.resolve(system),
+                autostart,
+            }),
+        );
+        self.settings_selects_sync = InputSyncState::NeedsSync;
     }
 
     fn configure_today_annotations_preview(&mut self, open_create_error: bool) {

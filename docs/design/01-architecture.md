@@ -196,6 +196,6 @@ tokio 仅用于命名管道与 host stdio 异步 I/O，绝不接管 Win32 消息
 
 ## 8. 自启、数据目录与更新
 
-- **开机自启**：写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Quartz`（值 `"<exe 绝对路径>" --autostart`），可在设置开关。
+- **开机自启**：写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Quartz`（值 `"<exe 绝对路径>" --autostart`），以注册表为唯一事实源（不存 SQLite）；仅当注册表值存在且与当前可执行文件路径完全一致时视为已开启，启用时覆写旧路径，停用时删除该值（值不存在亦视为成功），可在设置开关。
 - **目录分离**：程序目录与数据目录分离；数据目录位于 `%LOCALAPPDATA%\Quartz\`，包含 `quartz.db`、`logs\`、`icons\`、`backups\` 与单实例锁 `quartz.lock`。
 - **更新与备份恢复**：手动替换 exe 时利用 Windows 允许重命名运行中 exe 的特性（`quartz.exe` → `quartz.old.exe`，重启后清理 `.old`）。数据库升级、自动迁移前备份与 `quartz restore-backup` 降级恢复见 03 第 7–8 节。

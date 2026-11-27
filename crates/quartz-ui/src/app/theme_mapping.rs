@@ -65,6 +65,8 @@ component_fields! {
     link_hover => "link.hover" => LinkHover,
     link_active => "link.active" => LinkActive,
     progress_bar => "progress.bar.background" => ProgressBar,
+    switch => "switch.background" => Switch,
+    switch_thumb => "switch.thumb.background" => SwitchThumb,
     overlay => "overlay" => Overlay,
     window_border => "window.border" => WindowBorder,
     chart_1 => "chart.1" => Chart1,

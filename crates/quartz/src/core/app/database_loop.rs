@@ -381,8 +381,7 @@ impl DatabaseLoop {
             command.request,
             crate::persistence::dispatch::WriteRequest::SettingsSet(_)
         );
-        let system = command.settings.as_ref().map(|ports| ports.system);
-        let mut result = self.execute_write(command.request, system);
+        let mut result = self.execute_write(command.request, command.settings.as_ref());
         self.store.limit_write_wait(Duration::MAX);
         if result.is_ok()
             && !matches!(
@@ -422,12 +421,12 @@ impl DatabaseLoop {
     fn execute_write(
         &mut self,
         request: crate::persistence::dispatch::WriteRequest,
-        system: Option<quartz_protocol::EffectiveUiSettings>,
+        settings: Option<&crate::persistence::dispatch::SettingsPorts>,
     ) -> Result<crate::persistence::dispatch::WriteResponse, quartz_protocol::ProtocolError> {
         let now = self.now().map_err(|_| {
             quartz_protocol::ProtocolError::new(quartz_protocol::ErrorKind::Internal)
         })?;
-        request.execute(&mut self.store, now.utc, system, &mut self.registry)
+        request.execute(&mut self.store, now.utc, settings, &mut self.registry)
     }
     fn registry_command(
         &mut self,
