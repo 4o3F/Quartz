@@ -87,6 +87,12 @@ today.ranking.documents_empty.message:
   zh-CN: "尚未提取到文档标题，或标题已被隐私规则隐藏。可在“分类与规则”中查看文档提取与隐私规则。"
 today.ranking.documents_empty.action:
   zh-CN: "前往分类与规则"
+today.websites.title:
+  zh-CN: "网站"
+today.websites.internal:
+  zh-CN: "浏览器内部页面"
+today.websites.local_file:
+  zh-CN: "本地文件"
 today.pending.title:
   zh-CN: "待标注的离开"
 today.pending.range:

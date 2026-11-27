@@ -5,7 +5,7 @@ use super::{BRIDGE_CAPACITY, Link, LinkEvent};
 use quartz_pipe::CallCoreError;
 use quartz_protocol::{
     ApplicationRank, DayMetrics, DocumentRank, ErrorKind, HourStack, LocalDate,
-    MillisecondsPerPixel, PendingAway, ReferenceRange, TimelineSegment,
+    MillisecondsPerPixel, PendingAway, ReferenceRange, TimelineSegment, WebsiteRank,
 };
 #[cfg(windows)]
 use quartz_protocol::{
@@ -173,6 +173,7 @@ pub struct DayData {
     pub hours: Vec<HourStack>,
     pub applications: Vec<ApplicationRank>,
     pub documents: Vec<DocumentRank>,
+    pub websites: Vec<WebsiteRank>,
     pub truncated: bool,
     pub categories: Vec<TimelineSegment>,
     pub raw: Vec<TimelineSegment>,
@@ -205,6 +206,7 @@ impl DayCache {
                 hours: self.data.hours.clone(),
                 applications: self.data.applications.clone(),
                 documents: self.data.documents.clone(),
+                websites: self.data.websites.clone(),
                 truncated: self.data.truncated,
                 pending: self.data.pending.clone(),
                 categories: Vec::new(),
@@ -294,6 +296,7 @@ impl Link {
                 hours: day.hours,
                 applications: day.applications,
                 documents: day.documents,
+                websites: day.websites,
                 truncated: day.truncated,
                 categories: categories.segments,
                 raw: raw.segments,

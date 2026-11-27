@@ -38,6 +38,7 @@ fn empty_day_body(
             categories: Vec::new(),
         }],
         applications: Vec::new(),
+        websites: Vec::new(),
         versions: QueryVersions(versions.into()),
         truncated: false,
     })
@@ -122,6 +123,7 @@ impl DayHarness {
                         categories: Vec::new(),
                     }],
                     applications: vec![app(1), app(2)],
+                    websites: Vec::new(),
                     versions: version,
                     truncated: false,
                 })

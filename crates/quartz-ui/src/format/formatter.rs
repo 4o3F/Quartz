@@ -263,12 +263,14 @@ impl Formatter {
         })
     }
 
-    /// Display label of a ranking row, using localized text for hidden document identities.
+    /// Display label of a ranking row, using localized text for hidden documents and browser sentinels.
     #[must_use]
     pub(crate) fn rank_label(self, label: &RankLabel) -> String {
         match label {
             RankLabel::Visible(text) => text.clone(),
             RankLabel::HiddenDocument => self.text(Msg::RankingHiddenDocument),
+            RankLabel::BrowserInternal => self.text(Msg::WebsitesInternal),
+            RankLabel::LocalFile => self.text(Msg::WebsitesLocalFile),
         }
     }
 

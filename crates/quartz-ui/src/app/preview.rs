@@ -60,6 +60,8 @@ pub enum PreviewState {
     TodayData(TodayPreviewState),
     /// Today with application details.
     TodayAppDetails,
+    /// Today with a live-mapped day showing the Websites ranking card.
+    TodayWebsites,
     /// Rules page with builtin and user sets, a disabled user set, an override marker,
     /// and a user set selected with entries.
     Rules,
@@ -199,6 +201,7 @@ impl FromStr for PreviewState {
         match name {
             "today" => Ok(Self::Today),
             "today-app-details" => Ok(Self::TodayAppDetails),
+            "today-websites" => Ok(Self::TodayWebsites),
             "loading" => Ok(Self::TodayData(TodayPreviewState::Loading)),
             "empty-today" => Ok(Self::TodayData(TodayPreviewState::EmptyToday)),
             "empty-past" => Ok(Self::TodayData(TodayPreviewState::EmptyPast)),
@@ -452,6 +455,7 @@ impl PreviewState {
             Self::Today
             | Self::TodayDetails
             | Self::TodayAppDetails
+            | Self::TodayWebsites
             | Self::TodayHover
             | Self::TodayFullDay
             | Self::TodayData(_)
@@ -470,6 +474,7 @@ impl PreviewState {
             Self::Today
             | Self::TodayDetails
             | Self::TodayAppDetails
+            | Self::TodayWebsites
             | Self::TodayData(_)
             | Self::TodayHover
             | Self::Week
@@ -499,6 +504,7 @@ impl PreviewState {
     fn initial_view(self, sample: &SampleDay) -> InitialView {
         match self {
             Self::Today
+            | Self::TodayWebsites
             | Self::TodayFullDay
             | Self::TodayData(_)
             | Self::Week
@@ -951,6 +957,7 @@ mod tests {
             ("rule-import", PreviewState::RuleImport, Page::Rules),
             ("unclassified", PreviewState::Unclassified, Page::Rules),
             ("progress", PreviewState::Progress, Page::Rules),
+            ("today-websites", PreviewState::TodayWebsites, Page::Today),
             (
                 "today-annotations",
                 PreviewState::TodayAnnotations,

@@ -60,9 +60,27 @@ impl RankBar {
     }
 }
 
+/// Distinguishes element ids between the Ranking card and the Websites card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RankRowScope {
+    Ranking,
+    Websites,
+}
+
+impl RankRowScope {
+    const fn id_prefix(self) -> &'static str {
+        match self {
+            Self::Ranking => "rank",
+            Self::Websites => "website-rank",
+        }
+    }
+}
+
 /// The parts of a ranking row that depend on the other rows or on measuring.
 #[derive(Debug, Clone, PartialEq)]
 struct RankCell {
+    /// Card that owns this row, so GPUI element ids do not collide across cards.
+    scope: RankRowScope,
     /// Position of the row, for its element id.
     index: usize,
     /// The formatted total.
@@ -132,6 +150,7 @@ impl AppShell {
                     .enumerate()
                     .map(|(index, (row, duration))| {
                         let cell = RankCell {
+                            scope: RankRowScope::Ranking,
                             index,
                             duration,
                             value_width,
@@ -194,6 +213,63 @@ impl AppShell {
             )
             .children(truncated_notice)
             .child(content)
+    }
+
+    pub(super) fn render_websites(
+        &self,
+        ui: &Widgets<'_>,
+        frame: &Frame<'_>,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let rows = self.day.websites();
+        if rows.is_empty() {
+            return None;
+        }
+        let longest = rows.iter().map(|row| row.total).max().unwrap_or_default();
+        let durations: Vec<String> = rows
+            .iter()
+            .map(|row| self.formatter.duration(row.total))
+            .collect();
+        let value_width = VALUE_RANGE.select(
+            frame
+                .measure
+                .widths(durations.iter().map(String::as_str), Ramp::Caption),
+        );
+        let list =
+            div()
+                .flex()
+                .flex_col()
+                .children(rows.iter().zip(durations).enumerate().map(
+                    |(index, (row, duration))| {
+                        let cell = RankCell {
+                            scope: RankRowScope::Websites,
+                            index,
+                            duration,
+                            value_width,
+                        };
+                        self.rank_row(ui, row, cell, RankBar::of(row, longest), cx)
+                    },
+                ));
+        let truncated_notice = self
+            .day
+            .ranking_truncated()
+            .then(|| self.render_truncated_notice(ui, Msg::RankingTruncated, rows.len()));
+        Some(
+            ui.card()
+                .flex()
+                .flex_col()
+                .w_full()
+                .gap(ui.metrics.space.s)
+                .p(ui.metrics.space.l)
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .ramp(ui, Ramp::Subtitle)
+                        .child(self.formatter.text(Msg::WebsitesTitle)),
+                )
+                .children(truncated_notice)
+                .child(list),
+        )
     }
 
     fn render_empty_documents(&self, ui: &Widgets<'_>, cx: &mut Context<Self>) -> Div {
@@ -350,7 +426,7 @@ impl AppShell {
                 .child(name)
         };
         div()
-            .id(("rank", cell.index))
+            .id((cell.scope.id_prefix(), cell.index))
             .relative()
             .flex()
             .flex_row()

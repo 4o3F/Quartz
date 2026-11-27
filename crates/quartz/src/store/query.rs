@@ -29,8 +29,10 @@ use std::{
 mod facts;
 mod input;
 mod saved_annotations;
-pub(crate) use input::{InputRow, QueryAnnotation};
+mod web;
+pub(crate) use input::{InputRow, QueryAnnotation, WebInterval};
 pub(crate) use saved_annotations::AnnotationScan;
+use web::WebScanCursor;
 
 /// Bounds each SQLite fact scan before the database loop services pending writes.
 pub(crate) const READ_BATCH_ROWS: usize = 256;
@@ -45,6 +47,7 @@ impl ReadOnlyStore {
             reader: Some(self),
             transaction: SnapshotTransaction::Pending,
             cursor: ScanCursor::initial(),
+            web_cursor: WebScanCursor::initial(),
             applications: BTreeMap::new(),
             clocks: BTreeSet::new(),
         }
@@ -70,6 +73,7 @@ pub(crate) struct ReadSnapshot {
     reader: Option<ReadOnlyStore>,
     transaction: SnapshotTransaction,
     cursor: ScanCursor,
+    web_cursor: WebScanCursor,
     applications: BTreeMap<ApplicationId, Arc<ApplicationRef>>,
     clocks: BTreeSet<ClockSegmentId>,
 }
@@ -303,6 +307,7 @@ impl ReadSnapshot {
     /// Restarts the bounded scans within the same snapshot for the next logical day.
     pub(crate) fn restart_scan(&mut self) {
         self.cursor = ScanCursor::initial();
+        self.web_cursor = WebScanCursor::initial();
         // This dictionary belongs to the snapshot, not the resident read connection.
         self.applications.clear();
         self.clocks.clear();

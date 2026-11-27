@@ -87,6 +87,12 @@ today.ranking.documents_empty.message:
   en: "No document titles were extracted yet, or titles are hidden by privacy rules. Review extraction and privacy rules in Categories & rules."
 today.ranking.documents_empty.action:
   en: "Open Categories & rules"
+today.websites.title:
+  en: "Websites"
+today.websites.internal:
+  en: "Browser pages"
+today.websites.local_file:
+  en: "Local files"
 today.pending.title:
   en: "Away to label"
 today.pending.range:

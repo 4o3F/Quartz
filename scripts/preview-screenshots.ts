@@ -19,6 +19,7 @@ export const scenarios = [
   "today-nav",
   "today-details",
   "today-app-details",
+  "today-websites",
   "core-not-running",
   "core-not-running-starting",
   "core-start-failed",

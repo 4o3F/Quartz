@@ -43,6 +43,7 @@ impl std::fmt::Debug for LiveDocumentInfo {
 pub(crate) struct LiveDay {
     pub(super) apps_ranking: Vec<RankRow>,
     pub(super) documents_ranking: Vec<RankRow>,
+    pub(super) websites_ranking: Vec<RankRow>,
     pub(super) ranking_truncated: bool,
     app_ids: BTreeMap<AppId, wire::ApplicationId>,
     documents: BTreeMap<DocumentId, LiveDocumentInfo>,
@@ -361,6 +362,13 @@ impl Day {
                 },
             );
         }
+        let mut websites_ranking = Vec::with_capacity(data.websites.len());
+        for row in &data.websites {
+            websites_ranking.push(RankRow::website(
+                row.domain.clone(),
+                Mapping::duration(row.active_ms)?,
+            ));
+        }
         day.categories = map.categories;
         day.apps = map.apps;
         let activity_range = track
@@ -401,9 +409,10 @@ impl Day {
         for (protocol, local) in map.app_ids {
             app_ids.insert(local, protocol);
         }
-        day.source = DaySource::Live(LiveDay {
+        day.source = DaySource::Live(Box::new(LiveDay {
             apps_ranking,
             documents_ranking,
+            websites_ranking,
             ranking_truncated: data.truncated,
             app_ids,
             documents,
@@ -412,7 +421,7 @@ impl Day {
             pending,
             switches_per_hour,
             zone,
-        });
+        }));
         Ok(day)
     }
     pub(crate) fn ranking_truncated(&self) -> bool {
@@ -589,6 +598,7 @@ mod tests {
                 app: app.clone(),
                 active_ms: 2000,
             }],
+            websites: Vec::new(),
             versions: wire::QueryVersions("v1".into()),
             truncated: false,
         };
@@ -655,6 +665,7 @@ mod tests {
             hours: page.hours,
             applications: page.applications,
             documents: page.documents,
+            websites: page.websites,
             truncated: page.truncated,
             categories: timeline.segments.clone(),
             raw: timeline.segments,
@@ -1133,5 +1144,69 @@ mod tests {
             assert_eq!(en.rank_label(&row.label), "Hidden document");
             assert_eq!(zh.rank_label(&row.label), "已隐藏文档");
         }
+    }
+    #[test]
+    fn live_day_maps_websites_and_localizes_browser_sentinels() {
+        let mut input = data();
+        input.websites = vec![
+            wire::WebsiteRank {
+                domain: "github.com".into(),
+                active_ms: 3_000,
+            },
+            wire::WebsiteRank {
+                domain: "xn--mnchen-3ya.de".into(),
+                active_ms: 2_000,
+            },
+            wire::WebsiteRank {
+                domain: wire::INTERNAL_BROWSER_DOMAIN.into(),
+                active_ms: 1_000,
+            },
+            wire::WebsiteRank {
+                domain: wire::LOCAL_FILE_BROWSER_DOMAIN.into(),
+                active_ms: 500,
+            },
+        ];
+        let day = Day::from_protocol(input.clone()).expect("live day with websites");
+        let rows = day.websites();
+        assert_eq!(rows.len(), 4);
+        let first = rows.first().expect("first website");
+        let second = rows.get(1).expect("second website");
+        let third = rows.get(2).expect("third website");
+        let fourth = rows.get(3).expect("fourth website");
+        assert_eq!(first.label, RankLabel::Visible("github.com".into()));
+        assert_eq!(first.total, Duration::from_millis(3_000));
+        assert_eq!(second.label, RankLabel::Visible("xn--mnchen-3ya.de".into()));
+        assert_eq!(second.total, Duration::from_millis(2_000));
+        assert_eq!(third.label, RankLabel::BrowserInternal);
+        assert_eq!(third.total, Duration::from_millis(1_000));
+        assert_eq!(fourth.label, RankLabel::LocalFile);
+        assert_eq!(fourth.total, Duration::from_millis(500));
+        assert!(rows.iter().all(|row| row.key.details_subject().is_none()));
+
+        let en = Formatter::new(Language::English);
+        let zh = Formatter::new(Language::SimplifiedChinese);
+        assert_eq!(en.rank_label(&first.label), "github.com");
+        assert_eq!(en.rank_label(&second.label), "xn--mnchen-3ya.de");
+        assert_eq!(en.rank_label(&third.label), "Browser pages");
+        assert_eq!(en.rank_label(&fourth.label), "Local files");
+        assert_eq!(zh.rank_label(&third.label), "浏览器内部页面");
+        assert_eq!(zh.rank_label(&fourth.label), "本地文件");
+
+        let debug = format!("{first:?}");
+        assert!(!debug.contains("github.com"), "debug must redact domains");
+        assert!(Day::empty(day.date()).websites().is_empty());
+        assert!(
+            Day::new(crate::model::fixture::parts())
+                .expect("fixture")
+                .websites()
+                .is_empty()
+        );
+
+        input
+            .websites
+            .first_mut()
+            .expect("first website input")
+            .active_ms = -1;
+        assert!(Day::from_protocol(input).is_err());
     }
 }

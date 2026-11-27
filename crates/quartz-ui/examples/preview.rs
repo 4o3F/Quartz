@@ -1,7 +1,7 @@
 //! Opens the main window on a synthetic fixture state without starting a core or pipe.
 //!
 //! `QUARTZ_PREVIEW_STATE` values:
-//! - Today views: `today`, `today-details`, `today-app-details`, `today-hover`, `today-full-day`.
+//! - Today views: `today`, `today-details`, `today-app-details`, `today-websites`, `today-hover`, `today-full-day`.
 //! - Today data states: `loading`, `empty-today`, `empty-past`, `stopped-paused`,
 //!   `stopped-persistence-failed`, `query-failed`, `date-picker`, `today-nav`.
 //! - M4 editing flows: `rules`, `rules-categories`, `rule-editor`, `rule-editor-preview`,

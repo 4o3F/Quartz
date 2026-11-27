@@ -163,6 +163,9 @@ impl AppShell {
             PreviewState::Progress => {
                 self.configure_progress_preview(selected);
             }
+            PreviewState::TodayWebsites => {
+                self.day = sample_live_day_with_websites(fixture_preview_websites());
+            }
             PreviewState::TodayAnnotations => {
                 self.configure_today_annotations_preview(false);
             }
@@ -1384,6 +1387,10 @@ fn sample_live_apps() -> [wire::ApplicationRef; 4] {
 }
 
 fn sample_live_day() -> Day {
+    sample_live_day_with_websites(Vec::new())
+}
+
+fn sample_live_day_with_websites(websites: Vec<wire::WebsiteRank>) -> Day {
     let date = sample_day_date();
     let day_start = sample_day_start_utc_ms();
     let day_end = day_start + 24 * HOUR_MS;
@@ -1679,12 +1686,42 @@ fn sample_live_day() -> Day {
                 active_ms: 75 * MINUTE_MS,
             },
         ],
+        websites,
         truncated: false,
         categories: timeline.clone(),
         raw: timeline,
         pending: Vec::new(),
     };
     Day::from_protocol(data).expect("sample live day is valid")
+}
+
+fn fixture_preview_websites() -> Vec<wire::WebsiteRank> {
+    vec![
+        wire::WebsiteRank {
+            domain: "github.com".to_owned(),
+            active_ms: 48 * MINUTE_MS,
+        },
+        wire::WebsiteRank {
+            domain: "docs.rs".to_owned(),
+            active_ms: 32 * MINUTE_MS,
+        },
+        wire::WebsiteRank {
+            domain: "developer.mozilla.org".to_owned(),
+            active_ms: 18 * MINUTE_MS,
+        },
+        wire::WebsiteRank {
+            domain: "xn--mnchen-3ya.de".to_owned(),
+            active_ms: 11 * MINUTE_MS,
+        },
+        wire::WebsiteRank {
+            domain: wire::INTERNAL_BROWSER_DOMAIN.to_owned(),
+            active_ms: 4 * MINUTE_MS,
+        },
+        wire::WebsiteRank {
+            domain: wire::LOCAL_FILE_BROWSER_DOMAIN.to_owned(),
+            active_ms: 2 * MINUTE_MS,
+        },
+    ]
 }
 
 fn fixture_selected_segment_details(day: &Day) -> OpenDetails {
@@ -2314,5 +2351,23 @@ mod tests {
                 wire::BrowserKind::Firefox
             ]
         );
+    }
+
+    #[test]
+    fn today_websites_preview_fixture_satisfies_invariants() {
+        use crate::model::RankLabel;
+        assert!(sample_live_day().websites().is_empty());
+        let day = sample_live_day_with_websites(fixture_preview_websites());
+        let rows = day.websites();
+        assert_eq!(rows.len(), 6);
+        assert!(
+            rows.iter()
+                .any(|row| row.label == RankLabel::Visible("xn--mnchen-3ya.de".to_owned()))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.label == RankLabel::BrowserInternal)
+        );
+        assert!(rows.iter().any(|row| row.label == RankLabel::LocalFile));
     }
 }

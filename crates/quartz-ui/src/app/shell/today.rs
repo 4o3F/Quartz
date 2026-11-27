@@ -222,6 +222,7 @@ impl AppShell {
                         .child(self.render_hourly(ui, frame, cx))
                         .child(self.render_ranking(ui, frame, cx)),
                 )
+                .children(self.render_websites(ui, frame, cx))
                 .children(self.render_pending(ui, cx)),
         };
         div()

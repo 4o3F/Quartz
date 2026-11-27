@@ -121,7 +121,7 @@ u32 小端（JSON 字节长度） | UTF-8 JSON
 | op | 用途 |
 |---|---|
 | `query.facts` | 按位置游标分页读取日历日原始事实（供 `quartz dump` 与诊断） |
-| `query.day` | 返回单逻辑日指标、小时分类堆叠、应用/文档排行及 7 日 `reference_range` |
+| `query.day` | 返回单逻辑日指标、小时分类堆叠、应用/文档/网站（`websites`）排行及 7 日 `reference_range` |
 | `query.timeline` | 按 `category`/`app`/`raw` 细节与 `ms_per_pixel` 合并规则返回 UTC 范围时间轴片段 |
 | `query.range` | 按天/周分桶及 `category`/`app`/`document` 维度返回日期范围聚合 |
 | `query.segment_detail` | 返回选定 UTC 范围（≤48 h）裁剪后未像素合并的明细区间（可按应用/窗口实例过滤） |

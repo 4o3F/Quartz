@@ -28,20 +28,24 @@ pub(crate) mod timing;
 mod unclassified;
 pub(crate) mod versions;
 
-use crate::store::{ReadOnlyStore, query::ReadSnapshot, query_error::ReadQueryError};
+use crate::store::{
+    ReadOnlyStore,
+    query::{ReadSnapshot, WebInterval},
+    query_error::ReadQueryError,
+};
 use calendar::DayCalendar;
 use day_walker::DayWalker;
 use details::{EntityCalendar, EntityDetailAccumulator, EntitySelection, SegmentDetailProjection};
 use input::QueryRange;
 use pipeline::{DayAccumulator, DerivedSegment, Pipeline, QUERY_BATCH_ROWS, TimelineProjection};
 use quartz_protocol::{
-    DAY_MAX_APPLICATIONS, DAY_MAX_DOCUMENTS, ErrorKind, FACTS_DEFAULT_LIMIT, FACTS_MAX_LIMIT,
-    PENDING_AWAY_MAX_RANGES, QueryDayRequest, QueryDayResponse, QueryEntityDetailRequest,
-    QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse, QueryPendingAwayRequest,
-    QueryPendingAwayResponse, QueryRangeResponse, QuerySegmentDetailRequest,
-    QuerySegmentDetailResponse, QueryTimelineRequest, QueryTimelineResponse, QueryVersions,
-    SEGMENT_DETAIL_MAX_INTERVALS, SEGMENT_DETAIL_MAX_SPAN_MS, TIMELINE_MAX_SEGMENTS,
-    UNCLASSIFIED_MAX_ITEMS,
+    DAY_MAX_APPLICATIONS, DAY_MAX_DOCUMENTS, DAY_MAX_WEBSITES, ErrorKind, FACTS_DEFAULT_LIMIT,
+    FACTS_MAX_LIMIT, PENDING_AWAY_MAX_RANGES, QueryDayRequest, QueryDayResponse,
+    QueryEntityDetailRequest, QueryEntityDetailResponse, QueryFactsRequest, QueryFactsResponse,
+    QueryPendingAwayRequest, QueryPendingAwayResponse, QueryRangeResponse,
+    QuerySegmentDetailRequest, QuerySegmentDetailResponse, QueryTimelineRequest,
+    QueryTimelineResponse, QueryVersions, SEGMENT_DETAIL_MAX_INTERVALS, SEGMENT_DETAIL_MAX_SPAN_MS,
+    TIMELINE_MAX_SEGMENTS, UNCLASSIFIED_MAX_ITEMS,
 };
 use range::{FirstWeekday, RangeAccumulator};
 use serde::Serialize;
@@ -49,7 +53,7 @@ use timing::{QueryStage, QueryTimer, QueryTimings};
 use unclassified::UnclassifiedAccumulator;
 
 /// Increment whenever matching, slicing, duration, aggregation, or projection semantics change.
-pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 11;
+pub(crate) const QUERY_SEMANTICS_VERSION: u32 = 12;
 /// UTC timeline ranges are bounded to one leap year to limit one job's retained inputs.
 pub(crate) const MAX_QUERY_RANGE_MS: i64 = 366 * quartz_domain::capture::limits::UTC_DAY_MS;
 /// A 366-logical-day reference can include a backward UTC offset change of up to one day.
@@ -239,6 +243,7 @@ enum Stage {
     },
     FinalizeFacts(Box<facts::FinalizeFacts>),
     Read(Pipeline),
+    ReadWeb(Pipeline),
     Sweep(Pipeline),
     Aggregate {
         segments: std::vec::IntoIter<DerivedSegment>,
@@ -271,6 +276,7 @@ pub(crate) struct QueryJob {
     day_walker: Option<DayWalker>,
     unclassified: Option<UnclassifiedAccumulator>,
     range_accumulator: Option<RangeAccumulator>,
+    websites: Vec<WebInterval>,
     #[cfg(any(windows, test))]
     progress: progress::ProgressSink,
     stage: Stage,
@@ -324,6 +330,7 @@ impl QueryJob {
                     }
                     _ => None,
                 },
+                websites: Vec::new(),
                 #[cfg(any(windows, test))]
                 progress: progress::ProgressSink::disabled(),
                 stage: if let Some(read) = prepared.annotations {
@@ -691,6 +698,26 @@ impl QueryJob {
                     }
                     None => {
                         timer.measure(QueryStage::Slice, || pipeline.finish_input());
+                        self.stage = if matches!(self.request, QueryRequest::Day(_)) {
+                            Stage::ReadWeb(pipeline)
+                        } else {
+                            Stage::Sweep(pipeline)
+                        };
+                    }
+                }
+                Ok(None)
+            }
+            Stage::ReadWeb(pipeline) => {
+                match timer.measure(QueryStage::Read, || {
+                    self.snapshot
+                        .read_web_batch(self.scan_range)
+                        .map_err(RunQueryError::from)
+                })? {
+                    Some(rows) => {
+                        self.websites.extend(rows);
+                        self.stage = Stage::ReadWeb(pipeline);
+                    }
+                    None => {
                         self.stage = Stage::Sweep(pipeline);
                     }
                 }
@@ -711,8 +738,9 @@ impl QueryJob {
                     QueryRequest::Annotations(_) | QueryRequest::Facts(_) => {
                         unreachable!("stored entities bypass aggregation")
                     }
-                    QueryRequest::Day(_) => Aggregation::Day(DayAccumulator::new(
+                    QueryRequest::Day(_) => Aggregation::Day(DayAccumulator::with_websites(
                         self.calendar.take().expect("day calendar retained"),
+                        std::mem::take(&mut self.websites),
                     )),
                     QueryRequest::PendingAway(_) => {
                         Aggregation::PendingAway(pending_away::PendingAwayAccumulator::default())
@@ -859,12 +887,18 @@ impl QueryJob {
                     .into_iter()
                     .map(|entry| entry.into_rank(self.reference_range, &self.versions))
                     .collect::<Result<Vec<_>, _>>()?;
+                let mut websites = aggregate.websites;
+                if websites.len() > DAY_MAX_WEBSITES {
+                    websites.truncate(DAY_MAX_WEBSITES);
+                    truncated = true;
+                }
                 QueryResponse::Day(QueryDayResponse {
                     reference_range: Some(self.reference_range()),
                     documents,
                     metrics: aggregate.metrics,
                     hours: aggregate.calendar.hours,
                     applications,
+                    websites,
                     versions: self.versions.clone(),
                     truncated,
                 })
@@ -946,13 +980,9 @@ impl QueryJob {
             QueryResponse::Preview(_) | QueryResponse::Annotations(_) | QueryResponse::Facts(_) => {
                 response
             }
-            QueryResponse::Day(day) => QueryResponse::Day(fit_two_lists(
-                day,
-                QUERY_MAX_RESPONSE_BYTES,
-                |r| &mut r.applications,
-                |r| &mut r.documents,
-                |r| r.truncated = true,
-            )?),
+            QueryResponse::Day(day) => {
+                QueryResponse::Day(fit_day_response(day, QUERY_MAX_RESPONSE_BYTES)?)
+            }
             QueryResponse::Timeline(timeline) => QueryResponse::Timeline(fit_single_list(
                 timeline,
                 QUERY_MAX_RESPONSE_BYTES,
@@ -1137,6 +1167,97 @@ where
                 }
                 return Ok(response);
             }
+        }
+    }
+}
+
+fn fit_day_response(
+    mut response: QueryDayResponse,
+    max_bytes: usize,
+) -> Result<QueryDayResponse, RunQueryError> {
+    enum DayList {
+        Applications,
+        Documents,
+        Websites,
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FitOutcome {
+        Fits,
+        TooLarge,
+    }
+    fn trim_to_fit<R, T>(
+        response: &mut R,
+        max_bytes: usize,
+        target: usize,
+        list: impl Fn(&mut R) -> &mut Vec<T>,
+    ) -> Result<FitOutcome, RunQueryError>
+    where
+        R: Serialize,
+        T: Serialize,
+    {
+        let removed = list(response).split_off(target);
+        let mut used = JsonBytes::measure(response)?;
+        if used > max_bytes {
+            return Ok(FitOutcome::TooLarge);
+        }
+        let mut extra = Vec::new();
+        for item in removed {
+            let item_bytes = JsonBytes::measure(&item)? + 1;
+            if used.saturating_add(item_bytes) > max_bytes {
+                break;
+            }
+            used += item_bytes;
+            extra.push(item);
+        }
+        list(response).extend(extra);
+        while JsonBytes::measure(response)? > max_bytes {
+            if list(response).pop().is_none() {
+                break;
+            }
+        }
+        Ok(FitOutcome::Fits)
+    }
+
+    if JsonBytes::measure(&response)? <= max_bytes {
+        return Ok(response);
+    }
+    response.truncated = true;
+    loop {
+        if JsonBytes::measure(&response)? <= max_bytes {
+            return Ok(response);
+        }
+        let app_len = response.applications.len();
+        let doc_len = response.documents.len();
+        let web_len = response.websites.len();
+        let max_len = app_len.max(doc_len).max(web_len);
+        if max_len == 0 {
+            return Ok(response);
+        }
+        let (longest, second_len) = if app_len == max_len {
+            (DayList::Applications, doc_len.max(web_len))
+        } else if doc_len == max_len {
+            (DayList::Documents, app_len.max(web_len))
+        } else {
+            (DayList::Websites, app_len.max(doc_len))
+        };
+        let target = if max_len > second_len {
+            second_len
+        } else {
+            max_len / 2
+        };
+        let outcome = match longest {
+            DayList::Applications => {
+                trim_to_fit(&mut response, max_bytes, target, |r| &mut r.applications)?
+            }
+            DayList::Documents => {
+                trim_to_fit(&mut response, max_bytes, target, |r| &mut r.documents)?
+            }
+            DayList::Websites => {
+                trim_to_fit(&mut response, max_bytes, target, |r| &mut r.websites)?
+            }
+        };
+        if outcome == FitOutcome::Fits {
+            return Ok(response);
         }
     }
 }

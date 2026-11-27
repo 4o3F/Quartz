@@ -2936,3 +2936,185 @@ fn broken_annotation_storage_invariants_return_internal_and_log_safe_causes() {
         assert!(!text.contains("private invariant fixture"));
     }
 }
+
+#[test]
+fn websites_sum_across_foreground_pieces_exclude_idle_and_ignore_domainless_rows() {
+    use test_support::WebIntervalEnd;
+
+    let mut fixture = QueryFixture::new(2);
+    fixture.mask_idle(500, 1_200);
+    fixture.insert_web_interval(1, 1, 0, WebIntervalEnd::Closed(600), Some("github.com"));
+    fixture.insert_web_interval(1, 1, 600, WebIntervalEnd::Closed(1_000), Some("docs.rs"));
+    fixture.insert_web_interval(
+        1,
+        2,
+        1_000,
+        WebIntervalEnd::Closed(1_500),
+        Some("github.com"),
+    );
+    fixture.insert_web_interval(1, 2, 1_500, WebIntervalEnd::Closed(1_800), Some("docs.rs"));
+    fixture.insert_web_interval(1, 2, 1_800, WebIntervalEnd::Closed(2_000), None);
+
+    let QueryResponse::Day(day) = fixture.run(fixture.request_day()).expect("day websites") else {
+        panic!("day response");
+    };
+    assert_eq!(
+        day.websites,
+        vec![
+            quartz_protocol::WebsiteRank {
+                domain: "github.com".into(),
+                active_ms: 800,
+            },
+            quartz_protocol::WebsiteRank {
+                domain: "docs.rs".into(),
+                active_ms: 300,
+            },
+        ]
+    );
+}
+
+#[test]
+fn website_crossing_midnight_clips_to_logical_day_and_open_row_uses_confirmed_time() {
+    use test_support::WebIntervalEnd;
+
+    const BEFORE_MIDNIGHT_MS: i64 = 5_000;
+    let mut fixture = QueryFixture::new(2);
+    diesel::update(clock_segments::table.filter(clock_segments::id.eq(1_i64)))
+        .set((
+            clock_segments::start_utc_ms.eq(fixture.start - BEFORE_MIDNIGHT_MS),
+            clock_segments::start_mono_ms.eq(0_i64),
+            clock_segments::end_mono_ms.eq(Some(UTC_DAY_MS + BEFORE_MIDNIGHT_MS)),
+        ))
+        .execute(&mut fixture.store.writer)
+        .expect("clock spanning midnight");
+    diesel::update(intervals::table.filter(intervals::id.eq(1_i64)))
+        .set((
+            intervals::start_utc_ms.eq(fixture.start - 2_000),
+            intervals::end_utc_ms.eq(Some(fixture.start + 3_000)),
+            intervals::start_mono_ms.eq(BEFORE_MIDNIGHT_MS - 2_000),
+            intervals::end_mono_ms.eq(Some(BEFORE_MIDNIGHT_MS + 3_000)),
+            intervals::duration_ms.eq(Some(5_000)),
+        ))
+        .execute(&mut fixture.store.writer)
+        .expect("foreground spanning midnight");
+    diesel::update(intervals::table.filter(intervals::id.eq(2_i64)))
+        .set((
+            intervals::start_utc_ms.eq(fixture.start + 3_000),
+            intervals::end_utc_ms.eq(None::<i64>),
+            intervals::confirmed_utc_ms.eq(Some(fixture.start + 5_000)),
+            intervals::start_mono_ms.eq(BEFORE_MIDNIGHT_MS + 3_000),
+            intervals::end_mono_ms.eq(None::<i64>),
+            intervals::confirmed_mono_ms.eq(Some(BEFORE_MIDNIGHT_MS + 5_000)),
+            intervals::duration_ms.eq(None::<i64>),
+        ))
+        .execute(&mut fixture.store.writer)
+        .expect("open foreground row");
+
+    fixture.insert_web_interval(
+        1,
+        1,
+        -2_000,
+        WebIntervalEnd::Closed(3_000),
+        Some(quartz_protocol::INTERNAL_BROWSER_DOMAIN),
+    );
+    fixture.insert_web_interval(
+        1,
+        2,
+        3_000,
+        WebIntervalEnd::Open(4_200),
+        Some(quartz_protocol::LOCAL_FILE_BROWSER_DOMAIN),
+    );
+
+    let QueryResponse::Day(day) = fixture.run(fixture.request_day()).expect("day websites") else {
+        panic!("day response");
+    };
+    assert_eq!(
+        day.websites,
+        vec![
+            quartz_protocol::WebsiteRank {
+                domain: quartz_protocol::INTERNAL_BROWSER_DOMAIN.into(),
+                active_ms: 3_000,
+            },
+            quartz_protocol::WebsiteRank {
+                domain: quartz_protocol::LOCAL_FILE_BROWSER_DOMAIN.into(),
+                active_ms: 1_200,
+            },
+        ]
+    );
+}
+
+#[test]
+fn websites_sort_by_duration_desc_domain_asc_cap_at_limit_and_invalidate_on_web_version() {
+    use test_support::WebIntervalEnd;
+
+    const TOTAL_DOMAINS: usize = quartz_protocol::DAY_MAX_WEBSITES + 2;
+    const SPAN_MS: i64 = 10_000;
+    const TIE_MS: i64 = 20;
+    const SLICE_MS: i64 = 10;
+
+    let mut fixture = QueryFixture::new(1);
+    diesel::update(intervals::table.filter(intervals::id.eq(1_i64)))
+        .set((
+            intervals::end_utc_ms.eq(Some(fixture.start + SPAN_MS)),
+            intervals::end_mono_ms.eq(Some(SPAN_MS)),
+            intervals::duration_ms.eq(Some(SPAN_MS)),
+        ))
+        .execute(&mut fixture.store.writer)
+        .expect("extended foreground interval");
+
+    fixture.insert_web_interval(1, 1, 0, WebIntervalEnd::Closed(TIE_MS), Some("b.example"));
+    fixture.insert_web_interval(
+        1,
+        1,
+        TIE_MS,
+        WebIntervalEnd::Closed(2 * TIE_MS),
+        Some("a.example"),
+    );
+    let mut cursor = 2 * TIE_MS;
+    for index in 0..(TOTAL_DOMAINS - 2) {
+        let domain = format!("site-{index:04}.example");
+        fixture.insert_web_interval(
+            1,
+            1,
+            cursor,
+            WebIntervalEnd::Closed(cursor + SLICE_MS),
+            Some(&domain),
+        );
+        cursor += SLICE_MS;
+    }
+
+    let request = fixture.request_day();
+    let QueryResponse::Day(day) = fixture.run(request.clone()).expect("capped day websites") else {
+        panic!("day response");
+    };
+    assert!(day.truncated);
+    assert_eq!(day.websites.len(), quartz_protocol::DAY_MAX_WEBSITES);
+    assert_eq!(
+        day.websites[0],
+        quartz_protocol::WebsiteRank {
+            domain: "a.example".into(),
+            active_ms: TIE_MS,
+        }
+    );
+    assert_eq!(
+        day.websites[1],
+        quartz_protocol::WebsiteRank {
+            domain: "b.example".into(),
+            active_ms: TIE_MS,
+        }
+    );
+    assert_eq!(day.websites[2].domain, "site-0000.example");
+    assert_eq!(day.websites[2].active_ms, SLICE_MS);
+    assert!(
+        day.websites[2..]
+            .windows(2)
+            .all(|pair| pair[0].active_ms == SLICE_MS && pair[0].domain < pair[1].domain)
+    );
+
+    fixture.bump_web_version();
+    let QueryResponse::Day(refreshed) = fixture.run(request).expect("refreshed day websites")
+    else {
+        panic!("day response");
+    };
+    assert_ne!(day.versions, refreshed.versions);
+}

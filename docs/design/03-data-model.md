@@ -44,8 +44,8 @@
 
 ### 2.5 浏览器（`browser_streams`、`web_intervals`、`ingest_receipts`，M5）
 
-- 一条扩展消息可被前台区间切分为多段 `web_intervals`，去重键为 `ingest_receipts(stream_id, epoch, message_seq)`。
-- `web_level = none` 不写入 `web_intervals`；当前已关联网页以开放行 + `confirmed_utc_ms` 持久化。`browser.ack` 仅在消息结果（含丢弃原因）持久写入 `ingest_receipts` 后发出。
+- 每条网页行属于一个前台区间片段（`interval_id`），与之在同一批次开关并共用确认点；只有关联成功（`link_status = linked`）才写入，`ambiguous` 不写行。
+- `web_level = none` 不写入 `web_intervals`；当前已关联网页以开放行 + `confirmed_utc_ms` 持久化，崩溃恢复结算到确认点（`crash_recovered`）。`ingest_receipts` 表保留但不使用（05 开头的精简说明）。
 
 ### 2.6 规则与配置（`categories`、`rule_sets`、`rule_set_versions`、`annotations`、`settings`、`timed_policies`）
 

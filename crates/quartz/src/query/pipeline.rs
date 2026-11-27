@@ -11,12 +11,13 @@ use super::{
 };
 use quartz_protocol::{
     ApplicationId, ApplicationRank, CategoryRef, DayMetrics, QueryStopReason, TimelineDetail,
-    TimelineSegment,
+    TimelineSegment, WebsiteRank,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Bounds each compute turn independently of the size of the query range.
 pub(crate) use crate::store::query::READ_BATCH_ROWS as QUERY_BATCH_ROWS;
+use crate::store::query::WebInterval;
 use quartz_domain::{
     capture::{GapReason, StopReason},
     facts::{ClockSegmentId, Foreground, SpanDuration},
@@ -730,6 +731,7 @@ pub(crate) struct DayAggregation {
     pub calendar: DayCalendar,
     pub ranking: Vec<ApplicationRank>,
     pub(super) documents: Vec<DocumentDuration>,
+    pub websites: Vec<WebsiteRank>,
 }
 #[cfg(test)]
 impl DayAggregation {
@@ -752,6 +754,16 @@ struct PreviousActive {
     end: i64,
     app: ActiveApplication,
 }
+#[derive(Default)]
+struct WebsiteTotals(BTreeMap<String, i64>);
+impl std::fmt::Debug for WebsiteTotals {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebsiteTotals")
+            .field("count", &self.0.len())
+            .finish()
+    }
+}
 #[derive(Debug)]
 pub(crate) struct DayAccumulator {
     calendar: DayCalendar,
@@ -759,6 +771,8 @@ pub(crate) struct DayAccumulator {
     switches: u32,
     ranking: BTreeMap<ApplicationId, ApplicationRank>,
     documents: BTreeMap<DocumentIdentity, DocumentDuration>,
+    web_by_interval: BTreeMap<FactId, Vec<WebInterval>>,
+    websites: WebsiteTotals,
     previous: Option<PreviousActive>,
     focus_ms: i64,
     distract_ms: i64,
@@ -767,13 +781,26 @@ pub(crate) struct DayAccumulator {
     longest_focus_ms: i64,
 }
 impl DayAccumulator {
+    #[cfg(test)]
     pub(crate) fn new(calendar: DayCalendar) -> Self {
+        Self::with_websites(calendar, Vec::new())
+    }
+    pub(crate) fn with_websites(calendar: DayCalendar, web_intervals: Vec<WebInterval>) -> Self {
+        let mut web_by_interval: BTreeMap<FactId, Vec<WebInterval>> = BTreeMap::new();
+        for row in web_intervals {
+            web_by_interval
+                .entry(row.interval_id)
+                .or_default()
+                .push(row);
+        }
         Self {
             calendar,
             active_ms: 0,
             switches: 0,
             ranking: BTreeMap::new(),
             documents: BTreeMap::new(),
+            web_by_interval,
+            websites: WebsiteTotals::default(),
             previous: None,
             focus_ms: 0,
             distract_ms: 0,
@@ -833,6 +860,23 @@ impl DayAccumulator {
                     active_ms: 0,
                 })
                 .active_ms += current.duration_ms;
+        }
+        if segment.activity.is_captured_active()
+            && let Some(interval_id) = segment.interval_id
+            && let Some(rows) = self.web_by_interval.get(&interval_id)
+        {
+            for row in rows {
+                let overlap = QueryRange {
+                    start: current.start_utc_ms.max(row.start_utc_ms),
+                    end: current.end_utc_ms.min(row.end_utc_ms),
+                };
+                if overlap.end > overlap.start {
+                    let duration_ms = segment.duration_within(overlap);
+                    if duration_ms > 0 {
+                        *self.websites.0.entry(row.domain.clone()).or_insert(0) += duration_ms;
+                    }
+                }
+            }
         }
         let app = match &segment.activity {
             Activity::OfflineActivity(id) => ActiveApplication::Offline(id.clone()),
@@ -897,8 +941,22 @@ impl DayAccumulator {
                 .cmp(&left.active_ms)
                 .then(left.identity.cmp(&right.identity))
         });
+        let mut websites: Vec<_> = self
+            .websites
+            .0
+            .into_iter()
+            .filter(|(_, active_ms)| *active_ms > 0)
+            .map(|(domain, active_ms)| WebsiteRank { domain, active_ms })
+            .collect();
+        websites.sort_by(|left, right| {
+            right
+                .active_ms
+                .cmp(&left.active_ms)
+                .then_with(|| left.domain.cmp(&right.domain))
+        });
         DayAggregation {
             documents,
+            websites,
             metrics: DayMetrics {
                 active_ms: self.active_ms,
                 focus_ratio,

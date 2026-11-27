@@ -1859,6 +1859,7 @@ mod tests {
             }],
             applications: Vec::new(),
             documents: Vec::new(),
+            websites: Vec::new(),
             truncated: false,
             categories: Vec::new(),
             raw: Vec::new(),

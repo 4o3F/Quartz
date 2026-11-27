@@ -8,6 +8,8 @@ use std::num::NonZeroU64;
 pub const DAY_MAX_APPLICATIONS: usize = 500;
 /// Maximum documents returned in a single `query.day` response.
 pub const DAY_MAX_DOCUMENTS: usize = 500;
+/// Maximum websites returned in a single `query.day` response.
+pub const DAY_MAX_WEBSITES: usize = DAY_MAX_APPLICATIONS;
 /// Maximum pixel-merged segments returned in a single `query.timeline` response.
 pub const TIMELINE_MAX_SEGMENTS: usize = 4_000;
 /// Maximum unmerged slices returned in a single `query.segment_detail` response.
@@ -568,6 +570,21 @@ pub struct DocumentRank {
     pub profile: Option<String>,
     pub active_ms: i64,
 }
+/// One complete website ranking entry, keyed by stored domain or browser sentinel.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebsiteRank {
+    pub domain: String,
+    pub active_ms: i64,
+}
+impl std::fmt::Debug for WebsiteRank {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebsiteRank")
+            .field("domain", &"[redacted]")
+            .field("active_ms", &self.active_ms)
+            .finish()
+    }
+}
 /// Complete single-response day summary with metrics, hours, and capped rankings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryDayResponse {
@@ -578,6 +595,8 @@ pub struct QueryDayResponse {
     pub metrics: DayMetrics,
     pub hours: Vec<HourStack>,
     pub applications: Vec<ApplicationRank>,
+    #[serde(default)]
+    pub websites: Vec<WebsiteRank>,
     pub versions: QueryVersions,
     #[serde(default)]
     pub truncated: bool,
@@ -788,6 +807,7 @@ mod tests {
                 app: golden_app(),
                 active_ms: 1000,
             }],
+            websites: Vec::new(),
             versions: QueryVersions("version-token".into()),
             truncated: false,
         };
@@ -966,5 +986,42 @@ mod tests {
         assert!(serde_json::from_value::<QueryEntityDetailRequest>(serde_json::json!({
             "entity":{"kind":"document","document_ref":"opaque"},"local_date":"2025-01-02","reference_range":range
         })).is_err());
+    }
+    #[test]
+    fn day_response_websites_round_trip_and_legacy_payload_without_websites_parses() {
+        let mut wire: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/day.json"))
+                .expect("day golden JSON");
+        let object = wire.as_object_mut().expect("day JSON object");
+        object.remove("websites");
+        let legacy: QueryDayResponse =
+            serde_json::from_value(wire.clone()).expect("legacy day payload without websites");
+        assert!(legacy.websites.is_empty());
+
+        let populated = QueryDayResponse {
+            websites: vec![
+                WebsiteRank {
+                    domain: "github.com".into(),
+                    active_ms: 900,
+                },
+                WebsiteRank {
+                    domain: crate::INTERNAL_BROWSER_DOMAIN.into(),
+                    active_ms: 400,
+                },
+                WebsiteRank {
+                    domain: crate::LOCAL_FILE_BROWSER_DOMAIN.into(),
+                    active_ms: 100,
+                },
+            ],
+            ..legacy
+        };
+        let encoded = serde_json::to_value(&populated).expect("encode websites");
+        let decoded: QueryDayResponse = serde_json::from_value(encoded).expect("decode websites");
+        assert_eq!(decoded, populated);
+        let debug = format!("{:?}", populated.websites[0]);
+        assert!(
+            !debug.contains("github.com"),
+            "debug output must redact domains"
+        );
     }
 }

@@ -110,7 +110,7 @@ pub(crate) enum DaySource {
     )]
     Fixture,
     Loading,
-    Live(LiveDay),
+    Live(Box<LiveDay>),
 }
 
 /// Everything the Today page shows for one logical day. Every id inside refers to an item of the
@@ -376,6 +376,15 @@ impl Day {
             };
         }
         self.derived.rankings.get(kind)
+    }
+
+    /// Website ranking rows for a live day, longest first; empty for loading or fixture days.
+    #[must_use]
+    pub(crate) fn websites(&self) -> &[RankRow] {
+        match &self.source {
+            DaySource::Live(live) => &live.websites_ranking,
+            DaySource::Fixture | DaySource::Loading => &[],
+        }
     }
 
     /// The first idle span that still needs a label.

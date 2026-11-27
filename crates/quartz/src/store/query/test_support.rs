@@ -2,14 +2,14 @@
 
 use super::*;
 use crate::query::calendar::DayCalendar;
-use crate::store::schema::data_day_versions;
+use crate::store::schema::{browser_streams, data_day_versions, domains, web_intervals};
 use crate::store::versions::{UtcDay, VersionKey, VersionSource};
 use crate::store::{
     enums::{
         ApplicationKind, AvailabilityEndReason, ClockEndReason, DataSource, IntervalEndReason,
         IntervalKind, RunEndReason, TitleStatus,
     },
-    rows::{ApplicationsRow, CaptureRunsRow, TitlesRow},
+    rows::{ApplicationsRow, CaptureRunsRow, TitlesRow, WebIntervalsRow},
 };
 use crate::{
     data_directory::DataDirectory,
@@ -28,6 +28,12 @@ pub(crate) struct QueryFixture {
     pub count: i64,
     pub(crate) directory: tempfile::TempDir,
 }
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WebIntervalEnd {
+    Closed(i64),
+    Open(i64),
+}
+
 impl QueryFixture {
     pub(crate) fn new(count: i64) -> Self {
         let directory = tempfile::tempdir().expect("query fixture directory");
@@ -325,5 +331,97 @@ impl QueryFixture {
             .set(intervals::capture_level.eq(level))
             .execute(&mut self.store.writer)
             .expect("fixture capture level");
+    }
+    pub(crate) fn insert_web_interval(
+        &mut self,
+        stream_id: i64,
+        interval_id: i64,
+        start_offset: i64,
+        end: WebIntervalEnd,
+        domain: Option<&str>,
+    ) {
+        const LINK_STATUS_LINKED: i32 = 1;
+        const WEB_LEVEL_FULL: i32 = 1;
+        const AUDIBLE_SILENT: i32 = 0;
+        const WEB_END_REASON_TAB_SWITCH: i32 = 1;
+
+        diesel::insert_into(browser_streams::table)
+            .values((
+                browser_streams::id.eq(stream_id),
+                browser_streams::browser.eq("chrome"),
+                browser_streams::profile_instance_id.eq(format!("profile-{stream_id}")),
+                browser_streams::extension_id.eq("fixture-ext"),
+                browser_streams::first_seen_utc_ms.eq(self.start),
+                browser_streams::last_seen_utc_ms.eq(self.start),
+            ))
+            .on_conflict_do_nothing()
+            .execute(&mut self.store.writer)
+            .expect("browser stream fixture");
+        let domain_id = domain.map(|host| {
+            diesel::insert_into(domains::table)
+                .values(domains::host.eq(host))
+                .on_conflict(domains::host)
+                .do_update()
+                .set(domains::host.eq(host))
+                .returning(domains::id.assume_not_null())
+                .get_result::<i64>(&mut self.store.writer)
+                .expect("domain fixture")
+        });
+        let (end_utc_ms, confirmed_utc_ms, end_reason) = match end {
+            WebIntervalEnd::Closed(end_offset) => (
+                Some(self.start + end_offset),
+                None,
+                Some(WEB_END_REASON_TAB_SWITCH),
+            ),
+            WebIntervalEnd::Open(confirmed_offset) => {
+                (None, Some(self.start + confirmed_offset), None)
+            }
+        };
+        diesel::insert_into(web_intervals::table)
+            .values(WebIntervalsRow {
+                id: None,
+                stream_id,
+                interval_id,
+                start_utc_ms: self.start + start_offset,
+                end_utc_ms,
+                confirmed_utc_ms,
+                end_reason,
+                domain_id,
+                tab_title_id: None,
+                tab_title_status: TitleStatus::Empty,
+                tab_id: Some(1),
+                browser_window_id: Some(1),
+                navigation_id: None,
+                audible: AUDIBLE_SILENT,
+                link_status: LINK_STATUS_LINKED,
+                web_level: WEB_LEVEL_FULL,
+                privacy_rule_id: None,
+                privacy_label_key: None,
+                privacy_label: None,
+            })
+            .execute(&mut self.store.writer)
+            .expect("web interval fixture");
+    }
+    pub(crate) fn bump_web_version(&mut self) {
+        let day = self.start.div_euclid(UTC_DAY_MS);
+        let version = diesel::insert_into(data_day_versions::table)
+            .values((
+                data_day_versions::source.eq(DataSource::Web),
+                data_day_versions::utc_date.eq(day),
+                data_day_versions::version.eq(1_i64),
+            ))
+            .on_conflict((data_day_versions::source, data_day_versions::utc_date))
+            .do_update()
+            .set(data_day_versions::version.eq(data_day_versions::version + 1_i64))
+            .returning(data_day_versions::version)
+            .get_result(&mut self.store.writer)
+            .expect("bump web version");
+        self.store.pending_effects.days.insert(
+            VersionKey {
+                source: VersionSource(DataSource::Web.code()),
+                day: UtcDay(day),
+            },
+            version,
+        );
     }
 }

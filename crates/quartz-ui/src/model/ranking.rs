@@ -81,12 +81,14 @@ pub(crate) enum DocumentKey {
     Fixture(String),
 }
 
-/// Language-independent display label for a ranking row; hidden document identities never
-/// synthesize a placeholder string in the model.
+/// Language-independent display label for a ranking row; hidden document identities and browser
+/// sentinel domains never synthesize localized strings in the model.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum RankLabel {
     Visible(String),
     HiddenDocument,
+    BrowserInternal,
+    LocalFile,
 }
 
 /// Optional attribution metadata displayed with a document ranking row.
@@ -109,15 +111,21 @@ impl std::fmt::Debug for DocumentMeta {
 }
 
 /// What one ranking row groups by.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum RankKey {
     App(AppId),
-    #[cfg_attr(
-        all(not(test), not(feature = "preview")),
-        expect(dead_code, reason = "used by preview fixtures and their model tests")
-    )]
     Domain(String),
     Document(DocumentKey),
+}
+
+impl std::fmt::Debug for RankKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::App(app) => formatter.debug_tuple("App").field(app).finish(),
+            Self::Domain(_) => formatter.write_str("Domain([redacted])"),
+            Self::Document(doc) => formatter.debug_tuple("Document").field(doc).finish(),
+        }
+    }
 }
 
 impl RankKey {
@@ -184,6 +192,22 @@ impl RankRow {
             key: RankKey::Document(DocumentKey::Live(id)),
             label,
             meta,
+            total,
+            dominant: None,
+            parts: Vec::new(),
+        }
+    }
+
+    pub(super) fn website(domain: String, total: Duration) -> Self {
+        let label = match domain.as_str() {
+            quartz_protocol::INTERNAL_BROWSER_DOMAIN => RankLabel::BrowserInternal,
+            quartz_protocol::LOCAL_FILE_BROWSER_DOMAIN => RankLabel::LocalFile,
+            _ => RankLabel::Visible(domain.clone()),
+        };
+        Self {
+            key: RankKey::Domain(domain),
+            label,
+            meta: DocumentMeta::default(),
             total,
             dominant: None,
             parts: Vec::new(),

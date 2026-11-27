@@ -118,7 +118,9 @@ impl AppShell {
                 Some(doc) => {
                     let heading = match &doc.label {
                         RankLabel::Visible(name) => PanelHeading::Text(name.clone()),
-                        RankLabel::HiddenDocument => PanelHeading::HiddenDocument,
+                        RankLabel::HiddenDocument
+                        | RankLabel::BrowserInternal
+                        | RankLabel::LocalFile => PanelHeading::HiddenDocument,
                     };
                     let mut parts = Vec::new();
                     if let Some(project) = &doc.project {
