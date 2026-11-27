@@ -118,6 +118,8 @@
 - 多窗口、多 profile 时的 `linked` 覆盖率有实测数据。
 - 无痕窗口的标题不出现在数据库、日志、推送和托盘中。
 
+**进展（2026-11-27）**：代码部分全部完成——协议与 `quartz-host.exe` 转发、核心浏览器连接（d665636），关联、隐私与网页行描述（66deb3c），网页行持久化、确认点与崩溃恢复（0641ef2），Chrome/Edge/Firefox 扩展与打包（ee8320f，Chromium 扩展 ID `hmhnlfjafbcngnjgafhphcmljgldbakm`），`browser_hosts.*` 注册与设置页浏览器分组（71df9b7）。范围补充：`query.day` 增加按域名的网站时长排行并在今天页显示（2a8a878）。待验收：真实浏览器安装扩展、注册、多窗口 / 多 profile 的 `linked` 覆盖率实测与无痕检查，需要用户配合。
+
 ## M6 完善与发布
 
 **交付**
