@@ -107,10 +107,10 @@
 
 - Chrome/Edge 扩展、Firefox 扩展（05 第 1 节）。
 - `quartz-host.exe` 的 Native Messaging 转发与注册（05 第 2 节），设置页的浏览器分组。
-- 核心的上下文关联、求交、回执与去重（05 第 3 节）。
-- 浏览器隐私以扩展为准：有已连接 stream 时未关联窗口隐藏标题、关联后切段恢复，未接入时由 `builtin.browser_private` 标题模式兜底；扩充样本库与关联验证（06 第 3.2–3.4 节）。
-- browser.policy、purge 确认、gap 与连续 ack，扩展 alarm 重连、开放网页行恢复。
-- 将关联后的开放网页行加入 capture 的统一确认点目标与崩溃恢复输入；与前台、可用状态、运行和时钟段在同一事务中结算。
+- 核心的上下文关联与求交（05 第 3 节）。
+- 浏览器隐私以扩展为准：有已连接 stream 时未关联窗口隐藏标题、关联后切段恢复，未接入时由 `builtin.browser_private` 标题模式兜底（05 第 3.4 节、06 第 3.4 节）。
+- 扩展 alarm 重连；开放网页行加入 capture 的统一确认点与崩溃恢复，与前台区间同一事务结算。
+- 2026-11-27 按 YAGNI 不做扩展持久缓冲、重放、gap/ack/回执、browser.policy 与 purge、popup（05 开头）。
 
 **验收**
 
