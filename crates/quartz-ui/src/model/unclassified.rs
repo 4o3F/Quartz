@@ -13,6 +13,7 @@ use snafu::Snafu;
 use crate::{
     link::LoadDataError,
     model::{
+        LoadProgress, ProgressUpdate, QueryProgress,
         rule_editor::{ClassificationRulePrefill, PrefilledCondition},
         rules::LoadState,
     },
@@ -304,6 +305,7 @@ pub(crate) struct UnclassifiedQueue {
     search_text: String,
     search_error: Option<ValidateUnclassifiedSearchError>,
     state: LoadState<UnclassifiedList>,
+    progress: LoadProgress,
     loaded_range: Option<(LocalDate, LocalDate)>,
     freshness: QueueFreshness,
     generation: UnclassifiedGeneration,
@@ -316,6 +318,7 @@ impl fmt::Debug for UnclassifiedQueue {
             .field("group_by", &self.group_by)
             .field("has_search", &!self.search_text.trim().is_empty())
             .field("search_error", &self.search_error)
+            .field("progress", &self.progress)
             .field("loaded_range", &self.loaded_range)
             .field("freshness", &self.freshness)
             .field("generation", &self.generation)
@@ -338,6 +341,7 @@ impl UnclassifiedQueue {
             search_text: String::new(),
             search_error: None,
             state: LoadState::Loading,
+            progress: LoadProgress::Waiting,
             loaded_range: None,
             freshness: QueueFreshness::Unloaded,
             generation: UnclassifiedGeneration::default(),
@@ -376,6 +380,12 @@ impl UnclassifiedQueue {
         &self.state
     }
 
+    /// Current per-day loading progress of the active unclassified query.
+    #[must_use]
+    pub(crate) const fn progress(&self) -> LoadProgress {
+        self.progress
+    }
+
     /// Currently loaded or active 7-day logical range.
     #[cfg(windows)]
     #[must_use]
@@ -412,6 +422,7 @@ impl UnclassifiedQueue {
         self.group_by = group_by;
         if self.search_error.is_some() {
             self.generation = self.generation.next();
+            self.progress = LoadProgress::Waiting;
             return UnclassifiedEffect::None;
         }
         self.issue_query(today)
@@ -426,6 +437,7 @@ impl UnclassifiedQueue {
         }
         self.search_text = raw;
         self.generation = self.generation.next();
+        self.progress = LoadProgress::Waiting;
         if self.search_text.trim().chars().count() > wire::UNCLASSIFIED_MAX_SEARCH_SCALARS {
             self.search_error = Some(ValidateUnclassifiedSearchError::TooLong);
             return UnclassifiedEffect::None;
@@ -451,12 +463,27 @@ impl UnclassifiedQueue {
         };
         let request = self.build_request(start_date, end_date);
         self.state = LoadState::Loading;
+        self.progress = LoadProgress::Waiting;
         self.loaded_range = Some((start_date, end_date));
         UnclassifiedEffect::Query {
             request,
             range: (start_date, end_date),
             generation,
         }
+    }
+
+    /// Records per-day progress for an in-flight `query.unclassified` request, dropping updates
+    /// from superseded generations or after loading has finished.
+    pub(crate) fn apply_progress(
+        &mut self,
+        generation: UnclassifiedGeneration,
+        progress: QueryProgress,
+    ) -> ProgressUpdate {
+        if !self.generation.accepts(generation) || !matches!(self.state, LoadState::Loading) {
+            return ProgressUpdate::Ignored;
+        }
+        self.progress.record(progress);
+        ProgressUpdate::Applied
     }
 
     /// Applies the outcome of `query.unclassified`, dropping responses from older generations.
@@ -469,6 +496,7 @@ impl UnclassifiedQueue {
         if !self.generation.accepts(generation) {
             return;
         }
+        self.progress = LoadProgress::Waiting;
         match result {
             Ok(response) => {
                 self.loaded_range = Some(range);
@@ -515,6 +543,7 @@ impl UnclassifiedQueue {
         }
         self.freshness = QueueFreshness::Stale;
         self.generation = self.generation.next();
+        self.progress = LoadProgress::Waiting;
         UnclassifiedEffect::ScheduleQuery {
             generation: self.generation,
         }
@@ -526,6 +555,7 @@ impl UnclassifiedQueue {
         };
         self.generation = self.generation.next();
         self.state = LoadState::Loading;
+        self.progress = LoadProgress::Waiting;
         self.loaded_range = Some((start_date, end_date));
         UnclassifiedEffect::Query {
             request: self.build_request(start_date, end_date),
@@ -856,5 +886,52 @@ mod tests {
         assert!(session.text().contains("app.exe_name"));
         assert!(session.text().contains("notepad.exe"));
         assert!(session.text().contains("category = \"\""));
+    }
+
+    #[test]
+    fn superseded_generation_progress_is_dropped_and_resets_on_new_query() {
+        let today: LocalDate = "2026-11-26".parse().expect("today");
+        let mut queue = UnclassifiedQueue::new();
+
+        let UnclassifiedEffect::Query {
+            generation: gen_first,
+            ..
+        } = queue.open(today)
+        else {
+            panic!("opening emits Query");
+        };
+        assert_eq!(queue.progress(), LoadProgress::Waiting);
+        assert_eq!(
+            queue.apply_progress(gen_first, QueryProgress { done: 3, total: 7 }),
+            ProgressUpdate::Applied
+        );
+        assert_eq!(
+            queue.progress(),
+            LoadProgress::Counting { done: 3, total: 7 }
+        );
+
+        let UnclassifiedEffect::Query {
+            generation: gen_second,
+            ..
+        } = queue.set_group_by(UnclassifiedGroupBy::Document, today)
+        else {
+            panic!("group switch emits new Query");
+        };
+        assert_eq!(queue.progress(), LoadProgress::Waiting);
+        assert_eq!(
+            queue.apply_progress(gen_first, QueryProgress { done: 5, total: 7 }),
+            ProgressUpdate::Ignored,
+            "progress for superseded generation must be dropped"
+        );
+        assert_eq!(queue.progress(), LoadProgress::Waiting);
+
+        assert_eq!(
+            queue.apply_progress(gen_second, QueryProgress { done: 2, total: 7 }),
+            ProgressUpdate::Applied
+        );
+        assert_eq!(
+            queue.progress(),
+            LoadProgress::Counting { done: 2, total: 7 }
+        );
     }
 }

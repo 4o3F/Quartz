@@ -287,6 +287,16 @@ impl LaunchWindow {
                     shell.update(cx, |shell, cx| shell.detail_loading(generation, cx));
                 }
             }
+            LinkEvent::DetailProgress {
+                generation,
+                progress,
+            } => {
+                if let Some(shell) = &self.shell {
+                    shell.update(cx, |shell, cx| {
+                        shell.detail_progress(generation, progress, cx)
+                    });
+                }
+            }
             LinkEvent::DetailLoaded { generation, result } => {
                 if let Some(shell) = &self.shell {
                     shell.update(cx, |shell, cx| shell.detail_loaded(generation, result, cx));
@@ -546,6 +556,7 @@ impl UiSession {
             | LinkEvent::DayLoading { .. }
             | LinkEvent::DayLoaded { .. }
             | LinkEvent::DetailLoading { .. }
+            | LinkEvent::DetailProgress { .. }
             | LinkEvent::DetailLoaded { .. }
             | LinkEvent::Control(ControlOp::UiShow | ControlOp::UiActivate) => {}
         }

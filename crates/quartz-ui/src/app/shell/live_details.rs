@@ -9,7 +9,7 @@ use crate::{
     layout::PanelPlacement,
     link::{DetailData, DetailGeneration, DetailRequest, DetailTarget, LoadDataError},
     model::{
-        CategoryColor, DetailsSubject, RankLabel,
+        CategoryColor, DetailsSubject, LoadProgress, QueryProgress, RankLabel,
         live_details::{CategoryDisplay, LiveDetails},
     },
 };
@@ -19,16 +19,12 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px,
 };
 
+pub(super) use crate::model::live_details::{DetailPhase, DetailUpdate};
+
 const TITLE_BAR_HEIGHT: f32 = 4.;
 const WEEK_HEIGHT: f32 = 88.;
 const SKELETON_ROWS: usize = 6;
 const SKELETON_ROW_HEIGHT: f32 = 28.;
-#[derive(Debug)]
-pub(super) enum DetailPhase {
-    Loading,
-    Ready(LiveDetails),
-    Failed(LoadDataError),
-}
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum PanelHeading {
     Intervals,
@@ -43,11 +39,6 @@ impl std::fmt::Debug for PanelHeading {
             Self::HiddenDocument => formatter.write_str("HiddenDocument"),
         }
     }
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DetailUpdate {
-    Applied,
-    Ignored,
 }
 pub(super) struct LivePanel {
     pub request: DetailRequest,
@@ -69,25 +60,28 @@ impl std::fmt::Debug for LivePanel {
     }
 }
 impl LivePanel {
+    pub(super) fn apply_progress(
+        &mut self,
+        active_generation: DetailGeneration,
+        incoming_generation: DetailGeneration,
+        progress: QueryProgress,
+    ) -> DetailUpdate {
+        self.phase
+            .apply_progress(active_generation, incoming_generation, progress)
+    }
+
     pub(super) fn apply_loaded(
         &mut self,
         active_generation: DetailGeneration,
         incoming_generation: DetailGeneration,
         result: Result<DetailData, LoadDataError>,
     ) -> DetailUpdate {
-        if !active_generation.accepts(incoming_generation) {
-            return DetailUpdate::Ignored;
-        }
-        self.phase = match result.and_then(|data| {
-            if data.request != self.request {
-                return Err(LoadDataError::InvalidData);
-            }
-            LiveDetails::from_protocol(data).map_err(|_| LoadDataError::InvalidData)
-        }) {
-            Ok(details) => DetailPhase::Ready(details),
-            Err(error) => DetailPhase::Failed(error),
-        };
-        DetailUpdate::Applied
+        self.phase.apply_loaded(
+            &self.request,
+            active_generation,
+            incoming_generation,
+            result,
+        )
     }
 }
 impl AppShell {
@@ -164,7 +158,7 @@ impl AppShell {
                 heading,
                 subtitle,
                 color,
-                phase: DetailPhase::Loading,
+                phase: DetailPhase::Loading(LoadProgress::Waiting),
             }),
         });
         self.send_detail_intent(Some(intent), cx);
@@ -190,17 +184,34 @@ impl AppShell {
         .detach();
     }
     pub(crate) fn detail_loading(&mut self, generation: DetailGeneration, cx: &mut Context<Self>) {
-        if !self.detail_generation.accepts(generation) {
-            return;
-        }
         if let Some(OpenDetails {
             content: PanelContent::Live(panel),
             ..
         }) = &mut self.details
+            && panel
+                .phase
+                .apply_loading(self.detail_generation, generation)
+                == DetailUpdate::Applied
         {
-            if matches!(panel.phase, DetailPhase::Failed(_)) {
-                panel.phase = DetailPhase::Loading;
-            }
+            cx.notify();
+        }
+    }
+    pub(crate) fn detail_progress(
+        &mut self,
+        generation: DetailGeneration,
+        progress: QueryProgress,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(OpenDetails {
+            content: PanelContent::Live(panel),
+            ..
+        }) = &mut self.details
+        else {
+            return;
+        };
+        if panel.apply_progress(self.detail_generation, generation, progress)
+            == DetailUpdate::Applied
+        {
             cx.notify();
         }
     }
@@ -229,7 +240,7 @@ impl AppShell {
         else {
             return;
         };
-        panel.phase = DetailPhase::Loading;
+        panel.phase = DetailPhase::Loading(LoadProgress::Waiting);
         let request = panel.request.clone();
         self.send_detail_intent(Some(request), cx);
         cx.notify();
@@ -242,52 +253,57 @@ impl AppShell {
         placement: PanelPlacement,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let body =
-            match &panel.phase {
-                DetailPhase::Loading => div().flex().flex_col().gap(ui.metrics.space.m).children(
-                    (0..SKELETON_ROWS).map(|_| {
-                        ui.skeleton_block(SkeletonTone::Subtle)
-                            .h(px(SKELETON_ROW_HEIGHT))
-                            .w_full()
-                            .rounded(ui.metrics.radius.control)
-                    }),
-                ),
-                DetailPhase::Failed(error) => div()
-                    .flex()
-                    .flex_col()
-                    .min_w(px(0.))
-                    .gap(ui.metrics.space.s)
-                    .child(
-                        div()
-                            .ramp(ui, Ramp::BodyStrong)
-                            .child(self.formatter.text(Msg::DetailsFailed)),
-                    )
-                    .child(
-                        div()
-                            .ramp(ui, Ramp::Body)
-                            .text_color(ui.palette.text_secondary)
-                            .child(self.formatter.text(if error.is_busy() {
-                                Msg::DayBusy
-                            } else {
-                                Msg::DetailsFailedMessage
-                            })),
-                    )
-                    .child(
-                        div()
-                            .ramp(ui, Ramp::Caption)
-                            .font(ui.mono_font())
-                            .child(error.code().to_string()),
-                    )
-                    .child(
-                        ui.button(
-                            "retry-details",
-                            Density::Compact,
-                            ButtonContent::Label(self.formatter.text(Msg::RetryDay)),
+        let body = match &panel.phase {
+            DetailPhase::Loading(progress) => {
+                super::progress::query_progress_view(ui, self.formatter, *progress).unwrap_or_else(
+                    || {
+                        div().flex().flex_col().gap(ui.metrics.space.m).children(
+                            (0..SKELETON_ROWS).map(|_| {
+                                ui.skeleton_block(SkeletonTone::Subtle)
+                                    .h(px(SKELETON_ROW_HEIGHT))
+                                    .w_full()
+                                    .rounded(ui.metrics.radius.control)
+                            }),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_details(cx))),
-                    ),
-                DetailPhase::Ready(data) => self.live_detail_body(ui, measure, panel, data),
-            };
+                    },
+                )
+            }
+            DetailPhase::Failed(error) => div()
+                .flex()
+                .flex_col()
+                .min_w(px(0.))
+                .gap(ui.metrics.space.s)
+                .child(
+                    div()
+                        .ramp(ui, Ramp::BodyStrong)
+                        .child(self.formatter.text(Msg::DetailsFailed)),
+                )
+                .child(
+                    div()
+                        .ramp(ui, Ramp::Body)
+                        .text_color(ui.palette.text_secondary)
+                        .child(self.formatter.text(if error.is_busy() {
+                            Msg::DayBusy
+                        } else {
+                            Msg::DetailsFailedMessage
+                        })),
+                )
+                .child(
+                    div()
+                        .ramp(ui, Ramp::Caption)
+                        .font(ui.mono_font())
+                        .child(error.code().to_string()),
+                )
+                .child(
+                    ui.button(
+                        "retry-details",
+                        Density::Compact,
+                        ButtonContent::Label(self.formatter.text(Msg::RetryDay)),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.retry_details(cx))),
+                ),
+            DetailPhase::Ready(data) => self.live_detail_body(ui, measure, panel, data),
+        };
         let header_icon = match &panel.request.target {
             DetailTarget::Document { .. } => IconName::FileText,
             DetailTarget::App(_) => IconName::SquareTerminal,
@@ -752,7 +768,7 @@ mod tests {
             heading: PanelHeading::Text("curr.rs".into()),
             subtitle: None,
             color: None,
-            phase: DetailPhase::Loading,
+            phase: DetailPhase::Loading(LoadProgress::Waiting),
         };
 
         let late_previous = DetailData {
@@ -769,7 +785,7 @@ mod tests {
             panel.apply_loaded(current_gen, previous_gen, Ok(late_previous)),
             DetailUpdate::Ignored
         );
-        assert!(matches!(panel.phase, DetailPhase::Loading));
+        assert!(matches!(panel.phase, DetailPhase::Loading(_)));
 
         let current_response = DetailData {
             request: curr_request,

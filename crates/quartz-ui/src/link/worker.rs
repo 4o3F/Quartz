@@ -1,8 +1,8 @@
 //! One-attempt connection lifecycle and request handling on the pipe thread.
 
 use super::{
-    BRIDGE_CAPACITY, Command, ConnectionState, InitialConnection, LinkEvent, Reply,
-    RequestCoreError, SendUiEventError, StartCoreError, TopicChange,
+    BRIDGE_CAPACITY, Command, ConnectionState, InitialConnection, LinkEvent, ProgressObserver,
+    QueryProgress, Reply, RequestCoreError, SendUiEventError, StartCoreError, TopicChange,
 };
 use crate::failure::Failure;
 use quartz_pipe::{AsyncCoreClient, CallCoreError, IncomingFrame, PipeClient, RESPONSE_TIMEOUT};
@@ -26,6 +26,7 @@ enum Completion {
     Request {
         op: Op,
         reply: Reply,
+        progress: Option<ProgressObserver>,
     },
     Topics {
         change: TopicChange,
@@ -438,9 +439,23 @@ impl Worker {
             }
             Command::Retry { reply } => Self::reply_retry(reply, Ok(())),
             Command::StartCore { reply } => Self::reply_start(reply, Ok(())),
-            Command::Request { op, body, reply } => {
-                self.submit(client, op, body, Completion::Request { op, reply })
-                    .await?
+            Command::Request {
+                op,
+                body,
+                reply,
+                progress,
+            } => {
+                self.submit(
+                    client,
+                    op,
+                    body,
+                    Completion::Request {
+                        op,
+                        reply,
+                        progress,
+                    },
+                )
+                .await?
             }
             Command::Topics {
                 change,
@@ -594,6 +609,13 @@ impl Worker {
             IncomingFrame::Progress(progress) => {
                 if let Some(pending) = self.pending.get_mut(&progress.id) {
                     pending.deadline = Instant::now() + RESPONSE_TIMEOUT;
+                    if let Completion::Request {
+                        progress: Some(observer),
+                        ..
+                    } = &pending.completion
+                    {
+                        let _ = observer.send(Some(QueryProgress::from(progress)));
+                    }
                 }
             }
             IncomingFrame::Event(event) => {
@@ -657,7 +679,7 @@ impl Worker {
         result: Result<JsonValue, RequestCoreError>,
     ) -> Result<(), CallCoreError> {
         match completion {
-            Completion::Request { op, reply } => {
+            Completion::Request { op, reply, .. } => {
                 if result.is_ok()
                     && matches!(
                         op,

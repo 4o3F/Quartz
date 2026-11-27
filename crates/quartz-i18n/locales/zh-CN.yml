@@ -1046,4 +1046,6 @@ timeline.classify.title:
   zh-CN: "归类为…"
 timeline.classify.other:
   zh-CN: "其他…"
+query.progress.days:
+  zh-CN: "正在计算 %{done}/%{total} 天"
 

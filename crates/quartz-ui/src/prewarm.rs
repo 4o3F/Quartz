@@ -36,6 +36,7 @@ impl PrewarmGate {
             | LinkEvent::DayLoading { .. }
             | LinkEvent::DayLoaded { .. }
             | LinkEvent::DetailLoading { .. }
+            | LinkEvent::DetailProgress { .. }
             | LinkEvent::DetailLoaded { .. } => PrewarmAction::Wait,
         }
     }

@@ -27,8 +27,8 @@ use crate::{
     link::{LoadDataError, LoadDataErrorCode, RequestCoreError},
     model::{
         ExtractImportKeyError, ImportAction, ImportOutcome, ImportTarget, LeaveTarget,
-        MutationActivity, PreviewState, RuleImportEffect, RuleImportSession, StaleNotice,
-        VALIDATE_DEBOUNCE_DELAY,
+        MutationActivity, PreviewState, ProgressUpdate, RuleImportEffect, RuleImportSession,
+        StaleNotice, VALIDATE_DEBOUNCE_DELAY,
     },
 };
 
@@ -209,8 +209,35 @@ impl AppShell {
                     );
                     return;
                 };
+                let (progress_tx, mut progress_rx) = tokio::sync::watch::channel(None);
                 cx.spawn(async move |this, cx| {
-                    let result = link.preview_rules(request).await;
+                    while progress_rx.changed().await.is_ok() {
+                        let Some(progress) = *progress_rx.borrow_and_update() else {
+                            continue;
+                        };
+                        let keep_listening = this
+                            .update(cx, |this, cx| {
+                                if this.rule_import.apply_preview_progress(
+                                    buffer_generation,
+                                    preview_generation,
+                                    progress,
+                                ) == ProgressUpdate::Applied
+                                {
+                                    cx.notify();
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .unwrap_or(false);
+                        if !keep_listening {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+                cx.spawn(async move |this, cx| {
+                    let result = link.preview_rules(request, progress_tx).await;
                     let _ = this.update(cx, |this, cx| {
                         this.rule_import.apply_preview_finished(
                             buffer_generation,
@@ -620,7 +647,7 @@ impl AppShell {
                 }))
         };
 
-        let preview_hint = (!can_preview && !matches!(session.preview, PreviewState::Loading))
+        let preview_hint = (!can_preview && !matches!(session.preview, PreviewState::Loading(_)))
             .then(|| {
                 div()
                     .ramp(ui, Ramp::Caption)

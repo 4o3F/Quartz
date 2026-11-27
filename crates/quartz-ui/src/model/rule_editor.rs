@@ -10,7 +10,10 @@ use snafu::Snafu;
 
 use crate::{
     link::{LoadDataError, LoadDataErrorCode},
-    model::rules::{MutationActivity, RuleTree, RulesTab},
+    model::{
+        LoadProgress, ProgressUpdate, QueryProgress,
+        rules::{MutationActivity, RuleTree, RulesTab},
+    },
 };
 
 /// Delay before firing `rules_text.validate` after the user stops typing.
@@ -460,7 +463,7 @@ pub(crate) enum ValidationState {
 #[derive(Debug)]
 pub(crate) enum PreviewState {
     Idle,
-    Loading,
+    Loading(LoadProgress),
     Ready(wire::RulesPreviewResponse),
     Failed(LoadDataError),
 }
@@ -1192,7 +1195,7 @@ impl RuleEditor {
             && matches!(session.validation, ValidationState::Valid)
             && session.stale_notice.is_none()
             && session.saving == MutationActivity::Idle
-            && !matches!(session.preview, PreviewState::Loading)
+            && !matches!(session.preview, PreviewState::Loading(_))
             && session.has_valid_key()
     }
 
@@ -1209,7 +1212,7 @@ impl RuleEditor {
             return RuleEditorEffect::None;
         };
         self.preview_generation = self.preview_generation.next();
-        session.preview = PreviewState::Loading;
+        session.preview = PreviewState::Loading(LoadProgress::Waiting);
         session.preview_range = Some((start_date, end_date));
         let edit = wire::RuleSetsEditRequest {
             key: session.key().to_owned(),
@@ -1225,6 +1228,29 @@ impl RuleEditor {
             buffer_generation: self.buffer_generation,
             preview_generation: self.preview_generation,
         }
+    }
+
+    /// Records per-day progress for an in-flight `rules.preview` request, dropping updates from
+    /// older buffers or superseded preview generations.
+    pub(crate) fn apply_preview_progress(
+        &mut self,
+        buffer_generation: EditorGeneration,
+        preview_generation: EditorGeneration,
+        progress: QueryProgress,
+    ) -> ProgressUpdate {
+        if !self.buffer_generation.accepts(buffer_generation)
+            || !self.preview_generation.accepts(preview_generation)
+        {
+            return ProgressUpdate::Ignored;
+        }
+        let Some(session) = &mut self.session else {
+            return ProgressUpdate::Ignored;
+        };
+        let PreviewState::Loading(load_progress) = &mut session.preview else {
+            return ProgressUpdate::Ignored;
+        };
+        load_progress.record(progress);
+        ProgressUpdate::Applied
     }
 
     /// Applies the result of `rules.preview`, dropping responses from older buffers or requests.
@@ -2142,6 +2168,65 @@ mod tests {
         assert!(matches!(
             editor.retry_load(),
             RuleEditorEffect::ExportText { .. }
+        ));
+    }
+
+    #[test]
+    fn superseded_buffer_or_preview_generation_drops_preview_progress() {
+        let mut editor = RuleEditor::new();
+        let tree = sample_tree();
+        let initial = editor.open_override_child(
+            "builtin.classification".to_owned(),
+            RuleKind::Classification,
+            "vscode",
+            "builtin.classification/vscode".to_owned(),
+            Some(&tree),
+        );
+        let RuleEditorEffect::Validate { generation, .. } = initial else {
+            panic!("override child validates immediately");
+        };
+        editor.apply_validation_finished(
+            generation,
+            Ok(RulesTextValidateResponse {
+                valid: true,
+                diagnostics: Vec::new(),
+                truncated: false,
+            }),
+        );
+        let today: LocalDate = "2026-11-26".parse().expect("date");
+        let RuleEditorEffect::Preview {
+            buffer_generation,
+            preview_generation,
+            ..
+        } = editor.request_preview(today)
+        else {
+            panic!("request_preview emits Preview");
+        };
+        assert_eq!(
+            editor.apply_preview_progress(
+                buffer_generation,
+                preview_generation,
+                QueryProgress { done: 3, total: 7 },
+            ),
+            ProgressUpdate::Applied
+        );
+        assert!(matches!(
+            editor.session().expect("open").preview,
+            PreviewState::Loading(LoadProgress::Counting { done: 3, total: 7 })
+        ));
+
+        let _ = editor.set_text("edited buffer".to_owned());
+        assert_eq!(
+            editor.apply_preview_progress(
+                buffer_generation,
+                preview_generation,
+                QueryProgress { done: 5, total: 7 },
+            ),
+            ProgressUpdate::Ignored
+        );
+        assert!(matches!(
+            editor.session().expect("open").preview,
+            PreviewState::Idle
         ));
     }
 }

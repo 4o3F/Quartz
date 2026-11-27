@@ -20,7 +20,7 @@ use crate::{
     format::{Arg, Msg},
     link::{LoadDataError, RequestCoreError},
     model::{
-        LoadState, RulesTab, UNCLASSIFIED_DEBOUNCE_DELAY, UnclassifiedEffect,
+        LoadState, ProgressUpdate, RulesTab, UNCLASSIFIED_DEBOUNCE_DELAY, UnclassifiedEffect,
         UnclassifiedEntityKind, UnclassifiedList, UnclassifiedRow, ValidateUnclassifiedSearchError,
         unclassified_last_seven_days,
     },
@@ -169,8 +169,32 @@ impl AppShell {
                     );
                     return;
                 };
+                let (progress_tx, mut progress_rx) = tokio::sync::watch::channel(None);
                 cx.spawn(async move |this, cx| {
-                    let result = link.query_unclassified(request).await;
+                    while progress_rx.changed().await.is_ok() {
+                        let Some(progress) = *progress_rx.borrow_and_update() else {
+                            continue;
+                        };
+                        let keep_listening = this
+                            .update(cx, |this, cx| {
+                                if this.unclassified.apply_progress(generation, progress)
+                                    == ProgressUpdate::Applied
+                                {
+                                    cx.notify();
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .unwrap_or(false);
+                        if !keep_listening {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+                cx.spawn(async move |this, cx| {
+                    let result = link.query_unclassified(request, progress_tx).await;
                     let _ = this.update(cx, |this, cx| {
                         this.unclassified.apply_loaded(generation, range, result);
                         cx.notify();
@@ -273,39 +297,45 @@ impl AppShell {
             )
             .children(search_error);
 
-        let body = match self.unclassified.state() {
-            LoadState::Loading => div()
-                .flex()
-                .flex_col()
-                .gap(space.xs)
-                .children((0..SKELETON_UNCLASSIFIED_ROWS).map(|_| {
-                    ui.skeleton_block(SkeletonTone::Subtle)
-                        .h(px(SKELETON_UNCLASSIFIED_HEIGHT))
-                        .w_full()
-                        .rounded(ui.metrics.radius.control)
-                }))
-                .into_any_element(),
-            LoadState::Failed(error) => self
-                .render_rules_error_block(
+        let body =
+            match self.unclassified.state() {
+                LoadState::Loading => super::progress::query_progress_view(
                     ui,
-                    Msg::RulesUnclassifiedLoadFailedTitle,
-                    if error.is_busy() {
-                        Msg::DayBusy
-                    } else {
-                        Msg::RulesUnclassifiedLoadFailedMessage
-                    },
-                    error,
-                    "retry-unclassified",
-                    cx.listener(|this, _, _, cx| this.reload_unclassified(cx)),
+                    self.formatter,
+                    self.unclassified.progress(),
                 )
+                .unwrap_or_else(|| {
+                    div().flex().flex_col().gap(space.xs).children(
+                        (0..SKELETON_UNCLASSIFIED_ROWS).map(|_| {
+                            ui.skeleton_block(SkeletonTone::Subtle)
+                                .h(px(SKELETON_UNCLASSIFIED_HEIGHT))
+                                .w_full()
+                                .rounded(ui.metrics.radius.control)
+                        }),
+                    )
+                })
                 .into_any_element(),
-            LoadState::Stale => self
-                .render_unclassified_stale_block(ui, cx)
-                .into_any_element(),
-            LoadState::Ready(list) => self
-                .render_unclassified_list(ui, list, cx)
-                .into_any_element(),
-        };
+                LoadState::Failed(error) => self
+                    .render_rules_error_block(
+                        ui,
+                        Msg::RulesUnclassifiedLoadFailedTitle,
+                        if error.is_busy() {
+                            Msg::DayBusy
+                        } else {
+                            Msg::RulesUnclassifiedLoadFailedMessage
+                        },
+                        error,
+                        "retry-unclassified",
+                        cx.listener(|this, _, _, cx| this.reload_unclassified(cx)),
+                    )
+                    .into_any_element(),
+                LoadState::Stale => self
+                    .render_unclassified_stale_block(ui, cx)
+                    .into_any_element(),
+                LoadState::Ready(list) => self
+                    .render_unclassified_list(ui, list, cx)
+                    .into_any_element(),
+            };
 
         ui.card()
             .id("rules-unclassified-pane")

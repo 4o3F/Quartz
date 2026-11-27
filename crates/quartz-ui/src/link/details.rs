@@ -1,7 +1,7 @@
 //! Read-only sidebar queries on the existing pipe runtime.
 use super::{DayGeneration, UtcRange};
 #[cfg(windows)]
-use super::{Link, LinkEvent, LoadDataError, RequestCoreError};
+use super::{Link, LinkEvent, LoadDataError, QueryProgress, RequestCoreError};
 use quartz_protocol::{
     ApplicationId, DocumentRef, EntityClassificationRule, EntityDailyDuration, EntityTitleDuration,
     LocalDate, ReferenceRange, TimelineSegment, WindowInstanceRef,
@@ -73,13 +73,17 @@ impl Link {
         &self,
         app: ApplicationId,
         date: LocalDate,
+        progress: watch::Sender<Option<QueryProgress>>,
     ) -> Result<EntityData, LoadDataError> {
         let response = self
-            .request(QueryEntityDetailRequest {
-                reference_range: None,
-                entity: DetailEntity::App { id: app },
-                local_date: date,
-            })
+            .request_with_progress(
+                QueryEntityDetailRequest {
+                    reference_range: None,
+                    entity: DetailEntity::App { id: app },
+                    local_date: date,
+                },
+                progress,
+            )
             .await?;
         Ok(EntityData {
             entity: EntityKey::App(app),
@@ -93,15 +97,19 @@ impl Link {
         document_ref: DocumentRef,
         reference_range: ReferenceRange,
         date: LocalDate,
+        progress: watch::Sender<Option<QueryProgress>>,
     ) -> Result<EntityData, LoadDataError> {
         let response = self
-            .request(QueryEntityDetailRequest {
-                reference_range: Some(reference_range),
-                entity: DetailEntity::Document {
-                    document_ref: document_ref.clone(),
+            .request_with_progress(
+                QueryEntityDetailRequest {
+                    reference_range: Some(reference_range),
+                    entity: DetailEntity::Document {
+                        document_ref: document_ref.clone(),
+                    },
+                    local_date: date,
                 },
-                local_date: date,
-            })
+                progress,
+            )
             .await?;
         Ok(EntityData {
             entity: EntityKey::Document(document_ref),
@@ -110,14 +118,23 @@ impl Link {
             rules: response.rules,
         })
     }
-    async fn query_details(&self, request: DetailRequest) -> Result<DetailData, LoadDataError> {
+    async fn query_details(
+        &self,
+        request: DetailRequest,
+        progress: watch::Sender<Option<QueryProgress>>,
+    ) -> Result<DetailData, LoadDataError> {
         if let DetailTarget::Document {
             document_ref,
             reference_range,
         } = &request.target
         {
             let entity = self
-                .document_entity_details(document_ref.clone(), *reference_range, request.date)
+                .document_entity_details(
+                    document_ref.clone(),
+                    *reference_range,
+                    request.date,
+                    progress,
+                )
                 .await?;
             return Ok(DetailData {
                 request,
@@ -155,7 +172,10 @@ impl Link {
         // deciding rule labels; an entity summary is shown only for a single application.
         let mut entities = Vec::new();
         for app in apps {
-            entities.push(self.app_entity_details(app, request.date).await?);
+            entities.push(
+                self.app_entity_details(app, request.date, progress.clone())
+                    .await?,
+            );
         }
         Ok(DetailData {
             request,
@@ -215,6 +235,7 @@ impl DetailLoader {
     ) {
         type LoadFuture = Pin<Box<dyn Future<Output = Result<DetailData, LoadDataError>> + Send>>;
         let mut active: Option<LoadFuture> = None;
+        let mut active_progress: Option<watch::Receiver<Option<QueryProgress>>> = None;
         let mut latest: Option<DetailRequest> = None;
         let mut queued = None;
         let mut generation = DetailGeneration::default();
@@ -228,6 +249,7 @@ impl DetailLoader {
                     let intent = intents.borrow_and_update().clone();
                     if intent.generation < generation { continue; }
                     active = None;
+                    active_progress = None;
                     generation = intent.generation;
                     latest = intent.request;
                     queued = latest.clone();
@@ -241,13 +263,39 @@ impl DetailLoader {
                     match active.as_mut() { Some(future) => future.await, None => std::future::pending().await }
                 } => {
                     active = None;
+                    active_progress = None;
                     if events.send(LinkEvent::DetailLoaded { generation, result }).await.is_err() { break; }
+                }
+                changed = async {
+                    match active_progress.as_mut() {
+                        Some(receiver) => receiver.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match changed {
+                        Ok(()) => {
+                            let progress = active_progress
+                                .as_mut()
+                                .and_then(|receiver| *receiver.borrow_and_update());
+                            if let Some(progress) = progress {
+                                match events.try_send(LinkEvent::DetailProgress { generation, progress }) {
+                                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            active_progress = None;
+                        }
+                    }
                 }
                 () = async {}, if active.is_none() && queued.is_some() => {
                     let request = queued.take().expect("a queued selection enables this branch");
                     if events.send(LinkEvent::DetailLoading { generation }).await.is_err() { break; }
+                    let (progress_tx, progress_rx) = watch::channel(None);
+                    active_progress = Some(progress_rx);
                     let link = link.clone();
-                    active = Some(Box::pin(async move { link.query_details(request).await }));
+                    active = Some(Box::pin(async move { link.query_details(request, progress_tx).await }));
                 }
             }
         }

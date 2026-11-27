@@ -73,6 +73,8 @@ pub enum PreviewState {
     RuleImport,
     /// Rules page Unclassified tab grouped by application with 5 rows including a hidden entity.
     Unclassified,
+    /// Rules page Unclassified tab loading with per-day query progress (120/365).
+    Progress,
     /// Today page with the side panel Annotations tab listing 3 annotations, one missing category.
     TodayAnnotations,
     /// Today page with the annotation create editor open and an end-time validation error.
@@ -207,6 +209,7 @@ impl FromStr for PreviewState {
             "rule-editor-preview" => Ok(Self::RuleEditorPreview),
             "rule-import" => Ok(Self::RuleImport),
             "unclassified" => Ok(Self::Unclassified),
+            "progress" => Ok(Self::Progress),
             "today-annotations" => Ok(Self::TodayAnnotations),
             "annotation-editor" => Ok(Self::AnnotationEditor),
             "timeline-select" => Ok(Self::TimelineSelect),
@@ -412,7 +415,8 @@ impl PreviewState {
             | Self::RuleEditor
             | Self::RuleEditorPreview
             | Self::RuleImport
-            | Self::Unclassified => Page::Rules,
+            | Self::Unclassified
+            | Self::Progress => Page::Rules,
             Self::Today
             | Self::TodayDetails
             | Self::TodayAppDetails
@@ -442,6 +446,7 @@ impl PreviewState {
             | Self::RuleEditorPreview
             | Self::RuleImport
             | Self::Unclassified
+            | Self::Progress
             | Self::TodayAnnotations
             | Self::AnnotationEditor
             | Self::TimelineSelect
@@ -462,6 +467,7 @@ impl PreviewState {
             | Self::RuleEditorPreview
             | Self::RuleImport
             | Self::Unclassified
+            | Self::Progress
             | Self::TodayAnnotations
             | Self::AnnotationEditor
             | Self::TimelineSelect
@@ -896,6 +902,7 @@ mod tests {
             ),
             ("rule-import", PreviewState::RuleImport, Page::Rules),
             ("unclassified", PreviewState::Unclassified, Page::Rules),
+            ("progress", PreviewState::Progress, Page::Rules),
             (
                 "today-annotations",
                 PreviewState::TodayAnnotations,

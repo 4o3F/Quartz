@@ -30,9 +30,9 @@ use crate::{
     link::{LoadDataError, LoadDataErrorCode, RequestCoreError},
     model::{
         ClassificationRulePrefill, DirtyState, EditorLoadState, LeaveConfirmation, LeaveDecision,
-        LeaveTarget, MutationActivity, PreviewState, RuleEditorEffect, RuleEditorMode,
-        RuleEditorSession, RulesTab, SaveOutcome, StaleNotice, VALIDATE_DEBOUNCE_DELAY,
-        ValidateRuleSetKeyError, ValidationState, valid_parents_for_kind,
+        LeaveTarget, MutationActivity, PreviewState, ProgressUpdate, RuleEditorEffect,
+        RuleEditorMode, RuleEditorSession, RulesTab, SaveOutcome, StaleNotice,
+        VALIDATE_DEBOUNCE_DELAY, ValidateRuleSetKeyError, ValidationState, valid_parents_for_kind,
     },
 };
 
@@ -486,8 +486,35 @@ impl AppShell {
                     );
                     return;
                 };
+                let (progress_tx, mut progress_rx) = tokio::sync::watch::channel(None);
                 cx.spawn(async move |this, cx| {
-                    let result = link.preview_rules(request).await;
+                    while progress_rx.changed().await.is_ok() {
+                        let Some(progress) = *progress_rx.borrow_and_update() else {
+                            continue;
+                        };
+                        let keep_listening = this
+                            .update(cx, |this, cx| {
+                                if this.rule_editor.apply_preview_progress(
+                                    buffer_generation,
+                                    preview_generation,
+                                    progress,
+                                ) == ProgressUpdate::Applied
+                                {
+                                    cx.notify();
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .unwrap_or(false);
+                        if !keep_listening {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+                cx.spawn(async move |this, cx| {
+                    let result = link.preview_rules(request, progress_tx).await;
                     let _ = this.update(cx, |this, cx| {
                         this.rule_editor.apply_preview_finished(
                             buffer_generation,
@@ -1434,7 +1461,7 @@ impl AppShell {
                 }))
         };
 
-        let preview_hint = (!can_preview && !matches!(session.preview, PreviewState::Loading))
+        let preview_hint = (!can_preview && !matches!(session.preview, PreviewState::Loading(_)))
             .then(|| {
                 div()
                     .ramp(ui, Ramp::Caption)
@@ -1474,16 +1501,20 @@ impl AppShell {
 
         match preview {
             PreviewState::Idle => None,
-            PreviewState::Loading => Some(
-                div()
-                    .p(space.m)
-                    .rounded(ui.metrics.radius.control)
-                    .bg(palette.fill_card_secondary)
-                    .border_1()
-                    .border_color(palette.stroke_card)
-                    .ramp(ui, Ramp::Body)
-                    .text_color(palette.text_secondary)
-                    .child(self.formatter.text(Msg::RulesPreviewLoading)),
+            PreviewState::Loading(progress) => Some(
+                super::progress::query_progress_view(ui, self.formatter, *progress).unwrap_or_else(
+                    || {
+                        div()
+                            .p(space.m)
+                            .rounded(ui.metrics.radius.control)
+                            .bg(palette.fill_card_secondary)
+                            .border_1()
+                            .border_color(palette.stroke_card)
+                            .ramp(ui, Ramp::Body)
+                            .text_color(palette.text_secondary)
+                            .child(self.formatter.text(Msg::RulesPreviewLoading))
+                    },
+                ),
             ),
             PreviewState::Failed(error) => {
                 let colors = ui.info_bar_colors(InfoBarStyle::Critical);

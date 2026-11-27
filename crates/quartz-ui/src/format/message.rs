@@ -488,6 +488,7 @@ messages! {
     TodayAnnotationsErrorBusy => "today.annotations.error.busy",
     TodayAnnotationsErrorGeneric => "today.annotations.error.generic",
     TodayAnnotationsErrorCategoryUnavailable => "today.annotations.error.category_unavailable",
+    QueryProgressDays => "query.progress.days" [Done, Total],
 }
 
 impl From<quartz_protocol::AnnotationLabelPreset> for Msg {
@@ -508,6 +509,7 @@ pub(crate) enum Arg {
     Condition,
     Count,
     Day,
+    Done,
     Duration,
     Field,
     Hours,
@@ -520,6 +522,7 @@ pub(crate) enum Arg {
     Range,
     Rule,
     State,
+    Total,
     Value,
     Weekday,
 }
@@ -549,6 +552,7 @@ impl Arg {
             Self::Condition => "condition",
             Self::Count => "count",
             Self::Day => "day",
+            Self::Done => "done",
             Self::Duration => "duration",
             Self::Field => "field",
             Self::Hours => "hours",
@@ -561,6 +565,7 @@ impl Arg {
             Self::Range => "range",
             Self::Rule => "rule",
             Self::State => "state",
+            Self::Total => "total",
             Self::Value => "value",
             Self::Weekday => "weekday",
         }

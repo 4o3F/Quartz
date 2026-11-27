@@ -5,7 +5,7 @@
 //! - Today data states: `loading`, `empty-today`, `empty-past`, `stopped-paused`,
 //!   `stopped-persistence-failed`, `query-failed`, `date-picker`, `today-nav`.
 //! - M4 editing flows: `rules`, `rules-categories`, `rule-editor`, `rule-editor-preview`,
-//!   `rule-import`, `unclassified`, `today-annotations`, `annotation-editor`,
+//!   `rule-import`, `unclassified`, `progress`, `today-annotations`, `annotation-editor`,
 //!   `timeline-select`, `classify-menu`.
 //! - Error states (shared error component with sample diagnostics): `connecting`,
 //!   `core-not-running`, `core-not-running-starting`, `core-start-failed`, `connect-failed`,

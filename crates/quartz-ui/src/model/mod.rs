@@ -8,6 +8,7 @@ mod day;
 mod details;
 pub(crate) mod live_details;
 mod palette;
+mod progress;
 mod ranking;
 mod rule;
 pub(crate) mod rule_editor;
@@ -41,6 +42,7 @@ pub(crate) use details::{BarDay, Details, IntervalCard};
 #[cfg(windows)]
 pub(crate) use palette::PaletteSlotMap;
 pub(crate) use palette::{CategoryColor, PaletteSlot};
+pub(crate) use progress::{LoadProgress, ProgressUpdate, QueryProgress};
 #[cfg(windows)]
 pub(crate) use ranking::RankKey;
 pub(crate) use ranking::{DocumentId, DocumentMeta, RankLabel, RankRow, RankingKind};

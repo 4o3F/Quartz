@@ -11,8 +11,8 @@ use crate::model::RankingKind;
 use crate::model::{
     BuiltinCategory, CategoryCatalog, CategoryName, ClassificationSource, ConditionItem,
     ConditionPolarity, Day, DiagnosticCodeKind, EntryConditionSummary, MINUTES_PER_HOUR,
-    PrivacyEffectSummary, RankLabel, ResolvedCategory, RuleCondition, RuleEntryLabel,
-    SECONDS_PER_MINUTE, Share, StateKind, Tendency, UnclassifiedEntityLabel,
+    PrivacyEffectSummary, QueryProgress, RankLabel, ResolvedCategory, RuleCondition,
+    RuleEntryLabel, SECONDS_PER_MINUTE, Share, StateKind, Tendency, UnclassifiedEntityLabel,
 };
 
 /// Looks up translations and formats values for one interface language.
@@ -658,6 +658,17 @@ impl Formatter {
             ],
         )
     }
+
+    /// Formats per-day query progress, clamping `done` so display never exceeds `total`.
+    #[must_use]
+    pub(crate) fn query_progress(self, progress: QueryProgress) -> String {
+        let done = progress.clamped_done().to_string();
+        let total = progress.total.to_string();
+        self.text_with(
+            Msg::QueryProgressDays,
+            &[Arg::Done.with(&done), Arg::Total.with(&total)],
+        )
+    }
 }
 
 /// Replaces every `%{name}` whose name appears in `values`; other text, including placeholders
@@ -1059,6 +1070,38 @@ mod tests {
         assert_eq!(
             EN.unclassified_entity_label(&UnclassifiedEntityLabel::HiddenDocument),
             EN.text(Msg::RulesUnclassifiedHiddenDocument)
+        );
+    }
+
+    #[test]
+    fn query_progress_formats_both_languages_and_clamps_done_to_total() {
+        assert_eq!(
+            ZH.query_progress(QueryProgress {
+                done: 120,
+                total: 365,
+            }),
+            "正在计算 120/365 天"
+        );
+        assert_eq!(
+            EN.query_progress(QueryProgress {
+                done: 120,
+                total: 365,
+            }),
+            "Calculating day 120 of 365"
+        );
+        assert_eq!(
+            ZH.query_progress(QueryProgress {
+                done: 400,
+                total: 365,
+            }),
+            "正在计算 365/365 天"
+        );
+        assert_eq!(
+            EN.query_progress(QueryProgress {
+                done: 400,
+                total: 365,
+            }),
+            "Calculating day 365 of 365"
         );
     }
 }

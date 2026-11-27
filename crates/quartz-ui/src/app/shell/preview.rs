@@ -17,9 +17,9 @@ use crate::{
     format::Msg,
     link::{DayData, DetailData, EntityData, EntityKey, LoadDataError, UtcRange},
     model::{
-        AnnotationEditorEffect, Day, DetailsSubject, RuleEditorEffect, RuleImportEffect,
-        RulesEffect, RulesTab, SegmentId, TimeOfDay, TimeSpan, UnclassifiedEffect,
-        live_details::LiveDetails,
+        AnnotationEditorEffect, Day, DetailsSubject, QueryProgress, RuleEditorEffect,
+        RuleImportEffect, RulesEffect, RulesTab, SegmentId, TimeOfDay, TimeSpan,
+        UnclassifiedEffect, live_details::LiveDetails,
     },
     timeline_scale::RangeSelectGesture,
 };
@@ -38,6 +38,8 @@ const CLASSIFY_SEGMENT_ID: SegmentId = SegmentId::new(5);
 const PREVIEW_RULES_VERSION: &str = "preview-rules-v1";
 const PREVIEW_USER_SET_KEY: &str = "user.study-sites";
 const PREVIEW_USER_SET_VERSION: u32 = 3;
+const PREVIEW_PROGRESS_DONE: u32 = 120;
+const PREVIEW_PROGRESS_TOTAL: u32 = 365;
 
 const CAT_DEV_UUID: &str = "11111111-1111-4111-8111-111111111111";
 const CAT_LEARN_UUID: &str = "22222222-2222-4222-8222-222222222222";
@@ -128,6 +130,9 @@ impl AppShell {
             }
             PreviewState::Unclassified => {
                 self.configure_unclassified_preview(selected);
+            }
+            PreviewState::Progress => {
+                self.configure_progress_preview(selected);
             }
             PreviewState::TodayAnnotations => {
                 self.configure_today_annotations_preview(false);
@@ -401,6 +406,22 @@ impl AppShell {
         };
         self.unclassified
             .apply_loaded(generation, range, Ok(fixture_unclassified_response()));
+        self.unclassified_search_sync = InputSyncState::NeedsSync;
+    }
+
+    fn configure_progress_preview(&mut self, today: wire::LocalDate) {
+        self.load_fixture_rules_and_categories();
+        self.rules.set_active_tab(RulesTab::Unclassified);
+        let UnclassifiedEffect::Query { generation, .. } = self.unclassified.open(today) else {
+            unreachable!("opening UnclassifiedQueue emits Query");
+        };
+        let _ = self.unclassified.apply_progress(
+            generation,
+            QueryProgress {
+                done: PREVIEW_PROGRESS_DONE,
+                total: PREVIEW_PROGRESS_TOTAL,
+            },
+        );
         self.unclassified_search_sync = InputSyncState::NeedsSync;
     }
 
@@ -1513,9 +1534,10 @@ mod tests {
     use super::*;
     use crate::model::{
         AnnotationCategoryDisplay, AnnotationEditor, CategoryCatalog, ImportAction, ImportTarget,
-        LoadState, NodeEnablement, PreviewState as RulePreviewState, RuleEditor, RuleImport,
-        RulesPage, UnclassifiedEntityLabel, UnclassifiedQueue, ValidateAnnotationDraftError,
-        ValidateAnnotationTimeError, ValidationState, resolve_annotation_category,
+        LoadProgress, LoadState, NodeEnablement, PreviewState as RulePreviewState, ProgressUpdate,
+        RuleEditor, RuleImport, RulesPage, UnclassifiedEntityLabel, UnclassifiedQueue,
+        ValidateAnnotationDraftError, ValidateAnnotationTimeError, ValidationState,
+        resolve_annotation_category,
     };
 
     #[test]
@@ -1708,6 +1730,31 @@ mod tests {
             list.items
                 .iter()
                 .any(|row| row.label == UnclassifiedEntityLabel::HiddenApp)
+        );
+
+        // Progress preview: unclassified tab loading with 120/365 progress.
+        let mut loading_queue = UnclassifiedQueue::new();
+        let UnclassifiedEffect::Query { generation, .. } = loading_queue.open(sample_day_date())
+        else {
+            panic!("open unclassified for progress preview");
+        };
+        assert_eq!(
+            loading_queue.apply_progress(
+                generation,
+                QueryProgress {
+                    done: PREVIEW_PROGRESS_DONE,
+                    total: PREVIEW_PROGRESS_TOTAL,
+                },
+            ),
+            ProgressUpdate::Applied
+        );
+        assert!(matches!(loading_queue.state(), LoadState::Loading));
+        assert_eq!(
+            loading_queue.progress(),
+            LoadProgress::Counting {
+                done: PREVIEW_PROGRESS_DONE,
+                total: PREVIEW_PROGRESS_TOTAL,
+            }
         );
     }
 

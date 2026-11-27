@@ -1046,4 +1046,6 @@ timeline.classify.title:
   en: "Classify as…"
 timeline.classify.other:
   en: "Other…"
+query.progress.days:
+  en: "Calculating day %{done} of %{total}"
 

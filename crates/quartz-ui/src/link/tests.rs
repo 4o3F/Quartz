@@ -49,8 +49,8 @@ mod pipe {
         test_util::{TestPeer, TestPipeServer},
     };
     use quartz_protocol::{
-        Envelope, Event, EventSeq, Hello, HelloRole, ProtocolError, Request, Response,
-        ResponseOutcome, Subscribe, UiState,
+        Envelope, Event, EventSeq, Hello, HelloRole, Progress, ProtocolError, Request, RequestId,
+        Response, ResponseOutcome, Subscribe, UiState,
     };
     use std::time::Duration;
     use tokio::task::JoinHandle;
@@ -193,6 +193,12 @@ mod pipe {
                 }))
                 .await
                 .expect("event");
+        }
+        async fn progress(&mut self, id: RequestId, done: u32, total: u32) {
+            self.peer
+                .send(Envelope::Progress(Progress { id, done, total }))
+                .await
+                .expect("progress");
         }
         fn snapshot() -> JsonValue {
             serde_json::json!({"logical_date":"2026-11-21","foreground":{"app":{"kind":"exe","value":"test.exe"},"title":null,"interval_start_utc_ms":123},"timed_policies":{"pause_until_utc_ms":null,"privacy_mode":null,"keep_timing_until_utc_ms":null},"recording":true,"stop_reason":null,"browser_streams":[],"ui_language":"en","locale":null})
@@ -521,6 +527,75 @@ mod pipe {
             .await
             .expect("unsubscribe task")
             .expect("unsubscribe remains usable");
+        ui.stop().await;
+    }
+
+    #[tokio::test]
+    async fn worker_routes_progress_only_to_matching_pending_request_and_ignores_unknown_or_completed_ids()
+     {
+        let listener = TestPipeServer::bind().expect("listener");
+        let mut ui = Harness::start(listener.name().clone());
+        ui.connecting().await;
+        let mut core = Core::accept(listener).await;
+        core.handshake().await;
+        ui.connected().await;
+
+        let (tx_a, mut rx_a) = watch::channel(None);
+        let link_a = ui.link.clone();
+        let task_a = tokio::spawn(async move {
+            link_a
+                .request_with_progress(quartz_protocol::UiOpenRequest {}, tx_a)
+                .await
+        });
+        let req_a = core.request(Op::UiOpen).await;
+        let id_a = req_a.id;
+
+        let (tx_b, mut rx_b) = watch::channel(None);
+        let link_b = ui.link.clone();
+        let task_b = tokio::spawn(async move {
+            link_b
+                .request_with_progress(quartz_protocol::UiOpenRequest {}, tx_b)
+                .await
+        });
+        let req_b = core.request(Op::UiOpen).await;
+        let id_b = req_b.id;
+
+        core.progress(id_a, 3, 10).await;
+        rx_a.changed().await.expect("progress for request A");
+        assert_eq!(
+            *rx_a.borrow_and_update(),
+            Some(QueryProgress { done: 3, total: 10 })
+        );
+        assert!(
+            !rx_b.has_changed().expect("request B watch stays open"),
+            "progress for A must not notify request B"
+        );
+        assert_eq!(*rx_b.borrow(), None);
+
+        core.progress(RequestId(999_999), 1, 5).await;
+
+        core.ok(req_a, serde_json::json!({"accepted":true})).await;
+        assert_eq!(
+            task_a.await.expect("task A").expect("response A"),
+            quartz_protocol::AcceptedBody
+        );
+        assert!(
+            rx_a.changed().await.is_err(),
+            "completing request drops its progress observer"
+        );
+        core.progress(id_a, 4, 10).await;
+
+        core.progress(id_b, 2, 7).await;
+        rx_b.changed().await.expect("progress for request B");
+        assert_eq!(
+            *rx_b.borrow_and_update(),
+            Some(QueryProgress { done: 2, total: 7 })
+        );
+        core.ok(req_b, serde_json::json!({"accepted":true})).await;
+        assert_eq!(
+            task_b.await.expect("task B").expect("response B"),
+            quartz_protocol::AcceptedBody
+        );
         ui.stop().await;
     }
 

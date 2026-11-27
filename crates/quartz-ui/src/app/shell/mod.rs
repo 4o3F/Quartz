@@ -10,6 +10,7 @@ mod nav;
 mod pending;
 #[cfg(feature = "preview")]
 mod preview;
+mod progress;
 mod ranking;
 mod rule_editor;
 mod rule_import;

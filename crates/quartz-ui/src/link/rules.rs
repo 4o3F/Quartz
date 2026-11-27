@@ -1,6 +1,6 @@
 //! Rule-set and category reads and mutations over the existing UI pipe link.
 
-use super::{Link, LoadDataError};
+use super::{Link, LoadDataError, QueryProgress};
 use quartz_protocol::{
     AcceptedBody, CategoriesArchiveRequest, CategoriesCreateRequest, CategoriesListRequest,
     CategoriesListResponse, CategoriesReorderRequest, CategoriesUpdateRequest, CategoryResponse,
@@ -10,6 +10,7 @@ use quartz_protocol::{
     RulesPreviewRequest, RulesPreviewResponse, RulesTextExportRequest, RulesTextExportResponse,
     RulesTextImportRequest, RulesTextValidateRequest, RulesTextValidateResponse,
 };
+use tokio::sync::watch;
 
 /// All rule families queried when building the Rules page tree, in display order.
 const RULE_KINDS: [RuleKind; 3] = [
@@ -157,15 +158,19 @@ impl Link {
         self.request(request).await.map_err(LoadDataError::from)
     }
 
-    /// Previews the impact of a rule-set mutation over one to seven logical days.
+    /// Previews the impact of a rule-set mutation over one to seven logical days, forwarding
+    /// per-day core progress updates to `progress`.
     ///
     /// # Errors
     /// Returns any transport, decoding, or protocol failure.
     pub(crate) async fn preview_rules(
         &self,
         request: RulesPreviewRequest,
+        progress: watch::Sender<Option<QueryProgress>>,
     ) -> Result<RulesPreviewResponse, LoadDataError> {
-        self.request(request).await.map_err(LoadDataError::from)
+        self.request_with_progress(request, progress)
+            .await
+            .map_err(LoadDataError::from)
     }
 
     /// Creates or saves a user rule set with optimistic concurrency via `base_version`.
@@ -193,14 +198,18 @@ impl Link {
         self.request(request).await.map_err(LoadDataError::from)
     }
 
-    /// Queries grouped unclassified active work over a half-open logical-date range.
+    /// Queries grouped unclassified active work over a half-open logical-date range, forwarding
+    /// per-day core progress updates to `progress`.
     ///
     /// # Errors
     /// Returns any transport, decoding, or protocol failure.
     pub(crate) async fn query_unclassified(
         &self,
         request: QueryUnclassifiedRequest,
+        progress: watch::Sender<Option<QueryProgress>>,
     ) -> Result<QueryUnclassifiedResponse, LoadDataError> {
-        self.request(request).await.map_err(LoadDataError::from)
+        self.request_with_progress(request, progress)
+            .await
+            .map_err(LoadDataError::from)
     }
 }

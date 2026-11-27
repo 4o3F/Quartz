@@ -9,6 +9,7 @@ mod details;
 #[cfg(windows)]
 mod rules;
 use crate::failure::Failure;
+pub(crate) use crate::model::QueryProgress;
 #[cfg(windows)]
 pub(crate) use annotation::AwayAction;
 #[cfg(windows)]
@@ -28,7 +29,7 @@ use quartz_protocol::{CoreRequest, JsonValue, Op, Topic};
 use snafu::ResultExt;
 use snafu::Snafu;
 #[cfg(windows)]
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Bounded command, pending-request and event counts (01 §6–§7.2, 04 §7).
 #[cfg(windows)]
@@ -53,6 +54,10 @@ pub enum ConnectionState {
 pub enum LinkEvent {
     DetailLoading {
         generation: DetailGeneration,
+    },
+    DetailProgress {
+        generation: DetailGeneration,
+        progress: QueryProgress,
     },
     DetailLoaded {
         generation: DetailGeneration,
@@ -83,6 +88,7 @@ impl LinkEvent {
             Self::Disconnected | Self::Control(ControlOp::UiShutdown) => WindowAction::Quit,
             Self::Control(ControlOp::UiShow | ControlOp::UiActivate) => WindowAction::Activate,
             Self::DetailLoading { .. }
+            | Self::DetailProgress { .. }
             | Self::DetailLoaded { .. }
             | Self::DayLoading { .. }
             | Self::DayLoaded { .. }
@@ -154,6 +160,8 @@ impl StartCoreError {
 #[cfg(windows)]
 type Reply = oneshot::Sender<Result<JsonValue, RequestCoreError>>;
 #[cfg(windows)]
+type ProgressObserver = watch::Sender<Option<QueryProgress>>;
+#[cfg(windows)]
 enum Command {
     SelectDetails {
         request: Option<DetailRequest>,
@@ -171,6 +179,7 @@ enum Command {
         op: Op,
         body: JsonValue,
         reply: Reply,
+        progress: Option<ProgressObserver>,
     },
     Topics {
         change: TopicChange,
@@ -358,6 +367,21 @@ impl Link {
         &self,
         request: R,
     ) -> Result<R::Response, RequestCoreError> {
+        self.send_request(request, None).await
+    }
+    /// Executes an operation while forwarding core progress updates to `progress`.
+    pub async fn request_with_progress<R: CoreRequest>(
+        &self,
+        request: R,
+        progress: watch::Sender<Option<QueryProgress>>,
+    ) -> Result<R::Response, RequestCoreError> {
+        self.send_request(request, Some(progress)).await
+    }
+    async fn send_request<R: CoreRequest>(
+        &self,
+        request: R,
+        progress: Option<ProgressObserver>,
+    ) -> Result<R::Response, RequestCoreError> {
         let body = request
             .body()
             .map_err(|source| CallCoreError::EncodeBody { source })
@@ -368,6 +392,7 @@ impl Link {
                 op: R::OP,
                 body,
                 reply,
+                progress,
             })
             .await
             .map_err(|_| RequestCoreError::Closed)?;

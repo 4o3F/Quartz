@@ -1,6 +1,10 @@
 //! Typed sidebar content mapped from single-response detail queries.
-use super::{BuiltinCategory, CategoryColor, CategoryName, PaletteSlot};
-use crate::link::{DetailData, DetailRequest, EntityKey, UtcRange};
+use super::{
+    BuiltinCategory, CategoryColor, CategoryName, LoadProgress, PaletteSlot, QueryProgress,
+};
+use crate::link::{
+    DetailData, DetailGeneration, DetailRequest, EntityKey, LoadDataError, UtcRange,
+};
 use quartz_protocol::{self as wire, ClassificationRuleId};
 use std::{collections::BTreeMap, time::Duration};
 
@@ -88,6 +92,80 @@ pub(crate) struct EntityDetails {
     pub titles: Vec<DetailTitle>,
     pub rules: Vec<DetailRule>,
 }
+/// Whether an incoming detail lifecycle or progress event applied to the active selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetailUpdate {
+    Applied,
+    Ignored,
+}
+
+/// Lifecycle of loading live details for a selected sidebar subject.
+#[derive(Debug)]
+pub(crate) enum DetailPhase {
+    Loading(LoadProgress),
+    Ready(LiveDetails),
+    Failed(LoadDataError),
+}
+
+impl DetailPhase {
+    /// Marks a failed or loading panel as waiting when the loader starts a new attempt.
+    pub(crate) fn apply_loading(
+        &mut self,
+        active_generation: DetailGeneration,
+        incoming_generation: DetailGeneration,
+    ) -> DetailUpdate {
+        if !active_generation.accepts(incoming_generation) {
+            return DetailUpdate::Ignored;
+        }
+        match self {
+            Self::Loading(progress) => *progress = LoadProgress::Waiting,
+            Self::Failed(_) => *self = Self::Loading(LoadProgress::Waiting),
+            Self::Ready(_) => {}
+        }
+        DetailUpdate::Applied
+    }
+
+    /// Records per-day progress when `incoming_generation` matches the active loading request.
+    pub(crate) fn apply_progress(
+        &mut self,
+        active_generation: DetailGeneration,
+        incoming_generation: DetailGeneration,
+        progress: QueryProgress,
+    ) -> DetailUpdate {
+        if !active_generation.accepts(incoming_generation) {
+            return DetailUpdate::Ignored;
+        }
+        let Self::Loading(load_progress) = self else {
+            return DetailUpdate::Ignored;
+        };
+        load_progress.record(progress);
+        DetailUpdate::Applied
+    }
+
+    /// Applies a completed detail response when `incoming_generation` matches the active request.
+    pub(crate) fn apply_loaded(
+        &mut self,
+        expected_request: &DetailRequest,
+        active_generation: DetailGeneration,
+        incoming_generation: DetailGeneration,
+        result: Result<DetailData, LoadDataError>,
+    ) -> DetailUpdate {
+        if !active_generation.accepts(incoming_generation) {
+            return DetailUpdate::Ignored;
+        }
+        *self = match result.and_then(|data| {
+            if &data.request != expected_request {
+                return Err(LoadDataError::InvalidData);
+            }
+            LiveDetails::from_protocol(data).map_err(|_| LoadDataError::InvalidData)
+        }) {
+            Ok(details) => Self::Ready(details),
+            Err(error) => Self::Failed(error),
+        };
+        DetailUpdate::Applied
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct LiveDetails {
     pub intervals: Vec<DetailInterval>,
@@ -512,5 +590,47 @@ mod tests {
             }],
         };
         assert!(LiveDetails::from_protocol(mismatched).is_err());
+    }
+
+    #[test]
+    fn superseded_generation_and_ready_detail_drop_progress_updates() {
+        let old = DetailGeneration::default().next();
+        let current = old.next();
+        let mut phase = DetailPhase::Loading(LoadProgress::Waiting);
+
+        assert_eq!(
+            phase.apply_progress(current, old, QueryProgress { done: 2, total: 7 }),
+            DetailUpdate::Ignored
+        );
+        assert!(matches!(phase, DetailPhase::Loading(LoadProgress::Waiting)));
+
+        assert_eq!(
+            phase.apply_progress(current, current, QueryProgress { done: 9, total: 7 }),
+            DetailUpdate::Applied
+        );
+        assert!(matches!(
+            phase,
+            DetailPhase::Loading(LoadProgress::Counting { done: 7, total: 7 })
+        ));
+
+        assert_eq!(phase.apply_loading(current, old), DetailUpdate::Ignored);
+        assert!(matches!(
+            phase,
+            DetailPhase::Loading(LoadProgress::Counting { done: 7, total: 7 })
+        ));
+        assert_eq!(phase.apply_loading(current, current), DetailUpdate::Applied);
+        assert!(matches!(phase, DetailPhase::Loading(LoadProgress::Waiting)));
+
+        let data = Fixture::data();
+        let request = data.request.clone();
+        assert_eq!(
+            phase.apply_loaded(&request, current, current, Ok(data)),
+            DetailUpdate::Applied
+        );
+        assert_eq!(
+            phase.apply_progress(current, current, QueryProgress { done: 1, total: 7 }),
+            DetailUpdate::Ignored
+        );
+        assert!(matches!(phase, DetailPhase::Ready(_)));
     }
 }

@@ -130,7 +130,10 @@ impl DetailHarness {
     async fn loaded(&mut self, expected: DetailGeneration) -> Result<DetailData, LoadDataError> {
         loop {
             match self.ui.events.recv().await.expect("detail event") {
-                LinkEvent::DetailLoading { generation } => assert!(expected.accepts(generation)),
+                LinkEvent::DetailLoading { generation }
+                | LinkEvent::DetailProgress { generation, .. } => {
+                    assert!(expected.accepts(generation))
+                }
                 LinkEvent::DetailLoaded { generation, result } => {
                     assert!(expected.accepts(generation));
                     return result;
@@ -529,5 +532,55 @@ async fn document_selection_requests_document_entity_detail_and_drops_late_previ
             .is_err(),
         "late response for previous document subject must be ignored"
     );
+    harness.ui.stop().await;
+}
+
+#[tokio::test]
+async fn entity_detail_progress_reaches_active_generation_and_stops_after_superseding_selection() {
+    let mut harness = DetailHarness::start().await;
+    let first_gen = DetailGeneration::default().next();
+    harness
+        .select(DetailTarget::App(ApplicationId(3)), first_gen)
+        .await;
+    let first_req = harness.core.request(Op::QueryEntityDetail).await;
+    let first_id = first_req.id;
+    assert!(matches!(
+        harness.ui.events.recv().await,
+        Some(LinkEvent::DetailLoading { generation }) if generation == first_gen
+    ));
+
+    harness.core.progress(first_id, 2, 7).await;
+    assert!(matches!(
+        harness.ui.events.recv().await,
+        Some(LinkEvent::DetailProgress {
+            generation,
+            progress: QueryProgress { done: 2, total: 7 },
+        }) if generation == first_gen
+    ));
+
+    let second_gen = first_gen.next();
+    harness
+        .select(DetailTarget::App(ApplicationId(4)), second_gen)
+        .await;
+    let second_req = harness.core.request(Op::QueryEntityDetail).await;
+    let second_id = second_req.id;
+    assert!(matches!(
+        harness.ui.events.recv().await,
+        Some(LinkEvent::DetailLoading { generation }) if generation == second_gen
+    ));
+
+    harness.core.progress(first_id, 5, 7).await;
+    harness.core.progress(second_id, 1, 7).await;
+    assert!(matches!(
+        harness.ui.events.recv().await,
+        Some(LinkEvent::DetailProgress {
+            generation,
+            progress: QueryProgress { done: 1, total: 7 },
+        }) if generation == second_gen
+    ));
+
+    harness.entity(second_req).await;
+    harness.loaded(second_gen).await.expect("second detail");
+    harness.core.ok(first_req, serde_json::json!({})).await;
     harness.ui.stop().await;
 }

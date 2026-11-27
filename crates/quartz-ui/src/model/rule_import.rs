@@ -10,6 +10,7 @@ use snafu::Snafu;
 use crate::{
     link::{LoadDataError, LoadDataErrorCode},
     model::{
+        LoadProgress, ProgressUpdate, QueryProgress,
         rule_editor::{PreviewState, StaleNotice, ValidationState, preview_last_seven_days},
         rules::{MutationActivity, RuleTree},
     },
@@ -374,7 +375,7 @@ impl RuleImport {
             && matches!(session.validation, ValidationState::Valid)
             && session.stale_notice.is_none()
             && session.importing == MutationActivity::Idle
-            && !matches!(session.preview, PreviewState::Loading)
+            && !matches!(session.preview, PreviewState::Loading(_))
     }
 
     /// Requests a 7-day `rules.preview` using `RulePreviewMutation::Import`.
@@ -393,7 +394,7 @@ impl RuleImport {
             return RuleImportEffect::None;
         };
         self.preview_generation = self.preview_generation.next();
-        session.preview = PreviewState::Loading;
+        session.preview = PreviewState::Loading(LoadProgress::Waiting);
         session.preview_range = Some((start_date, end_date));
         let edit = wire::RuleSetsEditRequest {
             key: plan.key,
@@ -409,6 +410,29 @@ impl RuleImport {
             buffer_generation: self.buffer_generation,
             preview_generation: self.preview_generation,
         }
+    }
+
+    /// Records per-day progress for an in-flight `rules.preview` request, dropping updates from
+    /// older buffers or superseded preview generations.
+    pub(crate) fn apply_preview_progress(
+        &mut self,
+        buffer_generation: ImportGeneration,
+        preview_generation: ImportGeneration,
+        progress: QueryProgress,
+    ) -> ProgressUpdate {
+        if !self.buffer_generation.accepts(buffer_generation)
+            || !self.preview_generation.accepts(preview_generation)
+        {
+            return ProgressUpdate::Ignored;
+        }
+        let Some(session) = &mut self.session else {
+            return ProgressUpdate::Ignored;
+        };
+        let PreviewState::Loading(load_progress) = &mut session.preview else {
+            return ProgressUpdate::Ignored;
+        };
+        load_progress.record(progress);
+        ProgressUpdate::Applied
     }
 
     /// Applies the result of `rules.preview`, dropping responses from older buffers or requests.
@@ -1141,5 +1165,62 @@ mod tests {
         assert!(!debug.contains("secret-rule-marker"));
         import.close();
         assert!(!import.is_open());
+    }
+
+    #[test]
+    fn superseded_import_preview_generation_drops_progress() {
+        let tree = sample_tree();
+        let mut import = RuleImport::new();
+        import.open();
+        let text = "format = \"quartz-rules/1\"\n[set]\nkey = \"user.study-sites\"\nkind = \"classification\"\nname = \"Study\"\n";
+        let RuleImportEffect::ScheduleValidate { generation } =
+            import.set_text(text.to_owned(), Some(&tree))
+        else {
+            panic!("schedules validate");
+        };
+        let _ = import.trigger_validate(generation);
+        import.apply_validation_finished(
+            generation,
+            Ok(RulesTextValidateResponse {
+                valid: true,
+                diagnostics: Vec::new(),
+                truncated: false,
+            }),
+        );
+        let today: LocalDate = "2026-11-26".parse().expect("date");
+        let RuleImportEffect::Preview {
+            buffer_generation,
+            preview_generation,
+            ..
+        } = import.request_preview(today)
+        else {
+            panic!("requests preview");
+        };
+        assert_eq!(
+            import.apply_preview_progress(
+                buffer_generation,
+                preview_generation,
+                QueryProgress { done: 4, total: 7 },
+            ),
+            ProgressUpdate::Applied
+        );
+        assert!(matches!(
+            import.session().expect("open").preview,
+            PreviewState::Loading(LoadProgress::Counting { done: 4, total: 7 })
+        ));
+
+        let _ = import.set_text(format!("{text}# updated\n"), Some(&tree));
+        assert_eq!(
+            import.apply_preview_progress(
+                buffer_generation,
+                preview_generation,
+                QueryProgress { done: 6, total: 7 },
+            ),
+            ProgressUpdate::Ignored
+        );
+        assert!(matches!(
+            import.session().expect("open").preview,
+            PreviewState::Idle
+        ));
     }
 }
