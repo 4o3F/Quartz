@@ -77,7 +77,7 @@ impl Capture<'_> {
         row.apply_privacy(fields.privacy.as_ref());
         Ok(())
     }
-    fn title(&mut self, text: &str) -> Result<DbRowId, ExecuteCaptureBatchError> {
+    pub(super) fn title(&mut self, text: &str) -> Result<DbRowId, ExecuteCaptureBatchError> {
         diesel::insert_into(titles::table)
             .values(titles::text.eq(text))
             .on_conflict(titles::text)

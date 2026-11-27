@@ -6,11 +6,16 @@ use super::{
 };
 use crate::store::{
     enums::IntegerCode,
-    rows::{AvailabilityIntervalsRow, CaptureRunsRow, ClockSegmentsRow, IntervalsRow},
-    schema::{availability_intervals, capture_runs, clock_segments, intervals, titles},
+    rows::{
+        AvailabilityIntervalsRow, CaptureRunsRow, ClockSegmentsRow, IntervalsRow, WebIntervalsRow,
+    },
+    schema::{
+        availability_intervals, capture_runs, clock_segments, intervals, titles, web_intervals,
+    },
     settings::{SettingKey, Settings},
 };
 use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
+use diesel::{JoinOnDsl, NullableExpressionMethods};
 use quartz_domain::capture::{
     self as domain, ConfirmedAvailability, ConfirmedInterval, ConfirmedSegment, RecoverableRun,
     RowId, RunId, SegmentId, Timestamp, WindowId,
@@ -533,13 +538,52 @@ impl From<diesel::result::Error> for RecoverCaptureTransactionError {
         Self::Transaction { source }
     }
 }
+struct RecoverableWebRow {
+    id: DbRowId,
+    confirmed: domain::UtcInstant,
+}
 impl Capture<'_> {
+    fn load_recoverable_web(
+        &mut self,
+        run: DbRowId,
+    ) -> Result<Vec<RecoverableWebRow>, LoadRecoverableRunError> {
+        let rows = web_intervals::table
+            .inner_join(
+                intervals::table.on(web_intervals::interval_id.nullable().eq(intervals::id)),
+            )
+            .filter(intervals::run_id.eq(run.get()))
+            .filter(web_intervals::end_utc_ms.is_null())
+            .order(web_intervals::id)
+            .select(WebIntervalsRow::as_select())
+            .load::<WebIntervalsRow>(self.connection)?;
+        rows.into_iter()
+            .map(|row| {
+                let context = RowContext::new(row.id);
+                let id = DbRowId::new(context.required(row.id, web_intervals::id)?);
+                let start = context.utc(row.start_utc_ms, web_intervals::start_utc_ms)?;
+                let confirmed = context.utc(
+                    context.required(row.confirmed_utc_ms, web_intervals::confirmed_utc_ms)?,
+                    web_intervals::confirmed_utc_ms,
+                )?;
+                context.confirmation_utc(start, confirmed, web_intervals::confirmed_utc_ms)?;
+                Ok(RecoverableWebRow { id, confirmed })
+            })
+            .collect()
+    }
     fn recover(&mut self) -> Result<CaptureStartup, RecoverCaptureError> {
         let runs = self
             .load_recoverable()
             .context(recover_capture_error::LoadSnafu)?;
         for run in runs {
             let run_id = run.run;
+            let run_db_id = Self::run_id(run_id).context(recover_capture_error::ExecuteSnafu)?;
+            let web_rows = self
+                .load_recoverable_web(run_db_id)
+                .context(recover_capture_error::LoadSnafu)?;
+            for web in web_rows {
+                self.close_web_row(web.id, web.confirmed, domain::WebEndReason::CrashRecovered)
+                    .context(recover_capture_error::ExecuteSnafu)?;
+            }
             self.execute_writes(run.run, &run.settle())
                 .context(recover_capture_error::ExecuteSnafu)?;
             self.keys.record(run_id);

@@ -318,6 +318,22 @@ impl RowContext {
             mono: self.mono(mono, columns.mono)?,
         })
     }
+    pub(super) fn confirmation_utc(
+        self,
+        start: domain::UtcInstant,
+        confirmed: domain::UtcInstant,
+        column: impl SchemaColumn,
+    ) -> Result<(), DecodeCaptureRowError> {
+        confirmed
+            .duration_since(start)
+            .map_err(|source| DecodeCaptureRowError::Confirmation {
+                field: self.field(column),
+                start: i128::from(start.get().as_millisecond()),
+                confirmed: i128::from(confirmed.get().as_millisecond()),
+                source,
+            })?;
+        Ok(())
+    }
     pub(super) fn confirmation<U: SchemaColumn, M: SchemaColumn<Table = U::Table>>(
         self,
         start: Timestamp,

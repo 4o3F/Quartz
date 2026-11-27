@@ -246,7 +246,6 @@ impl Workers {
         let capture = CaptureLoop {
             pending_control: None,
             discard_remaining: 0,
-            browser_states: std::collections::BTreeMap::new(),
             core: started.core,
             run: startup.next_run,
             at,

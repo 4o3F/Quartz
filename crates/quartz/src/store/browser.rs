@@ -34,7 +34,6 @@ impl BrowserStreamRowId {
     }
 
     /// Returns the underlying SQLite primary key.
-    #[cfg(test)]
     #[must_use]
     pub(crate) const fn get(self) -> i64 {
         self.0

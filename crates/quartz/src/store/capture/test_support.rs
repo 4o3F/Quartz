@@ -5,10 +5,10 @@ use crate::{
     persistence::{CheckpointCollection, Persistence},
     store::{
         Store, enums,
-        rows::{CaptureRunsRow, IntervalsRow},
+        rows::{CaptureRunsRow, IntervalsRow, WebIntervalsRow},
         schema::{
             availability_intervals, capture_gaps, capture_runs, clock_segments, intervals,
-            timed_policies,
+            timed_policies, web_intervals,
         },
     },
 };
@@ -152,6 +152,13 @@ impl Fixture {
             .load(&mut self.store.writer)
             .expect("interval rows")
     }
+    pub(in crate::store) fn web_intervals(&mut self) -> Vec<WebIntervalsRow> {
+        web_intervals::table
+            .order(web_intervals::id)
+            .select(WebIntervalsRow::as_select())
+            .load(&mut self.store.writer)
+            .expect("web interval rows")
+    }
 }
 pub(crate) fn foreground(handle: u64, title: &str) -> CaptureEvent {
     CaptureEvent::Foreground {
@@ -189,6 +196,23 @@ pub(crate) struct RunInspection {
 pub(crate) struct TimedInspection {
     pub started_utc_ms: i64,
     pub until_utc_ms: i64,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WebIntervalInspection {
+    pub stream_id: i64,
+    pub interval_id: i64,
+    pub start_utc_ms: i64,
+    pub end_utc_ms: Option<i64>,
+    pub confirmed_utc_ms: Option<i64>,
+    pub end_reason: Option<i32>,
+    pub domain: Option<String>,
+    pub tab_title: Option<String>,
+    pub tab_title_status: TitleStatus,
+    pub tab_id: Option<i64>,
+    pub browser_window_id: Option<i64>,
+    pub audible: i32,
+    pub link_status: i32,
+    pub web_level: i32,
 }
 impl Inspection {
     pub(crate) fn open(directory: &std::path::Path) -> Self {
@@ -268,6 +292,50 @@ impl Inspection {
                 started_utc_ms: row.started_utc_ms,
                 until_utc_ms: row.until_utc_ms,
             })
+    }
+    pub(crate) fn web_intervals(&mut self) -> Vec<WebIntervalInspection> {
+        let rows = web_intervals::table
+            .order(web_intervals::id)
+            .select(WebIntervalsRow::as_select())
+            .load::<WebIntervalsRow>(&mut self.connection)
+            .expect("web intervals");
+        rows.into_iter()
+            .map(|row| {
+                let domain = row.domain_id.map(|id| {
+                    crate::store::schema::domains::table
+                        .filter(crate::store::schema::domains::id.eq(id))
+                        .select(crate::store::schema::domains::host)
+                        .first::<String>(&mut self.connection)
+                        .expect("domain host")
+                });
+                let tab_title = row.tab_title_id.map(|id| {
+                    crate::store::schema::titles::table
+                        .filter(crate::store::schema::titles::id.eq(id))
+                        .select(crate::store::schema::titles::text)
+                        .first::<String>(&mut self.connection)
+                        .expect("tab title text")
+                });
+                WebIntervalInspection {
+                    stream_id: row.stream_id,
+                    interval_id: row.interval_id,
+                    start_utc_ms: row.start_utc_ms,
+                    end_utc_ms: row.end_utc_ms,
+                    confirmed_utc_ms: row.confirmed_utc_ms,
+                    end_reason: row.end_reason,
+                    domain,
+                    tab_title,
+                    tab_title_status: row
+                        .tab_title_status
+                        .try_into()
+                        .expect("capture title status"),
+                    tab_id: row.tab_id,
+                    browser_window_id: row.browser_window_id,
+                    audible: row.audible,
+                    link_status: row.link_status,
+                    web_level: row.web_level,
+                }
+            })
+            .collect()
     }
     pub(crate) fn inject_write_failure(&mut self) {
         use diesel::connection::SimpleConnection;

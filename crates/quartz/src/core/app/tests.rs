@@ -394,7 +394,6 @@ fn resume_notifications_create_only_one_clock_segment() {
     let mut capture = CaptureLoop {
         pending_control: None,
         discard_remaining: 0,
-        browser_states: std::collections::BTreeMap::new(),
         core: started.core,
         run: RunId::new(1),
         at,
@@ -2374,4 +2373,95 @@ fn browser_second_connection_for_same_profile_replaces_and_closes_first() {
     });
     drop(services);
     runtime.shutdown();
+}
+
+#[test]
+fn browser_state_and_matching_foreground_persist_web_interval_end_to_end() {
+    use crate::ipc::browser::BrowserStreamKey as WireStreamKey;
+    use quartz_protocol as wire;
+
+    let directory = tempfile::tempdir().expect("isolated browser runtime");
+    let mut store = Store::open(&DataDirectory::new(directory.path())).expect("open store");
+    let profile: wire::Uuid = "a286737e-3855-43cb-98ee-c366344372d0"
+        .parse()
+        .expect("profile uuid");
+    let stream_id = store
+        .upsert_browser_stream(wire::BrowserKind::Chrome, &profile, at(0).utc)
+        .expect("upsert browser stream");
+    let clock = Arc::new(RuntimeClock::new());
+    let workers = crate::core::app::Workers::start(
+        store,
+        metadata(),
+        clock.clone(),
+        Arc::new(|| {}),
+        create_foreground(),
+    )
+    .expect("workers");
+    let runtime = RuntimeFixture {
+        directory,
+        workers,
+        clock,
+    };
+    let browser = runtime.workers.sender.browser_port(runtime.clock.clone());
+    runtime.observe(CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())));
+    runtime.clock.advance(100);
+    runtime.observe(CaptureEvent::Foreground {
+        source: ObservationSource::Review,
+        foreground: Foreground::Window {
+            facts: Box::new(WindowFacts {
+                handle: WindowHandle::new(1),
+                process: ProcessId::new(7),
+                process_created_utc: Some(at(0).utc),
+                class: "Chrome_WidgetWin_1".into(),
+                app: AppIdentity::Exe("c:\\chrome.exe".into()),
+                metadata_source: MetadataSource::Process,
+                exe_name: Some("chrome.exe".into()),
+                display_name: "Google Chrome".into(),
+                title: Title::readable("Rust Docs - Google Chrome"),
+            }),
+            privacy: PrivacyContext::default(),
+        },
+    });
+    runtime.clock.advance(100);
+    browser
+        .send_state(
+            stream_id,
+            WireStreamKey {
+                browser: wire::BrowserKind::Chrome,
+                profile_instance_id: profile,
+            },
+            wire::BrowserStateRequest {
+                focused: wire::BrowserFocus::Focused,
+                window: Some(wire::BrowserWindow {
+                    id: 7,
+                    state: wire::BrowserWindowState::Normal,
+                }),
+                tab: Some(wire::BrowserTab {
+                    id: 91,
+                    domain: Some("docs.rs".to_owned()),
+                    title: "Rust Docs".to_owned(),
+                    title_status: wire::BrowserTitleStatus::Ok,
+                    audible: wire::BrowserAudible::Audible,
+                }),
+            },
+        )
+        .expect("enqueue browser state");
+    runtime.clock.advance(100);
+    let directory = runtime.shutdown();
+    let mut inspection = Inspection::open(directory.path());
+    let web_rows = inspection.web_intervals();
+    assert_eq!(web_rows.len(), 1);
+    let row = &web_rows[0];
+    assert_eq!(row.stream_id, stream_id.get());
+    assert_eq!(row.domain.as_deref(), Some("docs.rs"));
+    assert_eq!(row.tab_title.as_deref(), Some("Rust Docs"));
+    assert_eq!(row.tab_title_status, TitleStatus::Ok);
+    assert_eq!(row.tab_id, Some(91));
+    assert_eq!(row.browser_window_id, Some(7));
+    assert_eq!(row.audible, 1);
+    assert_eq!(row.link_status, 1);
+    assert_eq!(row.web_level, WebLevel::Full.code());
+    assert!(row.end_utc_ms.is_some());
+    assert_eq!(row.confirmed_utc_ms, None);
+    assert_eq!(row.end_reason, Some(WebEndReason::Shutdown.code()));
 }

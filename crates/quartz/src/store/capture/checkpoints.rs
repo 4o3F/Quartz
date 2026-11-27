@@ -3,13 +3,14 @@
 use super::{Capture, CaptureColumn, DbRowId, ExecuteCaptureBatchError, TimeColumns};
 use crate::store::{
     enums,
-    rows::{AvailabilityIntervalsRow, ClockSegmentsRow, IntervalsRow},
-    schema::{availability_intervals, capture_runs, clock_segments, intervals},
+    rows::{AvailabilityIntervalsRow, ClockSegmentsRow, IntervalsRow, WebIntervalsRow},
+    schema::{availability_intervals, capture_runs, clock_segments, intervals, web_intervals},
 };
-use diesel::NullableExpressionMethods;
 use diesel::prelude::{ExpressionMethods, QueryDsl, RunQueryDsl, SelectableHelper};
+use diesel::{JoinOnDsl, NullableExpressionMethods};
 use quartz_domain::capture::{
     AvailabilityEndReason, Checkpoint, IntervalEndReason, RunId, SegmentId, TimeRange, Timestamp,
+    WebEndReason,
 };
 
 impl Capture<'_> {
@@ -20,9 +21,36 @@ impl Capture<'_> {
         let run = Self::run_id(point.run)?;
         let segment = self.segment(point.run, point.segment)?;
         self.confirm_foreground(run, point.at)?;
+        self.confirm_web(point)?;
         self.confirm_availability(run, point.at)?;
         self.confirm_run(run, point.at)?;
         self.confirm_segment(segment, point.at)
+    }
+    fn confirm_web(&mut self, point: &Checkpoint) -> Result<(), ExecuteCaptureBatchError> {
+        let Some(logical) = point.web else {
+            return Ok(());
+        };
+        let id = self.web_interval(point.run, logical)?;
+        let row = web_intervals::table
+            .filter(web_intervals::id.eq(id.get()))
+            .filter(web_intervals::end_utc_ms.is_null())
+            .select(WebIntervalsRow::as_select())
+            .first(self.connection)?;
+        let context = id.context();
+        let start = context.utc(row.start_utc_ms, web_intervals::start_utc_ms)?;
+        context.confirmation_utc(start, point.at.utc, web_intervals::confirmed_utc_ms)?;
+        let confirmed_utc_ms = context
+            .field(web_intervals::confirmed_utc_ms)
+            .utc(point.at.utc)?;
+        let count = diesel::update(
+            web_intervals::table
+                .filter(web_intervals::id.eq(id.get()))
+                .filter(web_intervals::end_utc_ms.is_null()),
+        )
+        .set(web_intervals::confirmed_utc_ms.eq(Some(confirmed_utc_ms)))
+        .execute(self.connection)?;
+        id.require_open(web_intervals::table, count)?;
+        self.bump_utc_days(enums::DataSource::Web, start, point.at.utc)
     }
     fn confirm_foreground(
         &mut self,
@@ -175,8 +203,40 @@ impl Capture<'_> {
         at: Timestamp,
     ) -> Result<(), ExecuteCaptureBatchError> {
         let segment = self.segment(run, segment)?;
+        self.settle_web(run, segment, at)?;
         self.settle_foreground(run, segment, at)?;
         self.settle_availability(run, segment, at)
+    }
+    fn settle_web(
+        &mut self,
+        run: RunId,
+        segment: DbRowId,
+        at: Timestamp,
+    ) -> Result<(), ExecuteCaptureBatchError> {
+        let ids = web_intervals::table
+            .inner_join(
+                intervals::table.on(web_intervals::interval_id.nullable().eq(intervals::id)),
+            )
+            .filter(intervals::clock_segment_id.eq(segment.get()))
+            .filter(web_intervals::end_utc_ms.is_null())
+            .select(web_intervals::id.assume_not_null())
+            .load::<i64>(self.connection)?;
+        for id in ids {
+            let row_id = DbRowId::new(id);
+            let key = self
+                .run_keys(run)
+                .web_intervals
+                .iter()
+                .find(|(_, value)| **value == row_id)
+                .map(|(key, _)| *key)
+                .ok_or(ExecuteCaptureBatchError::MissingMapping {
+                    run,
+                    table: crate::store::identifiers::TableName::of(web_intervals::table),
+                    row_id: row_id.get(),
+                })?;
+            self.close_web_interval(run, key, at, WebEndReason::Gap)?;
+        }
+        Ok(())
     }
     fn settle_foreground(
         &mut self,

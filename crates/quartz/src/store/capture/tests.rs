@@ -2560,3 +2560,365 @@ fn refocusing_discarded_window_registers_it_before_persisting_the_interval() {
         Some(instance.app_id)
     );
 }
+
+fn browser_foreground(handle: u64, exe_name: &str, title: &str) -> CaptureEvent {
+    CaptureEvent::Foreground {
+        source: ObservationSource::Review,
+        foreground: Foreground::Window {
+            facts: Box::new(WindowFacts {
+                handle: WindowHandle::new(handle),
+                process: ProcessId::new(42),
+                process_created_utc: Some(at(0).utc),
+                class: "Chrome_WidgetWin_1".into(),
+                app: AppIdentity::Exe(format!("c:\\{exe_name}")),
+                metadata_source: MetadataSource::Process,
+                exe_name: Some(exe_name.into()),
+                display_name: "Google Chrome".into(),
+                title: Title::readable(title),
+            }),
+            privacy: PrivacyContext::default(),
+        },
+    }
+}
+
+fn insert_chrome_stream(store: &mut crate::store::Store) -> BrowserStreamRef {
+    let profile: quartz_protocol::Uuid = "a286737e-3855-43cb-98ee-c366344372d0"
+        .parse()
+        .expect("profile uuid");
+    let row_id = store
+        .upsert_browser_stream(quartz_protocol::BrowserKind::Chrome, &profile, at(0).utc)
+        .expect("upsert chrome stream");
+    BrowserStreamRef {
+        id: BrowserStreamKey::new(row_id.get()),
+        family: BrowserFamily::Chrome,
+    }
+}
+
+#[test]
+fn web_interval_open_checkpoint_close_round_trips_with_interned_domain_and_title() {
+    use crate::store::schema::domains;
+    let mut fixture = Fixture::new(at(0));
+    let stream = insert_chrome_stream(&mut fixture.store);
+    fixture.persist(
+        at(0),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    fixture.persist(
+        at(0),
+        CaptureEvent::BrowserState {
+            stream,
+            snapshot: BrowserSnapshot {
+                focus: BrowserFocus::Focused,
+                window_id: Some(7),
+                window_state: Some(BrowserWindowState::Normal),
+                tab: Some(BrowserTab {
+                    id: 91,
+                    domain: Some("docs.rs".into()),
+                    title: Title::readable("Rust Docs"),
+                    audible: BrowserAudible::Audible,
+                }),
+            },
+        },
+    );
+    fixture.persist(
+        at(0),
+        browser_foreground(1, "chrome.exe", "Rust Docs - Google Chrome"),
+    );
+
+    let intervals = fixture.intervals();
+    let webs = fixture.web_intervals();
+    assert_eq!(webs.len(), 1);
+    assert_eq!(webs[0].stream_id, stream.id.get());
+    assert_eq!(webs[0].interval_id, intervals[0].id.expect("foreground id"));
+    assert_eq!(webs[0].start_utc_ms, 0);
+    assert_eq!(webs[0].end_utc_ms, None);
+    assert_eq!(webs[0].confirmed_utc_ms, Some(0));
+    assert_eq!(webs[0].end_reason, None);
+    assert_eq!(webs[0].tab_id, Some(91));
+    assert_eq!(webs[0].browser_window_id, Some(7));
+    assert_eq!(webs[0].audible, 1);
+    assert_eq!(webs[0].link_status, 1);
+    assert_eq!(webs[0].web_level, WebLevel::Full.code());
+    assert_eq!(webs[0].tab_title_status, enums::TitleStatus::Ok);
+    assert_eq!(webs[0].privacy_rule_id, None);
+    assert_eq!(webs[0].privacy_label_key, None);
+    assert_eq!(webs[0].privacy_label, None);
+    let first_domain_id = webs[0].domain_id.expect("domain id");
+    let first_title_id = webs[0].tab_title_id.expect("tab title id");
+    assert_eq!(
+        domains::table
+            .filter(domains::id.eq(first_domain_id))
+            .select(domains::host)
+            .first::<String>(&mut fixture.store.writer)
+            .expect("domain host"),
+        "docs.rs"
+    );
+    assert_eq!(
+        titles::table
+            .filter(titles::id.eq(first_title_id))
+            .select(titles::text)
+            .first::<String>(&mut fixture.store.writer)
+            .expect("tab title"),
+        "Rust Docs"
+    );
+    let web_version_after_open = data_day_versions::table
+        .filter(data_day_versions::source.eq(enums::DataSource::Web))
+        .filter(data_day_versions::utc_date.eq(0))
+        .select(data_day_versions::version)
+        .first::<i64>(&mut fixture.store.writer)
+        .expect("web day version after open");
+    assert!(web_version_after_open >= 1);
+
+    fixture.persist(at(59_000), CaptureEvent::Wake);
+    assert_eq!(fixture.intervals()[0].confirmed_utc_ms, Some(59_000));
+    assert_eq!(fixture.web_intervals()[0].confirmed_utc_ms, Some(59_000));
+    let web_version_after_checkpoint = data_day_versions::table
+        .filter(data_day_versions::source.eq(enums::DataSource::Web))
+        .filter(data_day_versions::utc_date.eq(0))
+        .select(data_day_versions::version)
+        .first::<i64>(&mut fixture.store.writer)
+        .expect("web day version after checkpoint");
+    assert!(web_version_after_checkpoint > web_version_after_open);
+
+    fixture.persist(
+        at(60_000),
+        CaptureEvent::BrowserState {
+            stream,
+            snapshot: BrowserSnapshot {
+                focus: BrowserFocus::Focused,
+                window_id: Some(7),
+                window_state: Some(BrowserWindowState::Normal),
+                tab: Some(BrowserTab {
+                    id: 91,
+                    domain: Some("docs.rs".into()),
+                    title: Title::readable("Rust Docs"),
+                    audible: BrowserAudible::Silent,
+                }),
+            },
+        },
+    );
+    fixture.persist(at(70_000), CaptureEvent::BrowserStreamClosed { stream });
+
+    let webs = fixture.web_intervals();
+    assert_eq!(webs.len(), 2);
+    assert_eq!(webs[0].end_utc_ms, Some(60_000));
+    assert_eq!(webs[0].confirmed_utc_ms, None);
+    assert_eq!(webs[0].end_reason, Some(WebEndReason::BrowserState.code()));
+    assert_eq!(webs[1].start_utc_ms, 60_000);
+    assert_eq!(webs[1].end_utc_ms, Some(70_000));
+    assert_eq!(webs[1].confirmed_utc_ms, None);
+    assert_eq!(webs[1].end_reason, Some(WebEndReason::Disconnected.code()));
+    assert_eq!(webs[1].audible, 0);
+    assert_eq!(webs[1].domain_id, Some(first_domain_id));
+    assert_eq!(webs[1].tab_title_id, Some(first_title_id));
+    assert_eq!(
+        domains::table
+            .count()
+            .get_result::<i64>(&mut fixture.store.writer)
+            .expect("domain dictionary count"),
+        1
+    );
+    let web_version_after_close = data_day_versions::table
+        .filter(data_day_versions::source.eq(enums::DataSource::Web))
+        .filter(data_day_versions::utc_date.eq(0))
+        .select(data_day_versions::version)
+        .first::<i64>(&mut fixture.store.writer)
+        .expect("web day version after close");
+    assert!(web_version_after_close > web_version_after_checkpoint);
+}
+
+#[test]
+fn web_interval_domain_only_retains_domain_without_persisting_tab_title() {
+    use crate::store::schema::domains;
+    let mut fixture = Fixture::new(at(0));
+    let stream = insert_chrome_stream(&mut fixture.store);
+    fixture.persist(
+        at(0),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    fixture.persist(
+        at(0),
+        CaptureEvent::SetTimedState(TimedState {
+            policy: TimedPolicy::Privacy(PrivacyMode::NoTitles),
+            started: at(0).utc,
+            until: at(600_000).utc,
+        }),
+    );
+    fixture.persist(
+        at(0),
+        CaptureEvent::BrowserState {
+            stream,
+            snapshot: BrowserSnapshot {
+                focus: BrowserFocus::Focused,
+                window_id: Some(2),
+                window_state: Some(BrowserWindowState::Normal),
+                tab: Some(BrowserTab {
+                    id: 55,
+                    domain: Some("bank.example".into()),
+                    title: Title::readable("Secret Account Balance"),
+                    audible: BrowserAudible::Silent,
+                }),
+            },
+        },
+    );
+    fixture.persist(
+        at(0),
+        browser_foreground(1, "chrome.exe", "Secret Account Balance - Google Chrome"),
+    );
+
+    let webs = fixture.web_intervals();
+    assert_eq!(webs.len(), 1);
+    assert_eq!(webs[0].web_level, WebLevel::DomainOnly.code());
+    assert_eq!(webs[0].tab_title_id, None);
+    assert_eq!(webs[0].tab_title_status, enums::TitleStatus::Redacted);
+    assert_eq!(
+        webs[0].privacy_rule_id.as_deref(),
+        Some("session.no_titles@1")
+    );
+    assert_eq!(
+        webs[0].privacy_label_key.as_deref(),
+        Some("privacy.label.title_hidden")
+    );
+    assert_eq!(webs[0].privacy_label, None);
+    assert_eq!(
+        domains::table
+            .filter(domains::id.eq(webs[0].domain_id.expect("domain id")))
+            .select(domains::host)
+            .first::<String>(&mut fixture.store.writer)
+            .expect("domain host"),
+        "bank.example"
+    );
+    assert_eq!(
+        titles::table
+            .count()
+            .get_result::<i64>(&mut fixture.store.writer)
+            .expect("no redacted title interned"),
+        0
+    );
+}
+
+#[test]
+fn crash_recovery_settles_open_web_interval_at_confirmation_and_bumps_web_day_versions() {
+    let mut fixture = Fixture::new(at(0));
+    let stream = insert_chrome_stream(&mut fixture.store);
+    fixture.persist(
+        at(0),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    fixture.persist(
+        at(0),
+        CaptureEvent::BrowserState {
+            stream,
+            snapshot: BrowserSnapshot {
+                focus: BrowserFocus::Focused,
+                window_id: Some(3),
+                window_state: Some(BrowserWindowState::Normal),
+                tab: Some(BrowserTab {
+                    id: 12,
+                    domain: Some("example.com".into()),
+                    title: Title::readable("Example"),
+                    audible: BrowserAudible::Silent,
+                }),
+            },
+        },
+    );
+    fixture.persist(
+        at(0),
+        browser_foreground(1, "chrome.exe", "Example - Google Chrome"),
+    );
+    fixture.persist(at(59_000), CaptureEvent::Wake);
+    assert_eq!(fixture.web_intervals()[0].confirmed_utc_ms, Some(59_000));
+
+    fixture.store.take_committed_versions();
+    let opened = Persistence::open(&mut fixture.store, metadata()).expect("recover web row");
+    assert_eq!(opened.startup.next_run, RunId::new(2));
+    let effects = fixture.store.take_committed_versions();
+    assert!(
+        effects
+            .facts
+            .iter()
+            .any(|fact| fact.key.source.0 == enums::DataSource::Web.code() && fact.key.day.0 == 0),
+        "crash recovery must bump web day versions"
+    );
+
+    let webs = fixture.web_intervals();
+    assert_eq!(webs.len(), 1);
+    assert_eq!(webs[0].end_utc_ms, Some(59_000));
+    assert_eq!(webs[0].confirmed_utc_ms, None);
+    assert_eq!(
+        webs[0].end_reason,
+        Some(WebEndReason::CrashRecovered.code())
+    );
+}
+
+#[test]
+fn settle_persisted_rows_on_gap_closes_open_web_interval_with_gap_reason() {
+    let mut fixture = Fixture::new(at(0));
+    let stream = insert_chrome_stream(&mut fixture.store);
+    fixture.persist(
+        at(0),
+        CaptureEvent::Session(SessionStatus::Ready(BTreeSet::new())),
+    );
+    fixture.persist(
+        at(0),
+        CaptureEvent::BrowserState {
+            stream,
+            snapshot: BrowserSnapshot {
+                focus: BrowserFocus::Focused,
+                window_id: Some(4),
+                window_state: Some(BrowserWindowState::Normal),
+                tab: Some(BrowserTab {
+                    id: 21,
+                    domain: Some("example.org".into()),
+                    title: Title::readable("Org Page"),
+                    audible: BrowserAudible::Silent,
+                }),
+            },
+        },
+    );
+    fixture.persist(
+        at(0),
+        browser_foreground(1, "chrome.exe", "Org Page - Google Chrome"),
+    );
+    fixture.persist(at(59_000), CaptureEvent::Wake);
+
+    let mut parts = fixture.step(at(60_000), foreground(2, "discarded switch"));
+    let batch = parts.batch.as_mut().expect("switch batch");
+    batch.writes = vec![
+        CaptureWrite::ClearDeadline {
+            owner: SchedulerKind::Midnight,
+        };
+        limits::WRITE_QUEUE_CAPACITY + 1
+    ];
+    let outcome = fixture.shell.accept(parts, at(60_000));
+    assert!(outcome.feedback.iter().any(|event| matches!(
+        event,
+        CaptureEvent::PersistenceGap {
+            reason: GapReason::WriteQueueOverload,
+            ..
+        }
+    )));
+    fixture.store.take_committed_versions();
+    let result = fixture
+        .shell
+        .flush(&mut fixture.store, at(60_000), CheckpointCollection::Skip);
+    assert!(result.failure().is_none(), "{:?}", result.failure());
+    let effects = fixture.store.take_committed_versions();
+    assert!(
+        effects
+            .facts
+            .iter()
+            .any(|fact| fact.key.source.0 == enums::DataSource::Web.code() && fact.key.day.0 == 0),
+        "gap settlement must bump web day versions"
+    );
+
+    let webs = fixture.web_intervals();
+    assert_eq!(webs.len(), 1);
+    assert_eq!(webs[0].end_utc_ms, Some(59_000));
+    assert_eq!(webs[0].confirmed_utc_ms, None);
+    assert_eq!(webs[0].end_reason, Some(WebEndReason::Gap.code()));
+    assert_eq!(
+        fixture.intervals()[0].end_reason,
+        Some(enums::IntervalEndReason::CaptureGap)
+    );
+}

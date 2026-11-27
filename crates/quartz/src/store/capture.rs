@@ -8,6 +8,7 @@ mod intervals;
 mod recovery;
 mod runs;
 mod timed;
+mod web;
 mod windows;
 pub(crate) use errors::{CaptureColumn, DecodeCaptureRowError, ExecuteCaptureBatchError};
 #[cfg(any(windows, test))]
@@ -25,7 +26,7 @@ use super::{
 use diesel::SqliteConnection;
 use errors::{RowContext, TimeColumns};
 use quartz_domain::{
-    capture::{CaptureWrite, RowId, RunId, SegmentId, TimeRange, WindowId, WriteBatch},
+    capture::{CaptureWrite, RowId, RunId, SegmentId, TimeRange, UtcInstant, WindowId, WriteBatch},
     facts::QueryRange,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -72,6 +73,7 @@ pub(crate) enum LogicalKey {
     Segment(SegmentId),
     Window(WindowId),
     Interval(RowId),
+    WebInterval(RowId),
     Availability(RowId),
 }
 impl std::fmt::Display for LogicalKey {
@@ -80,6 +82,7 @@ impl std::fmt::Display for LogicalKey {
             Self::Segment(id) => write!(formatter, "segment {}", id.get()),
             Self::Window(id) => write!(formatter, "window {}", id.get()),
             Self::Interval(id) => write!(formatter, "interval {}", id.get()),
+            Self::WebInterval(id) => write!(formatter, "web interval {}", id.get()),
             Self::Availability(id) => write!(formatter, "availability {}", id.get()),
         }
     }
@@ -103,6 +106,7 @@ struct RunKeys {
     closed_segments: BTreeSet<SegmentId>,
     windows: BTreeMap<WindowId, DbRowId>,
     intervals: BTreeMap<RowId, DbRowId>,
+    web_intervals: BTreeMap<RowId, DbRowId>,
     availability: BTreeMap<RowId, DbRowId>,
 }
 
@@ -166,8 +170,9 @@ impl<'connection> Capture<'connection> {
             CaptureWrite::CloseInterval { id, at, reason } => {
                 self.close_interval(run, *id, *at, *reason)
             }
-            CaptureWrite::OpenWebInterval(_) | CaptureWrite::CloseWebInterval { .. } => {
-                unreachable!("web rows are persisted in M5-B2b")
+            CaptureWrite::OpenWebInterval(row) => self.open_web_interval(run, row),
+            CaptureWrite::CloseWebInterval { id, at, reason } => {
+                self.close_web_interval(run, *id, *at, *reason)
             }
             CaptureWrite::OpenAvailability(row) => self.open_availability(run, row),
             CaptureWrite::CloseAvailability { id, at, reason } => {
@@ -190,20 +195,32 @@ impl<'connection> Capture<'connection> {
         range: TimeRange,
     ) -> Result<(), ExecuteCaptureBatchError> {
         let invalid_time = |source| ExecuteCaptureBatchError::InvalidationTime { source };
-        let start = i64::try_from(range.start.utc).map_err(invalid_time)?;
-        let end = i64::try_from(range.end.utc).map_err(invalid_time)?;
-        range
-            .end
-            .utc
-            .duration_since(range.start.utc)
-            .map_err(invalid_time)?;
         range
             .end
             .mono
             .duration_since(range.start.mono)
             .map_err(invalid_time)?;
+        self.bump_utc_days(source, range.start.utc, range.end.utc)
+    }
+    fn bump_utc_days(
+        &mut self,
+        source: DataSource,
+        start: UtcInstant,
+        end: UtcInstant,
+    ) -> Result<(), ExecuteCaptureBatchError> {
+        let invalid_time = |source| ExecuteCaptureBatchError::InvalidationTime { source };
+        let start_ms = i64::try_from(start).map_err(invalid_time)?;
+        let end_ms = i64::try_from(end).map_err(invalid_time)?;
+        end.duration_since(start).map_err(invalid_time)?;
         self.effects
-            .bump_days(self.connection, source, QueryRange { start, end })
+            .bump_days(
+                self.connection,
+                source,
+                QueryRange {
+                    start: start_ms,
+                    end: end_ms,
+                },
+            )
             .map_err(ExecuteCaptureBatchError::from)
     }
     fn run_keys(&mut self, run: RunId) -> &mut RunKeys {
@@ -235,6 +252,18 @@ impl<'connection> Capture<'connection> {
             ExecuteCaptureBatchError::MissingKey {
                 run,
                 key: LogicalKey::Interval(key),
+            },
+        )
+    }
+    fn web_interval(
+        &mut self,
+        run: RunId,
+        key: RowId,
+    ) -> Result<DbRowId, ExecuteCaptureBatchError> {
+        self.run_keys(run).web_intervals.get(&key).copied().ok_or(
+            ExecuteCaptureBatchError::MissingKey {
+                run,
+                key: LogicalKey::WebInterval(key),
             },
         )
     }

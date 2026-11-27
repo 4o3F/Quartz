@@ -14,15 +14,15 @@ use crate::store::capture::CaptureStartup;
 use crossbeam_channel::{Receiver, Sender, TrySendError, select_biased};
 use quartz_domain::{
     capture::{
-        CaptureCore, CaptureEffect, CaptureEvent, CaptureInput, CaptureParts, CaptureState,
-        CaptureStep, CaptureWrite, ClockChange, Deadline, MonoInstant, PolicyObservation,
-        RunEndReason, RunId, SchedulerKind, SessionStatus, StepCaptureError, StopChange,
-        StopReason, Timestamp,
+        BrowserAudible, BrowserFamily, BrowserFocus, BrowserSnapshot, BrowserStreamKey,
+        BrowserStreamRef, BrowserTab, BrowserWindowState, CaptureCore, CaptureEffect, CaptureEvent,
+        CaptureInput, CaptureParts, CaptureState, CaptureStep, CaptureWrite, ClockChange, Deadline,
+        MonoInstant, PolicyObservation, RunEndReason, RunId, SchedulerKind, SessionStatus,
+        StepCaptureError, StopChange, StopReason, Timestamp, Title,
     },
     rules::registry::SnapshotCell,
 };
 use std::{
-    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -73,17 +73,6 @@ enum CaptureWork {
     Observation(Observation),
     Feedback(Feedback),
 }
-/// Latest browser state retained per connected stream until M5-B2 adds linking.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RetainedBrowserState {
-    // Read in M5-B2 when linking browser state into `web_intervals`.
-    #[allow(dead_code)]
-    pub stream_id: crate::store::browser::BrowserStreamRowId,
-    #[allow(dead_code)]
-    pub at: Timestamp,
-    #[allow(dead_code)]
-    pub state: quartz_protocol::BrowserStateRequest,
-}
 
 pub(super) struct CaptureLoop {
     pub core: CaptureCore,
@@ -93,7 +82,6 @@ pub(super) struct CaptureLoop {
     pub observed: Receiver<Observation>,
     pub pending_control: Option<ObservedEvent>,
     pub discard_remaining: usize,
-    pub browser_states: BTreeMap<crate::ipc::browser::BrowserStreamKey, RetainedBrowserState>,
     pub replies: Receiver<Feedback>,
     pub stop: Receiver<Shutdown>,
     pub database: Sender<DatabaseCommand>,
@@ -231,13 +219,17 @@ impl CaptureLoop {
                 Observation::Event(event)
                     if matches!(
                         event.event,
-                        CaptureEvent::SetTimedState(_) | CaptureEvent::CancelTimedPolicy(_)
+                        CaptureEvent::SetTimedState(_)
+                            | CaptureEvent::CancelTimedPolicy(_)
+                            | CaptureEvent::BrowserStreamClosed { .. }
                     ) =>
                 {
                     self.pending_control = Some(event);
                 }
-                Observation::Browser(crate::ipc::browser::BrowserInput::StreamClosed(closed)) => {
-                    self.browser_states.remove(&closed.key);
+                Observation::Browser(
+                    input @ crate::ipc::browser::BrowserInput::StreamClosed(_),
+                ) => {
+                    self.pending_control = Some(browser_observation(input));
                 }
                 Observation::Event(_)
                 | Observation::Foreground(_)
@@ -274,31 +266,8 @@ impl CaptureLoop {
                     }
                 }
                 Observation::Browser(input) => {
-                    self.apply_browser_input(input);
-                    Ok(())
+                    self.step(browser_observation(input), Settlement::Deferred)
                 }
-            }
-        }
-    }
-    fn apply_browser_input(&mut self, input: crate::ipc::browser::BrowserInput) {
-        match input {
-            crate::ipc::browser::BrowserInput::State {
-                stream_id,
-                key,
-                at,
-                state,
-            } => {
-                self.browser_states.insert(
-                    key,
-                    RetainedBrowserState {
-                        stream_id,
-                        at,
-                        state,
-                    },
-                );
-            }
-            crate::ipc::browser::BrowserInput::StreamClosed(closed) => {
-                self.browser_states.remove(&closed.key);
             }
         }
     }
@@ -340,15 +309,17 @@ impl CaptureLoop {
                 Ok(Observation::Event(event))
                     if matches!(
                         event.event,
-                        CaptureEvent::SetTimedState(_) | CaptureEvent::CancelTimedPolicy(_)
+                        CaptureEvent::SetTimedState(_)
+                            | CaptureEvent::CancelTimedPolicy(_)
+                            | CaptureEvent::BrowserStreamClosed { .. }
                     ) =>
                 {
                     self.pending_control = Some(event);
                 }
-                Ok(Observation::Browser(crate::ipc::browser::BrowserInput::StreamClosed(
-                    closed,
-                ))) => {
-                    self.browser_states.remove(&closed.key);
+                Ok(Observation::Browser(
+                    input @ crate::ipc::browser::BrowserInput::StreamClosed(_),
+                )) => {
+                    self.pending_control = Some(browser_observation(input));
                 }
                 Ok(_) | Err(_) => {}
             }
@@ -539,6 +510,84 @@ impl CaptureLoop {
     }
 }
 
+fn browser_observation(input: crate::ipc::browser::BrowserInput) -> ObservedEvent {
+    match input {
+        crate::ipc::browser::BrowserInput::State {
+            stream_id,
+            key,
+            at,
+            state,
+        } => ObservedEvent {
+            at,
+            event: CaptureEvent::BrowserState {
+                stream: browser_stream_ref(stream_id, key.browser),
+                snapshot: browser_snapshot(state),
+            },
+        },
+        crate::ipc::browser::BrowserInput::StreamClosed(closed) => ObservedEvent {
+            at: closed.at,
+            event: CaptureEvent::BrowserStreamClosed {
+                stream: browser_stream_ref(closed.stream_id, closed.key.browser),
+            },
+        },
+    }
+}
+
+fn browser_stream_ref(
+    stream_id: crate::store::browser::BrowserStreamRowId,
+    kind: quartz_protocol::BrowserKind,
+) -> BrowserStreamRef {
+    BrowserStreamRef {
+        id: BrowserStreamKey::new(stream_id.get()),
+        family: browser_family(kind),
+    }
+}
+
+const fn browser_family(kind: quartz_protocol::BrowserKind) -> BrowserFamily {
+    match kind {
+        quartz_protocol::BrowserKind::Chrome => BrowserFamily::Chrome,
+        quartz_protocol::BrowserKind::Edge => BrowserFamily::Edge,
+        quartz_protocol::BrowserKind::Firefox => BrowserFamily::Firefox,
+    }
+}
+
+fn browser_snapshot(state: quartz_protocol::BrowserStateRequest) -> BrowserSnapshot {
+    let focus = match state.focused {
+        quartz_protocol::BrowserFocus::Focused => BrowserFocus::Focused,
+        quartz_protocol::BrowserFocus::Unfocused => BrowserFocus::Unfocused,
+    };
+    let window_id = state.window.map(|window| window.id);
+    let window_state = state.window.map(|window| match window.state {
+        quartz_protocol::BrowserWindowState::Normal => BrowserWindowState::Normal,
+        quartz_protocol::BrowserWindowState::Maximized => BrowserWindowState::Maximized,
+        quartz_protocol::BrowserWindowState::Minimized => BrowserWindowState::Minimized,
+        quartz_protocol::BrowserWindowState::Fullscreen => BrowserWindowState::Fullscreen,
+    });
+    let tab = state.tab.map(|tab| {
+        let title = match tab.title_status {
+            quartz_protocol::BrowserTitleStatus::Truncated => Title::truncated(&tab.title),
+            quartz_protocol::BrowserTitleStatus::Ok
+            | quartz_protocol::BrowserTitleStatus::Empty => Title::readable(&tab.title),
+        };
+        let audible = match tab.audible {
+            quartz_protocol::BrowserAudible::Audible => BrowserAudible::Audible,
+            quartz_protocol::BrowserAudible::Silent => BrowserAudible::Silent,
+        };
+        BrowserTab {
+            id: tab.id,
+            domain: tab.domain,
+            title,
+            audible,
+        }
+    });
+    BrowserSnapshot {
+        focus,
+        window_id,
+        window_state,
+        tab,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,7 +670,6 @@ mod tests {
         let mut capture = CaptureLoop {
             pending_control: None,
             discard_remaining: 0,
-            browser_states: BTreeMap::new(),
             core: started.core,
             run,
             at: at(10),
@@ -731,7 +779,6 @@ mod tests {
         let mut capture = CaptureLoop {
             pending_control: None,
             discard_remaining: 0,
-            browser_states: BTreeMap::new(),
             core: started.core,
             run,
             at: at(0),
@@ -919,7 +966,6 @@ mod tests {
             observed,
             pending_control: None,
             discard_remaining: 0,
-            browser_states: BTreeMap::new(),
             replies,
             stop,
             database,
@@ -1013,7 +1059,6 @@ mod tests {
             observed,
             pending_control: None,
             discard_remaining: 0,
-            browser_states: BTreeMap::new(),
             replies,
             stop,
             database,
@@ -1090,13 +1135,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_state_retains_latest_per_stream_and_drops_on_stream_closed() {
-        use crate::ipc::browser::{BrowserInput, BrowserStreamClosed, BrowserStreamKey};
-        use crate::store::browser::BrowserStreamRowId;
-        use quartz_protocol::{
-            BrowserAudible, BrowserFocus, BrowserKind, BrowserStateRequest, BrowserTab,
-            BrowserTitleStatus, BrowserWindow, BrowserWindowState, Uuid,
+    fn browser_state_and_stream_closed_step_core_in_arrival_order() {
+        use crate::ipc::browser::{
+            BrowserInput, BrowserStreamClosed, BrowserStreamKey as WireStreamKey,
         };
+        use crate::store::browser::BrowserStreamRowId;
+        use quartz_protocol as wire;
 
         let run = RunId::new(1);
         let started = CaptureCore::start(run, at(0)).expect("core");
@@ -1108,6 +1152,7 @@ mod tests {
         let (_shutdown, stop) = bounded(CONTROL_CAPACITY);
         let (database, _writes) = bounded(CONTROL_CAPACITY);
         let channel = crate::core::app::MainChannel::new(limits::MAIN_QUEUE_CAPACITY);
+        let _commands = channel.receiver;
         let mut capture = CaptureLoop {
             core: started.core,
             run,
@@ -1116,7 +1161,6 @@ mod tests {
             observed,
             pending_control: None,
             discard_remaining: 0,
-            browser_states: BTreeMap::new(),
             replies,
             stop,
             database,
@@ -1128,71 +1172,143 @@ mod tests {
             overloaded: Arc::new(AtomicBool::new(false)),
             clock: Arc::new(TestClock(at(10))),
         };
-        let key = BrowserStreamKey {
-            browser: BrowserKind::Chrome,
+        let key = WireStreamKey {
+            browser: wire::BrowserKind::Chrome,
             profile_instance_id: "a286737e-3855-43cb-98ee-c366344372d0"
-                .parse::<Uuid>()
+                .parse::<wire::Uuid>()
                 .expect("uuid"),
         };
         let stream_id = BrowserStreamRowId::new(7);
-        let first_state = BrowserStateRequest {
-            focused: BrowserFocus::Focused,
-            window: Some(BrowserWindow {
-                id: 1,
-                state: BrowserWindowState::Normal,
-            }),
-            tab: Some(BrowserTab {
-                id: 10,
-                domain: Some("docs.rs".to_owned()),
-                title: "First".to_owned(),
-                title_status: BrowserTitleStatus::Ok,
-                audible: BrowserAudible::Silent,
-            }),
-        };
-        let second_state = BrowserStateRequest {
-            focused: BrowserFocus::Unfocused,
-            window: None,
-            tab: None,
-        };
         let mut resolver = super::super::tests::FakeResolver;
+
+        capture
+            .observe(
+                Observation::Event(ObservedEvent {
+                    at: at(0),
+                    event: CaptureEvent::Session(SessionStatus::Ready(Default::default())),
+                }),
+                &mut resolver,
+            )
+            .expect("session ready");
+
         capture
             .observe(
                 Observation::Browser(BrowserInput::State {
                     stream_id,
                     key: key.clone(),
                     at: at(10),
-                    state: first_state,
+                    state: wire::BrowserStateRequest {
+                        focused: wire::BrowserFocus::Focused,
+                        window: Some(wire::BrowserWindow {
+                            id: 1,
+                            state: wire::BrowserWindowState::Normal,
+                        }),
+                        tab: Some(wire::BrowserTab {
+                            id: 10,
+                            domain: Some("other.example".to_owned()),
+                            title: "Unrelated Tab".to_owned(),
+                            title_status: wire::BrowserTitleStatus::Ok,
+                            audible: wire::BrowserAudible::Silent,
+                        }),
+                    },
                 }),
                 &mut resolver,
             )
-            .expect("first browser state");
+            .expect("initial browser state");
+        assert_eq!(capture.at, at(10));
+
+        capture
+            .observe(
+                Observation::Event(ObservedEvent {
+                    at: at(20),
+                    event: CaptureEvent::Foreground {
+                        source: ObservationSource::Review,
+                        foreground: Foreground::Window {
+                            facts: Box::new(WindowFacts {
+                                handle: WindowHandle::new(1),
+                                process: ProcessId::new(42),
+                                process_created_utc: Some(at(0).utc),
+                                class: "Chrome_WidgetWin_1".into(),
+                                app: AppIdentity::Exe(
+                                    "c:\\program files\\google\\chrome\\application\\chrome.exe"
+                                        .into(),
+                                ),
+                                metadata_source: MetadataSource::Process,
+                                exe_name: Some("chrome.exe".into()),
+                                display_name: "Google Chrome".into(),
+                                title: Title::readable("Rust Docs - Google Chrome"),
+                            }),
+                            privacy: PrivacyContext::default(),
+                        },
+                    },
+                }),
+                &mut resolver,
+            )
+            .expect("chrome foreground");
+        assert_eq!(
+            capture
+                .core
+                .foreground_view()
+                .expect("tracking chrome")
+                .title,
+            None,
+            "connected unlinked browser hides foreground title"
+        );
+
+        let matching_state = wire::BrowserStateRequest {
+            focused: wire::BrowserFocus::Focused,
+            window: Some(wire::BrowserWindow {
+                id: 1,
+                state: wire::BrowserWindowState::Maximized,
+            }),
+            tab: Some(wire::BrowserTab {
+                id: 11,
+                domain: Some("docs.rs".to_owned()),
+                title: "Rust Docs".to_owned(),
+                title_status: wire::BrowserTitleStatus::Truncated,
+                audible: wire::BrowserAudible::Audible,
+            }),
+        };
+        let converted = browser_snapshot(matching_state.clone());
+        let tab = converted.tab.expect("converted tab");
+        assert_eq!(tab.title.status(), TitleStatus::Truncated);
+        assert_eq!(tab.title.text(), Some("Rust Docs"));
+        assert_eq!(tab.audible, BrowserAudible::Audible);
+        assert_eq!(converted.window_id, Some(1));
+        assert_eq!(converted.window_state, Some(BrowserWindowState::Maximized));
+
         capture
             .observe(
                 Observation::Browser(BrowserInput::State {
                     stream_id,
                     key: key.clone(),
-                    at: at(20),
-                    state: second_state.clone(),
+                    at: at(30),
+                    state: matching_state,
                 }),
                 &mut resolver,
             )
-            .expect("second browser state replaces first");
-        assert_eq!(capture.browser_states.len(), 1);
-        let retained = capture.browser_states.get(&key).expect("retained stream");
-        assert_eq!(retained.stream_id, stream_id);
-        assert_eq!(retained.at, at(20));
-        assert_eq!(retained.state, second_state);
+            .expect("matching browser state links foreground");
+        assert_eq!(capture.at, at(30));
+        assert_eq!(
+            capture
+                .core
+                .foreground_view()
+                .expect("linked tracking")
+                .title
+                .as_deref(),
+            Some("Rust Docs - Google Chrome")
+        );
 
         capture
             .observe(
                 Observation::Browser(BrowserInput::StreamClosed(BrowserStreamClosed {
                     stream_id,
-                    key: key.clone(),
-                    at: at(30),
+                    key,
+                    at: at(40),
                 })),
                 &mut resolver,
             )
-            .expect("stream closed drops retained state");
-        assert!(capture.browser_states.is_empty());
+            .expect("stream closed steps core");
+        assert_eq!(capture.at, at(40));
     }
 }
