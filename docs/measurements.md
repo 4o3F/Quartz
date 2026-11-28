@@ -1036,4 +1036,5 @@ cargo test --workspace --all-features --target-dir target/windows
 - 核心启动即为 Chrome、Edge、Firefox 写入 HKCU 键与两份 manifest（路径指向同目录 `quartz-host.exe`，Chromium `allowed_origins` 为固定 ID），无需手动注册；扩展角标为空（已连接）。
 - 扩展连接后 Firefox 前台 51.7 s，其中 49.3 s 关联到网页行（**linked 覆盖率 95%**）；其余 2.4 s 为每次切换标签后、扩展消息到达前的 `builtin.web_unlinked@1` 片段（3–1100 ms，标题隐藏，时长照常）。连接前的 76 s 未关联（预期）。
 - 网页行 18 条，全部 `web_level = full`、带域名与标签标题；核心日志无 WARN / ERROR。
-- 未测：无痕窗口、Chrome / Edge、多 profile（单 profile 时无歧义）。Firefox 临时加载的扩展在浏览器重启后失效，长期使用需经 AMO 签名（未做）。
+- 无痕窗口：扩展不进入无痕窗口（`incognito: not_allowed`），切到无痕窗口时 stream 报告未聚焦，前台片段按 `builtin.web_unlinked@1` 隐藏标题（如 3.4 s、2.0 s 两段），`titles` 中无任何“隐私浏览 / Private Browsing”标题，无对应网页行。
+- 未测：Chrome / Edge、多 profile（单 profile 时无歧义）。Firefox 临时加载的扩展在浏览器重启后失效，长期使用需经 AMO 签名（未做）。
