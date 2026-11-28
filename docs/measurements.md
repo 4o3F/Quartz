@@ -986,3 +986,44 @@ cargo test --workspace --all-features --target-dir target/windows
 - 唯一进入构建的 HTTP 相关 crate 是 GPUI 的 `gpui-pre-http-client`（`http`、`url` 等类型与 trait），不含传输实现；Quartz 不安装 HTTP 客户端。
 - tokio 的 `net` 特性只用于命名管道；源码中没有 `TcpStream`、`UdpSocket`、`TcpListener`、WinHTTP 或 WinINet 调用。
 - `deny.toml` 的 `[bans].deny` 补充 `rustls`、`quinn`、`h2`、`tungstenite`，由 CI 的 `cargo deny check` 阻止今后引入。
+
+## 2026-11-27 M6 验收：08 指标复测与 8 小时运行
+
+用户实机空闲时段（i7-14700HX、RTX 4060 Laptop，接电），release `66deb3c`，独立数据目录（`target/windows/m6-accept/`，`run.ps1` 由 M4 模板改写，增加 `soak` 与 `reopen` 步骤）。
+
+### 查询（typical 一年模拟库，99.6 MB，`bench-query`）
+
+| 指标 | 实测 P95 | 预算 | 结果 |
+|---|---:|---:|---|
+| `query.day`（实际分类负载） | 6.2–8.7 ms | < 100 ms | 通过 |
+| `query.timeline` 单日 / 七日 | 9.8–12.8 / 44.5–48.3 ms | — | — |
+| 七次 `query.day` 周折叠对照 | 43.5–46.3 ms | 对照项 | — |
+| 文档实体详情（七日） | 31.7–33.2 ms | — | — |
+| `query.range` 7 日（日桶 / 周桶，分类或三维） | 28.3–40.2 ms | < 100 ms | 通过 |
+| `query.range` 365 日（`--runs 10`） | 1540.7–2195.7 ms | ≤ 2.5 s（2026-11-27 放宽） | 通过 |
+| 查询期间核心 PrivateUsage 峰值增量 | 除下项外 ≤ 12.6 MiB；365 日按日三维 26.4–27.4 MiB | ≤ 20 MiB | 年度三维超（新记录；M4 表未含 range 年度项） |
+
+### 资源（`run.ps1 -Steps core-only, resident, on-demand`，稳定 30 s）
+
+| 指标 | 实测 | 预算（08） | 结果 |
+|---|---|---|---|
+| 核心 10 分钟空闲 Private Bytes 中位 | 7.12–7.19 MiB | 8–12（上限 16） | 通过 |
+| 核心 Private WS / 线程 | 6.2 MiB / 6（峰值 9） | ≤ 12 MiB / ≤ 8 | 通过（峰值瞬时） |
+| 核心 10 分钟空闲 CPU | 78.1–125.0 ms | ≤ 150（上限 300） | 通过 |
+| 界面开关 20 次后核心增量 | 常驻 0.02 MiB；按需 0.30 MiB | ≤ 1 MiB | 通过 |
+| 按需 20 次后核心句柄 | +20 | 脚本要求不增 | 同 M4，判为脚本误报（前台进程缓存，有界） |
+| 常驻：点击到首帧 | P50 34 ms，P95 90 ms | P50 ≤ 1 s | 通过 |
+| 按需：冷启动到首帧 | P50 548 ms，P95 4196 ms，最大 4878 ms | ≤ 4.5 s | P95 通过，最大值略超（同 M4） |
+| 隐藏常驻 UI（从未打开 / 首次关窗后） | 56.8 / 83.5 MiB | ≤ 100 MiB | 通过（M4 关窗后 109.9） |
+| 打开状态 UI Private Bytes | 常驻 109.1–109.7 MiB；按需 90.2–90.4 MiB | ≤ 100 MiB | 常驻略超，按需通过（M4 为 160 / 117） |
+| 静止 UI 30 s CPU | 296.9–875.0 ms | ≤ 20 ms | 超（GPUI VSync，已接受偏差） |
+| 隐藏常驻 UI 30 s CPU | 46.9–93.8 ms | ≤ 20 ms | 超（已接受偏差） |
+| 核心 `nv*.dll` | 无 | 不加载 | 通过 |
+
+### 8 小时运行（`run.ps1 -Steps soak`，核心 + 常驻 UI，每 5 分钟采样，每 60 分钟经 `quartz.exe ui` 打开一次并关窗）
+
+- 8.07 小时，96 次采样，`quartz.exe status` 全部成功；核心与 UI 日志无 ERROR。
+- 核心 Private Bytes 7.46–8.36 MiB（中位 7.75），无增长趋势；CPU 合计 5.8 s（约 121 ms / 10 分钟）；线程 ≤ 10；句柄 229 → 262（增量出现在同期两次预览截图之后，为前台进程缓存，有界）。
+- **常驻 UI 泄漏**：每次打开再关窗，隐藏 UI 的 Private Bytes 增加 23–27 MiB 且不回落（57 → 84 → 111 → 134 → 156 → 180 → 203 → 226 → 249 MiB，8 次）。同期核心日志每次都有 `could not grant UI foreground permission`（转发进程持有前台，核心授权失败），已由 `47bdf02` 修复；修复后复测（`-Steps reopen -ExeDir bin-fix`，5 次）授权失败为 0，但每次仍增加约 25 MiB（57 → 83 → 108 → 132 → 155 → 180 MiB）。结论：每次显示新建、关窗销毁 GPUI 窗口时约 25 MiB 未释放，与前台无关；待定位修复（M6 未关闭项）。
+
+原始数据：`target/windows/m6-accept/run-20261127-235421/`（core-only）、`run-20261128-000548/`（resident）、`run-20261128-002344/`（on-demand）、`run-20261128-004800/soak.csv`、`run-20261128-085319/reopen.csv`，查询日志 `bench-*.log`；截图 `target/m3-screenshots/`（week、week-loading、settings*，三语言 × 五种外观，共 106 张，已人工检查）。

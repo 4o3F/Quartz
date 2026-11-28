@@ -415,8 +415,16 @@ export class Windows {
           continue;
         }
         let keep = false;
+        let image: string;
         try {
-          keep = this.imagePath(process).toLowerCase() === exe.toLowerCase() &&
+          image = this.imagePath(process);
+        } catch {
+          // An exiting or foreign-session process may deny the image query.
+          this.closeProcess(process);
+          continue;
+        }
+        try {
+          keep = image.toLowerCase() === exe.toLowerCase() &&
             (parent === undefined ||
               (entry.id !== parent && this.parentId(process) === parent));
           if (keep) result.push(process);
