@@ -37,11 +37,11 @@ use crate::{
     layout::WindowClass,
     link::{LoadDataError, LoadDataErrorCode, RequestCoreError},
     model::{
-        BrowserHostAction, BrowserHostDisplayStatus, BrowserHostMutation, BrowserHostsLoadState,
-        CompactNotice, CoreStatusLoadState, DataInfoLoadState, DataInfoView, DataOperation,
-        DeleteNotice, DeleteRangeConfirm, GeneralSettingChange, MAX_DELETE_RANGE_DAYS,
-        RetentionConfirm, RowVisibility, SaveActivity, SettingsEffect, SettingsLoadState,
-        SettingsValues, ValidateDeleteRangeError, browser_host_presentation, max_deletable_date,
+        BrowserHostDisplayStatus, BrowserHostsLoadState, CompactNotice, CoreStatusLoadState,
+        DataInfoLoadState, DataInfoView, DataOperation, DeleteNotice, DeleteRangeConfirm,
+        GeneralSettingChange, MAX_DELETE_RANGE_DAYS, RetentionConfirm, RowVisibility, SaveActivity,
+        SettingsEffect, SettingsLoadState, SettingsValues, ValidateDeleteRangeError,
+        browser_host_presentation, max_deletable_date,
     },
 };
 
@@ -248,26 +248,10 @@ const fn browser_name_msg(browser: wire::BrowserKind) -> Msg {
 
 const fn browser_status_msg(status: BrowserHostDisplayStatus) -> Msg {
     match status {
-        BrowserHostDisplayStatus::NotRegistered => Msg::SettingsBrowserStatusNotRegistered,
-        BrowserHostDisplayStatus::RegisteredDisconnected => Msg::SettingsBrowserStatusRegistered,
         BrowserHostDisplayStatus::Connected => Msg::SettingsBrowserStatusConnected,
-        BrowserHostDisplayStatus::NeedsReenable => Msg::SettingsBrowserStatusNeedsReenable,
-    }
-}
-
-const fn browser_action_msg(action: BrowserHostAction) -> Msg {
-    match action {
-        BrowserHostAction::Enable => Msg::SettingsBrowserActionEnable,
-        BrowserHostAction::Disable => Msg::SettingsBrowserActionDisable,
-        BrowserHostAction::Reenable => Msg::SettingsBrowserActionReenable,
-    }
-}
-
-const fn browser_button_id(browser: wire::BrowserKind) -> &'static str {
-    match browser {
-        wire::BrowserKind::Chrome => "settings-browser-chrome",
-        wire::BrowserKind::Edge => "settings-browser-edge",
-        wire::BrowserKind::Firefox => "settings-browser-firefox",
+        BrowserHostDisplayStatus::NotConnected => Msg::SettingsBrowserStatusNotConnected,
+        BrowserHostDisplayStatus::NeedsRepair => Msg::SettingsBrowserStatusNeedsRepair,
+        BrowserHostDisplayStatus::HostMissing => Msg::SettingsBrowserStatusHostMissing,
     }
 }
 
@@ -305,12 +289,6 @@ impl AppShell {
 
     fn retry_browser_hosts(&mut self, cx: &mut Context<Self>) {
         let effect = self.settings.load_browser_hosts();
-        self.run_settings_effect(effect, cx);
-        cx.notify();
-    }
-
-    fn trigger_browser_host_action(&mut self, browser: wire::BrowserKind, cx: &mut Context<Self>) {
-        let effect = self.settings.trigger_browser_host_action(browser);
         self.run_settings_effect(effect, cx);
         cx.notify();
     }
@@ -593,48 +571,6 @@ impl AppShell {
                     let result = link.get_browser_hosts().await;
                     let _ = this.update(cx, |this, cx| {
                         this.settings.apply_browser_hosts_loaded(generation, result);
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            SettingsEffect::EnableBrowserHost {
-                browser,
-                generation,
-            } => {
-                let Some(link) = self.live.as_ref().map(|live| live.link.clone()) else {
-                    self.settings.apply_browser_host_action_finished(
-                        generation,
-                        Err(LoadDataError::from(RequestCoreError::Disconnected)),
-                    );
-                    return;
-                };
-                cx.spawn(async move |this, cx| {
-                    let result = link.enable_browser_host(browser).await;
-                    let _ = this.update(cx, |this, cx| {
-                        this.settings
-                            .apply_browser_host_action_finished(generation, result);
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            SettingsEffect::DisableBrowserHost {
-                browser,
-                generation,
-            } => {
-                let Some(link) = self.live.as_ref().map(|live| live.link.clone()) else {
-                    self.settings.apply_browser_host_action_finished(
-                        generation,
-                        Err(LoadDataError::from(RequestCoreError::Disconnected)),
-                    );
-                    return;
-                };
-                cx.spawn(async move |this, cx| {
-                    let result = link.disable_browser_host(browser).await;
-                    let _ = this.update(cx, |this, cx| {
-                        this.settings
-                            .apply_browser_host_action_finished(generation, result);
                         cx.notify();
                     });
                 })
@@ -1973,7 +1909,7 @@ impl AppShell {
                 BROWSER_SKELETON_ROW_COUNT,
             ),
             BrowserHostsLoadState::Failed(error) => self.render_browser_failed_card(ui, error, cx),
-            BrowserHostsLoadState::Ready(hosts) => self.render_browser_ready_card(ui, hosts, cx),
+            BrowserHostsLoadState::Ready(hosts) => self.render_browser_ready_card(ui, hosts),
         }
     }
 
@@ -2056,102 +1992,53 @@ impl AppShell {
         &self,
         ui: &Widgets<'_>,
         hosts: &[wire::BrowserHostEntry],
-        cx: &Context<Self>,
     ) -> AnyElement {
         let space = &ui.metrics.space;
         let palette = ui.palette;
-        let mutation = self.settings.browser_host_mutation();
-
-        let inline_error = self.settings.browser_hosts_error().map(|error| {
-            let msg = if error.code()
-                == LoadDataErrorCode::Protocol(wire::ErrorKind::HostExecutableMissing)
-            {
-                Msg::SettingsBrowserErrorHostMissing
-            } else {
-                Msg::SettingsBrowserErrorGeneric
-            };
-            self.render_inline_error(ui, msg, error)
-        });
 
         let rows = hosts.iter().enumerate().map(|(index, &entry)| {
             let presentation = browser_host_presentation(entry);
-            let browser = presentation.browser;
             let dot_color = match presentation.status {
                 BrowserHostDisplayStatus::Connected => palette.status_success,
-                BrowserHostDisplayStatus::NeedsReenable => palette.status_caution,
-                BrowserHostDisplayStatus::NotRegistered
-                | BrowserHostDisplayStatus::RegisteredDisconnected => palette.status_neutral,
+                BrowserHostDisplayStatus::NotConnected => palette.status_neutral,
+                BrowserHostDisplayStatus::NeedsRepair => palette.status_caution,
+                BrowserHostDisplayStatus::HostMissing => palette.status_critical,
             };
             let status_text = self.formatter.text(browser_status_msg(presentation.status));
-            let action_label = self.formatter.text(browser_action_msg(presentation.action));
-            let id = browser_button_id(browser);
-            let control: AnyElement = match mutation {
-                BrowserHostMutation::Updating(active) if active == browser => self
-                    .busy_button(
-                        ui,
-                        id,
-                        Density::Standard,
-                        self.formatter.text(Msg::SettingsBrowserActionWorking),
-                    )
-                    .into_any_element(),
-                BrowserHostMutation::Updating(_) => ui
-                    .disabled_button(id, Density::Standard, ButtonContent::Label(action_label))
-                    .into_any_element(),
-                BrowserHostMutation::Idle => ui
-                    .button(id, Density::Standard, ButtonContent::Label(action_label))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.trigger_browser_host_action(browser, cx);
-                    }))
-                    .into_any_element(),
-            };
 
-            let mut row = div()
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_x(space.l)
-                .gap_y(space.xs)
-                .py(space.m);
+            let mut row = div().flex().flex_col().gap(space.xxs).py(space.m);
             if index > 0 {
                 row = row.border_t_1().border_color(palette.stroke_divider);
             }
             row.child(
                 div()
+                    .ramp(ui, Ramp::Body)
+                    .text_color(palette.text_primary)
+                    .child(self.formatter.text(browser_name_msg(presentation.browser))),
+            )
+            .child(
+                div()
                     .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .gap(space.xxs)
+                    .flex_row()
+                    .items_center()
+                    .gap(space.s)
                     .child(
                         div()
-                            .ramp(ui, Ramp::Body)
-                            .text_color(palette.text_primary)
-                            .child(self.formatter.text(browser_name_msg(browser))),
+                            .size(px(STATUS_DOT_SIZE))
+                            .rounded_full()
+                            .flex_shrink_0()
+                            .bg(dot_color),
                     )
                     .child(
                         div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(space.s)
-                            .child(
-                                div()
-                                    .size(px(STATUS_DOT_SIZE))
-                                    .rounded_full()
-                                    .flex_shrink_0()
-                                    .bg(dot_color),
-                            )
-                            .child(
-                                div()
-                                    .ramp(ui, Ramp::Caption)
-                                    .text_color(palette.text_secondary)
-                                    .child(status_text),
-                            ),
+                            .flex_1()
+                            .min_w(px(0.))
+                            .whitespace_normal()
+                            .ramp(ui, Ramp::Caption)
+                            .text_color(palette.text_secondary)
+                            .child(status_text),
                     ),
             )
-            .child(div().flex_shrink_0().child(control))
         });
 
         let hint = div()
@@ -2174,7 +2061,6 @@ impl AppShell {
                     .text_color(palette.text_primary)
                     .child(self.formatter.text(Msg::SettingsGroupBrowser)),
             )
-            .children(inline_error)
             .child(div().flex().flex_col().w_full().children(rows).child(hint))
             .into_any_element()
     }

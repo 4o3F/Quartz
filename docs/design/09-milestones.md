@@ -106,7 +106,7 @@
 **交付**
 
 - Chrome/Edge 扩展、Firefox 扩展（05 第 1 节）。
-- `quartz-host.exe` 的 Native Messaging 转发与注册（05 第 2 节），设置页的浏览器分组。
+- `quartz-host.exe` 的 Native Messaging 转发与自动注册（核心启动时）（05 第 2 节），设置页的浏览器分组（仅状态展示）。
 - 核心的上下文关联与求交（05 第 3 节）。
 - 浏览器隐私以扩展为准：有已连接 stream 时未关联窗口隐藏标题、关联后切段恢复，未接入时由 `builtin.browser_private` 标题模式兜底（05 第 3.4 节、06 第 3.4 节）。
 - 扩展 alarm 重连；开放网页行加入 capture 的统一确认点与崩溃恢复，与前台区间同一事务结算。
@@ -118,7 +118,7 @@
 - 多窗口、多 profile 时的 `linked` 覆盖率有实测数据。
 - 无痕窗口的标题不出现在数据库、日志、推送和托盘中。
 
-**进展（2026-11-27）**：代码部分全部完成——协议与 `quartz-host.exe` 转发、核心浏览器连接（d665636），关联、隐私与网页行描述（66deb3c），网页行持久化、确认点与崩溃恢复（0641ef2），Chrome/Edge/Firefox 扩展与打包（ee8320f，Chromium 扩展 ID `hmhnlfjafbcngnjgafhphcmljgldbakm`），`browser_hosts.*` 注册与设置页浏览器分组（71df9b7）。范围补充：`query.day` 增加按域名的网站时长排行并在今天页显示（2a8a878）。待验收：真实浏览器安装扩展、注册、多窗口 / 多 profile 的 `linked` 覆盖率实测与无痕检查，需要用户配合。
+**进展（2026-11-27）**：代码部分全部完成——协议与 `quartz-host.exe` 转发、核心浏览器连接（d665636），关联、隐私与网页行描述（66deb3c），网页行持久化、确认点与崩溃恢复（0641ef2），Chrome/Edge/Firefox 扩展与打包（ee8320f，Chromium 扩展 ID `hmhnlfjafbcngnjgafhphcmljgldbakm`），`browser_hosts.*` 注册与设置页浏览器分组（71df9b7）。范围补充：`query.day` 增加按域名的网站时长排行并在今天页显示（2a8a878）。2026-11-27 按用户要求改为核心启动时自动注册（同 1Password），设置页只显示状态。Firefox 实测通过：linked 覆盖率 95%（[measurements](../measurements.md) “M5 验收”）。待补：无痕窗口、Chrome / Edge 与多 profile 实测，Firefox 扩展签名。
 
 ## M6 完善与发布
 

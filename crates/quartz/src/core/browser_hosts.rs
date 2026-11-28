@@ -37,7 +37,7 @@ pub(crate) const CHROMIUM_MANIFEST_FILE: &str = "dev.4o3f.quartz.chrome.json";
 /// Manifest file name used by Firefox under `native-hosts/`.
 pub(crate) const FIREFOX_MANIFEST_FILE: &str = "dev.4o3f.quartz.firefox.json";
 
-/// Fixed order of browsers returned in `browser_hosts.*` responses.
+/// Fixed order of browsers returned in `browser_hosts.status` responses.
 pub(crate) const ALL_BROWSERS: [BrowserKind; 3] =
     [BrowserKind::Chrome, BrowserKind::Edge, BrowserKind::Firefox];
 
@@ -93,8 +93,6 @@ pub(crate) enum ManageBrowserHostsError {
     EncodeHostPath,
     #[snafu(display("browser host manifest path is not valid UTF-8"))]
     EncodeManifestPath,
-    #[snafu(display("native messaging host executable not found at {}", path.display()))]
-    MissingHostExecutable { path: PathBuf },
     #[snafu(display("could not serialize native messaging host manifest"))]
     SerializeManifest { source: serde_json::Error },
     #[snafu(display("could not create native host manifest directory {}", path.display()))]
@@ -112,11 +110,6 @@ pub(crate) enum ManageBrowserHostsError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[snafu(display("could not remove native host manifest {}", path.display()))]
-    RemoveManifestFile {
-        path: PathBuf,
-        source: std::io::Error,
-    },
     #[snafu(display("could not read native host registry key for {browser:?}"))]
     ReadHostRegistry {
         browser: BrowserKind,
@@ -124,11 +117,6 @@ pub(crate) enum ManageBrowserHostsError {
     },
     #[snafu(display("could not write native host registry key for {browser:?}"))]
     WriteHostRegistry {
-        browser: BrowserKind,
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    #[snafu(display("could not delete native host registry key for {browser:?}"))]
-    DeleteHostRegistry {
         browser: BrowserKind,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -177,8 +165,6 @@ pub(crate) trait BrowserHostRegistry: Send + Sync {
         browser: BrowserKind,
         manifest_path: &str,
     ) -> Result<(), ManageBrowserHostsError>;
-    /// Deletes `browser`'s Native Messaging host key; a missing key succeeds.
-    fn delete_host_key(&self, browser: BrowserKind) -> Result<(), ManageBrowserHostsError>;
 }
 
 /// Filesystem operations used for manifest files and host-executable presence checks.
@@ -189,27 +175,15 @@ pub(crate) trait BrowserHostFs: Send + Sync {
     fn read_to_string(&self, path: &Path) -> Result<Option<String>, ManageBrowserHostsError>;
     /// Atomically writes `contents` to `path` via a temporary file in the same directory.
     fn write_atomic(&self, path: &Path, contents: &str) -> Result<(), ManageBrowserHostsError>;
-    /// Removes `path` if present; a missing file succeeds.
-    fn remove_if_exists(&self, path: &Path) -> Result<(), ManageBrowserHostsError>;
 }
 
-/// Core-facing port for Native Messaging host status, enable, and disable operations.
+/// Core-facing port for Native Messaging host startup registration and status inspection.
 pub(crate) trait BrowserHostsPort: Send + Sync {
+    /// Idempotently writes manifests and HKCU keys for all supported browsers on core startup.
+    fn register_all(&self);
     /// Inspects registration state for all supported browsers and merges live connection state.
     fn status(
         &self,
-        streams: &[BrowserStream],
-    ) -> Result<BrowserHostsStatusResponse, ManageBrowserHostsError>;
-    /// Writes the browser's manifest and registry key and returns the updated status.
-    fn enable(
-        &self,
-        browser: BrowserKind,
-        streams: &[BrowserStream],
-    ) -> Result<BrowserHostsStatusResponse, ManageBrowserHostsError>;
-    /// Removes the browser's registry key (and unused manifest) and returns the updated status.
-    fn disable(
-        &self,
-        browser: BrowserKind,
         streams: &[BrowserStream],
     ) -> Result<BrowserHostsStatusResponse, ManageBrowserHostsError>;
 }
@@ -322,17 +296,6 @@ impl BrowserHostFs for StdBrowserHostFs {
                 )
             }),
         })
-    }
-
-    fn remove_if_exists(&self, path: &Path) -> Result<(), ManageBrowserHostsError> {
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(ManageBrowserHostsError::RemoveManifestFile {
-                path: path.to_path_buf(),
-                source,
-            }),
-        }
     }
 }
 
@@ -463,6 +426,61 @@ impl<R, F> NativeHostManager<R, F> {
 }
 
 impl<R: BrowserHostRegistry, F: BrowserHostFs> NativeHostManager<R, F> {
+    fn register_browser(&self, browser: BrowserKind, host_exe_str: &str) {
+        let manifest_path = self.manifest_path(browser);
+        let manifest_path_str = match path_to_utf8(&manifest_path, || {
+            ManageBrowserHostsError::EncodeManifestPath
+        }) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(?browser, %error, "browser host manifest path is not valid UTF-8");
+                return;
+            }
+        };
+        let expected_manifest = match serialize_manifest(browser, host_exe_str) {
+            Ok(json) => json,
+            Err(error) => {
+                tracing::warn!(?browser, %error, "could not serialize native host manifest");
+                return;
+            }
+        };
+
+        let needs_manifest_write = match self.fs.read_to_string(&manifest_path) {
+            Ok(Some(existing)) => existing != expected_manifest,
+            Ok(None) => true,
+            Err(error) => {
+                tracing::warn!(
+                    ?browser,
+                    %error,
+                    "could not read existing native host manifest; attempting rewrite"
+                );
+                true
+            }
+        };
+        if needs_manifest_write
+            && let Err(error) = self.fs.write_atomic(&manifest_path, &expected_manifest)
+        {
+            tracing::warn!(?browser, %error, "could not write native host manifest");
+            return;
+        }
+
+        let needs_registry_write = match self.registry.read_default_value(browser) {
+            Ok(RegistryHostEntry::Value(existing)) => existing != manifest_path_str,
+            Ok(RegistryHostEntry::Absent | RegistryHostEntry::WithoutStringValue) => true,
+            Err(error) => {
+                tracing::warn!(?browser, %error, "could not read native host registry key");
+                return;
+            }
+        };
+        if needs_registry_write
+            && let Err(error) = self
+                .registry
+                .write_default_value(browser, manifest_path_str)
+        {
+            tracing::warn!(?browser, %error, "could not write native host registry key");
+        }
+    }
+
     fn evaluate_registration(
         &self,
         browser: BrowserKind,
@@ -473,29 +491,42 @@ impl<R: BrowserHostRegistry, F: BrowserHostFs> NativeHostManager<R, F> {
             ManageBrowserHostsError::EncodeManifestPath
         })?;
 
-        match self.registry.read_default_value(browser)? {
-            RegistryHostEntry::Absent => Ok(BrowserHostRegistration::NotRegistered),
-            RegistryHostEntry::WithoutStringValue => Ok(BrowserHostRegistration::NeedsReenable),
+        let entry = match self.registry.read_default_value(browser) {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    ?browser,
+                    %error,
+                    "native host registry key could not be read; reporting needs_repair"
+                );
+                return Ok(BrowserHostRegistration::NeedsRepair);
+            }
+        };
+
+        match entry {
+            RegistryHostEntry::Absent | RegistryHostEntry::WithoutStringValue => {
+                Ok(BrowserHostRegistration::NeedsRepair)
+            }
             RegistryHostEntry::Value(registered_path) => {
                 if registered_path != expected_manifest {
-                    return Ok(BrowserHostRegistration::NeedsReenable);
+                    return Ok(BrowserHostRegistration::NeedsRepair);
                 }
                 let raw_manifest = match self.fs.read_to_string(&manifest_path) {
                     Ok(Some(contents)) => contents,
-                    Ok(None) => return Ok(BrowserHostRegistration::NeedsReenable),
+                    Ok(None) => return Ok(BrowserHostRegistration::NeedsRepair),
                     Err(error) => {
                         tracing::warn!(
                             ?browser,
                             %error,
-                            "native host manifest could not be read; reporting needs_reenable"
+                            "native host manifest could not be read; reporting needs_repair"
                         );
-                        return Ok(BrowserHostRegistration::NeedsReenable);
+                        return Ok(BrowserHostRegistration::NeedsRepair);
                     }
                 };
                 if manifest_matches(browser, &raw_manifest, expected_host_exe) {
                     Ok(BrowserHostRegistration::Registered)
                 } else {
-                    Ok(BrowserHostRegistration::NeedsReenable)
+                    Ok(BrowserHostRegistration::NeedsRepair)
                 }
             }
         }
@@ -508,9 +539,13 @@ impl<R: BrowserHostRegistry, F: BrowserHostFs> NativeHostManager<R, F> {
         let host_exe = (self.resolve_host_exe)()?;
         let expected_host_exe =
             path_to_utf8(&host_exe, || ManageBrowserHostsError::EncodeHostPath)?;
+        let host_presence = self.fs.file_presence(&host_exe);
         let mut hosts = Vec::with_capacity(ALL_BROWSERS.len());
         for browser in ALL_BROWSERS {
-            let registration = self.evaluate_registration(browser, expected_host_exe)?;
+            let registration = match host_presence {
+                FilePresence::Absent => BrowserHostRegistration::HostMissing,
+                FilePresence::Present => self.evaluate_registration(browser, expected_host_exe)?,
+            };
             let connected = if streams.iter().any(|stream| stream.browser == browser) {
                 BrowserHostConnection::Connected
             } else {
@@ -524,17 +559,48 @@ impl<R: BrowserHostRegistry, F: BrowserHostFs> NativeHostManager<R, F> {
         }
         Ok(BrowserHostsStatusResponse { hosts })
     }
-
-    fn chromium_peer(browser: BrowserKind) -> Option<BrowserKind> {
-        match browser {
-            BrowserKind::Chrome => Some(BrowserKind::Edge),
-            BrowserKind::Edge => Some(BrowserKind::Chrome),
-            BrowserKind::Firefox => None,
-        }
-    }
 }
 
 impl<R: BrowserHostRegistry, F: BrowserHostFs> BrowserHostsPort for NativeHostManager<R, F> {
+    fn register_all(&self) {
+        let _guard = self
+            .serialize_ops
+            .lock()
+            .expect("browser host manager lock");
+        let host_exe = match (self.resolve_host_exe)() {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "could not resolve quartz-host.exe path; skipping browser host registration"
+                );
+                return;
+            }
+        };
+        let host_exe_str = match path_to_utf8(&host_exe, || ManageBrowserHostsError::EncodeHostPath)
+        {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "quartz-host.exe path is not valid UTF-8; skipping browser host registration"
+                );
+                return;
+            }
+        };
+        if self.fs.file_presence(&host_exe) == FilePresence::Absent {
+            tracing::warn!(
+                path = %host_exe.display(),
+                "quartz-host.exe not found beside quartz.exe; skipping automatic browser host registration"
+            );
+            return;
+        }
+
+        for browser in ALL_BROWSERS {
+            self.register_browser(browser, host_exe_str);
+        }
+    }
+
     fn status(
         &self,
         streams: &[BrowserStream],
@@ -545,67 +611,12 @@ impl<R: BrowserHostRegistry, F: BrowserHostFs> BrowserHostsPort for NativeHostMa
             .expect("browser host manager lock");
         self.collect_status(streams)
     }
-
-    fn enable(
-        &self,
-        browser: BrowserKind,
-        streams: &[BrowserStream],
-    ) -> Result<BrowserHostsStatusResponse, ManageBrowserHostsError> {
-        let _guard = self
-            .serialize_ops
-            .lock()
-            .expect("browser host manager lock");
-        let host_exe = (self.resolve_host_exe)()?;
-        let host_exe_str = path_to_utf8(&host_exe, || ManageBrowserHostsError::EncodeHostPath)?;
-        if self.fs.file_presence(&host_exe) == FilePresence::Absent {
-            return Err(ManageBrowserHostsError::MissingHostExecutable { path: host_exe });
-        }
-
-        let manifest_path = self.manifest_path(browser);
-        let manifest_path_str = path_to_utf8(&manifest_path, || {
-            ManageBrowserHostsError::EncodeManifestPath
-        })?;
-        let manifest_json = serialize_manifest(browser, host_exe_str)?;
-        self.fs.write_atomic(&manifest_path, &manifest_json)?;
-        self.registry
-            .write_default_value(browser, manifest_path_str)?;
-        self.collect_status(streams)
-    }
-
-    fn disable(
-        &self,
-        browser: BrowserKind,
-        streams: &[BrowserStream],
-    ) -> Result<BrowserHostsStatusResponse, ManageBrowserHostsError> {
-        let _guard = self
-            .serialize_ops
-            .lock()
-            .expect("browser host manager lock");
-        self.registry.delete_host_key(browser)?;
-
-        let manifest_path = self.manifest_path(browser);
-        let manifest_path_str = path_to_utf8(&manifest_path, || {
-            ManageBrowserHostsError::EncodeManifestPath
-        })?;
-        let peer_still_references_manifest = match Self::chromium_peer(browser) {
-            Some(peer) => matches!(
-                self.registry.read_default_value(peer)?,
-                RegistryHostEntry::Value(ref path) if path == manifest_path_str
-            ),
-            None => false,
-        };
-        if !peer_still_references_manifest {
-            self.fs.remove_if_exists(&manifest_path)?;
-        }
-
-        self.collect_status(streams)
-    }
 }
 
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     /// Fault mode for the in-memory browser host registry fake.
@@ -615,13 +626,13 @@ pub(crate) mod test_support {
         None,
         FailRead,
         FailWrite,
-        FailDelete,
     }
 
     #[derive(Debug, Default)]
     struct FakeRegistryState {
         entries: BTreeMap<BrowserKind, RegistryHostEntry>,
-        fault: FakeBrowserHostRegistryFault,
+        faults: BTreeMap<BrowserKind, FakeBrowserHostRegistryFault>,
+        write_count: usize,
     }
 
     /// In-memory `BrowserHostRegistry` fake so tests never touch HKCU.
@@ -650,8 +661,24 @@ pub(crate) mod test_support {
                 .unwrap_or(RegistryHostEntry::Absent)
         }
 
-        pub(crate) fn set_fault(&self, fault: FakeBrowserHostRegistryFault) {
-            self.state.lock().expect("fake host registry lock").fault = fault;
+        pub(crate) fn set_browser_fault(
+            &self,
+            browser: BrowserKind,
+            fault: FakeBrowserHostRegistryFault,
+        ) {
+            let mut state = self.state.lock().expect("fake host registry lock");
+            if fault == FakeBrowserHostRegistryFault::None {
+                state.faults.remove(&browser);
+            } else {
+                state.faults.insert(browser, fault);
+            }
+        }
+
+        pub(crate) fn write_count(&self) -> usize {
+            self.state
+                .lock()
+                .expect("fake host registry lock")
+                .write_count
         }
     }
 
@@ -661,7 +688,7 @@ pub(crate) mod test_support {
             browser: BrowserKind,
         ) -> Result<RegistryHostEntry, ManageBrowserHostsError> {
             let state = self.state.lock().expect("fake host registry lock");
-            if state.fault == FakeBrowserHostRegistryFault::FailRead {
+            if state.faults.get(&browser).copied() == Some(FakeBrowserHostRegistryFault::FailRead) {
                 return Err(ManageBrowserHostsError::ReadHostRegistry {
                     browser,
                     source: Box::new(std::io::Error::new(
@@ -683,7 +710,8 @@ pub(crate) mod test_support {
             manifest_path: &str,
         ) -> Result<(), ManageBrowserHostsError> {
             let mut state = self.state.lock().expect("fake host registry lock");
-            if state.fault == FakeBrowserHostRegistryFault::FailWrite {
+            if state.faults.get(&browser).copied() == Some(FakeBrowserHostRegistryFault::FailWrite)
+            {
                 return Err(ManageBrowserHostsError::WriteHostRegistry {
                     browser,
                     source: Box::new(std::io::Error::new(
@@ -692,24 +720,10 @@ pub(crate) mod test_support {
                     )),
                 });
             }
+            state.write_count += 1;
             state
                 .entries
                 .insert(browser, RegistryHostEntry::Value(manifest_path.to_owned()));
-            Ok(())
-        }
-
-        fn delete_host_key(&self, browser: BrowserKind) -> Result<(), ManageBrowserHostsError> {
-            let mut state = self.state.lock().expect("fake host registry lock");
-            if state.fault == FakeBrowserHostRegistryFault::FailDelete {
-                return Err(ManageBrowserHostsError::DeleteHostRegistry {
-                    browser,
-                    source: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "simulated registry delete failure",
-                    )),
-                });
-            }
-            state.entries.remove(&browser);
             Ok(())
         }
     }
@@ -717,7 +731,8 @@ pub(crate) mod test_support {
     #[derive(Debug, Default)]
     struct FakeFsState {
         files: BTreeMap<PathBuf, String>,
-        unreadable: std::collections::BTreeSet<PathBuf>,
+        unreadable: BTreeSet<PathBuf>,
+        write_count: usize,
     }
 
     /// In-memory `BrowserHostFs` fake so tests never touch `%LOCALAPPDATA%\Quartz`.
@@ -767,6 +782,10 @@ pub(crate) mod test_support {
                 .files
                 .contains_key(path)
         }
+
+        pub(crate) fn write_count(&self) -> usize {
+            self.state.lock().expect("fake host fs lock").write_count
+        }
     }
 
     impl BrowserHostFs for FakeBrowserHostFs {
@@ -793,20 +812,9 @@ pub(crate) mod test_support {
         }
 
         fn write_atomic(&self, path: &Path, contents: &str) -> Result<(), ManageBrowserHostsError> {
-            self.state
-                .lock()
-                .expect("fake host fs lock")
-                .files
-                .insert(path.to_path_buf(), contents.to_owned());
-            Ok(())
-        }
-
-        fn remove_if_exists(&self, path: &Path) -> Result<(), ManageBrowserHostsError> {
-            self.state
-                .lock()
-                .expect("fake host fs lock")
-                .files
-                .remove(path);
+            let mut state = self.state.lock().expect("fake host fs lock");
+            state.write_count += 1;
+            state.files.insert(path.to_path_buf(), contents.to_owned());
             Ok(())
         }
     }
@@ -875,20 +883,28 @@ mod tests {
     }
 
     #[test]
-    fn manifest_json_shapes_match_chromium_and_firefox_specifications() {
+    fn auto_registration_writes_manifests_and_keys_for_all_three_browsers() {
         let fixture = FakeBrowserHosts::new();
-        fixture
-            .port
-            .enable(BrowserKind::Chrome, &[])
-            .expect("enable chrome");
-        fixture
-            .port
-            .enable(BrowserKind::Firefox, &[])
-            .expect("enable firefox");
+        fixture.port.register_all();
+
+        let chromium_manifest = fixture.manifests_dir.join(CHROMIUM_MANIFEST_FILE);
+        let firefox_manifest = fixture.manifests_dir.join(FIREFOX_MANIFEST_FILE);
+        assert_eq!(
+            fixture.registry.entry(BrowserKind::Chrome),
+            RegistryHostEntry::Value(chromium_manifest.to_str().expect("utf-8").to_owned())
+        );
+        assert_eq!(
+            fixture.registry.entry(BrowserKind::Edge),
+            RegistryHostEntry::Value(chromium_manifest.to_str().expect("utf-8").to_owned())
+        );
+        assert_eq!(
+            fixture.registry.entry(BrowserKind::Firefox),
+            RegistryHostEntry::Value(firefox_manifest.to_str().expect("utf-8").to_owned())
+        );
 
         let chrome_raw = fixture
             .fs
-            .read_file(&fixture.manifests_dir.join(CHROMIUM_MANIFEST_FILE))
+            .read_file(&chromium_manifest)
             .expect("chrome manifest written");
         let chrome_json: serde_json::Value =
             serde_json::from_str(&chrome_raw).expect("valid chrome manifest json");
@@ -907,7 +923,7 @@ mod tests {
 
         let firefox_raw = fixture
             .fs
-            .read_file(&fixture.manifests_dir.join(FIREFOX_MANIFEST_FILE))
+            .read_file(&firefox_manifest)
             .expect("firefox manifest written");
         let firefox_json: serde_json::Value =
             serde_json::from_str(&firefox_raw).expect("valid firefox manifest json");
@@ -921,13 +937,166 @@ mod tests {
                 "allowed_extensions": [FIREFOX_EXTENSION_ID]
             })
         );
+
+        let status = fixture.port.status(&[]).expect("status after registration");
+        assert_eq!(
+            status
+                .hosts
+                .iter()
+                .map(|host| (host.browser, host.registration))
+                .collect::<Vec<_>>(),
+            vec![
+                (BrowserKind::Chrome, BrowserHostRegistration::Registered),
+                (BrowserKind::Edge, BrowserHostRegistration::Registered),
+                (BrowserKind::Firefox, BrowserHostRegistration::Registered),
+            ]
+        );
     }
 
     #[test]
-    fn status_matrix_reports_absent_registered_and_needs_reenable_conditions() {
+    fn second_registration_run_with_identical_content_performs_no_writes() {
+        let fixture = FakeBrowserHosts::new();
+        fixture.port.register_all();
+        // Chrome and Edge share one manifest file, so initial registration writes 2 files + 3 keys.
+        assert_eq!(fixture.fs.write_count(), 2);
+        assert_eq!(fixture.registry.write_count(), 3);
+
+        fixture.port.register_all();
+        assert_eq!(fixture.fs.write_count(), 2);
+        assert_eq!(fixture.registry.write_count(), 3);
+    }
+
+    #[test]
+    fn moved_host_path_rewrites_manifests_and_restores_registered_status() {
+        let fixture = FakeBrowserHosts::new();
+        fixture.port.register_all();
+        let initial_fs_writes = fixture.fs.write_count();
+        let initial_registry_writes = fixture.registry.write_count();
+
+        // Executable moved -> manifest path mismatches current host path -> needs_repair.
+        let moved_host = PathBuf::from(r"D:\Tools\Quartz\quartz-host.exe");
+        fixture.fs.insert_file(&moved_host, "moved-host");
+        fixture.set_host_exe(&moved_host);
+        let moved = fixture.port.status(&[]).expect("moved status");
+        for browser in ALL_BROWSERS {
+            assert_eq!(
+                entry(&moved, browser).registration,
+                BrowserHostRegistration::NeedsRepair
+            );
+        }
+
+        // Next startup rewrites the two manifests in place without rewriting unchanged HKCU keys.
+        fixture.port.register_all();
+        assert_eq!(fixture.fs.write_count(), initial_fs_writes + 2);
+        assert_eq!(fixture.registry.write_count(), initial_registry_writes);
+        let repaired = fixture.port.status(&[]).expect("repaired status");
+        for browser in ALL_BROWSERS {
+            assert_eq!(
+                entry(&repaired, browser).registration,
+                BrowserHostRegistration::Registered
+            );
+        }
+
+        // A stale registry key path is also rewritten on startup.
+        fixture.registry.set_entry(
+            BrowserKind::Edge,
+            RegistryHostEntry::Value(r"C:\Old\dev.4o3f.quartz.chrome.json".to_owned()),
+        );
+        fixture.port.register_all();
+        assert_eq!(fixture.fs.write_count(), initial_fs_writes + 2);
+        assert_eq!(fixture.registry.write_count(), initial_registry_writes + 1);
+        let edge_repaired = fixture.port.status(&[]).expect("edge repaired status");
+        assert_eq!(
+            entry(&edge_repaired, BrowserKind::Edge).registration,
+            BrowserHostRegistration::Registered
+        );
+    }
+
+    #[test]
+    fn missing_host_executable_skips_registration_without_writes_and_reports_host_missing() {
+        let fixture = FakeBrowserHosts::new();
+        let host_exe = fixture.host_exe();
+        fixture.fs.remove_file(&host_exe);
+
+        fixture.port.register_all();
+        assert_eq!(fixture.fs.write_count(), 0);
+        assert_eq!(fixture.registry.write_count(), 0);
+        for browser in ALL_BROWSERS {
+            assert_eq!(fixture.registry.entry(browser), RegistryHostEntry::Absent);
+        }
+        assert!(
+            !fixture
+                .fs
+                .exists(&fixture.manifests_dir.join(CHROMIUM_MANIFEST_FILE))
+        );
+        assert!(
+            !fixture
+                .fs
+                .exists(&fixture.manifests_dir.join(FIREFOX_MANIFEST_FILE))
+        );
+
+        let status = fixture.port.status(&[]).expect("status with missing host");
+        for browser in ALL_BROWSERS {
+            assert_eq!(
+                entry(&status, browser).registration,
+                BrowserHostRegistration::HostMissing
+            );
+        }
+    }
+
+    #[test]
+    fn one_browsers_registry_failure_does_not_stop_other_browsers() {
+        let fixture = FakeBrowserHosts::new();
+        fixture
+            .registry
+            .set_browser_fault(BrowserKind::Edge, FakeBrowserHostRegistryFault::FailWrite);
+
+        fixture.port.register_all();
+
+        let status = fixture
+            .port
+            .status(&[])
+            .expect("status after partial failure");
+        assert_eq!(
+            entry(&status, BrowserKind::Chrome).registration,
+            BrowserHostRegistration::Registered
+        );
+        assert_eq!(
+            entry(&status, BrowserKind::Edge).registration,
+            BrowserHostRegistration::NeedsRepair
+        );
+        assert_eq!(
+            entry(&status, BrowserKind::Firefox).registration,
+            BrowserHostRegistration::Registered
+        );
+
+        // Read failure on one browser reports needs_repair for that browser without breaking others.
+        fixture
+            .registry
+            .set_browser_fault(BrowserKind::Edge, FakeBrowserHostRegistryFault::FailRead);
+        let read_fault_status = fixture
+            .port
+            .status(&[])
+            .expect("status with one browser read failure");
+        assert_eq!(
+            entry(&read_fault_status, BrowserKind::Chrome).registration,
+            BrowserHostRegistration::Registered
+        );
+        assert_eq!(
+            entry(&read_fault_status, BrowserKind::Edge).registration,
+            BrowserHostRegistration::NeedsRepair
+        );
+        assert_eq!(
+            entry(&read_fault_status, BrowserKind::Firefox).registration,
+            BrowserHostRegistration::Registered
+        );
+    }
+
+    #[test]
+    fn status_matrix_reports_needs_repair_registered_and_connected_states() {
         let fixture = FakeBrowserHosts::new();
 
-        // Initially absent -> not_registered in fixed Chrome, Edge, Firefox order.
+        // Initially unregistered -> needs_repair in fixed Chrome, Edge, Firefox order.
         let initial = fixture.port.status(&[]).expect("initial status");
         assert_eq!(
             initial
@@ -936,56 +1105,33 @@ mod tests {
                 .map(|host| (host.browser, host.registration))
                 .collect::<Vec<_>>(),
             vec![
-                (BrowserKind::Chrome, BrowserHostRegistration::NotRegistered),
-                (BrowserKind::Edge, BrowserHostRegistration::NotRegistered),
-                (BrowserKind::Firefox, BrowserHostRegistration::NotRegistered),
+                (BrowserKind::Chrome, BrowserHostRegistration::NeedsRepair),
+                (BrowserKind::Edge, BrowserHostRegistration::NeedsRepair),
+                (BrowserKind::Firefox, BrowserHostRegistration::NeedsRepair),
             ]
         );
 
-        // Enable Chrome -> registered.
-        let enabled = fixture
-            .port
-            .enable(BrowserKind::Chrome, &[])
-            .expect("enable chrome");
-        assert_eq!(
-            entry(&enabled, BrowserKind::Chrome).registration,
-            BrowserHostRegistration::Registered
-        );
+        fixture.port.register_all();
 
-        // Executable moved -> manifest path mismatches current host path -> needs_reenable.
-        let moved_host = PathBuf::from(r"D:\Tools\Quartz\quartz-host.exe");
-        fixture.fs.insert_file(&moved_host, "moved-host");
-        fixture.set_host_exe(&moved_host);
-        let moved = fixture.port.status(&[]).expect("moved status");
-        assert_eq!(
-            entry(&moved, BrowserKind::Chrome).registration,
-            BrowserHostRegistration::NeedsReenable
-        );
-
-        // Re-enabling rewrites manifest with the new host path -> registered again.
-        let reenabled = fixture
-            .port
-            .enable(BrowserKind::Chrome, &[])
-            .expect("reenable chrome");
-        assert_eq!(
-            entry(&reenabled, BrowserKind::Chrome).registration,
-            BrowserHostRegistration::Registered
-        );
-
-        // Deleting manifest while key stays -> needs_reenable.
+        // Deleting manifest while key stays -> needs_repair for Chrome and Edge; Firefox stays registered.
         let chrome_manifest = fixture.manifests_dir.join(CHROMIUM_MANIFEST_FILE);
         fixture.fs.remove_file(&chrome_manifest);
         let missing_manifest = fixture.port.status(&[]).expect("missing manifest status");
         assert_eq!(
             entry(&missing_manifest, BrowserKind::Chrome).registration,
-            BrowserHostRegistration::NeedsReenable
+            BrowserHostRegistration::NeedsRepair
+        );
+        assert_eq!(
+            entry(&missing_manifest, BrowserKind::Edge).registration,
+            BrowserHostRegistration::NeedsRepair
+        );
+        assert_eq!(
+            entry(&missing_manifest, BrowserKind::Firefox).registration,
+            BrowserHostRegistration::Registered
         );
 
-        // Unreadable manifest -> needs_reenable.
-        fixture
-            .port
-            .enable(BrowserKind::Chrome, &[])
-            .expect("restore chrome");
+        // Unreadable manifest -> needs_repair.
+        fixture.port.register_all();
         fixture.fs.mark_unreadable(&chrome_manifest);
         let unreadable = fixture
             .port
@@ -993,153 +1139,38 @@ mod tests {
             .expect("unreadable manifest status");
         assert_eq!(
             entry(&unreadable, BrowserKind::Chrome).registration,
-            BrowserHostRegistration::NeedsReenable
+            BrowserHostRegistration::NeedsRepair
         );
 
-        // Registry default value pointing elsewhere -> needs_reenable.
-        fixture.registry.set_entry(
-            BrowserKind::Edge,
-            RegistryHostEntry::Value(r"C:\Old\dev.4o3f.quartz.chrome.json".to_owned()),
-        );
+        // Non-string default registry value -> needs_repair.
         fixture
             .registry
             .set_entry(BrowserKind::Firefox, RegistryHostEntry::WithoutStringValue);
-        let mismatched = fixture.port.status(&[]).expect("mismatched status");
-        assert_eq!(
-            entry(&mismatched, BrowserKind::Edge).registration,
-            BrowserHostRegistration::NeedsReenable
-        );
-        assert_eq!(
-            entry(&mismatched, BrowserKind::Firefox).registration,
-            BrowserHostRegistration::NeedsReenable
-        );
-    }
-
-    #[test]
-    fn disable_keeps_shared_chromium_manifest_until_both_chrome_and_edge_are_disabled() {
-        let fixture = FakeBrowserHosts::new();
-        let chromium_manifest = fixture.manifests_dir.join(CHROMIUM_MANIFEST_FILE);
-        let firefox_manifest = fixture.manifests_dir.join(FIREFOX_MANIFEST_FILE);
-
-        fixture
-            .port
-            .enable(BrowserKind::Chrome, &[])
-            .expect("enable chrome");
-        fixture
-            .port
-            .enable(BrowserKind::Edge, &[])
-            .expect("enable edge");
-        fixture
-            .port
-            .enable(BrowserKind::Firefox, &[])
-            .expect("enable firefox");
-        assert!(fixture.fs.exists(&chromium_manifest));
-        assert!(fixture.fs.exists(&firefox_manifest));
-
-        // Disabling Chrome removes Chrome's key but preserves the shared manifest for Edge.
-        let after_chrome = fixture
-            .port
-            .disable(BrowserKind::Chrome, &[])
-            .expect("disable chrome");
-        assert_eq!(
-            fixture.registry.entry(BrowserKind::Chrome),
-            RegistryHostEntry::Absent
-        );
-        assert!(fixture.fs.exists(&chromium_manifest));
-        assert_eq!(
-            entry(&after_chrome, BrowserKind::Chrome).registration,
-            BrowserHostRegistration::NotRegistered
-        );
-        assert_eq!(
-            entry(&after_chrome, BrowserKind::Edge).registration,
-            BrowserHostRegistration::Registered
-        );
-
-        // Disabling Edge removes Edge's key and now deletes the shared Chromium manifest.
-        let after_edge = fixture
-            .port
-            .disable(BrowserKind::Edge, &[])
-            .expect("disable edge");
-        assert_eq!(
-            fixture.registry.entry(BrowserKind::Edge),
-            RegistryHostEntry::Absent
-        );
-        assert!(!fixture.fs.exists(&chromium_manifest));
-        assert_eq!(
-            entry(&after_edge, BrowserKind::Edge).registration,
-            BrowserHostRegistration::NotRegistered
-        );
-
-        // Disabling Firefox removes both its key and its dedicated manifest.
-        let after_firefox = fixture
-            .port
-            .disable(BrowserKind::Firefox, &[])
-            .expect("disable firefox");
-        assert_eq!(
-            fixture.registry.entry(BrowserKind::Firefox),
-            RegistryHostEntry::Absent
-        );
-        assert!(!fixture.fs.exists(&firefox_manifest));
-        assert_eq!(
-            entry(&after_firefox, BrowserKind::Firefox).registration,
-            BrowserHostRegistration::NotRegistered
-        );
-    }
-
-    #[test]
-    fn enable_fails_when_host_executable_is_missing_beside_core() {
-        let fixture = FakeBrowserHosts::new();
-        let host_exe = fixture.host_exe();
-        fixture.fs.remove_file(&host_exe);
-
-        let err = fixture
-            .port
-            .enable(BrowserKind::Chrome, &[])
-            .expect_err("missing host exe must fail");
-        assert!(matches!(
-            err,
-            ManageBrowserHostsError::MissingHostExecutable { path } if path == host_exe
-        ));
-        assert_eq!(
-            fixture.registry.entry(BrowserKind::Chrome),
-            RegistryHostEntry::Absent
-        );
-        assert!(
-            !fixture
-                .fs
-                .exists(&fixture.manifests_dir.join(CHROMIUM_MANIFEST_FILE))
-        );
-    }
-
-    #[test]
-    fn status_derives_connected_flag_from_live_browser_streams() {
-        let fixture = FakeBrowserHosts::new();
-        fixture
-            .port
-            .enable(BrowserKind::Chrome, &[])
-            .expect("enable chrome");
         let streams = vec![BrowserStream {
             browser_stream: BrowserStreamId("a286737e-3855-43cb-98ee-c366344372d0".into()),
             browser: BrowserKind::Chrome,
         }];
-
-        let status = fixture.port.status(&streams).expect("status with streams");
+        let mismatched = fixture.port.status(&streams).expect("status with streams");
         assert_eq!(
-            entry(&status, BrowserKind::Chrome).connected,
+            entry(&mismatched, BrowserKind::Firefox).registration,
+            BrowserHostRegistration::NeedsRepair
+        );
+        assert_eq!(
+            entry(&mismatched, BrowserKind::Chrome).connected,
             BrowserHostConnection::Connected
         );
         assert_eq!(
-            entry(&status, BrowserKind::Edge).connected,
+            entry(&mismatched, BrowserKind::Edge).connected,
             BrowserHostConnection::Disconnected
         );
         assert_eq!(
-            entry(&status, BrowserKind::Firefox).connected,
+            entry(&mismatched, BrowserKind::Firefox).connected,
             BrowserHostConnection::Disconnected
         );
     }
 
     #[test]
-    fn std_filesystem_atomic_write_and_remove_operate_inside_temp_dir() {
+    fn std_filesystem_auto_registration_operates_idempotently_inside_temp_dir() {
         let temp = tempfile::tempdir().expect("isolated temp dir");
         let manifests_dir = temp.path().join("native-hosts");
         let host_exe = temp.path().join(HOST_EXECUTABLE_NAME);
@@ -1147,34 +1178,30 @@ mod tests {
         let registry = FakeBrowserHostRegistry::default();
         let host_for_closure = host_exe.clone();
         let manager = NativeHostManager::new(
-            registry,
+            registry.clone(),
             StdBrowserHostFs,
             manifests_dir.clone(),
             move || Ok(host_for_closure.clone()),
         );
 
-        let enabled = manager
-            .enable(BrowserKind::Firefox, &[])
-            .expect("enable firefox on temp dir");
-        assert_eq!(
-            entry(&enabled, BrowserKind::Firefox).registration,
-            BrowserHostRegistration::Registered
-        );
-        let manifest_path = manifests_dir.join(FIREFOX_MANIFEST_FILE);
-        assert!(manifest_path.is_file());
+        manager.register_all();
+        let status = manager.status(&[]).expect("status after temp dir register");
+        for browser in ALL_BROWSERS {
+            assert_eq!(
+                entry(&status, browser).registration,
+                BrowserHostRegistration::Registered
+            );
+        }
+        assert!(manifests_dir.join(CHROMIUM_MANIFEST_FILE).is_file());
+        assert!(manifests_dir.join(FIREFOX_MANIFEST_FILE).is_file());
+        assert_eq!(registry.write_count(), 3);
 
-        let disabled = manager
-            .disable(BrowserKind::Firefox, &[])
-            .expect("disable firefox on temp dir");
-        assert_eq!(
-            entry(&disabled, BrowserKind::Firefox).registration,
-            BrowserHostRegistration::NotRegistered
-        );
-        assert!(!manifest_path.exists());
+        manager.register_all();
+        assert_eq!(registry.write_count(), 3);
     }
 
     #[test]
-    fn registry_subkeys_and_errors_match_contract() {
+    fn registry_subkeys_match_contract() {
         assert_eq!(
             registry_subkey(BrowserKind::Chrome),
             r"Software\Google\Chrome\NativeMessagingHosts\dev.4o3f.quartz"
@@ -1187,28 +1214,5 @@ mod tests {
             registry_subkey(BrowserKind::Firefox),
             r"Software\Mozilla\NativeMessagingHosts\dev.4o3f.quartz"
         );
-
-        let fixture = FakeBrowserHosts::new();
-        fixture
-            .registry
-            .set_fault(FakeBrowserHostRegistryFault::FailRead);
-        assert!(matches!(
-            fixture.port.status(&[]),
-            Err(ManageBrowserHostsError::ReadHostRegistry { .. })
-        ));
-        fixture
-            .registry
-            .set_fault(FakeBrowserHostRegistryFault::FailWrite);
-        assert!(matches!(
-            fixture.port.enable(BrowserKind::Chrome, &[]),
-            Err(ManageBrowserHostsError::WriteHostRegistry { .. })
-        ));
-        fixture
-            .registry
-            .set_fault(FakeBrowserHostRegistryFault::FailDelete);
-        assert!(matches!(
-            fixture.port.disable(BrowserKind::Chrome, &[]),
-            Err(ManageBrowserHostsError::DeleteHostRegistry { .. })
-        ));
     }
 }

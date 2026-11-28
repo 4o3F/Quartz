@@ -2,11 +2,10 @@
 
 use super::{Link, LoadDataError};
 use quartz_protocol::{
-    BackupEntry, BrowserHostsDisableRequest, BrowserHostsEnableRequest, BrowserHostsStatusRequest,
-    BrowserHostsStatusResponse, BrowserKind, CoreStatusRequest, CoreStatusResponse,
-    DataBackupRequest, DataCompactRequest, DataCompactResponse, DataDeleteRangeRequest,
-    DataDeleteRangeResponse, DataInfoRequest, DataInfoResponse, SettingsGetRequest,
-    SettingsResponse, SettingsSetRequest,
+    BackupEntry, BrowserHostsStatusRequest, BrowserHostsStatusResponse, CoreStatusRequest,
+    CoreStatusResponse, DataBackupRequest, DataCompactRequest, DataCompactResponse,
+    DataDeleteRangeRequest, DataDeleteRangeResponse, DataInfoRequest, DataInfoResponse,
+    SettingsGetRequest, SettingsResponse, SettingsSetRequest,
 };
 
 impl Link {
@@ -90,32 +89,6 @@ impl Link {
         &self,
     ) -> Result<BrowserHostsStatusResponse, LoadDataError> {
         self.request(BrowserHostsStatusRequest {})
-            .await
-            .map_err(LoadDataError::from)
-    }
-
-    /// Enables or re-enables Native Messaging host registration for `browser`.
-    ///
-    /// # Errors
-    /// Returns any transport, decoding, or protocol failure (such as `host_executable_missing`).
-    pub(crate) async fn enable_browser_host(
-        &self,
-        browser: BrowserKind,
-    ) -> Result<BrowserHostsStatusResponse, LoadDataError> {
-        self.request(BrowserHostsEnableRequest { browser })
-            .await
-            .map_err(LoadDataError::from)
-    }
-
-    /// Disables Native Messaging host registration for `browser`.
-    ///
-    /// # Errors
-    /// Returns any transport, decoding, or protocol failure.
-    pub(crate) async fn disable_browser_host(
-        &self,
-        browser: BrowserKind,
-    ) -> Result<BrowserHostsStatusResponse, LoadDataError> {
-        self.request(BrowserHostsDisableRequest { browser })
             .await
             .map_err(LoadDataError::from)
     }

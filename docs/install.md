@@ -14,7 +14,7 @@ Quartz 是解压即用的单个程序，不需要安装程序，也不联网。
 1. 运行 `deno task package-extension`，生成 `target/extension/chromium` 与 `target/extension/firefox`。
 2. Chrome / Edge：打开扩展管理页，开启 **开发者模式**，点击 **加载已解压的扩展程序** 并选择 `target/extension/chromium`。
 3. Firefox：打开 `about:debugging`，选择 **临时加载** 并载入 `target/extension/firefox/manifest.json`。
-4. 扩展通过同目录的 `quartz-host.exe` 连接 Quartz；宿主注册由 **设置 → 浏览器** 完成（下一批次）。
+4. 核心启动时会自动为 Chrome、Edge、Firefox 注册同目录的 `quartz-host.exe`。安装扩展后，只要 Quartz 正在运行即会自动连接，可在 **设置 → 浏览器** 查看连接状态。
 
 ## 数据
 
@@ -44,3 +44,10 @@ quartz.exe restore-backup "%LOCALAPPDATA%\Quartz\backups\<备份文件>.db" --ye
 1. 在 **设置 → 常规** 关闭开机自启。
 2. 从托盘退出 Quartz，删除程序目录。
 3. 如不再需要数据，删除 `%LOCALAPPDATA%\Quartz\`。
+4. 如需清理浏览器 Native Messaging 注册表项，在命令行中运行：
+
+```cmd
+reg delete "HKCU\Software\Google\Chrome\NativeMessagingHosts\dev.4o3f.quartz" /f
+reg delete "HKCU\Software\Microsoft\Edge\NativeMessagingHosts\dev.4o3f.quartz" /f
+reg delete "HKCU\Software\Mozilla\NativeMessagingHosts\dev.4o3f.quartz" /f
+```

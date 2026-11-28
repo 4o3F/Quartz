@@ -98,7 +98,7 @@ pub enum PreviewState {
     SettingsData,
     /// Settings page Data group with the date-range deletion confirmation block visible.
     SettingsDeleteConfirm,
-    /// Settings page Browser group showing connected, needs-reenable, and not-registered hosts.
+    /// Settings page Browser group showing connected, not-connected, and registration-failed hosts.
     SettingsBrowser,
     /// Settings page About group with versions, core status, and logs directory.
     SettingsAbout,

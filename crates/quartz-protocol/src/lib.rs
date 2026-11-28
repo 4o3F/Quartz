@@ -10,8 +10,8 @@ pub use browser::{
 };
 mod browser_hosts;
 pub use browser_hosts::{
-    BrowserHostConnection, BrowserHostEntry, BrowserHostRegistration, BrowserHostsDisableRequest,
-    BrowserHostsEnableRequest, BrowserHostsStatusRequest, BrowserHostsStatusResponse,
+    BrowserHostConnection, BrowserHostEntry, BrowserHostRegistration, BrowserHostsStatusRequest,
+    BrowserHostsStatusResponse,
 };
 mod categories;
 pub use categories::{

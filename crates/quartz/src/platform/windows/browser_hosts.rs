@@ -9,8 +9,8 @@ use windows::{
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS, WIN32_ERROR},
         System::Registry::{
             HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
-            REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegOpenKeyExW,
-            RegQueryValueExW, RegSetValueExW,
+            REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegQueryValueExW,
+            RegSetValueExW,
         },
     },
     core::{HRESULT, PCWSTR},
@@ -217,19 +217,6 @@ impl BrowserHostRegistry for WindowsBrowserHostRegistry {
             });
         }
         Ok(())
-    }
-
-    fn delete_host_key(&self, browser: BrowserKind) -> Result<(), ManageBrowserHostsError> {
-        let subkey = WideString::new(registry_subkey(browser));
-        // SAFETY: `subkey` is NUL-terminated UTF-16 naming the HKCU subkey to delete.
-        let status = unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr())) };
-        if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
-            return Ok(());
-        }
-        Err(ManageBrowserHostsError::DeleteHostRegistry {
-            browser,
-            source: win32_source(status),
-        })
     }
 }
 

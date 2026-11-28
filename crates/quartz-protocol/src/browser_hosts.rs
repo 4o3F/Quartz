@@ -1,4 +1,4 @@
-//! Native Messaging host registration status and control operations (05 §2.1).
+//! Native Messaging host registration status operations (05 §2.1).
 
 use serde::{Deserialize, Serialize};
 
@@ -8,12 +8,12 @@ use crate::BrowserKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserHostRegistration {
-    /// The browser's Native Messaging host registry key is absent.
-    NotRegistered,
     /// The registry key and manifest exist and point to the current `quartz-host.exe`.
     Registered,
-    /// The registry key exists but its manifest is missing, unreadable, or points to another path.
-    NeedsReenable,
+    /// The registry key or manifest is missing, unreadable, or points to another path.
+    NeedsRepair,
+    /// The `quartz-host.exe` executable is missing beside the running core executable.
+    HostMissing,
 }
 
 /// Whether at least one extension profile for a browser family is currently connected.
@@ -58,23 +58,7 @@ pub struct BrowserHostEntry {
 #[serde(deny_unknown_fields)]
 pub struct BrowserHostsStatusRequest {}
 
-/// Request body for `browser_hosts.enable`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BrowserHostsEnableRequest {
-    /// Browser family to register.
-    pub browser: BrowserKind,
-}
-
-/// Request body for `browser_hosts.disable`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BrowserHostsDisableRequest {
-    /// Browser family to unregister.
-    pub browser: BrowserKind,
-}
-
-/// Response body returned by `browser_hosts.status`, `browser_hosts.enable`, and `browser_hosts.disable`.
+/// Response body returned by `browser_hosts.status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserHostsStatusResponse {
     /// Registration and connection state for Chrome, Edge, and Firefox in that fixed order.
@@ -96,18 +80,14 @@ mod tests {
     }
 
     #[test]
-    fn browser_hosts_wire_snapshots_cover_every_request_and_response() {
+    fn browser_hosts_wire_snapshots_cover_status_request_and_response() {
         let wire: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/browser_hosts.json"))
                 .expect("browser_hosts wire snapshots");
         snapshot::<BrowserHostsStatusRequest>(&wire["status_request"]);
-        snapshot::<BrowserHostsEnableRequest>(&wire["enable_request"]);
-        snapshot::<BrowserHostsDisableRequest>(&wire["disable_request"]);
         snapshot::<BrowserHostsStatusResponse>(&wire["status_response"]);
 
         assert_eq!(BrowserHostsStatusRequest::OP, Op::BrowserHostsStatus);
-        assert_eq!(BrowserHostsEnableRequest::OP, Op::BrowserHostsEnable);
-        assert_eq!(BrowserHostsDisableRequest::OP, Op::BrowserHostsDisable);
 
         let decoded: BrowserHostsStatusResponse =
             BrowserHostsStatusRequest::response(wire["status_response"].clone())
@@ -122,12 +102,12 @@ mod tests {
                 },
                 BrowserHostEntry {
                     browser: BrowserKind::Edge,
-                    registration: BrowserHostRegistration::NeedsReenable,
+                    registration: BrowserHostRegistration::NeedsRepair,
                     connected: BrowserHostConnection::Disconnected,
                 },
                 BrowserHostEntry {
                     browser: BrowserKind::Firefox,
-                    registration: BrowserHostRegistration::NotRegistered,
+                    registration: BrowserHostRegistration::HostMissing,
                     connected: BrowserHostConnection::Disconnected,
                 },
             ]
@@ -136,20 +116,6 @@ mod tests {
         assert!(
             serde_json::from_value::<BrowserHostsStatusRequest>(serde_json::json!({"extra": true}))
                 .is_err()
-        );
-        assert!(
-            serde_json::from_value::<BrowserHostsEnableRequest>(serde_json::json!({
-                "browser": "chrome",
-                "extra": true
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<BrowserHostsDisableRequest>(serde_json::json!({
-                "browser": "firefox",
-                "extra": true
-            }))
-            .is_err()
         );
     }
 }

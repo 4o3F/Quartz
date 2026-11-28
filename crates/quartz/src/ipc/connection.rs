@@ -4,7 +4,7 @@ use super::{
     browser::BrowserStreamKey,
     outbox::OutboxTask,
     registry::{BrowserPeer, RegistryHandle},
-    session::{Action, BrowserHostsRequest},
+    session::Action,
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use quartz_protocol::{
@@ -433,36 +433,16 @@ impl Connection {
                         },
                     )
                 }
-                Action::BrowserHosts { id, request } => {
+                Action::BrowserHostsStatus { id } => {
                     let streams = self.services.status.borrow().status.browser_streams.clone();
-                    let result = match request {
-                        BrowserHostsRequest::Status => self.services.browser_hosts.status(&streams),
-                        BrowserHostsRequest::Enable(browser) => {
-                            self.services.browser_hosts.enable(browser, &streams)
-                        }
-                        BrowserHostsRequest::Disable(browser) => {
-                            self.services.browser_hosts.disable(browser, &streams)
-                        }
-                    };
-                    Some(match result {
+                    Some(match self.services.browser_hosts.status(&streams) {
                         Ok(response) => Action::success_response(id, response),
-                        Err(
-                            crate::core::browser_hosts::ManageBrowserHostsError::MissingHostExecutable {
-                                path,
-                            },
-                        ) => {
-                            tracing::warn!(
-                                path = %path.display(),
-                                "could not enable browser host because quartz-host.exe is missing"
-                            );
+                        Err(error) => {
+                            tracing::error!(%error, "could not handle browser_hosts.status request");
                             Action::error_response(
                                 Some(id),
-                                ProtocolError::new(ErrorKind::HostExecutableMissing),
+                                ProtocolError::new(ErrorKind::Internal),
                             )
-                        }
-                        Err(error) => {
-                            tracing::error!(%error, "could not handle browser_hosts request");
-                            Action::error_response(Some(id), ProtocolError::new(ErrorKind::Internal))
                         }
                     })
                 }

@@ -49,7 +49,7 @@
 
 ### 2.1 注册
 
-设置页“浏览器”分组为 Chrome、Edge、Firefox 分别显示：未注册、已注册未连接、已连接，并提供启用/停用。`browser_hosts.enable {browser}` 让核心在 `%LOCALAPPDATA%\Quartz\native-hosts\` 写 manifest 并写当前用户注册表：
+核心在每次启动时（数据目录与命名管道就绪后，在后台线程执行，不阻塞主线程或管道就绪）自动、幂等地为 Chrome、Edge、Firefox 注册 Native Messaging host：在 `%LOCALAPPDATA%\Quartz\native-hosts\` 写出 manifest，并写入当前用户 HKCU 注册表键：
 
 | 浏览器 | 注册表键（默认值为 manifest 绝对路径） | 授权字段 |
 |---|---|---|
@@ -57,7 +57,11 @@
 | Edge | `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\dev.4o3f.quartz` | 同上 |
 | Firefox | `HKCU\Software\Mozilla\NativeMessagingHosts\dev.4o3f.quartz` | `allowed_extensions: ["quartz@4o3f.dev"]` |
 
-Chrome/Edge 共用 `dev.4o3f.quartz.chrome.json`，Firefox 使用 `dev.4o3f.quartz.firefox.json`。manifest 的 `path` 指向与 `quartz.exe` 同目录的 `quartz-host.exe`；`browser_hosts.status` 比较注册内容与当前路径，不一致显示为“需要重新启用”，不在启动时自动改写。`browser_hosts.disable` 删除该浏览器的注册表键与 manifest（无其他浏览器引用时）。
+Chrome/Edge 共用 `dev.4o3f.quartz.chrome.json`，Firefox 使用 `dev.4o3f.quartz.firefox.json`。manifest 的 `path` 指向与当前 `quartz.exe` 同目录的 `quartz-host.exe`：
+
+- **幂等与路径修复**：仅当 manifest 内容或注册表值与当前路径不一致时才改写，重复启动无多余写入；移动程序目录后下次启动自动修复路径。
+- **缺省与故障隔离**：若同目录缺少 `quartz-host.exe`，仅记一次警告日志并跳过，不向用户报错；单个浏览器的注册表或文件失败时记警告日志并继续处理其余浏览器，绝不触碰其他 host 名称的键。
+- **只读状态页**：设置页“浏览器”分组通过 `browser_hosts.status` 展示各浏览器状态（已连接、未连接（在浏览器中安装 Quartz 扩展后自动连接）、注册失败（查看日志）或缺少 `quartz-host.exe`），不提供启用/停用按钮。
 
 ### 2.2 行为
 

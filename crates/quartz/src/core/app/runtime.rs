@@ -135,6 +135,7 @@ impl RuntimeExit {
 pub(crate) struct CoreRuntime {
     workers: Option<Workers>,
     pipe: Option<Box<dyn CorePipe>>,
+    browser_host_registration: Option<std::thread::JoinHandle<()>>,
     clock: Arc<dyn ClockReader>,
     pub status: StatusPublisher,
     _ui_port: UiPort,
@@ -236,6 +237,7 @@ impl CoreRuntime {
         let browser = workers.sender.browser_port(Arc::clone(&ports.clock));
         let browser_streams = status.browser_streams().with_wake(Arc::clone(&ports.wake));
         let summary = crate::ipc::summary::SummaryTask::channel(ports.wake);
+        let browser_hosts = Arc::clone(&ports.browser_hosts);
         let pipe_ports = PipePorts {
             shutdown_timeout: SHUTDOWN_TIMEOUT,
             services: Services {
@@ -254,6 +256,7 @@ impl CoreRuntime {
         let mut runtime = Self {
             workers: Some(workers),
             pipe: None,
+            browser_host_registration: None,
             clock: ports.clock,
             status,
             summary: summary.port,
@@ -264,6 +267,16 @@ impl CoreRuntime {
         // The runtime owns workers before the next fallible step; Drop uses the same shutdown path.
         runtime.pipe =
             Some((ports.pipe)(pipe_ports).map_err(|source| StartCoreError::StartPipe { source })?);
+        runtime.browser_host_registration = match std::thread::Builder::new()
+            .name("quartz-browser-hosts".into())
+            .spawn(move || browser_hosts.register_all())
+        {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                tracing::warn!(%error, "could not spawn browser host registration thread");
+                None
+            }
+        };
         Ok(runtime)
     }
     pub(crate) fn writes(&self) -> crate::persistence::dispatch::WritePort {
@@ -293,6 +306,11 @@ impl CoreRuntime {
         let Some(workers) = self.workers.take() else {
             return Ok(());
         };
+        if let Some(registration) = self.browser_host_registration.take()
+            && registration.join().is_err()
+        {
+            tracing::warn!("browser host registration thread panicked");
+        }
         let pipe_stopped = if let Some(pipe) = self.pipe.take() {
             if matches!(exit, RuntimeExit::UserExit) {
                 pipe.control(quartz_protocol::ControlOp::UiShutdown);

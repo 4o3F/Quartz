@@ -92,8 +92,6 @@ requests! {
     crate::DataDeleteRangeRequest => DataDeleteRange => crate::DataDeleteRangeResponse,
     crate::BrowserStateRequest => BrowserState => AcceptedBody,
     crate::BrowserHostsStatusRequest => BrowserHostsStatus => crate::BrowserHostsStatusResponse,
-    crate::BrowserHostsEnableRequest => BrowserHostsEnable => crate::BrowserHostsStatusResponse,
-    crate::BrowserHostsDisableRequest => BrowserHostsDisable => crate::BrowserHostsStatusResponse,
 }
 
 #[cfg(test)]
@@ -255,14 +253,6 @@ mod tests {
         AdditiveFields::insert(&mut browser_hosts);
         assert!(
             crate::BrowserHostsStatusRequest::response(browser_hosts["status_response"].clone())
-                .is_ok()
-        );
-        assert!(
-            crate::BrowserHostsEnableRequest::response(browser_hosts["status_response"].clone())
-                .is_ok()
-        );
-        assert!(
-            crate::BrowserHostsDisableRequest::response(browser_hosts["status_response"].clone())
                 .is_ok()
         );
     }

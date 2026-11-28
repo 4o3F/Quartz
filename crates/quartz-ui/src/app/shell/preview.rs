@@ -738,12 +738,12 @@ fn fixture_browser_hosts_response() -> wire::BrowserHostsStatusResponse {
             },
             wire::BrowserHostEntry {
                 browser: wire::BrowserKind::Edge,
-                registration: wire::BrowserHostRegistration::NeedsReenable,
+                registration: wire::BrowserHostRegistration::Registered,
                 connected: wire::BrowserHostConnection::Disconnected,
             },
             wire::BrowserHostEntry {
                 browser: wire::BrowserKind::Firefox,
-                registration: wire::BrowserHostRegistration::NotRegistered,
+                registration: wire::BrowserHostRegistration::NeedsRepair,
                 connected: wire::BrowserHostConnection::Disconnected,
             },
         ],

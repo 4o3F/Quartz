@@ -1028,3 +1028,12 @@ cargo test --workspace --all-features --target-dir target/windows
 - **修复（窗口复用）**：常驻 UI 关窗时隐藏并保留同一窗口，再次显示时复用并刷新数据。复测（`-Steps reopen -ExeDir bin-fix2`，8 次）：57 → 85 → 85.3 → 85.5 → 85.6 → 85.7 → 86.0 → 87.9 → 88.0 MiB，每次约 0.4 MiB 漂移（观察项），8 次首帧确认 6–60 ms。常驻测量两遍：首帧 P50 17 / 21 ms、P95 25 / 24 ms；打开与关窗后隐藏 UI 87 / 112 MiB（两遍差异较大，≤ 112 MiB 且不再随开关增长）；第二遍核心 20 次开关后增量 0.09 MiB、句柄 0，通过（第一遍句柄 +2 与同期核心空闲 CPU 偏高均为机器干扰：同时段旧版 `66deb3c` 核心 10 分钟空闲 CPU 344 ms，新版 141 ms）。
 
 复测数据：`run-20261128-093147/reopen.csv`、`run-20261128-093658/`、`run-20261128-095550/`。原始数据：`target/windows/m6-accept/run-20261127-235421/`（core-only）、`run-20261128-000548/`（resident）、`run-20261128-002344/`（on-demand）、`run-20261128-004800/soak.csv`、`run-20261128-085319/reopen.csv`，查询日志 `bench-*.log`；截图 `target/m3-screenshots/`（week、week-loading、settings*，三语言 × 五种外观，共 106 张，已人工检查）。
+
+## 2026-11-27 M5 验收：Firefox 实测
+
+用户实机，release（含 B6 自动注册），独立数据目录 `target/windows/m5-accept/data`；扩展经 `about:debugging` 临时加载。
+
+- 核心启动即为 Chrome、Edge、Firefox 写入 HKCU 键与两份 manifest（路径指向同目录 `quartz-host.exe`，Chromium `allowed_origins` 为固定 ID），无需手动注册；扩展角标为空（已连接）。
+- 扩展连接后 Firefox 前台 51.7 s，其中 49.3 s 关联到网页行（**linked 覆盖率 95%**）；其余 2.4 s 为每次切换标签后、扩展消息到达前的 `builtin.web_unlinked@1` 片段（3–1100 ms，标题隐藏，时长照常）。连接前的 76 s 未关联（预期）。
+- 网页行 18 条，全部 `web_level = full`、带域名与标签标题；核心日志无 WARN / ERROR。
+- 未测：无痕窗口、Chrome / Edge、多 profile（单 profile 时无歧义）。Firefox 临时加载的扩展在浏览器重启后失效，长期使用需经 AMO 签名（未做）。
