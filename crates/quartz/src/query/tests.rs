@@ -1142,7 +1142,8 @@ fn offline_activity_fills_idle_stopped_gap_no_foreground_and_core_offline_as_a_u
     assert_eq!(day.metrics.unclassified_ms, 10);
     assert_eq!(day.metrics.longest_focus_ms, 100);
     assert_eq!(day.ranking[0].active_ms, 30);
-    assert_eq!(day.metrics.switches_per_hour, 4.0 * 3_600_000.0 / 130.0);
+    // Every piece in this millisecond-scale fixture is shorter than SWITCH_MIN_DWELL_MS.
+    assert_eq!(day.metrics.switches_per_hour, 0.0);
     assert_eq!(
         day.calendar
             .hours
@@ -2404,4 +2405,188 @@ fn frame_fit_helpers_truncate_longest_list_and_set_truncated() {
     assert_eq!(fitted.buckets[0].active_ms, 10_000);
     assert!(fitted.buckets[0].groups.len() < 20);
     assert!(serde_json::to_vec(&fitted).expect("json").len() <= 800);
+}
+
+#[test]
+fn application_switches_ignore_transient_pieces_and_reset_across_gaps() {
+    const HOUR_MS: f64 = 3_600_000.0;
+    const DWELL_MS: i64 = 10_000;
+    const MIN_DWELL_MS: i64 = 2_000;
+    const TRANSIT_MS: i64 = 300;
+    const SHORT_APP_MS: i64 = 1_000;
+    const NO_FOREGROUND_MS: i64 = 5;
+    const GAP_MS: i64 = 1_000;
+    const APP_A: i64 = 1;
+    const APP_B: i64 = 2;
+    const APP_EXPLORER: i64 = 3;
+
+    let app_window = |fact_id: i64, app_id: i64, start: i64, end: i64, exe: &str| {
+        let mut input = classified_window(fact_id, start, end, exe);
+        if let InputRow::Foreground(row) = &mut input {
+            edit_foreground(row, CaptureLevel::Full, |content| {
+                std::sync::Arc::make_mut(content.app.as_mut().expect("app")).id =
+                    ApplicationId(app_id);
+            });
+        }
+        input
+    };
+    let no_foreground = |fact_id: i64, start: i64, end: i64| {
+        InputRow::Foreground(Foreground::new(
+            span(fact_id, start, end),
+            ForegroundKind::NoForeground,
+            CaptureLevel::Full,
+            Default::default(),
+        ))
+    };
+    let assert_switches = |label: &str,
+                           end: i64,
+                           rows: Vec<InputRow>,
+                           expected_active_ms: i64,
+                           expected_switches: u32| {
+        let segments = derive(rows, QueryRange { start: 0, end });
+        let day = DayAggregation::new(test_day_calendar(), &segments);
+        assert_eq!(day.metrics.active_ms, expected_active_ms, "{label}");
+        let expected_rate = f64::from(expected_switches) * HOUR_MS
+            / f64::from(u32::try_from(expected_active_ms).expect("active duration fits u32"));
+        assert_eq!(day.metrics.switches_per_hour, expected_rate, "{label}");
+    };
+
+    // A(10 s) -> explorer(300 ms) -> B(10 s) = 1 switch.
+    let end = 2 * DWELL_MS + TRANSIT_MS;
+    assert_switches(
+        "single switch across task switcher transit",
+        end,
+        vec![
+            clock(1, 0, 0, end),
+            app_window(1, APP_A, 0, DWELL_MS, "code.exe"),
+            app_window(
+                2,
+                APP_EXPLORER,
+                DWELL_MS,
+                DWELL_MS + TRANSIT_MS,
+                "explorer.exe",
+            ),
+            app_window(3, APP_B, DWELL_MS + TRANSIT_MS, end, "chrome.exe"),
+        ],
+        end,
+        1,
+    );
+
+    // A -> B -> A with transits = 2 switches.
+    let b_start = DWELL_MS + TRANSIT_MS;
+    let b_end = b_start + DWELL_MS;
+    let a2_start = b_end + TRANSIT_MS;
+    let end = a2_start + DWELL_MS;
+    assert_switches(
+        "round-trip switch with transits",
+        end,
+        vec![
+            clock(1, 0, 0, end),
+            app_window(1, APP_A, 0, DWELL_MS, "code.exe"),
+            app_window(2, APP_EXPLORER, DWELL_MS, b_start, "explorer.exe"),
+            app_window(3, APP_B, b_start, b_end, "chrome.exe"),
+            app_window(4, APP_EXPLORER, b_end, a2_start, "explorer.exe"),
+            app_window(5, APP_A, a2_start, end, "code.exe"),
+        ],
+        end,
+        2,
+    );
+
+    // A(10 s) -> B(1 s) -> A(10 s) = 0 switches.
+    let a2_start = DWELL_MS + SHORT_APP_MS;
+    let end = a2_start + DWELL_MS;
+    assert_switches(
+        "brief peek at another app and back",
+        end,
+        vec![
+            clock(1, 0, 0, end),
+            app_window(1, APP_A, 0, DWELL_MS, "code.exe"),
+            app_window(2, APP_B, DWELL_MS, a2_start, "chrome.exe"),
+            app_window(3, APP_A, a2_start, end, "code.exe"),
+        ],
+        end,
+        0,
+    );
+
+    // A(10 s) -> no-foreground(5 ms) -> A(10 s) = 0 switches.
+    let a2_start = DWELL_MS + NO_FOREGROUND_MS;
+    let end = a2_start + DWELL_MS;
+    assert_switches(
+        "brief no-foreground flicker",
+        end,
+        vec![
+            clock(1, 0, 0, end),
+            app_window(1, APP_A, 0, DWELL_MS, "code.exe"),
+            no_foreground(2, DWELL_MS, a2_start),
+            app_window(3, APP_A, a2_start, end, "code.exe"),
+        ],
+        2 * DWELL_MS,
+        0,
+    );
+
+    // A(10 s) -> no-foreground(5 ms) -> B(10 s) = 1 switch: the flicker bridges the chain.
+    let b_start = DWELL_MS + NO_FOREGROUND_MS;
+    let end = b_start + DWELL_MS;
+    assert_switches(
+        "no-foreground flicker between two apps",
+        end,
+        vec![
+            clock(1, 0, 0, end),
+            app_window(1, APP_A, 0, DWELL_MS, "code.exe"),
+            no_foreground(2, DWELL_MS, b_start),
+            app_window(3, APP_B, b_start, end, "chrome.exe"),
+        ],
+        2 * DWELL_MS,
+        1,
+    );
+
+    // A(10 s) -> gap -> B(10 s) = 0 switches.
+    let b_start = DWELL_MS + GAP_MS;
+    let end = b_start + DWELL_MS;
+    assert_switches(
+        "gap resets dwell chain",
+        end,
+        vec![
+            clock(1, 0, 0, end),
+            app_window(1, APP_A, 0, DWELL_MS, "code.exe"),
+            InputRow::Gap {
+                span: span(2, DWELL_MS, b_start),
+                reason: quartz_domain::capture::GapReason::EventOverload,
+            },
+            app_window(3, APP_B, b_start, end, "chrome.exe"),
+        ],
+        2 * DWELL_MS,
+        0,
+    );
+
+    // Non-contiguous active slices without an intervening inactive slice also reset the chain.
+    let mut gapped = derive(
+        vec![
+            clock(1, 0, 0, 2 * DWELL_MS),
+            app_window(1, APP_A, 0, DWELL_MS, "code.exe"),
+            app_window(2, APP_B, DWELL_MS, 2 * DWELL_MS, "chrome.exe"),
+        ],
+        QueryRange {
+            start: 0,
+            end: 2 * DWELL_MS,
+        },
+    );
+    gapped.segments[1].span.start_utc_ms += 1;
+    let day = DayAggregation::new(test_day_calendar(), &gapped);
+    assert_eq!(day.metrics.active_ms, 2 * DWELL_MS);
+    assert_eq!(day.metrics.switches_per_hour, 0.0, "UTC gap resets chain");
+
+    // A(10 s) -> B(2 s exactly) = 1 switch.
+    let end = DWELL_MS + MIN_DWELL_MS;
+    assert_switches(
+        "dwell threshold boundary is inclusive",
+        end,
+        vec![
+            clock(1, 0, 0, end),
+            app_window(1, APP_A, 0, DWELL_MS, "code.exe"),
+            app_window(2, APP_B, DWELL_MS, end, "chrome.exe"),
+        ],
+        end,
+        1,
+    );
 }

@@ -23,6 +23,10 @@ use quartz_domain::{
     facts::{ClockSegmentId, Foreground, SpanDuration},
 };
 const HOUR_MS: f64 = 3_600_000.0;
+/// Minimum active piece duration to count as a dwell for application switches;
+/// shorter pieces are transits (task switcher, focus flicker, brief popup) and
+/// are never the source or target of a switch.
+const SWITCH_MIN_DWELL_MS: i64 = 2_000;
 #[derive(Debug, snafu::Snafu)]
 pub(crate) enum DeriveSegmentsError {
     #[snafu(display("capture row has no enclosing clock segment"))]
@@ -752,7 +756,7 @@ enum ActiveApplication {
 struct PreviousActive {
     segment: Option<ClockSegmentId>,
     end: i64,
-    app: ActiveApplication,
+    last_dwell: Option<ActiveApplication>,
 }
 #[derive(Default)]
 struct WebsiteTotals(BTreeMap<String, i64>);
@@ -813,8 +817,20 @@ impl DayAccumulator {
         let current = &segment.span;
         let category = facts.category(segment);
         if !segment.activity.is_active() {
-            self.previous = None;
             self.focus_run_ms = 0;
+            // A brief no-foreground flicker is a transit: it extends the switch chain
+            // instead of breaking it, so A -> flicker -> B still counts one switch.
+            match self.previous.as_mut() {
+                Some(previous)
+                    if matches!(segment.activity, Activity::NoForeground)
+                        && current.duration_ms < SWITCH_MIN_DWELL_MS
+                        && previous.segment == segment.clock_segment_id
+                        && previous.end == current.start_utc_ms =>
+                {
+                    previous.end = current.end_utc_ms;
+                }
+                _ => self.previous = None,
+            }
             return;
         }
         if current.duration_ms == 0 {
@@ -878,21 +894,29 @@ impl DayAccumulator {
                 }
             }
         }
-        let app = match &segment.activity {
-            Activity::OfflineActivity(id) => ActiveApplication::Offline(id.clone()),
-            _ => ActiveApplication::Captured(facts.app(segment).map(|app| ApplicationId(app.id.0))),
+        let previous_dwell = if adjacent {
+            self.previous.take().and_then(|old| old.last_dwell)
+        } else {
+            None
         };
-        if self.previous.as_ref().is_some_and(|old| {
-            old.segment == segment.clock_segment_id
-                && old.end == current.start_utc_ms
-                && old.app != app
-        }) {
-            self.switches += 1;
-        }
+        let last_dwell = if current.duration_ms >= SWITCH_MIN_DWELL_MS {
+            let app = match &segment.activity {
+                Activity::OfflineActivity(id) => ActiveApplication::Offline(id.clone()),
+                _ => ActiveApplication::Captured(
+                    facts.app(segment).map(|app| ApplicationId(app.id.0)),
+                ),
+            };
+            if previous_dwell.is_some_and(|old| old != app) {
+                self.switches += 1;
+            }
+            Some(app)
+        } else {
+            previous_dwell
+        };
         self.previous = Some(PreviousActive {
             segment: segment.clock_segment_id,
             end: current.end_utc_ms,
-            app,
+            last_dwell,
         });
         for hour in &mut self.calendar.hours {
             let range = QueryRange {

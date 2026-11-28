@@ -95,7 +95,8 @@ fn known_day_applies_idle_and_clips_open_rows_at_their_confirmation() {
     assert_eq!(metrics.focus_ratio, 0.0);
     assert_eq!(metrics.distract_ratio, 0.0);
     assert_eq!(metrics.longest_focus_ms, 0);
-    assert_eq!(metrics.switches_per_hour, 2880.0);
+    // Pieces shorter than the 2 s switch dwell are transits, so no switch is counted.
+    assert_eq!(metrics.switches_per_hour, 0.0);
     assert!(!day.truncated);
     assert_eq!(day.applications.len(), 4);
     assert_eq!(
@@ -559,7 +560,8 @@ fn annotations_drive_day_metrics_hour_stacks_and_timeline_from_one_snapshot() {
     assert_eq!(metrics.distract_ratio, 0.4);
     assert_eq!(metrics.unclassified_ms, 1000);
     assert_eq!(metrics.longest_focus_ms, 2000);
-    assert_eq!(metrics.switches_per_hour, 4.0 * 3_600_000.0 / 5000.0);
+    // Pieces shorter than the 2 s switch dwell are transits, so no switch is counted.
+    assert_eq!(metrics.switches_per_hour, 0.0);
     assert_eq!(
         day.applications
             .iter()
