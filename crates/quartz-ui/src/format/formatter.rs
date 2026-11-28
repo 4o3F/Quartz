@@ -158,7 +158,6 @@ impl Formatter {
     }
 }
 impl Formatter {
-    #[cfg(debug_assertions)]
     #[cfg(windows)]
     pub(crate) fn language(self) -> Language {
         self.language

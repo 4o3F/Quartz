@@ -11,6 +11,10 @@ use crate::{
     failure::{Failure, FailureAction, FailureKind, Severity},
     format::{Formatter, Msg},
     link::{ConnectionState, Link, LinkBridge, LinkEvent},
+    prewarm::{
+        LastWindowAction, PrewarmAction, PrewarmGate, SessionLifecycle, ShowWindowDecision,
+        WindowCloseDecision, WindowPresence,
+    },
     text_scale::{LiveTextScale, ReadTextScaleError, TextScaleChange, TextScaleSource},
 };
 use gpui_kit::{
@@ -20,8 +24,18 @@ use gpui_kit::{
 };
 use quartz_i18n::{Language, ParseLanguageError};
 use quartz_protocol::{ControlOp, CoreError, StateSnapshot};
+use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 use snafu::{ResultExt as _, Snafu};
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::RefCell,
+    rc::{Rc, Weak},
+};
+use windows::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{
+        IsWindow, IsWindowVisible, SHOW_WINDOW_CMD, SW_HIDE, SW_SHOW, ShowWindow,
+    },
+};
 
 /// Initial size of the main shell window.
 const MAIN_WINDOW_SIZE: Size<f32> = Size {
@@ -64,6 +78,79 @@ pub enum RunUiError {
 enum LinkAction {
     Retry,
     StartCore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeVisibility {
+    Hidden,
+    Visible,
+}
+impl NativeVisibility {
+    const fn command(self) -> SHOW_WINDOW_CMD {
+        match self {
+            Self::Hidden => SW_HIDE,
+            Self::Visible => SW_SHOW,
+        }
+    }
+    const fn from_visible(visible: bool) -> Self {
+        if visible { Self::Visible } else { Self::Hidden }
+    }
+}
+
+#[derive(Debug, Snafu)]
+enum WindowVisibilityError {
+    #[snafu(display("GPUI did not expose a native window handle"))]
+    GetWindowHandle { source: HandleError },
+    #[snafu(display("the window handle is not a Win32 handle"))]
+    RequireWin32Handle,
+    #[snafu(display("the Win32 window handle is no longer valid"))]
+    InvalidWindowHandle,
+    #[snafu(display("Win32 ShowWindow left visibility {actual:?} instead of {expected:?}"))]
+    UnexpectedVisibility {
+        expected: NativeVisibility,
+        actual: NativeVisibility,
+    },
+}
+
+fn native_hwnd(window: &Window) -> Result<HWND, WindowVisibilityError> {
+    let handle = HasWindowHandle::window_handle(window).context(GetWindowHandleSnafu)?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return RequireWin32HandleSnafu.fail();
+    };
+    Ok(HWND(std::ptr::with_exposed_provenance_mut(
+        handle.hwnd.get().cast_unsigned(),
+    )))
+}
+
+fn set_native_visibility(
+    hwnd: HWND,
+    visibility: NativeVisibility,
+) -> Result<(), WindowVisibilityError> {
+    // SAFETY: `IsWindow` safely validates any HWND value without dereferencing it.
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return InvalidWindowHandleSnafu.fail();
+    }
+    // SAFETY: `hwnd` was just validated as a live Win32 window owned by this thread.
+    // `ShowWindow`'s return value reports previous visibility rather than success or failure.
+    let _ = unsafe { ShowWindow(hwnd, visibility.command()) };
+    // SAFETY: `hwnd` is a live Win32 window owned by this thread.
+    let actual = NativeVisibility::from_visible(unsafe { IsWindowVisible(hwnd) }.as_bool());
+    if actual != visibility {
+        return UnexpectedVisibilitySnafu {
+            expected: visibility,
+            actual,
+        }
+        .fail();
+    }
+    Ok(())
+}
+
+fn hide_native_window(window: &Window) -> Result<(), WindowVisibilityError> {
+    set_native_visibility(native_hwnd(window)?, NativeVisibility::Hidden)
+}
+
+fn show_native_window(hwnd: HWND) -> Result<(), WindowVisibilityError> {
+    set_native_visibility(hwnd, NativeVisibility::Visible)
 }
 
 #[derive(Debug)]
@@ -216,6 +303,86 @@ impl LaunchWindow {
         self.snapshot = None;
         self.connection = state;
     }
+    fn apply_snapshot(
+        &mut self,
+        snapshot: StateSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let language = match snapshot.ui_language {
+            quartz_protocol::UiLanguage::English => Language::English,
+            quartz_protocol::UiLanguage::SimplifiedChinese => Language::SimplifiedChinese,
+        };
+        #[cfg(debug_assertions)]
+        let language = if self.formatter.language() == Language::PseudoEnglish {
+            Language::PseudoEnglish
+        } else {
+            language
+        };
+        self.formatter = Formatter::new(language);
+        self.title = self.formatter.text(Msg::AppName);
+        language.set_global();
+        gpui_kit::component::set_locale(language.code());
+        if let Some(shell) = &self.shell {
+            shell.update(cx, |shell, cx| {
+                shell.state_changed(snapshot.clone(), self.formatter, cx)
+            });
+        } else if let Some(link) = self.link.clone() {
+            let init = ShellInit {
+                day: Day::empty(snapshot.logical_date),
+                formatter: self.formatter,
+                tokens: Rc::new(
+                    crate::app::system_theme::SystemTheme::tokens(cx)
+                        .as_ref()
+                        .clone(),
+                ),
+                page: Page::Today,
+                details: None,
+                range: RangeChoice::FullDay,
+                text_scale: self.text_scale,
+            };
+            let shell = cx.new(|cx| {
+                let mut shell = AppShell::new(init, window, cx);
+                shell.connect(link, snapshot.clone(), cx);
+                shell.resume_queries(self.query_generations);
+                shell
+            });
+            self.shell = Some(shell);
+        }
+        self.snapshot = Some(snapshot);
+    }
+    fn prepare_hide(&mut self, cx: &mut Context<Self>) {
+        if let Some(shell) = &self.shell {
+            shell.update(cx, |shell, _| shell.prepare_hide());
+        }
+    }
+    fn reopen(
+        &mut self,
+        connection: ConnectionState,
+        formatter: Formatter,
+        snapshot: Option<StateSnapshot>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_connection(connection, cx);
+        let had_shell = self.shell.is_some();
+        if let Some(snapshot) = snapshot {
+            self.apply_snapshot(snapshot, window, cx);
+        } else {
+            self.formatter = formatter;
+            self.title = self.formatter.text(Msg::AppName);
+            let language = formatter.language();
+            language.set_global();
+            gpui_kit::component::set_locale(language.code());
+        }
+        if had_shell && let Some(shell) = &self.shell {
+            shell.update(cx, |shell, cx| shell.on_shown(cx));
+        }
+        if self.link.is_some() {
+            self.acknowledge_frame(window, cx);
+        }
+        cx.notify();
+    }
     fn receive(&mut self, event: LinkEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.window_action() {
             crate::link::WindowAction::Quit => {
@@ -240,48 +407,7 @@ impl LaunchWindow {
                     self.set_connection(state, cx);
                 }
             }
-            LinkEvent::State(snapshot) => {
-                let language = match snapshot.ui_language {
-                    quartz_protocol::UiLanguage::English => Language::English,
-                    quartz_protocol::UiLanguage::SimplifiedChinese => Language::SimplifiedChinese,
-                };
-                #[cfg(debug_assertions)]
-                let language = if self.formatter.language() == Language::PseudoEnglish {
-                    Language::PseudoEnglish
-                } else {
-                    language
-                };
-                self.formatter = Formatter::new(language);
-                language.set_global();
-                gpui_kit::component::set_locale(language.code());
-                if let Some(shell) = &self.shell {
-                    shell.update(cx, |shell, cx| {
-                        shell.state_changed(snapshot.clone(), self.formatter, cx)
-                    });
-                } else if let Some(link) = self.link.clone() {
-                    let init = ShellInit {
-                        day: Day::empty(snapshot.logical_date),
-                        formatter: self.formatter,
-                        tokens: Rc::new(
-                            crate::app::system_theme::SystemTheme::tokens(cx)
-                                .as_ref()
-                                .clone(),
-                        ),
-                        page: Page::Today,
-                        details: None,
-                        range: RangeChoice::FullDay,
-                        text_scale: self.text_scale,
-                    };
-                    let shell = cx.new(|cx| {
-                        let mut shell = AppShell::new(init, window, cx);
-                        shell.connect(link, snapshot.clone(), cx);
-                        shell.resume_queries(self.query_generations);
-                        shell
-                    });
-                    self.shell = Some(shell);
-                }
-                self.snapshot = Some(snapshot);
-            }
+            LinkEvent::State(snapshot) => self.apply_snapshot(snapshot, window, cx),
             LinkEvent::DetailLoading { generation } => {
                 if let Some(shell) = &self.shell {
                     shell.update(cx, |shell, cx| shell.detail_loading(generation, cx));
@@ -403,17 +529,21 @@ impl RunOptions {
                 };
 
                 let link = bridge.as_ref().map(|bridge| bridge.link.clone());
-                let session = Rc::new(RefCell::new(UiSession {
-                    formatter,
-                    connection,
-                    link,
-                    snapshot: None,
-                    window: None,
-                    gate: crate::prewarm::PrewarmGate::Hidden,
-                    policy,
-                    lifecycle: SessionLifecycle::Running,
-                    query_generations: Default::default(),
-                }));
+                let session = Rc::new_cyclic(|self_ref| {
+                    RefCell::new(UiSession {
+                        self_ref: self_ref.clone(),
+                        deferred_error: Rc::clone(&report),
+                        formatter,
+                        connection,
+                        link,
+                        snapshot: None,
+                        window: None,
+                        gate: PrewarmGate::Hidden,
+                        policy,
+                        lifecycle: SessionLifecycle::Running,
+                        query_generations: Default::default(),
+                    })
+                });
                 let closed = Rc::clone(&session);
                 cx.on_window_closed(move |cx, _| {
                     let closed = Rc::clone(&closed);
@@ -460,24 +590,73 @@ enum InitialWindow {
     Visible,
     Hidden,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionLifecycle {
-    Running,
-    Stopping,
-}
 struct UiSession {
+    self_ref: Weak<RefCell<Self>>,
+    deferred_error: Rc<RefCell<Option<RunUiError>>>,
     formatter: Formatter,
     connection: ConnectionState,
     link: Option<Link>,
     snapshot: Option<StateSnapshot>,
     window: Option<UiWindow>,
-    gate: crate::prewarm::PrewarmGate,
+    gate: PrewarmGate,
     policy: crate::instance::InstancePolicy,
     lifecycle: SessionLifecycle,
     query_generations: crate::app::QueryGenerations,
 }
 impl UiSession {
-    fn open(&mut self, cx: &mut gpui_kit::App) -> Result<(), RunUiError> {
+    fn effective_resident(&self) -> quartz_protocol::ResidentEnabled {
+        if self.policy == crate::instance::InstancePolicy::CoreError {
+            quartz_protocol::ResidentEnabled::Disabled
+        } else {
+            self.snapshot
+                .as_ref()
+                .map_or(quartz_protocol::ResidentEnabled::Enabled, |state| {
+                    state.ui_resident
+                })
+        }
+    }
+    fn close_decision(&self) -> WindowCloseDecision {
+        WindowCloseDecision::decide(self.lifecycle, self.effective_resident(), &self.connection)
+    }
+    fn finish_hide(&mut self, cx: &mut gpui_kit::App) -> WindowCloseDecision {
+        if let Some(window) = &self.window {
+            window.view.update(cx, |view, cx| view.prepare_hide(cx));
+            if let Some(shell) = &window.view.read(cx).shell {
+                self.query_generations = shell.read(cx).query_generations();
+            }
+        }
+        self.gate = PrewarmGate::Hidden;
+        let Some(link) = &self.link else {
+            tracing::warn!("resident UI has no pipe handle; destroying window and exiting");
+            self.lifecycle = SessionLifecycle::Stopping;
+            return WindowCloseDecision::Destroy;
+        };
+        if let Err(error) = link.hidden() {
+            tracing::warn!(%error, "could not queue UI hidden notification; destroying window and exiting");
+            self.lifecycle = SessionLifecycle::Stopping;
+            return WindowCloseDecision::Destroy;
+        }
+        WindowCloseDecision::Hide
+    }
+    fn destroy_existing_window(&mut self, cx: &mut gpui_kit::App) {
+        if let Some(window) = self.window.take() {
+            if let Some(shell) = &window.view.read(cx).shell {
+                self.query_generations = shell.read(cx).query_generations();
+            }
+            if let Err(error) = window
+                .handle
+                .update(cx, |_, window, _| window.remove_window())
+            {
+                tracing::warn!(%error, "could not destroy previous UI window");
+            }
+        }
+    }
+    fn shutdown_and_quit(&mut self, cx: &mut gpui_kit::App) {
+        self.lifecycle = SessionLifecycle::Stopping;
+        self.destroy_existing_window(cx);
+        cx.quit();
+    }
+    fn create_window(&mut self, cx: &mut gpui_kit::App) -> Result<(), RunUiError> {
         let handle = WindowLaunch {
             formatter: self.formatter,
             connection: self.connection.clone(),
@@ -485,10 +664,101 @@ impl UiSession {
             snapshot: self.snapshot.clone(),
             query_generations: self.query_generations,
         }
-        .open(cx)?;
+        .open(self.self_ref.clone(), cx)?;
         self.window = Some(handle);
-        self.gate = crate::prewarm::PrewarmGate::Opened;
+        self.gate = PrewarmGate::Opened;
         Ok(())
+    }
+    fn is_running_opened(&self) -> bool {
+        self.lifecycle == SessionLifecycle::Running && self.gate == PrewarmGate::Opened
+    }
+    fn recover_show_failure(&mut self, cx: &mut gpui_kit::App) {
+        if !self.is_running_opened() {
+            return;
+        }
+        self.destroy_existing_window(cx);
+        if let Err(error) = self.create_window(cx) {
+            tracing::error!(%error, "could not recreate UI window after show failure");
+            *self.deferred_error.borrow_mut() = Some(error);
+            self.lifecycle = SessionLifecycle::Stopping;
+            cx.quit();
+        }
+    }
+    fn reuse_window(&mut self, cx: &mut gpui_kit::App) -> Result<(), RunUiError> {
+        let Some(existing) = &self.window else {
+            return self.create_window(cx);
+        };
+        let handle = existing.handle;
+        let view = existing.view.clone();
+        let connection = self.connection.clone();
+        let formatter = self.formatter;
+        let snapshot = self.snapshot.clone();
+        let prepared = handle.update(cx, |_, window, cx| {
+            let hwnd = native_hwnd(window);
+            if hwnd.is_ok() {
+                view.update(cx, |view, cx| {
+                    view.reopen(connection, formatter, snapshot, window, cx);
+                });
+            }
+            hwnd
+        });
+        let hwnd = match prepared {
+            Ok(Ok(hwnd)) => hwnd,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "could not read native handle for hidden UI window; recreating window");
+                self.destroy_existing_window(cx);
+                return self.create_window(cx);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "hidden UI window is no longer available; opening a new window");
+                self.window = None;
+                return self.create_window(cx);
+            }
+        };
+        self.gate = PrewarmGate::Opened;
+        let session = self.self_ref.clone();
+        cx.spawn(async move |cx| {
+            // Run `ShowWindow(SW_SHOW)` outside GPUI's `AppCell` borrow because `WM_SHOWWINDOW`
+            // synchronously invokes `draw_window` on Windows.
+            let should_show = session
+                .upgrade()
+                .is_some_and(|session| session.borrow().is_running_opened());
+            if !should_show {
+                return;
+            }
+            if let Err(error) = show_native_window(hwnd) {
+                tracing::warn!(%error, "could not show hidden resident UI window; recreating window");
+                cx.update(|cx| {
+                    if let Some(session) = session.upgrade() {
+                        session.borrow_mut().recover_show_failure(cx);
+                    }
+                });
+                return;
+            }
+            cx.update(|cx| {
+                let still_open = session
+                    .upgrade()
+                    .is_some_and(|session| session.borrow().is_running_opened());
+                if !still_open {
+                    return;
+                }
+                if let Err(error) = handle.update(cx, |_, window, cx| {
+                    // GPUI restores minimized Windows windows before requesting foreground activation.
+                    window.activate_window();
+                    cx.activate(true);
+                }) {
+                    tracing::warn!(%error, "could not activate reused UI window");
+                }
+            });
+        })
+        .detach();
+        Ok(())
+    }
+    fn open(&mut self, cx: &mut gpui_kit::App) -> Result<(), RunUiError> {
+        match ShowWindowDecision::decide(WindowPresence::from_option(self.window.as_ref())) {
+            ShowWindowDecision::CreateWindow => self.create_window(cx),
+            ShowWindowDecision::ReuseWindow => self.reuse_window(cx),
+        }
     }
     fn last_window_closed(&mut self, cx: &mut gpui_kit::App) {
         if self.lifecycle == SessionLifecycle::Stopping {
@@ -503,22 +773,14 @@ impl UiSession {
             self.query_generations = shell.read(cx).query_generations();
         }
         drop(window);
-        let resident = if self.policy == crate::instance::InstancePolicy::CoreError {
-            quartz_protocol::ResidentEnabled::Disabled
-        } else {
-            self.snapshot
-                .as_ref()
-                .map_or(quartz_protocol::ResidentEnabled::Enabled, |state| {
-                    state.ui_resident
-                })
-        };
-        match crate::prewarm::LastWindowAction::decide(resident, &self.connection) {
-            crate::prewarm::LastWindowAction::Quit => {
+        let resident = self.effective_resident();
+        match LastWindowAction::decide(resident, &self.connection) {
+            LastWindowAction::Quit => {
                 self.lifecycle = SessionLifecycle::Stopping;
                 cx.quit();
             }
-            crate::prewarm::LastWindowAction::HideAndNotify => {
-                self.gate = crate::prewarm::PrewarmGate::Hidden;
+            LastWindowAction::HideAndNotify => {
+                self.gate = PrewarmGate::Hidden;
                 if let Some(link) = &self.link {
                     if let Err(error) = link.hidden() {
                         tracing::warn!(%error, "could not queue UI hidden notification");
@@ -560,34 +822,39 @@ impl UiSession {
             | LinkEvent::DetailLoaded { .. }
             | LinkEvent::Control(ControlOp::UiShow | ControlOp::UiActivate) => {}
         }
-        let action = event.window_action();
-        if let Some(window) = &self.window {
-            let view = window.view.clone();
-            if let Err(error) = window.handle.update(cx, |_, window, cx| {
-                view.update(cx, |view, cx| view.receive(event, window, cx))
-            }) {
-                tracing::debug!(%error, "UI window closed before event delivery");
-                self.last_window_closed(cx);
-                match action {
-                    crate::link::WindowAction::Quit => {
-                        self.lifecycle = SessionLifecycle::Stopping;
-                        cx.quit();
+        match self.gate {
+            PrewarmGate::Hidden => match self.gate.receive(&event) {
+                PrewarmAction::Wait => {}
+                PrewarmAction::Open => self.open(cx)?,
+                PrewarmAction::Quit => self.shutdown_and_quit(cx),
+            },
+            PrewarmGate::Opened => {
+                let action = event.window_action();
+                if let Some(window) = &self.window {
+                    let view = window.view.clone();
+                    if let Err(error) = window.handle.update(cx, |_, window, cx| {
+                        view.update(cx, |view, cx| view.receive(event, window, cx))
+                    }) {
+                        tracing::debug!(%error, "UI window closed before event delivery");
+                        self.last_window_closed(cx);
+                        match action {
+                            crate::link::WindowAction::Quit => self.shutdown_and_quit(cx),
+                            crate::link::WindowAction::Activate
+                                if self.lifecycle == SessionLifecycle::Running =>
+                            {
+                                self.open(cx)?
+                            }
+                            crate::link::WindowAction::Activate
+                            | crate::link::WindowAction::Observe => {}
+                        }
                     }
-                    crate::link::WindowAction::Activate
-                        if self.lifecycle == SessionLifecycle::Running =>
-                    {
-                        self.open(cx)?
+                } else {
+                    self.gate = PrewarmGate::Hidden;
+                    match self.gate.receive(&event) {
+                        PrewarmAction::Wait => {}
+                        PrewarmAction::Open => self.open(cx)?,
+                        PrewarmAction::Quit => self.shutdown_and_quit(cx),
                     }
-                    crate::link::WindowAction::Activate | crate::link::WindowAction::Observe => {}
-                }
-            }
-        } else {
-            match self.gate.receive(&event) {
-                crate::prewarm::PrewarmAction::Wait => {}
-                crate::prewarm::PrewarmAction::Open => self.open(cx)?,
-                crate::prewarm::PrewarmAction::Quit => {
-                    self.lifecycle = SessionLifecycle::Stopping;
-                    cx.quit();
                 }
             }
         }
@@ -610,7 +877,11 @@ struct WindowLaunch {
     query_generations: crate::app::QueryGenerations,
 }
 impl WindowLaunch {
-    fn open(self, cx: &mut gpui_kit::App) -> Result<UiWindow, RunUiError> {
+    fn open(
+        self,
+        session: Weak<RefCell<UiSession>>,
+        cx: &mut gpui_kit::App,
+    ) -> Result<UiWindow, RunUiError> {
         let Self {
             formatter,
             connection,
@@ -632,6 +903,29 @@ impl WindowLaunch {
             cx,
             move |window, cx| {
                 appearance.observe(window, cx);
+                window.on_window_should_close(cx, move |window, cx| {
+                    let Some(session) = session.upgrade() else {
+                        return true;
+                    };
+                    let decision = {
+                        let session = session.borrow();
+                        session.close_decision()
+                    };
+                    let outcome = match decision {
+                        WindowCloseDecision::Destroy => WindowCloseDecision::Destroy,
+                        WindowCloseDecision::Hide => match hide_native_window(window) {
+                            Ok(()) => session.borrow_mut().finish_hide(cx),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "could not hide resident UI window; falling back to destroying it"
+                                );
+                                WindowCloseDecision::Destroy
+                            }
+                        },
+                    };
+                    matches!(outcome, WindowCloseDecision::Destroy)
+                });
                 cx.new(|cx| {
                     crate::app::system_theme::SystemTheme::observe_activation(window, cx);
                     cx.observe_window_activation(window, |this: &mut LaunchWindow, _, cx| {

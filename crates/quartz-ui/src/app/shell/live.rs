@@ -392,6 +392,51 @@ impl AppShell {
         }
         cx.notify();
     }
+    /// Cancels UI-only timers, drops in-flight tasks, and clears cached day-request state before
+    /// hiding the resident window so nothing polls or renders while hidden and re-showing reloads
+    /// fresh data.
+    pub(crate) fn prepare_hide(&mut self) {
+        self.rule_editor_validate_task = None;
+        self.rule_import_validate_task = None;
+        self.unclassified_query_task = None;
+        self.calendar = None;
+        self.settings_calendar = None;
+        self.hover = None;
+        self.pan = None;
+        self.range_select = None;
+        self.segment_menu = None;
+        self.details = None;
+        self.detail_generation = self.detail_generation.next();
+        if let Some(live) = &mut self.live {
+            live.timer = None;
+            live.indicator = Indicator::Hidden;
+            live.load_task = None;
+            live.resume_task = None;
+            live.request = None;
+            live.generation = live.generation.next();
+            if live.phase == LoadPhase::Refreshing {
+                live.phase = LoadPhase::Ready;
+            }
+        }
+    }
+    /// Reloads the active page after a hidden resident window becomes visible again.
+    pub(crate) fn on_shown(&mut self, cx: &mut Context<Self>) {
+        match self.page {
+            super::Page::Today => {
+                // `prepare_hide` cleared `live.request`, so the next Today frame's `measure_plot`
+                // issues an immediate day reload and re-subscribes `Topic::Day`.
+                if matches!(self.day.source(), DaySource::Live(_))
+                    && self.annotation_editor.is_panel_open()
+                {
+                    self.on_annotations_day_changed(self.day.date(), cx);
+                }
+            }
+            super::Page::Week => self.open_week_page(cx),
+            super::Page::Rules => self.open_rules_page(cx),
+            super::Page::Settings => self.open_settings_page(cx),
+        }
+        cx.notify();
+    }
     pub(crate) fn day_loading(&mut self, generation: DayGeneration, cx: &mut Context<Self>) {
         let Some(live) = &mut self.live else {
             return;
